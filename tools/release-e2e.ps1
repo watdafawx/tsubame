@@ -113,10 +113,10 @@ try {
     $r = Run-Cli $sb $base @('apply'); Check 'apply: exit 0' ($r.Code -eq 0 -and $r.Out -match 'applied 0\.2\.0 \(was 0\.1\.0\)')
     Check 'VERSION CHANGED: tsubame.exe is now the 0.2.0 file' ((Sha $exe) -eq $newHash)
     Check 'previous version kept as tsubame.exe.old' ((Test-Path "$exe.old") -and ((Sha "$exe.old") -eq $oldHash))
-    $r = Run-Cli $sb $base @('status'); Check 'status: running 0.2.0, previous 0.1.0' ($r.Out -match 'running:\s+0\.2\.0' -and $r.Out -match 'previous: 0\.1\.0')
-    # note: Run-Cli passes --current-version 0.1.0; state records 0.2.0 -> the explicit flag wins, so ask without it:
+    # Run-Cli always passes --current-version 0.1.0 (an explicit flag wins); ask without it to read what the update recorded:
     $out = & $cli status --install-dir (Join-Path $sb 'app') --data-dir (Join-Path $sb 'data') --api-base $base 2>&1 | Out-String
-    Check 'status without --current-version reads the recorded 0.2.0' ($out -match 'running:\s+0\.2\.0')
+    Write-Host "      $(($out.Trim() -split "`r?`n") -join "`n      ")"
+    Check 'status (no --current-version): running 0.2.0, previous 0.1.0 kept' ($out -match 'running:\s+0\.2\.0' -and $out -match 'previous: 0\.1\.0')
     $out = & $cli check --force --install-dir (Join-Path $sb 'app') --data-dir (Join-Path $sb 'data') --api-base $base 2>&1 | Out-String
     Check 'check again: up to date (exit 0)' ($LASTEXITCODE -eq 0 -and $out -match 'up to date \(0\.2\.0\)')
 
@@ -138,7 +138,7 @@ try {
     $base = Start-Server $bad
     $sb2 = New-Sandbox 'tamper-zip' '0.1.0'
     $r = Run-Cli $sb2 $base @('check', '--force'); Check 'check passes (manifest is genuine)' ($r.Code -eq 3)
-    $r = Run-Cli $sb2 $base @('download'); Check 'download REFUSED: hash mismatch' ($r.Code -eq 1 -and $r.Out -match '(?i)hash')
+    $r = Run-Cli $sb2 $base @('download'); Check 'download REFUSED: hash mismatch' ($r.Code -eq 1 -and $r.Out -match '(?i)sha-256 mismatch')
     Check 'nothing staged, exe unchanged' (-not (Test-Path (Join-Path $sb2 'data\update\staging\0.2.0')) -and ((Sha (Join-Path $sb2 'app\tsubame.exe')) -eq $oldHash))
     $r = Run-Cli $sb2 $base @('apply'); Check 'apply has nothing to apply' ($r.Code -eq 1)
 
