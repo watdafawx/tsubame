@@ -11,10 +11,10 @@ Updated 2026-11-17 by the planning session.
 | ID | State | Notes |
 |---|---|---|
 | S0 | merged | Workspace, 7 crate stubs, release profile from blink. `windows = "0.61"` (same as blink, so `gfx.rs` ports without API changes). |
-| S0b | todo | Icon. |
-| S1 | todo | Direct2D list. |
-| S2 | todo | Enumeration bench. |
-| S3 | todo | Wasm host. |
+| S0b | merged | Icon (6 frames), manifest (PerMonitorV2, longPathAware), version info, `tools/make-icon.ps1`, `mocks/tokens.json` brand colours. exe 152 KB. No live Explorer/taskbar screenshot (main.rs is still a windowless stub); verified with `SHGetFileInfoW` on FOX and rig. Small cut kept (user has not answered the open question). |
+| S1 | running | Direct2D list (Sonnet). |
+| S2 | running | Enumeration bench (DeepSeek). |
+| S3 | running | Wasm host. GPT hit its usage limit; relaunched on Sonnet 5.5 (user rule: on a limit, substitute a similar-quality model). |
 | S4 | todo | Shell threading. Needs S1 merged first: it draws into S1's window. |
 
 ## Next batch
