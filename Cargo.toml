@@ -10,6 +10,7 @@ members = [
     "crates/tsubame-ext-api",
     "crates/tsubame-plughost",
     "crates/tsubame-bench",
+    "crates/tsubame-update",
 ]
 default-members = ["."]
 
@@ -24,6 +25,7 @@ tsubame-win = { path = "crates/tsubame-win" }
 tsubame-ui = { path = "crates/tsubame-ui" }
 tsubame-d2d = { path = "crates/tsubame-d2d" }
 tsubame-ext-api = { path = "crates/tsubame-ext-api" }
+tsubame-update = { path = "crates/tsubame-update" }
 windows = "0.61"
 
 [package]

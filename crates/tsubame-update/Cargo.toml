@@ -1,0 +1,53 @@
+[package]
+name = "tsubame-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tsubame self-update: GitHub Releases check, signed-manifest verification, staged swap with rollback"
+
+[lib]
+name = "tsubame_update"
+
+[[bin]]
+name = "tsubame-update"
+path = "src/bin/tsubame-update.rs"
+
+# Maintainer tool: key generation and manifest signing. Not shipped, needs the `release-tool` feature.
+[[bin]]
+name = "tsubame-release"
+path = "src/bin/tsubame-release.rs"
+required-features = ["release-tool"]
+
+# Local fake of the GitHub endpoints for the end-to-end proof. Needs the `test-server` feature.
+[[bin]]
+name = "tsubame-update-testserver"
+path = "src/bin/tsubame-update-testserver.rs"
+required-features = ["test-server"]
+
+[features]
+default = []
+# Maintainer tool only (key generation needs an OS random source).
+release-tool = ["ed25519-compact/random"]
+# TEST ONLY: allows http://127.0.0.1, overridable endpoints/dirs and trusts the DEV test key.
+# `cargo build --release --features test-server` is a compile error on purpose.
+test-server = []
+
+[dependencies]
+# Pure Rust, no dependencies of its own, ~1 file. Verify-only without `random`.
+ed25519-compact = { version = "2", default-features = false }
+# Raw deflate for reading the release zip. Pure Rust, only dependency is adler2.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+]
