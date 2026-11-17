@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsubame window states</title>
+<!--
+  Tsubame state variants (task M1): row states, path bar edit mode, loading, empty folder, filter as you type, context menu.
+  Same tokens and window as mock-main.html. Every window is 1280 px wide at 1:1.
+  URL params: ?theme=dark|light &only=<section id>   ids: rows, path-edit, loading, empty, filter, menu
+-->
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mock.css">
+</head>
+<body>
+<div class="page">
+  <h1>Window states</h1>
+  <p class="lede">Each section is the main window in one state. Drawing rules: only fills, strokes, lines, text and bitmap icons. No shadows or blur: popups are a filled rounded rect with a 1 px border.</p>
+  <div class="ctl">
+    <span><span class="lbl">Theme</span><span class="seg"><button data-theme-btn="dark">Dark</button><button data-theme-btn="light">Light</button></span></span>
+  </div>
+
+  <div class="sec" id="rows">
+    <h2>Row states</h2>
+    <p class="cap">One row (22 px) in every state. Hover and selected are solid fills (<code>hover</code>, <code>selected</code>, <code>selected_inactive</code>); focus is a 1 px inset stroke in <code>focus</code> drawn on top of whatever fill the row has. Text colours never change between states: <code>text</code> for the name, <code>text_dim</code> for the other columns (both pass 4.5:1 on every fill).</p>
+    <div class="win" id="rowspec" style="width:auto;height:auto"></div>
+  </div>
+
+  <div class="sec" id="path-edit">
+    <h2>Path bar: edit mode</h2>
+    <p class="cap">Click the bar, Ctrl+L or Alt+D. Breadcrumbs become a text field with a <code>focus</code> border; folder suggestions drop down in a popup (Tab completes, Enter goes, Esc restores the breadcrumbs). The caret is solid, not blinking, so an idle window needs no timer.</p>
+    <div class="win-frame" id="w-path-edit"></div>
+  </div>
+
+  <div class="sec" id="loading">
+    <h2>Loading</h2>
+    <p class="cap">No spinner. A 2 px <code>accent</code> line sits on the bottom edge of the toolbar (under the path bar) and its width grows each time a batch of entries arrives (repaint on the batch message, no timer). Rows appear as they stream in; the status bar counts up. Width formula suggestion: <code>1 - exp(-count / 20000)</code>, since the total is unknown. The line disappears when the listing is complete.</p>
+    <div class="win-frame" id="w-loading"></div>
+  </div>
+
+  <div class="sec" id="empty">
+    <h2>Empty folder</h2>
+    <p class="cap">Header stays; a centred 40 px folder bitmap, one line of <code>text</code>, one hint line in <code>text_dim</code> with the shortcut in a stroked key cap.</p>
+    <div class="win-frame" id="w-empty"></div>
+  </div>
+
+  <div class="sec" id="filter">
+    <h2>Filter as you type</h2>
+    <p class="cap">Typing in the list (or Ctrl+F) focuses the filter field and narrows the list live, case-insensitive substring. The match is a solid <code>highlight</code> rect behind the characters. The status bar says how many rows match. Esc clears. Folders still come first.</p>
+    <div class="win-frame" id="w-filter"></div>
+  </div>
+
+  <div class="sec" id="menu">
+    <h2>Context menu popup</h2>
+    <p class="cap">Opened at the pointer on the focused row. 24 px items, 248 px wide, icon column, shortcut right-aligned in <code>text_dim</code>, 1 px separators, disabled item in <code>text_disabled</code>, hovered item in <code>selected</code>, Delete in <code>danger</code>. Shell verbs live behind &ldquo;Show more options&rdquo; (the S4 native menu); see the open decisions in the report.</p>
+    <div class="win-frame" id="w-menu"></div>
+  </div>
+</div>
+<script src="mock.js"></script>
+<script>
+  var st = { theme: Tsu.qs('theme', 'dark') };
+  var only = Tsu.qs('only', '');
+  if (only) { document.body.classList.add('only'); document.getElementById(only).classList.add('show'); }
+  var $ = function (id) { return document.getElementById(id); };
+  function draw() {
+    Tsu.setTheme(st.theme);
+    $('rowspec').innerHTML = Tsu.rowSpecimens();
+    $('w-path-edit').innerHTML = Tsu.win({ h: 420,
+      pathEdit: { text: 'C:\\Users\\Alex\\D', base: 'C:\\Users\\Alex\\', sugg: ['Desktop', 'Documents', 'Downloads', 'Dropbox'], hot: 2 }, sel: 'none' });
+    $('w-loading').innerHTML = Tsu.win({ h: 520, path: ['X:', 'Dev', 'fixtures', '100k'], tabs: [{ t: '100k', active: true }, { t: 'tsubame' }],
+      loading: { pct: 0.38, count: 12480, shown: 16 }, curDrive: 1 });
+    $('w-empty').innerHTML = Tsu.win({ h: 520, path: ['C:', 'Users', 'Alex', 'Downloads', 'Unsorted'], empty: true, tabs: [{ t: 'Unsorted', active: true }, { t: 'tsubame' }] });
+    $('w-filter').innerHTML = Tsu.win({ h: 520, filter: 'inv' });
+    $('w-menu').innerHTML = Tsu.win({ h: 640, menu: { x: 420, y: 318 }, sel: 'multi' });
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-theme-btn]'); if (!b) return;
+    st.theme = b.dataset.themeBtn; draw();
+  });
+  draw();
+</script>
+</body>
+</html>
