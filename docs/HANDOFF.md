@@ -85,3 +85,7 @@ U2 waits for U1, M1 (approved), C1, C2. B1 waits for U2.
 - Production builds refuse all updates until a release public key is pinned in `crates/tsubame-update/src/keys.rs` (`RELEASE_PUBLIC_KEYS_HEX`). Run `tools/release-keygen.ps1`, back up the private key, pin the public key, `gh secret set UPDATE_SIGNING_KEY`.
 - **Before the first public push**: git history carries the user's real e-mail as author (`watdafawx <...@hotmail.com>`), tracked files carry `C:\Users\MIcha\...` paths (HANDOFF.md, a sample path in `crates/tsubame-plughost/src/proto.rs`). Needs the user's decision (see the report). No remote has been added and nothing was pushed.
 - Next: updater wiring card (Settings > Updates, startup check) after U2 merges.
+
+## Update 5 (2026-11-18)
+- U2 on Claude Sonnet hit the Claude 5-hour limit (resets 01:10 Cairo). Partial work is committed on branch `t3/u2-browsable-file-manager` (head `be1aba2`, kept until the continuation merges). Substituted a **Codex gpt-6.1-sol (medium)** continuation child per the user's limit rule; it merges that branch first, then finishes and verifies on rig. Old task cancelled.
+- Still waiting on the user: public-repo push decision (scrub history e-mail and local paths first).
