@@ -14,7 +14,7 @@ Updated 2026-11-17 by the planning session.
 | S0b | merged | Icon (6 frames), manifest (PerMonitorV2, longPathAware), version info, `tools/make-icon.ps1`, `mocks/tokens.json` brand colours. exe 152 KB. No live Explorer/taskbar screenshot (main.rs is still a windowless stub); verified with `SHGetFileInfoW` on FOX and rig. Small cut kept (user has not answered the open question). |
 | S1 | running | Direct2D list (Sonnet). |
 | S2 | running | Enumeration bench (DeepSeek). |
-| S3 | running | Wasm host. GPT hit its usage limit; relaunched on Sonnet 5.5 (user rule: on a limit, substitute a similar-quality model). |
+| S3 | merged | Wasmtime 50.0.2 component host works. See `docs/spike-wasm.md`. GPT hit its limit; ran on Sonnet 5.5. Proposed plan changes there (ship host without Cranelift, 0.86 MB; precompiled `.cwasm` only from our own compile step). |
 | S4 | todo | Shell threading. Needs S1 merged first: it draws into S1's window. |
 
 ## Next batch
