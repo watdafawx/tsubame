@@ -250,7 +250,7 @@ impl Updater {
         let mut st = State::load(l);
         let now = now_unix();
         if !check_due(&st, now, force) {
-            return self.from_cache(&mut st);
+            return self.cached_release(&mut st);
         }
         st.last_attempt_unix = now;
         let r = self.fetch_latest(&mut st);
@@ -272,7 +272,7 @@ impl Updater {
         (d.join(manifest::MANIFEST_FILE), d.join(manifest::SIGNATURE_FILE))
     }
 
-    fn from_cache(&self, st: &mut State) -> Result<Option<Release>> {
+    fn cached_release(&self, st: &mut State) -> Result<Option<Release>> {
         let (mp, sp) = self.cache_paths();
         let (Ok(m), Ok(s)) = (std::fs::read(&mp), std::fs::read(&sp)) else { return Ok(None) };
         let Some(tag) = st.latest_tag.clone() else { return Ok(None) };
@@ -297,7 +297,7 @@ impl Updater {
         let etag = if have_cache { st.etag.clone() } else { None };
         let (resp, body) = http::get_bytes(&self.api_url(), etag.as_deref(), self.opts(API_MAX_BYTES))?;
         match resp.status {
-            304 => self.from_cache(st),
+            304 => self.cached_release(st),
             200 => {
                 #[derive(Deserialize)]
                 struct Latest {

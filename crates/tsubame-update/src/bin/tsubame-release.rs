@@ -33,7 +33,7 @@ fn load_key(args: &[String]) -> (KeyPair, bool) {
     } else {
         die("need --key-file, --key-env or --dev-test-key")
     };
-    let seed_bytes = hash::from_hex(text.trim()).unwrap_or_else(|_| die("key is not hex"));
+    let seed_bytes = hash::from_hex(text.trim()).unwrap_or_else(|| die("key is not hex"));
     let seed = Seed::from_slice(&seed_bytes).unwrap_or_else(|_| die("key must be a 32-byte seed (64 hex chars)"));
     (KeyPair::from_seed(seed), false)
 }

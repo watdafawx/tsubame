@@ -1,3 +1,9 @@
 target/
 .claude/worktrees/
 *.log
+
+# release output and signing keys (never commit)
+dist/
+*.key
+update-signing*
+.tsubame/

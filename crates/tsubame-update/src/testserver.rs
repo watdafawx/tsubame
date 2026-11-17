@@ -113,14 +113,12 @@ fn route(dir: &std::path::Path, repo: &str, path: &str, inm: Option<&str>) -> (u
         return (200, Some(etag), body);
     }
     let prefix = format!("/{repo}/releases/download/");
-    if let Some(rest) = path.strip_prefix(&prefix) {
-        if let Some((_tag, file)) = rest.split_once('/') {
-            if crate::manifest::is_safe_file_name(file) {
-                if let Ok(b) = std::fs::read(dir.join(file)) {
-                    return (200, None, b);
-                }
-            }
-        }
+    if let Some(rest) = path.strip_prefix(&prefix)
+        && let Some((_tag, file)) = rest.split_once('/')
+        && crate::manifest::is_safe_file_name(file)
+        && let Ok(b) = std::fs::read(dir.join(file))
+    {
+        return (200, None, b);
     }
     nf
 }

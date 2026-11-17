@@ -110,7 +110,7 @@ fn main() {
             let mut last_pct = u64::MAX;
             let staged = up
                 .download(&rel, &mut |p| {
-                    let pct = if p.total == 0 { 100 } else { p.done * 100 / p.total };
+                    let pct = (p.done * 100).checked_div(p.total).unwrap_or(100);
                     if pct / 25 != last_pct / 25 {
                         println!("  downloaded {pct}%");
                         last_pct = pct;
@@ -138,10 +138,10 @@ fn main() {
         "rollback" => {
             let r = up.rollback().unwrap_or_else(|e| die(e));
             println!("rolled back {} -> {}; restored: {}", r.from, r.to, r.restored.join(", "));
-            if a.has("--restart") {
-                if let Err(e) = up.relaunch(&[]) {
-                    die(e);
-                }
+            if a.has("--restart")
+                && let Err(e) = up.relaunch(&[])
+            {
+                die(e);
             }
         }
         "status" => {
