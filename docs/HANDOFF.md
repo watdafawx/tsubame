@@ -16,6 +16,7 @@ Updated 2026-11-17 by the P0 master session.
 | S1 | merged | Direct2D 1M-row list. `docs/spike-d2d.md`. |
 | S2 | merged | Enumeration bench. `docs/spike-enum.md`. |
 | S3 | merged | Wasmtime host. `docs/spike-wasm.md`. Ran on Sonnet 5.5 because GPT hit its usage limit. |
+| C1 | merged | Core entry store (24-byte record, 50.0 MB at 1M, name sort 100k 9.6 ms / 1M 139 ms, filter 100k 2.6 ms, ID-based selection). See docs/core-store.md. Type sort at 1M is 470 ms (no gate). Selection is by entry ID with bitset + epoch. |
 | S4 | merged | Shell on STA workers. `docs/shell-threading.md`. Opus 5.5. |
 
 ## Measured numbers against PLAN.md section 2
