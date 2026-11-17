@@ -123,6 +123,8 @@ pub struct View {
     text: String,
     crumbs: CrumbCache,
     focus_list: bool,
+    /// a failed typed path re-opens the field: focus it on the next frame
+    focus_path: bool,
     pub maximized: bool,
     /// y of the list's top edge (keyboard menus)
     list_top: f32,
@@ -166,6 +168,7 @@ impl View {
             text: String::with_capacity(64),
             crumbs: CrumbCache::default(),
             focus_list: true,
+            focus_path: false,
             maximized: false,
             list_top: 0.0,
             last_range: (0, 0),
@@ -326,6 +329,7 @@ impl View {
                         self.path_text.select_all();
                         self.path_error = Some(format!("Can't open \"{typed}\": {msg}"));
                         self.focus_list = false;
+                        self.focus_path = true;
                     }
                 }
                 Some(t) if t.is_loading() => self.edit_nav = Some((id, prev, typed)),
@@ -445,7 +449,9 @@ impl View {
             g.end();
             return Some(out);
         }
-        if std::mem::take(&mut self.focus_list) {
+        if std::mem::take(&mut self.focus_path) {
+            ui.set_focus(Some(ID_PATH_EDIT));
+        } else if std::mem::take(&mut self.focus_list) {
             ui.set_focus(Some(ID_LIST));
         }
         let t = ui.theme;
@@ -983,5 +989,201 @@ mod tests {
         assert_eq!(count(999), "999");
         assert_eq!(count(12_480), "12,480");
         assert_eq!(count(1_000_000), "1,000,000");
+    }
+
+    // ---- whole-frame tests on the kit's recording canvas -----------------
+
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tsubame_ui::TestCanvas;
+
+    struct Rig {
+        v: View,
+        ui: Ui,
+        c: TestCanvas,
+        shell: ShellUi,
+        dir: std::path::PathBuf,
+    }
+
+    impl Rig {
+        fn new(tag: &str) -> Rig {
+            let dir = std::env::temp_dir().join(format!("tsubame-u2-view-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("Docs")).unwrap();
+            std::fs::write(dir.join("alpha.txt"), b"a").unwrap();
+            std::fs::write(dir.join("beta.txt"), b"bb").unwrap();
+            let wake: Wake = Arc::new(|| {});
+            let v = View::new(dir.to_str().unwrap(), wake, true, Density::Compact);
+            let mut ui = Ui::new(v.base_theme());
+            bind_shortcuts(&mut ui);
+            let mut r = Rig { v, ui, c: TestCanvas::new(1120.0, 720.0), shell: ShellUi::new(16), dir };
+            r.settle();
+            r
+        }
+        fn settle(&mut self) {
+            let t0 = Instant::now();
+            while self.v.tabs.items.iter().any(|t| t.is_loading()) {
+                self.v.pump();
+                assert!(t0.elapsed() < Duration::from_secs(10), "listing did not finish");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            self.v.pump();
+            self.frame();
+        }
+        /// two frames: hit-testing uses the previous frame's widgets
+        fn frame(&mut self) {
+            for _ in 0..2 {
+                self.c.clear();
+                self.shell.begin_frame();
+                assert!(self.v.paint(&mut self.ui, &mut self.c, &mut self.shell).is_some());
+            }
+        }
+        fn key(&mut self, key: Key, mods: Mods) {
+            self.ui.push(Event::KeyDown { key, mods, repeat: false });
+            self.frame();
+        }
+        fn click(&mut self, x: f32, y: f32) {
+            let pos = Pt::new(x, y);
+            self.ui.push(Event::MouseMove { pos });
+            self.frame();
+            self.ui.push(Event::MouseDown { pos, button: Button::Left, mods: Mods::NONE, double: false });
+            self.frame();
+            self.ui.push(Event::MouseUp { pos, button: Button::Left, mods: Mods::NONE });
+            self.frame();
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn frame_shows_rows_crumbs_and_status() {
+        let r = Rig::new("frame");
+        for name in ["Docs", "alpha.txt", "beta.txt"] {
+            assert!(r.c.has_text(name), "{name} missing: {:?}", r.c.texts());
+        }
+        assert!(r.c.has_text("3 items"), "{:?}", r.c.texts());
+        assert!(r.c.has_text("Name") && r.c.has_text("Date modified") && r.c.has_text("Type") && r.c.has_text("Size"));
+        assert!(r.c.texts().iter().any(|t| t.starts_with("tsubame-u2-view-frame")), "crumb of the folder: {:?}", r.c.texts());
+        assert_eq!(r.c.clip_depth(), 0);
+    }
+
+    #[test]
+    fn typing_in_the_list_filters_and_escape_clears() {
+        let mut r = Rig::new("typing");
+        r.ui.push(Event::Char('b'));
+        r.frame();
+        assert_eq!(r.v.tab().filter, "b");
+        assert_eq!(r.v.tab().shown(), 1, "only beta.txt has a b");
+        assert!(r.c.has_text("1 of 3 items"), "{:?}", r.c.texts());
+        r.key(Key::Escape, Mods::NONE);
+        assert_eq!(r.v.tab().filter, "");
+        assert_eq!(r.v.tab().shown(), 3);
+    }
+
+    #[test]
+    fn tabs_open_close_and_keep_their_own_state() {
+        let mut r = Rig::new("tabs");
+        assert_eq!(r.v.tabs.len(), 1);
+        r.key(Key::Char('T'), Mods::CTRL);
+        r.settle();
+        assert_eq!(r.v.tabs.len(), 2);
+        assert_eq!(r.v.tabs.active, 1);
+        // sort in tab 2 does not touch tab 1
+        r.v.tab_mut().sort_by(tsubame_core::Column::Size);
+        r.key(Key::Tab, Mods::CTRL);
+        assert_eq!(r.v.tabs.active, 0);
+        assert_eq!(r.v.tab().sort.column, tsubame_core::Column::Name);
+        r.key(Key::Char('W'), Mods::CTRL);
+        assert_eq!(r.v.tabs.len(), 1);
+        assert!(!r.v.quit);
+        r.key(Key::Char('W'), Mods::CTRL);
+        assert!(r.v.quit, "closing the last tab ends the window");
+    }
+
+    #[test]
+    fn history_buttons_and_keys() {
+        let mut r = Rig::new("hist");
+        let root = r.v.tab().path.clone();
+        let docs = format!("{root}\\Docs");
+        r.v.go(&docs);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+        assert!(r.c.has_text("This folder is empty"));
+        r.key(Key::Left, Mods::ALT);
+        r.settle();
+        assert_eq!(r.v.tab().path, root);
+        r.key(Key::Right, Mods::ALT);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+        r.key(Key::Up, Mods::ALT);
+        r.settle();
+        assert_eq!(r.v.tab().path, root);
+        // Enter on a folder row opens it
+        r.v.activate(0);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+    }
+
+    #[test]
+    fn path_edit_navigates_or_shows_an_error() {
+        let mut r = Rig::new("pathedit");
+        r.key(Key::Char('L'), Mods::CTRL);
+        assert!(r.v.editing);
+        // a bad path: the bar stays in edit mode with an error
+        r.v.path_text.set_text("C:\\definitely\\not\\here");
+        r.key(Key::Enter, Mods::NONE);
+        r.settle();
+        r.settle();
+        assert!(r.v.editing, "error keeps the field open");
+        assert!(r.c.texts().iter().any(|t| t.starts_with("Can't open")), "{:?}", r.c.texts());
+        assert_eq!(r.v.tab().path, r.dir.to_str().unwrap(), "back on the old folder");
+        // Escape cancels
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.editing);
+    }
+
+    #[test]
+    fn theme_and_density_switch_at_runtime() {
+        let mut r = Rig::new("theme");
+        assert!(r.v.dark);
+        r.key(Key::Char('L'), Mods::CTRL_SHIFT);
+        assert!(!r.v.dark);
+        assert_eq!(r.ui.theme.bg, LIGHT.bg);
+        assert_eq!(r.ui.theme.height_list_row, 22.0);
+        r.key(Key::Char('D'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.density, Density::Comfortable);
+        assert_eq!(r.ui.theme.height_list_row, 26.0);
+        assert_eq!(r.v.tab().list.row_h, 26.0);
+        r.key(Key::Char('D'), Mods::CTRL_SHIFT);
+        r.key(Key::Char('D'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.density, Density::Compact);
+    }
+
+    #[test]
+    fn selection_counts_show_in_the_status_bar() {
+        let mut r = Rig::new("sel");
+        r.key(Key::Char('A'), Mods::CTRL);
+        assert_eq!(r.v.tab().sel.count(), 3);
+        assert!(r.c.texts().iter().any(|t| t.starts_with("3 selected")), "{:?}", r.c.texts());
+        r.key(Key::Escape, Mods::NONE);
+        assert_eq!(r.v.tab().sel.count(), 0);
+    }
+
+    #[test]
+    fn sidebar_click_navigates() {
+        let mut r = Rig::new("side");
+        let target = r.dir.join("Docs").to_str().unwrap().to_string();
+        r.v.side.places = vec![tsubame_win::places::Place { name: "Desktop", path: target.clone() }];
+        r.frame();
+        // the Desktop row is the second quick-access entry, below the title bar and toolbar
+        let t = r.ui.theme;
+        let y = t.height_titlebar + t.height_toolbar + t.space_2 + t.height_sidebar_header + t.height_sidebar_item * 1.5;
+        r.click(60.0, y);
+        r.settle();
+        assert_eq!(r.v.tab().path, target);
     }
 }
