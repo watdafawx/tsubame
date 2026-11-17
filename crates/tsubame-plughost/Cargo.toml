@@ -3,3 +3,24 @@ name = "tsubame-plughost"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tsubame-plughost"
+path = "src/main.rs"
+
+# Measurement client (spawn / round trip / memory). Not shipped, not linked into the host exe.
+[[bin]]
+name = "plughost-bench"
+path = "src/bin/plughost-bench.rs"
+
+[features]
+default = ["compiler"]
+# Cranelift: compile .wasm at startup and `precompile`. Without it the host is runtime-only and loads precompiled .cwasm.
+compiler = ["wasmtime/cranelift"]
+
+[dependencies]
+# Smallest set that works: component model + runtime, no cache/profiling/wat/gc/async/threads/parallel-compilation.
+wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime", "component-model", "std"] }

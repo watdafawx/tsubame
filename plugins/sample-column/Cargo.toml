@@ -1,0 +1,21 @@
+[package]
+name = "sample-column"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Own workspace: this crate builds for wasm32-wasip2 and is not part of the app workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.63", default-features = false, features = ["macros"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
