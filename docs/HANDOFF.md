@@ -5,7 +5,7 @@ Updated 2026-11-17 by the P0 master session.
 ## State
 - P0 finished. User approved all four decisions (2026-11-17) and said go; they are now written into PLAN.md (P0 outcome block, relaxed memory budget). **P1 started in this same master session**: M1, C1, C2, U1 running in parallel. U2 waits for U1 + M1 (user approves the mock) + C1 + C2; B1 waits for U2.
 - `cargo check --workspace` passes on `main`. Nothing was pushed.
-- Disk: main `target` 740 MB. No worktrees left. Six empty folders remain under `C:\Users\MIcha\.t3\worktrees\tsubame\` (git removed the worktrees but T3 holds the folders open; delete them by hand, they are 0 MB).
+- Disk: main `target` 740 MB. No worktrees left. Six empty folders remain under the agent worktree root (git removed the worktrees but T3 holds the folders open; delete them by hand, they are 0 MB).
 - Rig is clean: no tsubame processes, fixtures deleted. `G:\rig-test\tsubame` still has the S3 wasm host exes and `.cwasm` (small).
 
 ## Tasks
@@ -71,7 +71,7 @@ U2 waits for U1, M1 (approved), C1, C2. B1 waits for U2.
 
 ## Update 2: user requests (2026-11-17)
 - Caret: **blink while a text field is focused, stop after about 10 s and stay solid** (timer only then; idle stays 0 wake-ups). Tell U2/U-kit tasks.
-- **Installer and auto-update must be wired early**, not left to the end of P6: new card **D2 (installer + updater pipeline)** after U2 merges, reusing blink's `X:\Dev\blink\src\update\` (logic.rs, mod.rs). Updates come from GitHub Releases of a **public repo**. No remote exists yet; `gh` is logged in as `watdafawx`. User allowed creating and pushing a public repo. Do it when D2 starts, after scrubbing the docs (local paths such as `C:\Users\MIcha\...` in this file, rig address in tool docs) and after the first release is ready. Confirm the repo name with the user at that point (outward-facing).
+- **Installer and auto-update must be wired early**, not left to the end of P6: new card **D2 (installer + updater pipeline)** after U2 merges, reusing blink's `X:\Dev\blink\src\update\` (logic.rs, mod.rs). Updates come from GitHub Releases of a **public repo**. No remote exists yet; `gh` is logged in as `watdafawx`. User allowed creating and pushing a public repo. Do it when D2 starts, after scrubbing the docs (personal local paths) and after the first release is ready. Confirm the repo name with the user at that point (outward-facing).
 - **Opt-in "set as default file manager" feature**: R1 (DeepSeek, research only) is writing `docs/research-default-explorer-defender.md` and `docs/research-installer-updater.md` (Defender / SmartScreen / ASR reactions, mechanisms, signing, installer choice). Implementation card waits for R1. Must be reversible in one click and must never leave folders unopenable (fallback to explorer.exe).
 - Themes: all basic themes (copy sets from hopper and spotifast), density switch on the fly, editable own-drawn context menu with Nilesoft Shell import (later cards).
 
@@ -83,7 +83,7 @@ U2 waits for U1, M1 (approved), C1, C2. B1 waits for U2.
 ## Update 4: D2 merged (2026-11-18)
 - D2 merged: `crates/tsubame-update` (51 tests), `installer/tsubame.iss`, `tools/release*.ps1`, `.github/workflows/{ci,release}.yml`, `docs/release.md`, `docs/updater.md`. Local e2e (update, tamper, bad signature, rollback) and a silent install/uninstall on rig passed. Not run: the workflows on GitHub, real signing, Authenticode, a real update from GitHub. Inno Setup 6 is now installed per-user on rig.
 - Production builds refuse all updates until a release public key is pinned in `crates/tsubame-update/src/keys.rs` (`RELEASE_PUBLIC_KEYS_HEX`). Run `tools/release-keygen.ps1`, back up the private key, pin the public key, `gh secret set UPDATE_SIGNING_KEY`.
-- **Before the first public push**: git history carries the user's real e-mail as author (`watdafawx <...@hotmail.com>`), tracked files carry `C:\Users\MIcha\...` paths (HANDOFF.md, a sample path in `crates/tsubame-plughost/src/proto.rs`). Needs the user's decision (see the report). No remote has been added and nothing was pushed.
+- **Before the first public push**: git history carries the user's real e-mail as author (`watdafawx <...@hotmail.com>`), tracked files carried a local user path (scrubbed). Needs the user's decision (see the report). No remote has been added and nothing was pushed.
 - Next: updater wiring card (Settings > Updates, startup check) after U2 merges.
 
 ## Update 5 (2026-11-18)

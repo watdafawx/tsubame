@@ -82,7 +82,7 @@ pub fn gen_paths(n: usize) -> Vec<String> {
     (0..n)
         .map(|i| {
             format!(
-                "C:\\Users\\MIcha\\Documents\\Projects\\folder_{:03}\\sub_{:02}\\file_{:06}.{}",
+                "C:\\Users\\alex\\Documents\\Projects\\folder_{:03}\\sub_{:02}\\file_{:06}.{}",
                 i % 997,
                 i % 31,
                 i,
