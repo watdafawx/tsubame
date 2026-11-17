@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsubame logos</title>
+<style>
+  :root { --navy: #16233f; --cream: #f3ecdf; --tsu-red: #e0492c; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .card { background: var(--card); color: var(--card-foreground, var(--foreground)); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 16px; --tile-bg: var(--card); }
+  .head { display: flex; flex-direction: column; gap: 3px; margin-bottom: 12px; }
+  .head b { font-size: 14px; }
+  .head span { font-size: 12px; opacity: .65; }
+  .tiles { display: flex; align-items: flex-end; gap: 8px; }
+  .tile { display: inline-grid; place-items: center; border-radius: 22%; flex: none; }
+  .tile svg { width: 72%; height: 72%; display: block; }
+  .dark  { background: var(--navy);  color: var(--cream); --tile-bg: var(--navy); }
+  .light { background: var(--cream); color: var(--navy);  --tile-bg: var(--cream); }
+  .s96 { width: 84px; height: 84px; } .s32 { width: 32px; height: 32px; } .s16 { width: 16px; height: 16px; }
+  .word { display: flex; align-items: center; gap: 8px; margin-top: 14px; font: 650 22px/1 var(--font-sans); letter-spacing: -0.02em; }
+  .word svg { width: 26px; height: 26px; }
+  .word i { font-style: normal; font-weight: 400; font-size: 13px; opacity: .6; letter-spacing: 0; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <path id="bird-top" d="M50 12C56 12 59 18 59 26C72 28 86 38 94 56C82 46 70 44 60 46C61 60 64 78 68 94C60 84 54 74 50 66C46 74 40 84 32 94C36 78 39 60 40 46C30 44 18 46 6 56C14 38 28 28 41 26C41 18 44 12 50 12Z"/>
+    <path id="bird-side" d="M104 41L92 37C84 33 74 34 66 38C58 28 48 16 34 6C40 22 44 36 46 46C34 48 20 52 4 54C18 58 26 60 32 61C24 66 16 72 8 80C28 76 44 70 54 64C68 64 84 58 92 48Z"/>
+    <clipPath id="clip-side"><use href="#bird-side"/></clipPath>
+  </defs>
+
+  <symbol id="m-a" viewBox="0 0 100 100">
+    <g transform="rotate(40 50 52) translate(5 5) scale(.9)">
+      <use href="#bird-top" fill="currentColor"/>
+      <circle cx="50" cy="21" r="4.5" fill="var(--tsu-red)"/>
+    </g>
+  </symbol>
+
+  <symbol id="m-b" viewBox="0 0 110 90">
+    <use href="#bird-side" fill="currentColor"/>
+    <ellipse cx="88" cy="47" rx="10" ry="6" transform="rotate(-35 88 47)" fill="var(--tsu-red)" clip-path="url(#clip-side)"/>
+  </symbol>
+
+  <symbol id="m-c" viewBox="0 0 100 100">
+    <path fill="currentColor" d="M8 26q0-8 8-8h22l9 9h37q8 0 8 8v43q0 8-8 8H16q-8 0-8-8Z"/>
+    <g transform="translate(52 58) rotate(40) scale(.56) translate(-50 -52)">
+      <use href="#bird-top" fill="var(--tile-bg)"/>
+    </g>
+  </symbol>
+
+  <symbol id="m-d" viewBox="0 0 100 100">
+    <g fill="currentColor">
+      <path d="M4 42Q50 4 96 42Q50 24 4 42Z"/>
+      <path d="M43 30H57L60 66L72 94L50 78L28 94L40 66Z"/>
+    </g>
+    <circle cx="50" cy="19" r="8" fill="var(--tsu-red)"/>
+  </symbol>
+
+  <symbol id="m-e" viewBox="0 0 100 100">
+    <path fill="currentColor" d="M50 5L89 19V48C89 72 71 88 50 96C29 88 11 72 11 48V19Z"/>
+    <g transform="translate(50 50) rotate(40) scale(.58) translate(-50 -52)">
+      <use href="#bird-top" fill="var(--tile-bg)"/>
+      <circle cx="50" cy="21" r="5" fill="var(--tsu-red)"/>
+    </g>
+  </symbol>
+
+  <symbol id="m-f" viewBox="0 0 100 100">
+    <rect x="6" y="6" width="88" height="88" rx="14" fill="var(--tsu-red)"/>
+    <text x="50" y="52" text-anchor="middle" dominant-baseline="central" font-size="66" font-weight="700"
+          font-family="'Yu Mincho','Noto Serif JP','MS Mincho',serif" fill="#f3ecdf">燕</text>
+  </symbol>
+</svg>
+
+<div class="grid" id="grid"></div>
+
+<script>
+  const marks = [
+    ["a", "A · Dive",   "top view, banking. Red crown dot."],
+    ["b", "B · Glide",  "side profile, red throat like the real bird."],
+    ["c", "C · Folder", "swallow cut out of a folder. Says what the app is."],
+    ["d", "D · T-bird", "letter T: wings are the bar, forked tail the stem."],
+    ["e", "E · Shield", "swallow in a shield. Leans on safety."],
+    ["f", "F · Hanko",  "the kanji as a red seal stamp."],
+  ];
+  const use = id => `<svg><use href="#m-${id}"/></svg>`;
+  document.getElementById("grid").innerHTML = marks.map(([id, name, note]) => `
+    <div class="card">
+      <div class="head"><b>${name}</b><span>${note}</span></div>
+      <div class="tiles">
+        <span class="tile dark s96">${use(id)}</span>
+        <span class="tile light s96">${use(id)}</span>
+        <span class="tile dark s32">${use(id)}</span>
+        <span class="tile light s32">${use(id)}</span>
+        <span class="tile dark s16">${use(id)}</span>
+        <span class="tile light s16">${use(id)}</span>
+      </div>
+      <div class="word">${use(id)}tsubame <i>燕</i></div>
+    </div>`).join("");
+</script>
+</body>
+</html>

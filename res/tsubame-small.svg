@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Tsubame app icon, small cut. Use for 16 and 24 px: fatter wings and tail, no red dot. -->
+  <rect width="100" height="100" rx="22" fill="#16233f"/>
+  <g transform="translate(13 13) scale(.74)">
+    <g transform="rotate(40 50 53) translate(2 3) scale(.96)">
+      <path fill="#f3ecdf" d="M50 12C57 12 61 18 61 26C74 28 87 38 94 54C82 47 72 46 63 48C64 62 68 78 74 94C63 86 55 78 50 70C45 78 37 86 26 94C32 78 36 62 37 48C28 46 18 47 6 54C13 38 26 28 39 26C39 18 43 12 50 12Z"/>
+    </g>
+  </g>
+</svg>

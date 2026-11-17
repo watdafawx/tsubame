@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsubame logo</title>
+<style>
+  :root { --navy: #16233f; --cream: #f3ecdf; --tsu-red: #e0492c; }
+  .stack { display: grid; gap: 12px; }
+  .card { background: var(--card); color: var(--card-foreground, var(--foreground)); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 16px; }
+  h3 { margin: 0 0 3px; font-size: 14px; }
+  p { margin: 0 0 12px; font-size: 12px; opacity: .65; }
+  .row { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+  .tile { display: inline-grid; place-items: center; border-radius: 22%; flex: none; width: var(--s); height: var(--s); }
+  .tile svg { width: 74%; height: 74%; display: block; }
+  .navy  { background: var(--navy);  color: var(--cream); }
+  .cream { background: var(--cream); color: var(--navy); }
+  .red   { background: var(--tsu-red); color: var(--cream); --tsu-red: #16233f; }
+  .black { background: #000; color: #fff; --tsu-red: #fff; }
+  .white { background: #fff; color: #000; --tsu-red: #000; }
+  .cell { display: grid; justify-items: center; gap: 5px; font-size: 11px; opacity: .9; }
+  .cell small { opacity: .6; }
+  .pair { display: flex; gap: 4px; align-items: flex-end; }
+  .lock { display: flex; align-items: center; gap: 10px; font: 650 30px/1 var(--font-sans); letter-spacing: -0.025em; }
+  .lock svg { width: 38px; height: 38px; }
+  .lock i { font-style: normal; font-weight: 400; font-size: 15px; opacity: .55; letter-spacing: 0; }
+  .locks { display: flex; gap: 28px; align-items: center; flex-wrap: wrap; }
+  .chip { padding: 14px 18px; border-radius: var(--radius); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <!-- master: for 32 px and up -->
+  <symbol id="tsu" viewBox="0 0 100 100">
+    <g transform="rotate(40 50 53) translate(4 5) scale(.92)">
+      <path fill="currentColor" d="M50 10C55.5 10 59 15 59 23C73 25 88 36 96 56C84 45 71 42 60 43C60 58 63 78 70 97C61 86 54 75 50 64C46 75 39 86 30 97C37 78 40 58 40 43C29 42 16 45 4 56C12 36 27 25 41 23C41 15 44.5 10 50 10Z"/>
+      <circle cx="50" cy="20" r="4.5" fill="var(--tsu-red)"/>
+    </g>
+  </symbol>
+  <!-- small cut: for 16 and 24 px. Fatter wings and tail, shallower fork, no dot. -->
+  <symbol id="tsu-s" viewBox="0 0 100 100">
+    <g transform="rotate(40 50 53) translate(2 3) scale(.96)">
+      <path fill="currentColor" d="M50 12C57 12 61 18 61 26C74 28 87 38 94 54C82 47 72 46 63 48C64 62 68 78 74 94C63 86 55 78 50 70C45 78 37 86 26 94C32 78 36 62 37 48C28 46 18 47 6 54C13 38 26 28 39 26C39 18 43 12 50 12Z"/>
+    </g>
+  </symbol>
+  <symbol id="seal" viewBox="0 0 100 100">
+    <rect x="6" y="6" width="88" height="88" rx="14" fill="#e0492c"/>
+    <text x="50" y="52" text-anchor="middle" dominant-baseline="central" font-size="66" font-weight="700"
+          font-family="'Yu Mincho','Noto Serif JP','MS Mincho',serif" fill="#f3ecdf">燕</text>
+  </symbol>
+</svg>
+
+<div class="stack">
+  <div class="card">
+    <h3>Mark</h3>
+    <p>Longer, thinner tail streamers and sharper wing tips than the concept.</p>
+    <div class="row">
+      <span class="tile navy" style="--s:132px"><svg><use href="#tsu"/></svg></span>
+      <span class="tile cream" style="--s:132px"><svg><use href="#tsu"/></svg></span>
+      <span class="tile red" style="--s:64px"><svg><use href="#tsu"/></svg></span>
+      <span class="tile black" style="--s:64px"><svg><use href="#tsu"/></svg></span>
+      <span class="tile white" style="--s:64px"><svg><use href="#tsu"/></svg></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Sizes</h3>
+    <p>At 24 and 16 px the left of each pair is the master shrunk, the right is the small cut.</p>
+    <div class="row" id="sizes"></div>
+  </div>
+
+  <div class="card">
+    <h3>Wordmark</h3>
+    <p>Title bar, About, website.</p>
+    <div class="locks">
+      <div class="lock"><svg><use href="#tsu"/></svg>tsubame</div>
+      <div class="lock chip navy"><svg><use href="#tsu"/></svg>tsubame <i>燕</i></div>
+      <div class="lock chip cream"><svg><use href="#tsu"/></svg>tsubame</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Seal (secondary)</h3>
+    <p>Concept F kept as a stamp: installer, About screen, release notes. Never the app icon.</p>
+    <div class="locks">
+      <svg width="56" height="56"><use href="#seal"/></svg>
+      <div class="lock"><svg><use href="#tsu"/></svg>tsubame<svg style="width:26px;height:26px;margin-left:4px"><use href="#seal"/></svg></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const tile = (cls, s, id) => `<span class="tile ${cls}" style="--s:${s}px"><svg><use href="#${id}"/></svg></span>`;
+  const cell = (s, ids) => `<div class="cell"><div class="pair">${ids.map(id => tile("navy", s, id) + tile("cream", s, id)).join("")}</div>${s} px</div>`;
+  document.getElementById("sizes").innerHTML =
+    [64, 48, 32].map(s => cell(s, ["tsu"])).join("") + [24, 16].map(s => cell(s, ["tsu", "tsu-s"])).join("");
+</script>
+</body>
+</html>
