@@ -45,6 +45,7 @@ pub struct Bench {
     pub first_paint_ms: f64,
     first_path: &'static str,
     private_first: usize,
+    private_before_scroll: usize,
     gpu_swap_ms: Option<f64>,
     final_path: &'static str,
     page_scroll_acc: f64,
@@ -107,6 +108,7 @@ impl Bench {
             first_paint_ms: 0.0,
             first_path: "",
             private_first: 0,
+            private_before_scroll: 0,
             gpu_swap_ms: None,
             final_path: "",
             page_scroll_acc: 0.0,
@@ -152,6 +154,7 @@ impl Bench {
         match self.state {
             State::WaitGpu(deadline) => {
                 if Instant::now() >= deadline {
+                    self.private_before_scroll = memory().0;
                     v.selected = START_ROW + 3;
                     v.set_scroll(START_ROW as f64 * ROW_H as f64);
                     self.state = State::Running(Instant::now());
@@ -215,6 +218,7 @@ impl Bench {
         }
         line(stats("enddraw_all", self.samples.iter().map(|s| s.end_ms).collect()));
         line(format!("private_bytes_first_paint: {} ({:.1} MB)", self.private_first, self.private_first as f64 / 1048576.0));
+        line(format!("private_bytes_before_scroll (after GPU swap, idle): {} ({:.1} MB)", self.private_before_scroll, self.private_before_scroll as f64 / 1048576.0));
         line(format!("private_bytes_end: {} ({:.1} MB)", private_end, private_end as f64 / 1048576.0));
         line(format!("working_set_end: {} ({:.1} MB)", ws_end, ws_end as f64 / 1048576.0));
         line(format!("peak_commit: {} ({:.1} MB)", peak_commit, peak_commit as f64 / 1048576.0));

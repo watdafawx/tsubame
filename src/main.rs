@@ -4,6 +4,7 @@
 //! `tsubame.exe [--store] [--bench]`
 //!   --store  rows come from a compact array store (name buffer + 24-byte
 //!            records) instead of being computed per frame
+//!   --windowed  with --bench: keep the 1120x720 DIP window instead of maximizing
 //!   --bench  measure first paint + scroll paint times, write `s1-bench.txt`, exit
 //!            (also: env TSUBAME_BENCH=1)
 
@@ -78,7 +79,8 @@ fn main() {
         APP.with(|a| *a.borrow_mut() = Some(App { view: view::View::new(source), gfx, bench, first_done: false }));
 
         // bench measures at full screen (4K on rig); normal runs open 1120x720 DIP
-        let _ = ShowWindow(hwnd, if bench_mode { SW_SHOWMAXIMIZED } else { SW_SHOW });
+        let maximize = bench_mode && !args.iter().any(|a| a == "--windowed");
+        let _ = ShowWindow(hwnd, if maximize { SW_SHOWMAXIMIZED } else { SW_SHOW });
 
         // Idle = blocked here. No timers except the bench-only frame ticker.
         let mut msg = MSG::default();

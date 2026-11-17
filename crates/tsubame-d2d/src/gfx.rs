@@ -121,8 +121,24 @@ pub struct Gfx {
     warming: bool,
 }
 
-/// Most layouts `Gfx::text` keeps (a busy frame draws ~400 strings).
-const LAYOUT_CAP: usize = 4096;
+/// Most layouts `Gfx::text` keeps. Blink used 4096 / 30 frames (a busy frame
+/// draws ~400 strings); a scrolling list draws mostly new strings each frame, so
+/// that only held ~70 MB of dead layouts (spike S1, docs/spike-d2d.md).
+const LAYOUT_CAP: usize = 1024;
+/// Frames a layout survives without being drawn.
+const LAYOUT_AGE: u32 = 4;
+
+fn layout_age() -> u32 {
+    static C: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *C.get_or_init(|| std::env::var("TSUBAME_LAYOUT_AGE").ok().and_then(|v| v.parse().ok()).unwrap_or(LAYOUT_AGE).max(1))
+}
+
+/// Layout cache cap. `TSUBAME_LAYOUT_CAP=<n>` overrides it (spike experiment;
+/// 0 turns the cache off).
+fn layout_cap() -> usize {
+    static C: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *C.get_or_init(|| std::env::var("TSUBAME_LAYOUT_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(LAYOUT_CAP))
+}
 
 struct Layout {
     s: Box<str>,
@@ -419,11 +435,11 @@ impl Gfx {
             return false;
         }
         self.frame = self.frame.wrapping_add(1);
-        // drop layouts no frame drew in the last 30 (values that changed)
-        if self.frame.is_multiple_of(30) || self.layouts.len() > LAYOUT_CAP {
-            let f = self.frame;
-            self.layouts.retain(|_, l| f.wrapping_sub(l.used) < 30);
-            if self.layouts.len() > LAYOUT_CAP {
+        // drop layouts no frame drew in the last `layout_age()` frames (values that changed)
+        if self.frame.is_multiple_of(layout_age()) || self.layouts.len() > layout_cap() {
+            let (f, age) = (self.frame, layout_age());
+            self.layouts.retain(|_, l| f.wrapping_sub(l.used) < age);
+            if self.layouts.len() > layout_cap() {
                 self.layouts.clear();
             }
         }
@@ -585,7 +601,9 @@ impl Gfx {
                 let fmt = self.format(font);
                 let wide: Vec<u16> = s.encode_utf16().collect();
                 let Ok(l) = (unsafe { self.dw.CreateTextLayout(&wide, &fmt, w4 as f32 / 4.0, h4 as f32 / 4.0) }) else { return };
-                self.layouts.insert(key, Layout { s: s.into(), font, w4, h4, l: l.clone(), used: frame });
+                if layout_cap() > 0 {
+                    self.layouts.insert(key, Layout { s: s.into(), font, w4, h4, l: l.clone(), used: frame });
+                }
                 l
             }
         };
