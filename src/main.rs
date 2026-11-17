@@ -37,7 +37,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_F10, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
@@ -360,6 +360,17 @@ fn menu_at(hwnd: HWND, x: i32, y: i32, wrong_owner: bool) {
     invalidate(hwnd);
 }
 
+/// Keyboard-invoked menu, at the selected row.
+fn key_menu(hwnd: HWND, wrong_owner: bool) {
+    let p = with(|a| {
+        let s = a.gfx.dpi / 96.0;
+        ((60.0 * s) as i32, (a.view.row_mid_y(a.view.selected) * s) as i32)
+    });
+    if let Some((x, y)) = p {
+        menu_at(hwnd, x, y, wrong_owner);
+    }
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
@@ -458,13 +469,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_CONTEXTMENU if lp.0 == -1 => {
-                // keyboard (menu key, Shift+F10): at the selected row
-                let p = with(|a| {
-                    let s = a.gfx.dpi / 96.0;
-                    ((60.0 * s) as i32, (a.view.row_mid_y(a.view.selected) * s) as i32)
-                });
-                if let Some((x, y)) = p {
-                    menu_at(hwnd, x, y, false);
+                // keyboard (menu key): at the selected row
+                key_menu(hwnd, false);
+                LRESULT(0)
+            }
+            WM_SYSKEYDOWN | WM_SYSKEYUP if wp.0 as u16 == VK_F10.0 => {
+                // F10 must not reach DefWindowProc: it enters menu mode on the
+                // UI thread, and while any menu is active the worker's
+                // SetForegroundWindow fails, so Escape never reaches its menu.
+                if msg == WM_SYSKEYDOWN && GetKeyState(VK_SHIFT.0 as i32) < 0 {
+                    key_menu(hwnd, false);
                 }
                 LRESULT(0)
             }
@@ -489,18 +503,25 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_KEYDOWN => {
-                let vk = wp.0 as u16;
-                match vk {
-                    0x54 => {
-                        // T: thumbnail panel
+                if with(|a| a.view.key(wp.0 as u16)).unwrap_or(false) {
+                    invalidate(hwnd);
+                }
+                LRESULT(0)
+            }
+            // letter commands as characters: injected input (VK_PACKET) and
+            // other layouts arrive here, not as a 'T' virtual key
+            WM_CHAR => {
+                match char::from_u32(wp.0 as u32).map(|c| c.to_ascii_lowercase()) {
+                    Some('t') => {
+                        // thumbnail panel
                         with(|a| {
                             a.shell.thumbs.on = !a.shell.thumbs.on;
                             a.shell.thumbs.row = None;
                         });
                         invalidate(hwnd);
                     }
-                    0x48 => {
-                        // H: hang one worker in a "shell call"
+                    Some('h') => {
+                        // hang one worker in a "shell call"
                         with(|a| {
                             a.pool.submit(Request::Hang { ms: HANG_MS });
                             a.shell.menu_status = format!("a worker sleeps {} s; watchdog replaces it after {} ms", HANG_MS / 1000, a.pool.hang_after.as_millis());
@@ -508,21 +529,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         });
                         invalidate(hwnd);
                     }
-                    0x57 => {
-                        // W: wrong-owner menu (owner = this UI window, on another thread)
-                        let p = with(|a| {
-                            let s = a.gfx.dpi / 96.0;
-                            ((60.0 * s) as i32, (a.view.row_mid_y(a.view.selected) * s) as i32)
-                        });
-                        if let Some((x, y)) = p {
-                            menu_at(hwnd, x, y, true);
-                        }
+                    Some('w') => {
+                        // wrong-owner menu (owner = this UI window, on another thread)
+                        key_menu(hwnd, true);
                     }
-                    _ => {
-                        if with(|a| a.view.key(vk)).unwrap_or(false) {
-                            invalidate(hwnd);
-                        }
-                    }
+                    _ => {}
                 }
                 LRESULT(0)
             }

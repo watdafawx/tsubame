@@ -318,7 +318,7 @@ fn worker(idx: usize, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sender<Reply>) 
                 st.kind.store(job.req.kind(), Relaxed);
                 st.busy_since.store(sh.now_ms(), Release);
                 let t = Instant::now();
-                let payload = run(job.req, host);
+                let payload = run(job.req, host, HWND(sh.hwnd as *mut _));
                 let work_us = t.elapsed().as_micros() as u64;
                 st.busy_since.store(0, Release);
                 st.kind.store(K_IDLE, Relaxed);
@@ -348,11 +348,11 @@ fn worker(idx: usize, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sender<Reply>) 
     }
 }
 
-fn run(req: Request, host: Option<HWND>) -> Payload {
+fn run(req: Request, host: Option<HWND>, ui: HWND) -> Payload {
     match req {
         Request::Icon { src, size } => Payload::Icon(icon::get(&src, size)),
         Request::Thumb { path, size, cache_only } => thumb::get(&path, size, cache_only),
-        Request::Menu { paths, x, y, extended, auto_close, owner } => Payload::Menu(menu::show(host, &paths, x, y, extended, auto_close, owner)),
+        Request::Menu { paths, x, y, extended, auto_close, owner } => Payload::Menu(menu::show(host, &paths, x, y, extended, auto_close, owner, ui)),
         Request::Hang { ms } => {
             unsafe { Sleep(ms) };
             Payload::Hang

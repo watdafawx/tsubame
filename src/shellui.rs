@@ -360,6 +360,9 @@ pub fn menu_line(m: &MenuResult, queued_us: u64) -> String {
     if m.foreign_owner {
         s.push_str(", owner on another thread");
     }
+    if m.items > 0 && !m.foreground {
+        s.push_str(", SetForegroundWindow failed");
+    }
     if let Some(e) = &m.error {
         s.push_str(&format!(", error: {e}"));
     }

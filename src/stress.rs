@@ -50,6 +50,7 @@ pub struct Stress {
     query_us: Vec<u64>,
     bind_us: Vec<u64>,
     menu_total_us: Vec<u64>,
+    asked: Option<Instant>,
     menu_errors: Vec<String>,
     not_shown: usize,
     hold_paints: Vec<f32>,
@@ -77,6 +78,7 @@ impl Stress {
             query_us: Vec::new(),
             bind_us: Vec::new(),
             menu_total_us: Vec::new(),
+            asked: None,
             menu_errors: Vec::new(),
             not_shown: 0,
             hold_paints: Vec::new(),
@@ -107,6 +109,7 @@ impl Stress {
         let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
         let paths = self.paths[..n].to_vec();
         pool.submit(Request::Menu { paths, x: self.pt.0, y: self.pt.1, extended: false, auto_close: Some(hold_ms.unwrap_or(0)), owner: None });
+        self.asked = Some(Instant::now());
     }
 
     /// Timer tick and after every drained batch of replies. `pt` is a screen
@@ -157,10 +160,12 @@ impl Stress {
                 (false, false)
             }
             State::MenuRun { i } => {
-                let Some((m, total)) = shell.last_menu.take() else { return (false, false) };
+                let Some((m, _)) = shell.last_menu.take() else { return (false, false) };
                 self.bind_us.push(m.bind_us);
                 self.query_us.push(m.query_us);
-                self.menu_total_us.push(total);
+                if let Some(t) = self.asked.take() {
+                    self.menu_total_us.push(t.elapsed().as_micros() as u64);
+                }
                 match m.popup_us {
                     Some(u) => self.popup_us.push(u),
                     None => self.not_shown += 1,
@@ -282,8 +287,28 @@ impl Stress {
                 z.gdi as i64 - warm.gdi as i64,
                 z.user as i64 - warm.user as i64
             ));
-            let gate = pct(z.private_bytes, a.private_bytes).abs() <= 5.0;
-            line(format!("leak gate (private bytes within 5% of start): {}", if gate { "PASS" } else { "FAIL" }));
+            // A leak is growth: private bytes may fall (the GPU swap transient
+            // is trimmed during the run) without failing the gate.
+            let grow = pct(z.private_bytes, a.private_bytes);
+            let gate_total = grow <= 5.0;
+            line(format!("leak gate A (private bytes end vs start, growth <= 5%): {grow:+.1}% {}", if gate_total { "PASS" } else { "FAIL" }));
+            // per cycle: after the first ten items (handlers loaded, caches
+            // warm) to the last item; a per-item leak shows up here
+            let at = |label: &str| self.c.iter().find(|(l, _)| l.starts_with(label)).map(|(_, c)| *c);
+            let mut gate = gate_total;
+            if let (Some(b), Some(e)) = (at("after menu 10"), at("after menu 200")) {
+                let (pp, ph) = (pct(e.private_bytes, b.private_bytes), pct(e.handles as usize, b.handles as usize));
+                let ok = pp <= 5.0 && ph <= 5.0;
+                gate &= ok;
+                line(format!(
+                    "leak gate B (menu 10 -> 200, 190 cycles, growth <= 5%): private {pp:+.1}%, handles {ph:+.1}% ({:+}), gdi {:+}, user {:+} {}",
+                    e.handles as i64 - b.handles as i64,
+                    e.gdi as i64 - b.gdi as i64,
+                    e.user as i64 - b.user as i64,
+                    if ok { "PASS" } else { "FAIL" }
+                ));
+            }
+            line(format!("leak gate: {}", if gate { "PASS" } else { "FAIL" }));
         }
         match self.mode {
             Mode::Menu => {

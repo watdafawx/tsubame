@@ -42,6 +42,9 @@ pub struct MenuResult {
     pub popup_us: Option<u64>,
     /// the owner used was a window of another thread
     pub foreign_owner: bool,
+    /// SetForegroundWindow(owner) succeeded; when false, Escape and
+    /// click-away do not reach the menu (e.g. the UI thread was in menu mode)
+    pub foreground: bool,
 }
 
 const ID_FIRST: u32 = 1;
@@ -137,7 +140,10 @@ fn parent_of(p: &str) -> &str {
     p.rfind('\\').map(|i| &p[..i]).unwrap_or("")
 }
 
-pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool, auto_close: Option<u32>, owner: Option<isize>) -> MenuResult {
+/// `ui` is the app window that gets the foreground back afterwards (the
+/// hidden host keeps it otherwise, and the UI stops receiving keys).
+#[allow(clippy::too_many_arguments)]
+pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool, auto_close: Option<u32>, owner: Option<isize>, ui: HWND) -> MenuResult {
     let mut r = MenuResult::default();
     let Some(host) = host else {
         r.error = Some("no host window".into());
@@ -211,14 +217,15 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
     let cmd = unsafe {
         // the owner must be foreground or a click elsewhere does not close
         // the menu (KB 135788); the app is the foreground process, so a
-        // window of any of its threads may take it
-        let _ = SetForegroundWindow(owner);
+        // window of any of its threads may take it. It fails while any menu
+        // is active, including the UI thread's F10/Alt menu mode.
+        r.foreground = SetForegroundWindow(owner).as_bool();
         SetLastError(WIN32_ERROR(0));
         let cmd = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, x, y, owner, None).0 as u32;
         if cmd == 0 {
             let e = GetLastError();
             if e.0 != 0 {
-                r.error = Some(format!("TrackPopupMenuEx: {}", windows::core::Error::from(e.to_hresult()).message()));
+                r.error = Some(format!("TrackPopupMenuEx: GetLastError {} ({})", e.0, windows::core::Error::from(e.to_hresult()).message()));
             }
         }
         // KB 135788: lets the menu loop end cleanly
@@ -261,6 +268,11 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
     CM3.with(|c| *c.borrow_mut() = None);
     CM2.with(|c| *c.borrow_mut() = None);
     unsafe {
+        // hand the foreground back unless the command moved it (a dialog,
+        // another app): keys would otherwise go to the hidden host window
+        if GetForegroundWindow() == host && !ui.is_invalid() {
+            let _ = SetForegroundWindow(ui);
+        }
         let _ = DestroyMenu(hmenu);
     }
     START.set(None);
