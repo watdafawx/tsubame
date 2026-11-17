@@ -12,6 +12,7 @@
 
 pub mod bitmap;
 pub mod enumerate;
+pub mod places;
 pub mod procinfo;
 pub mod shell;
 

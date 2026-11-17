@@ -146,7 +146,7 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
     let mut resp = ListResponse::default();
     let len = src.len();
     let mut rows = rect;
-    let track = rows.cut_right(ui.theme.sb_w);
+    let track = rows.cut_right(ui.theme.layout_scrollbar_width);
     st.view_h = rows.h.max(0.0);
     let rh = st.row_h;
     let scroll0 = st.scroll;
@@ -161,7 +161,7 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
 
     // wheel: whole line steps, no smoothing
     if it.wheel.1 != 0.0 {
-        let step = it.wheel.1 as f64 * ui.theme.wheel_lines as f64 * rh as f64;
+        let step = it.wheel.1 as f64 * ui.theme.wheel_lines() as f64 * rh as f64;
         st.set_scroll(st.scroll - step, len);
     }
 
@@ -251,12 +251,12 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
         let r = Rect::new(rows.x, y, rows.w, rh);
         let rs = RowState { selected: src.is_selected(i), cursor: i == st.cursor, hot: hot_row == Some(i), focused };
         if rs.selected {
-            c.fill(r, if focused { theme.row_sel } else { theme.row_sel_unfocused });
+            c.fill(r, if focused { theme.selected } else { theme.selected_inactive });
         } else if rs.hot {
-            c.fill(r, theme.row_hot);
+            c.fill(r, theme.hover);
         }
         if rs.cursor && focused {
-            c.round_stroke(r, 2.0, theme.row_cursor, 1.0);
+            c.round_stroke(r, 2.0, theme.focus, 1.0);
         }
         src.draw_row(c, theme, i, r, rs);
     }

@@ -1,23 +1,22 @@
 #![windows_subsystem = "windows"]
-//! S1 + S4 spike on the `tsubame-ui` kit (U1): a details-view list on
-//! Direct2D, fed by shell workers, with a filter box (Ctrl+F; Tab moves
-//! the focus between the filter and the list).
+//! Tsubame: a very fast Windows file browser (U2: the browsable skeleton).
+//! Raw Win32 window with its own title bar, Direct2D drawing, and the
+//! `tsubame-ui` kit on top. See `docs/u2-views.md` for the code structure.
 //!
-//! `tsubame.exe [--dir <path>] [--store] [--bench [--hang]] [--stress menu|thumbs] [--workers N]`
-//!   --dir <path>  list a real folder (on a worker thread); rows get real
-//!                 shell icons; right-click opens the real shell context menu
-//!                 (Shift: extended verbs), Ctrl+click multi-selects, T shows
-//!                 a thumbnail of the selected item, H hangs a worker for 20 s,
-//!                 W opens a menu owned by the UI window (wrong-owner test)
-//!   --store       1M fake rows from a compact array store (else procedural)
-//!   --windowed    with --bench: keep the 1120x720 DIP window instead of maximizing
-//!   --bench       measure first paint + scroll paint times (icons streaming
-//!                 with --dir), write `s1-bench.txt` (env TSUBAME_BENCH_OUT
-//!                 renames it), exit. Also: env TSUBAME_BENCH=1
-//!   --hang        with --bench: hang every shell worker for 20 s when the
-//!                 scroll starts (hung-worker replacement test)
-//!   --stress m    S4 stress run (menu: 200 context menus; thumbs: 500
-//!                 thumbnails), writes `s4-stress-<m>.txt`, exits
+//! `tsubame.exe [path] [--dir <path>] [--theme dark|light] [--density compact|comfortable|spacious]`
+//!   path / --dir  folder to open (default: the profile folder)
+//! Measurement and test modes (hidden):
+//!   --bench       first paint + scroll paint times; writes `s1-bench.txt`
+//!                 (env TSUBAME_BENCH_OUT renames it), exits. Without --dir the
+//!                 list holds 1M synthetic rows. Also: env TSUBAME_BENCH=1
+//!     --windowed  keep the 1120x720 DIP window instead of maximizing
+//!     --hang      hang every shell worker for 20 s when the scroll starts
+//!   --timing      navigation timings (first rows, complete+sorted), writes
+//!                 `u2-timing.txt`, exits. `--timing-dirs "A;B"` the folders
+//!                 (the first one is also the start folder), `--reps N` per folder
+//!   --leak-smoke  no window: 200 navigations + 50 tab open/close, writes
+//!                 `u2-leak.txt` (private bytes before/after)
+//!   --stress m    S4 stress run (menu: 200 context menus; thumbs: 500 thumbnails)
 //!   --workers N   shell STA workers (default 2)
 //! Env: TSUBAME_ICON_PER_PATH=1 asks every real file's icon by path (worst
 //! case), TSUBAME_ICON_FACTORY=1 uses IShellItemImageFactory for per-path
@@ -25,21 +24,31 @@
 
 mod bench;
 mod clip;
+mod cols;
 mod data;
+mod leak;
 mod lru;
+mod nav;
 mod shellui;
+mod sidebar;
 mod stress;
+mod tab;
+mod tabs;
+mod timing;
 mod view;
 
 use std::cell::RefCell;
-use std::sync::mpsc::{Receiver, channel};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tsubame_d2d::Gfx;
-use tsubame_ui::{Button, Cursor, Event, Key, Mods, Pt, Theme, Ui};
+use tsubame_ui::{Button, Cursor, Density, Event, Key, Mods, Pt, Ui};
+use tsubame_win::places;
 use tsubame_win::shell::{Pool, Request};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -47,14 +56,27 @@ use windows::core::*;
 
 /// Shell pool replies are ready (posted by a worker, at most one in flight).
 const WM_APP_SHELL: u32 = WM_APP + 1;
-/// The folder listing finished.
-const WM_APP_DIR: u32 = WM_APP + 2;
+/// An enumerator delivered a batch or finished (coalesced: at most one in flight).
+const WM_APP_WAKE: u32 = WM_APP + 2;
+/// The drives / known folders worker finished.
+const WM_APP_PLACES: u32 = WM_APP + 3;
 /// Hung-worker watchdog: armed only while the pool has icon/thumbnail work.
 const WATCH_TIMER: usize = 2;
+/// Caret blink: exists only while a text field has focus.
+const CARET_TIMER: usize = 4;
+const CARET_MS: u32 = 530;
+/// The blink stops (caret solid) after this long without input.
+const CARET_IDLE: Duration = Duration::from_secs(10);
 /// not exported by the windows crate features we use
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WATCH_MS: u32 = 1000;
 const HANG_MS: u32 = 20_000;
+/// Resize border of the frameless window, DIPs.
+const RESIZE_BORDER: f32 = 6.0;
+
+static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+static PLACES_BUSY: AtomicBool = AtomicBool::new(false);
+static PLACES: Mutex<Option<(Vec<places::Drive>, Vec<places::Place>)>> = Mutex::new(None);
 
 struct App {
     view: view::View,
@@ -68,13 +90,20 @@ struct App {
     cursor_kind: Cursor,
     gfx: Gfx,
     bench: Option<bench::Bench>,
+    timing: Option<timing::Run>,
     first_done: bool,
     pool: Pool,
     shell: shellui::ShellUi,
-    dir_rx: Option<Receiver<std::result::Result<data::DirStore, String>>>,
     stress: Option<stress::Stress>,
     hang_bench: bool,
     watch_armed: bool,
+    /// the blink timer exists
+    caret_timer: bool,
+    /// the blink stopped for lack of input (caret solid until the next key)
+    caret_idle: bool,
+    last_input: Instant,
+    /// start of the last paint (streaming listings repaint at most ~60/s)
+    last_paint: Instant,
 }
 
 thread_local! {
@@ -91,30 +120,64 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
 }
 
+/// The system "apps" theme: dark unless it says light.
+fn system_dark() -> bool {
+    let mut v = 1u32;
+    let mut sz = size_of::<u32>() as u32;
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut v as *mut u32 as *mut _),
+            Some(&mut sz),
+        )
+    };
+    r == ERROR_SUCCESS && v == 0
+}
+
+fn parse_density(s: &str) -> Option<Density> {
+    match s.to_ascii_lowercase().as_str() {
+        "compact" => Some(Density::Compact),
+        "comfortable" => Some(Density::Comfortable),
+        "spacious" => Some(Density::Spacious),
+        _ => None,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let bench_mode = args.iter().any(|a| a == "--bench") || std::env::var_os("TSUBAME_BENCH").is_some_and(|v| v != "0");
-    let use_store = args.iter().any(|a| a == "--store");
-    let dir = arg_value(&args, "--dir");
+    let flag = |n: &str| args.iter().any(|a| a == n);
+    let bench_mode = flag("--bench") || std::env::var_os("TSUBAME_BENCH").is_some_and(|v| v != "0");
+    let timing_mode = flag("--timing");
     let stress_mode = arg_value(&args, "--stress").map(|m| if m == "thumbs" { stress::Mode::Thumbs } else { stress::Mode::Menu });
     let workers = arg_value(&args, "--workers").and_then(|v| v.parse().ok()).unwrap_or(2usize);
-
-    let (source, store_ms, store_bytes) = if let Some(d) = &dir {
-        (data::Source::Loading(d.clone()), None, 0)
-    } else if use_store {
-        let t = Instant::now();
-        let s = data::Store::build();
-        let bytes = s.bytes();
-        (data::Source::Store(s), Some(t.elapsed().as_secs_f64() * 1000.0), bytes)
-    } else {
-        (data::Source::Procedural, None, 0)
+    let timing_dirs: Vec<String> = arg_value(&args, "--timing-dirs").map(|s| s.split(';').filter(|p| !p.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+    // first bare argument that is not a flag value is the folder to open
+    const VALUE_FLAGS: [&str; 7] = ["--dir", "--theme", "--density", "--stress", "--workers", "--timing-dirs", "--reps"];
+    let positional = args.iter().enumerate().skip(1).find(|(i, a)| !a.starts_with("--") && !VALUE_FLAGS.contains(&args[i - 1].as_str())).map(|(_, a)| a.clone());
+    let explicit_dir = arg_value(&args, "--dir").or(positional);
+    let synthetic = bench_mode && explicit_dir.is_none();
+    let start = timing_dirs.first().cloned().or(explicit_dir.clone()).unwrap_or_else(places::home_folder);
+    let dark = match arg_value(&args, "--theme").as_deref() {
+        Some("light") => false,
+        Some("dark") => true,
+        _ => system_dark(),
     };
-    let label = source.label();
+    let density = arg_value(&args, "--density").and_then(|d| parse_density(&d)).unwrap_or(Density::Compact);
+
+    if flag("--leak-smoke") {
+        let text = leak::run(&start);
+        bench::write_text_report("u2-leak.txt", &text);
+        return;
+    }
 
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
-        let class = w!("TsubameS1");
+        let class = w!("TsubameMain");
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
@@ -128,63 +191,81 @@ fn main() {
 
         let scale = GetDpiForSystem() as f32 / 96.0;
         let (w, h) = ((1120.0 * scale) as i32, (720.0 * scale) as i32);
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("Tsubame S4 spike"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).unwrap();
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("Tsubame"), WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).unwrap();
 
+        // no WS_CAPTION: the kit draws the title bar (WM_NCCALCSIZE gives it the whole window)
+        let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         let mut gfx = Gfx::new(hwnd).unwrap();
         let dpi = GetDpiForWindow(hwnd) as f32;
         gfx.set_dpi(dpi);
-        let bench = bench_mode.then(|| bench::Bench::new(label, store_ms, store_bytes));
 
         // shell workers: all COM and disk work happens there
         let mut pool = Pool::new(workers, hwnd.0 as isize, WM_APP_SHELL);
         if let Some(ms) = std::env::var("TSUBAME_HANG_MS").ok().and_then(|v| v.parse().ok()) {
-            pool.hang_after = std::time::Duration::from_millis(ms);
+            pool.hang_after = Duration::from_millis(ms);
         }
         let mut shell = shellui::ShellUi::new(icon_px(dpi));
         shell.collect_other = stress_mode == Some(stress::Mode::Thumbs);
 
-        // the folder listing runs on its own thread too
-        let dir_rx = dir.map(|d| {
-            let (tx, rx) = channel();
-            let h = hwnd.0 as isize;
-            std::thread::spawn(move || {
-                let _ = tx.send(data::DirStore::load(&d));
-                let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_DIR, WPARAM(0), LPARAM(0));
-            });
-            rx
+        // enumerator workers wake the UI thread with one coalesced message
+        let hw = hwnd.0 as isize;
+        let wake: tsubame_win::enumerate::Wake = Arc::new(move || {
+            if !WAKE_PENDING.swap(true, Ordering::AcqRel) {
+                let _ = PostMessageW(Some(HWND(hw as *mut _)), WM_APP_WAKE, WPARAM(0), LPARAM(0));
+            }
         });
 
-        let mut ui = Ui::new(Theme::dark());
-        ui.shortcuts.bind(Key::Char('F'), Mods::CTRL, view::CMD_FIND, true);
+        let mut view = view::View::new(&start, wake, dark, density);
+        let mut bench_state = None;
+        if synthetic {
+            let t = Instant::now();
+            let store = data::synthetic_store(1_000_000);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            let bytes = store.memory_bytes();
+            view.tab_mut().adopt_store("Synthetic\\1,000,000 rows", store);
+            bench_state = Some(bench::Bench::new("synthetic 1M-entry EntryStore", Some(ms), bytes));
+        } else if bench_mode {
+            bench_state = Some(bench::Bench::new("real folder (enumerator)", None, 0));
+        }
+
+        let mut ui = Ui::new(view.base_theme());
+        view::bind_shortcuts(&mut ui);
         ui.clipboard = Box::new(clip::WinClipboard(hwnd.0 as isize));
-        ui.set_focus(Some(view::LIST_ID));
+        ui.set_focus(Some(view::ID_LIST));
+        view.zebra = flag("--zebra");
+
+        let timing = timing_mode.then(|| timing::Run::new(if timing_dirs.is_empty() { vec![start.clone()] } else { timing_dirs.clone() }, arg_value(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(3)));
 
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
-                view: view::View::new(source),
+                view,
                 ui,
                 captured: false,
                 tracking: false,
                 hi_surrogate: None,
                 cursor_kind: Cursor::Arrow,
                 gfx,
-                bench,
+                bench: bench_state,
+                timing,
                 first_done: false,
                 pool,
                 shell,
-                dir_rx,
                 stress: stress_mode.map(stress::Stress::new),
-                hang_bench: args.iter().any(|a| a == "--hang"),
+                hang_bench: flag("--hang"),
                 watch_armed: false,
+                caret_timer: false,
+                caret_idle: false,
+                last_input: Instant::now(),
+                last_paint: Instant::now(),
             })
         });
 
-        // bench measures at full screen (4K on rig); normal runs open 1120x720 DIP
-        let maximize = bench_mode && !args.iter().any(|a| a == "--windowed");
+        // bench and timing runs measure at full screen (4K on rig)
+        let maximize = (bench_mode || timing_mode) && !flag("--windowed");
         let _ = ShowWindow(hwnd, if maximize { SW_SHOWMAXIMIZED } else { SW_SHOW });
 
-        // Idle = blocked here. Timers only while a bench/stress run or the
-        // hung-worker watchdog (pool busy) needs them.
+        // Idle = blocked here. Timers only while a bench/stress run, the
+        // hung-worker watchdog (pool busy) or a focused text field's caret needs them.
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
@@ -225,17 +306,58 @@ fn arm_watch(hwnd: HWND, a: &mut App) {
     }
 }
 
-/// After a paint: submit icon misses, cancel rows scrolled away, follow the
-/// selection with the thumbnail panel.
+/// The caret rule: one blink timer exists only while a text field has
+/// focus; it stops after `CARET_IDLE` without input (caret stays solid);
+/// with no text field focused there is no timer at all.
+fn sync_caret(hwnd: HWND, a: &mut App, text_focus: bool) {
+    if text_focus && !a.caret_timer && !a.caret_idle {
+        a.last_input = Instant::now();
+        a.ui.caret_on = true;
+        unsafe { SetTimer(Some(hwnd), CARET_TIMER, CARET_MS, None) };
+        a.caret_timer = true;
+    } else if !text_focus {
+        if a.caret_timer {
+            let _ = unsafe { KillTimer(Some(hwnd), CARET_TIMER) };
+            a.caret_timer = false;
+        }
+        a.caret_idle = false;
+        a.ui.caret_on = true;
+    }
+}
+
+/// Keyboard / click input restarts a stopped blink and shows the caret.
+fn note_input(a: &mut App) {
+    a.last_input = Instant::now();
+    a.caret_idle = false;
+    a.ui.caret_on = true;
+}
+
+/// Reads drives and known folders on a worker (they can block on a dead
+/// network share or an empty card reader); WM_APP_PLACES brings the result.
+fn spawn_places(hwnd: HWND) {
+    if PLACES_BUSY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let h = hwnd.0 as isize;
+    let _ = std::thread::Builder::new().name("tsubame-places".into()).spawn(move || {
+        let r = (places::list_drives(), places::known_folders());
+        if let Ok(mut g) = PLACES.lock() {
+            *g = Some(r);
+        }
+        PLACES_BUSY.store(false, Ordering::Release);
+        let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_PLACES, WPARAM(0), LPARAM(0)) };
+    });
+}
+
+/// After a paint: submit icon misses, cancel rows scrolled away, start the
+/// drive scan when the folder moved to another volume.
 fn after_paint(hwnd: HWND, a: &mut App) {
     a.shell.end_frame(&mut a.pool);
-    if a.shell.thumbs.on {
-        let sel = a.view.cursor();
-        let path = a.view.path(sel);
-        let px = (view::THUMB_DIP * a.gfx.dpi / 96.0) as u32;
-        a.shell.want_thumb(&mut a.pool, sel, path, px);
-    }
     arm_watch(hwnd, a);
+    if a.view.want_drives && !PLACES_BUSY.load(Ordering::Acquire) {
+        a.view.want_drives = false;
+        spawn_places(hwnd);
+    }
 }
 
 unsafe fn on_paint(hwnd: HWND) {
@@ -243,6 +365,7 @@ unsafe fn on_paint(hwnd: HWND) {
     unsafe { BeginPaint(hwnd, &mut ps) };
     let info = with(|a| {
         let t0 = Instant::now();
+        a.last_paint = t0;
         a.shell.begin_frame();
         let out = a.view.paint(&mut a.ui, &mut a.gfx, &mut a.shell);
         let total = t0.elapsed().as_secs_f32() * 1000.0;
@@ -250,10 +373,12 @@ unsafe fn on_paint(hwnd: HWND) {
         if let Some(s) = a.stress.as_mut() {
             s.painted(total);
         }
-        (total, a.gfx.end_ms, a.gfx.path(), out)
+        // timing of the navigation: a frame with rows / the final frame was presented
+        let final_frame = out.is_some() && a.view.tab_mut().frame_presented();
+        (total, a.gfx.end_ms, a.gfx.path(), out, final_frame)
     });
     let _ = unsafe { EndPaint(hwnd, &ps) };
-    let Some((total_ms, end_ms, path, out)) = info else { return };
+    let Some((total_ms, end_ms, path, out, final_frame)) = info else { return };
     if let Some(out) = out {
         after_frame(hwnd, out);
     }
@@ -270,13 +395,13 @@ unsafe fn on_paint(hwnd: HWND) {
         if let Some(b) = a.bench.as_mut() {
             b.first_paint(path, (rc.right, rc.bottom), a.gfx.dpi);
         }
+        if let Some(t) = a.timing.as_mut() {
+            t.first_paint(ms, bench::memory().0);
+        }
         Some(ms)
     })
     .flatten();
-    if let Some(ms) = first {
-        let title = format!("Tsubame S4 spike - first paint {ms:.0} ms\0");
-        let w: Vec<u16> = title.encode_utf16().collect();
-        let _ = unsafe { SetWindowTextW(hwnd, PCWSTR(w.as_ptr())) };
+    if first.is_some() {
         if with(|a| a.bench.is_some()).unwrap_or(false) {
             unsafe { SetTimer(Some(hwnd), bench::TIMER_ID, bench::TICK_MS, None) };
         }
@@ -290,12 +415,40 @@ unsafe fn on_paint(hwnd: HWND) {
             }
         });
     }
+    if final_frame {
+        timing_step(hwnd);
+    }
+}
+
+/// The final frame of a navigation was presented: the timing run records it
+/// and starts the next one, or writes the report and closes the window.
+fn timing_step(hwnd: HWND) {
+    let done = with(|a| {
+        let App { view, timing, .. } = a;
+        let t = timing.as_mut()?;
+        if !t.next(view) {
+            return Some(false);
+        }
+        let mut rc = RECT::default();
+        let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+        let text = t.report((rc.right, rc.bottom), a.gfx.dpi, a.gfx.path(), bench::memory().0);
+        bench::write_text_report("u2-timing.txt", &text);
+        Some(true)
+    })
+    .flatten();
+    match done {
+        Some(true) => {
+            let _ = unsafe { DestroyWindow(hwnd) };
+        }
+        Some(false) => invalidate(hwnd),
+        None => {}
+    }
 }
 
 unsafe fn on_bench_tick(hwnd: HWND) {
     let r = with(|a| {
         let b = a.bench.as_mut()?;
-        let r = b.tick(&mut a.view);
+        let r = b.tick(a.view.tab_mut());
         if b.just_started {
             b.just_started = false;
             if a.hang_bench {
@@ -354,7 +507,7 @@ unsafe fn on_stress_tick(hwnd: HWND) {
     let pt = window_center(hwnd);
     let r = with(|a| {
         let App { view, shell, pool, stress, .. } = a;
-        stress.as_mut().map(|s| s.step(view, shell, pool, pt))
+        stress.as_mut().map(|s| s.step(view.tab(), shell, pool, pt))
     })
     .flatten();
     match r {
@@ -368,37 +521,38 @@ unsafe fn on_stress_tick(hwnd: HWND) {
 }
 
 /// Context menu for view row `row`, at client px (x, y).
-fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32, wrong_owner: bool) {
+fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32) {
     let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     let (sx, sy) = screen_pt(hwnd, x, y);
     with(|a| {
         let paths = a.view.menu_paths(row);
         if paths.is_empty() {
-            a.shell.menu_status = "fake rows have no file: run with --dir <path>".into();
             return;
         }
-        a.shell.open_menu(&mut a.pool, paths, sx, sy, extended, wrong_owner.then_some(hwnd.0 as isize));
+        a.shell.open_menu(&mut a.pool, paths, sx, sy, extended, None);
     });
     invalidate(hwnd);
 }
 
 /// Keyboard-invoked menu, at the cursor row.
-fn key_menu(hwnd: HWND, wrong_owner: bool) {
+fn key_menu(hwnd: HWND) {
     let p = with(|a| {
         let s = a.gfx.dpi / 96.0;
-        let row = a.view.cursor();
-        if a.view.len() > 0 && !a.view.sel.contains(row) {
-            a.view.sel.single(row);
+        let t = a.view.tab_mut();
+        let row = t.list.cursor;
+        if t.shown() > 0 && !t.store.at(row).is_some_and(|id| t.sel.contains(id)) {
+            t.sel.single(&t.store, row);
         }
         (row, (60.0 * s) as i32, (a.view.row_mid_y(row) * s) as i32)
     });
     if let Some((row, x, y)) = p {
-        open_menu(hwnd, row, x, y, wrong_owner);
+        open_menu(hwnd, row, x, y);
     }
 }
 
-/// What the kit asked for after a frame: another frame, mouse capture, the
-/// cursor, the IME position; then the S4 menu and the letter commands.
+/// What the kit and the view asked for after a frame: mouse capture, the IME
+/// position, the shell menu, files to open, window commands, another frame,
+/// and the caret timer.
 fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
     let r = with(|a| {
         a.cursor_kind = out.cursor;
@@ -412,9 +566,11 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
             Some(p) => (row, (p.x * s) as i32, (p.y * s) as i32),
             None => (row, (60.0 * s) as i32, (a.view.row_mid_y(row) * s) as i32),
         });
-        (cap, ime, menu, view::View::leftover_chars(&a.ui))
+        sync_caret(hwnd, a, out.text_focus);
+        let open = std::mem::take(&mut a.view.open_paths);
+        (cap, ime, menu, open, a.view.win_cmd.take(), a.view.quit)
     });
-    let Some((cap, ime, menu, chars)) = r else { return };
+    let Some((cap, ime, menu, open, win_cmd, quit)) = r else { return };
     match cap {
         Some(true) => unsafe {
             SetCapture(hwnd);
@@ -428,10 +584,26 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
         clip::place_ime(hwnd, x, y, h);
     }
     if let Some((row, x, y)) = menu {
-        open_menu(hwnd, row, x, y, false);
+        open_menu(hwnd, row, x, y);
     }
-    for c in chars {
-        on_letter(hwnd, c);
+    for p in open {
+        places::open_async(p);
+    }
+    match win_cmd {
+        Some(view::WinCmd::Minimize) => unsafe {
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+        },
+        Some(view::WinCmd::MaxRestore) => unsafe {
+            let _ = ShowWindow(hwnd, if IsZoomed(hwnd).as_bool() { SW_RESTORE } else { SW_MAXIMIZE });
+        },
+        Some(view::WinCmd::Close) => unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        },
+        None => {}
+    }
+    if quit {
+        let _ = unsafe { DestroyWindow(hwnd) };
+        return;
     }
     if out.repaint {
         invalidate(hwnd);
@@ -440,7 +612,15 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
 
 /// Feeds one event to the kit; paints only if it can change the screen.
 fn push(hwnd: HWND, ev: Event) {
-    if with(|a| a.ui.push(ev)).unwrap_or(false) {
+    let typed = matches!(ev, Event::KeyDown { .. } | Event::Char(_) | Event::MouseDown { .. });
+    if with(|a| {
+        if typed {
+            note_input(a);
+        }
+        a.ui.push(ev)
+    })
+    .unwrap_or(false)
+    {
         invalidate(hwnd);
     }
 }
@@ -499,28 +679,41 @@ fn button_event(hwnd: HWND, msg: u32, lp: LPARAM) {
     push(hwnd, ev);
 }
 
-/// Letter commands (chars no widget took): T thumbnail panel, H hang a
-/// worker in a "shell call", W wrong-owner menu (owner = this UI window).
-fn on_letter(hwnd: HWND, c: char) {
-    match c {
-        't' => {
-            with(|a| {
-                a.shell.thumbs.on = !a.shell.thumbs.on;
-                a.shell.thumbs.row = None;
-            });
-            invalidate(hwnd);
-        }
-        'h' => {
-            with(|a| {
-                a.pool.submit(Request::Hang { ms: HANG_MS });
-                a.shell.menu_status = format!("a worker sleeps {} s; watchdog replaces it after {} ms", HANG_MS / 1000, a.pool.hang_after.as_millis());
-                arm_watch(hwnd, a);
-            });
-            invalidate(hwnd);
-        }
-        'w' => key_menu(hwnd, true),
-        _ => {}
+/// Frameless window: where a point (screen px) counts as caption or border.
+fn hit_test(hwnd: HWND, lp: LPARAM) -> LRESULT {
+    let mut p = POINT { x: lo(lp), y: hi(lp) };
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = ScreenToClient(hwnd, &mut p);
+        let _ = GetClientRect(hwnd, &mut rc);
     }
+    let zoomed = unsafe { IsZoomed(hwnd).as_bool() };
+    let r = with(|a| {
+        let s = a.gfx.dpi / 96.0;
+        let pt = Pt::new(p.x as f32 / s, p.y as f32 / s);
+        let caption = pt.y < a.ui.theme.height_titlebar && !a.ui.over_widget(pt);
+        (s, caption)
+    });
+    let Some((s, caption)) = r else { return LRESULT(HTCLIENT as isize) };
+    let b = (RESIZE_BORDER * s) as i32;
+    if !zoomed {
+        let (l, t, rr, bb) = (p.x < b, p.y < b, p.x >= rc.right - b, p.y >= rc.bottom - b);
+        let code = match (l, t, rr, bb) {
+            (true, true, _, _) => HTTOPLEFT,
+            (_, true, true, _) => HTTOPRIGHT,
+            (true, _, _, true) => HTBOTTOMLEFT,
+            (_, _, true, true) => HTBOTTOMRIGHT,
+            (true, ..) => HTLEFT,
+            (_, _, true, _) => HTRIGHT,
+            (_, true, ..) => HTTOP,
+            (_, _, _, true) => HTBOTTOM,
+            _ => 0,
+        };
+        if code != 0 {
+            return LRESULT(code as isize);
+        }
+    }
+    LRESULT(if caption { HTCAPTION } else { HTCLIENT } as isize)
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -531,9 +724,35 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
+            // no system title bar or frame: the client area is the whole window
+            WM_NCCALCSIZE if wp.0 != 0 => {
+                if IsZoomed(hwnd).as_bool() {
+                    // maximized: the window overhangs the monitor by the frame; pull it in
+                    let p = &mut *(lp.0 as *mut NCCALCSIZE_PARAMS);
+                    let dpi = GetDpiForWindow(hwnd);
+                    let pad = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                    let (fx, fy) = (GetSystemMetricsForDpi(SM_CXFRAME, dpi) + pad, GetSystemMetricsForDpi(SM_CYFRAME, dpi) + pad);
+                    p.rgrc[0].left += fx;
+                    p.rgrc[0].right -= fx;
+                    p.rgrc[0].top += fy;
+                    p.rgrc[0].bottom -= fy;
+                }
+                LRESULT(0)
+            }
+            WM_NCHITTEST => hit_test(hwnd, lp),
+            WM_GETMINMAXINFO => {
+                let s = dpi_scale();
+                let m = &mut *(lp.0 as *mut MINMAXINFO);
+                m.ptMinTrackSize = POINT { x: (640.0 * s) as i32, y: (400.0 * s) as i32 };
+                LRESULT(0)
+            }
             WM_SIZE => {
                 let (w, h) = (lo(lp).max(1) as u32, hi(lp).max(1) as u32);
-                with(|a| a.gfx.resize(w, h));
+                let zoomed = wp.0 as u32 == SIZE_MAXIMIZED;
+                with(|a| {
+                    a.gfx.resize(w, h);
+                    a.view.maximized = zoomed;
+                });
                 invalidate(hwnd);
                 LRESULT(0)
             }
@@ -556,7 +775,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     }
                     let st = {
                         let App { view, shell, pool, stress, .. } = &mut *a;
-                        stress.as_mut().map(|s| s.step(view, shell, pool, pt))
+                        stress.as_mut().map(|s| s.step(view.tab(), shell, pool, pt))
                     };
                     arm_watch(hwnd, a);
                     (repaint, st)
@@ -573,20 +792,36 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 LRESULT(0)
             }
-            WM_APP_DIR => {
-                with(|a| {
-                    if let Some(rx) = a.dir_rx.take() {
-                        match rx.try_recv() {
-                            Ok(Ok(d)) => {
-                                a.shell.menu_status = format!("listed {} entries in {:.1} ms on a worker ({:.2} MB store)", d.len(), d.list_ms, d.bytes() as f64 / 1048576.0);
-                                a.view.set_source(data::Source::Dir(d));
-                            }
-                            Ok(Err(e)) => a.shell.menu_status = format!("listing failed: {e}"),
-                            Err(_) => a.dir_rx = Some(rx),
-                        }
+            WM_APP_WAKE => {
+                // clear first: a worker that posts after this point gets a new message
+                WAKE_PENDING.store(false, Ordering::Release);
+                // WM_PAINT is lowest priority: a worker that keeps posting wakes would
+                // starve it until the listing is done. Paint right away (at most
+                // ~60 frames/s) so the first rows and the streaming show at once.
+                let r = with(|a| (a.view.pump(), a.view.pump_more, a.last_paint.elapsed() >= Duration::from_millis(16)));
+                if let Some((_, true, _)) = r {
+                    // budget used up with batches still queued: come back after the paint
+                    if !WAKE_PENDING.swap(true, Ordering::AcqRel) {
+                        let _ = PostMessageW(Some(hwnd), WM_APP_WAKE, WPARAM(0), LPARAM(0));
                     }
-                });
-                invalidate(hwnd);
+                }
+                if let Some((true, _, stale)) = r {
+                    invalidate(hwnd);
+                    if stale {
+                        let _ = UpdateWindow(hwnd);
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_APP_PLACES => {
+                let got = PLACES.lock().ok().and_then(|mut g| g.take());
+                if let Some((drives, places)) = got {
+                    with(|a| {
+                        a.view.side.drives = drives;
+                        a.view.side.places = places;
+                    });
+                    invalidate(hwnd);
+                }
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
@@ -669,7 +904,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_CONTEXTMENU if lp.0 == -1 => {
                 // keyboard (menu key): at the cursor row
-                key_menu(hwnd, false);
+                key_menu(hwnd);
                 LRESULT(0)
             }
             WM_SYSKEYDOWN | WM_SYSKEYUP if wp.0 as u16 == VK_F10.0 => {
@@ -677,16 +912,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 // UI thread, and while any menu is active the worker's
                 // SetForegroundWindow fails, so Escape never reaches its menu.
                 if msg == WM_SYSKEYDOWN && GetKeyState(VK_SHIFT.0 as i32) < 0 {
-                    key_menu(hwnd, false);
+                    key_menu(hwnd);
                 }
                 LRESULT(0)
             }
-            WM_KEYDOWN => {
+            // Alt+key shortcuts (Alt+Left/Right/Up, Alt+D) arrive as SYSKEY messages
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
                 let repeat = lp.0 & (1 << 30) != 0;
-                push(hwnd, Event::KeyDown { key: map_key(wp.0 as u16), mods: mods(), repeat });
+                let key = map_key(wp.0 as u16);
+                // bare Alt (menu activation) is ignored; every other Alt combo goes to the kit
+                if matches!(VIRTUAL_KEY(wp.0 as u16), VK_MENU | VK_LMENU | VK_RMENU) {
+                    return LRESULT(0);
+                }
+                push(hwnd, Event::KeyDown { key, mods: mods(), repeat });
                 LRESULT(0)
             }
-            WM_KEYUP => {
+            WM_KEYUP | WM_SYSKEYUP => {
                 push(hwnd, Event::KeyUp { key: map_key(wp.0 as u16), mods: mods() });
                 LRESULT(0)
             }
@@ -714,6 +955,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_TIMER if wp.0 == stress::TIMER_ID => {
                 on_stress_tick(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == CARET_TIMER => {
+                with(|a| {
+                    if a.last_input.elapsed() >= CARET_IDLE {
+                        // no input for a while: stop the blink, caret stays solid
+                        let _ = KillTimer(Some(hwnd), CARET_TIMER);
+                        a.caret_timer = false;
+                        a.caret_idle = true;
+                        a.ui.caret_on = true;
+                    } else {
+                        a.ui.caret_on = !a.ui.caret_on;
+                    }
+                });
+                invalidate(hwnd);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == WATCH_TIMER => {

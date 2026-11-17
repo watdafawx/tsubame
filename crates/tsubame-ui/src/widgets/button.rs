@@ -11,17 +11,17 @@ pub fn button(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, label: &str) 
     let clicked = button_behaviour(ui, id, rect);
     let t = &ui.theme;
     let col = if ui.is_active(id) {
-        t.button_down
+        t.selected_inactive
     } else if ui.hot() == Some(id) {
-        t.button_hot
+        t.hover
     } else {
-        t.button
+        t.panel
     };
-    c.round(rect, t.radius, col);
+    c.round(rect, t.radius_md, col);
     if ui.has_focus(id) && ui.window_focused() {
-        c.round_stroke(rect, t.radius, t.input_focus, 1.0);
+        c.round_stroke(rect, t.radius_md, t.focus, 1.0);
     }
-    c.text(label, rect.inset(6.0, 0.0), t.font.c(), t.text);
+    c.text(label, rect.inset(6.0, 0.0), t.font().c(), t.text);
     clicked
 }
 

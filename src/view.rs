@@ -1,435 +1,973 @@
-//! Details view on the `tsubame-ui` kit: a filter box, a header, the
-//! virtual list with its scrollbar, the thumbnail panel and a status bar.
-//! All coordinates are DIPs; the render target applies the DPI scale.
+//! The window's contents on the `tsubame-ui` kit, per the mock: title bar
+//! with tabs and window controls, toolbar (back/forward/up, breadcrumb or
+//! editable path, filter box), sidebar, details list with sortable and
+//! resizable columns, status bar. All coordinates are DIPs.
 //!
-//! The kit owns no rows: `Rows` (a `ListSource`) reads them from `Source`
-//! through the filter index, and only the rows the list asks for are fetched
-//! and drawn.
+//! The view owns the tabs (`Tabs<Tab>`) and the UI state that is not per tab
+//! (path edit, filter box text, column widths, density, theme). It never
+//! touches the disk: listings run on enumerator workers (`Tab::start`), and
+//! what the platform must do (shell menu, open a file, window commands) is
+//! left in `menu_request`, `open_paths` and `win_cmd` for main.rs.
+//!
+//! `paint` takes `&mut dyn Canvas`, so the tests drive whole frames on the
+//! kit's `TestCanvas`.
 
-use crate::data::{self, RowBuf, Source};
+use crate::cols::{Col, Columns};
+use crate::data::{self, RowBuf};
+use crate::nav::{self, Crumb};
 use crate::shellui::ShellUi;
-use std::collections::BTreeSet;
-use tsubame_d2d::Gfx;
-use tsubame_ui::{Canvas, Event, Font, Id, ListSource, ListState, Mods, Output, Pt, Rect, RowState, SelectBy, TextInput, Theme, Ui, f, list, text_input};
+use crate::sidebar::Sidebar;
+use crate::tab::{Load, Tab};
+use crate::tabs::Tabs;
+use tsubame_core::{EntryStore, Selection};
+use tsubame_ui::{
+    Button, Canvas, Cursor, DARK, Density, Event, HeaderCol, Id, Key, LIGHT, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, TabStrip, TextInput, Theme, Ui, column_header, f, list, tab_strip, text_input,
+};
+use tsubame_win::enumerate::Wake;
 
-pub const ROW_H: f32 = 22.0;
-pub const TOOLBAR_H: f32 = 36.0;
-pub const HEADER_H: f32 = 26.0;
-pub const STATUS_H: f32 = 22.0;
-
-const COL_SIZE_W: f32 = 96.0;
-const COL_MOD_W: f32 = 150.0;
-const COL_TYPE_W: f32 = 150.0;
-const PAD: f32 = 10.0;
-const NAME_X: f32 = 34.0;
-const FILTER_W: f32 = 320.0;
-
-const ICON_DIR: u32 = 0xe6b84d;
-const ICON_FILE: u32 = 0x6f7a91;
-const PANEL_BORDER: u32 = 0x3a4252;
 pub const ICON_DIP: f32 = 16.0;
-pub const THUMB_DIP: f32 = 256.0;
 
-const FONT_R: Font = f(12.0).r();
-const FONT_HDR_R: Font = f(11.0).b().r();
-
-pub const LIST_ID: Id = Id::new("details");
-pub const FILTER_ID: Id = Id::new("filter");
+const ID_TABS: Id = Id::new("tabs");
+pub const ID_LIST: Id = Id::new("details");
+pub const ID_FILTER: Id = Id::new("filter");
+const ID_PATH: Id = Id::new("pathbar");
+const ID_PATH_EDIT: Id = Id::new("pathedit");
+const ID_HEADER: Id = Id::new("header");
+const ID_BACK: Id = Id::new("nav-back");
+const ID_FWD: Id = Id::new("nav-forward");
+const ID_UP: Id = Id::new("nav-up");
+const ID_WIN: Id = Id::new("winctl");
 
 /// App commands (shortcut table values).
-pub const CMD_FIND: u32 = 1;
+pub const CMD_NEW_TAB: u32 = 1;
+pub const CMD_CLOSE_TAB: u32 = 2;
+pub const CMD_NEXT_TAB: u32 = 3;
+pub const CMD_PREV_TAB: u32 = 4;
+pub const CMD_FOCUS_PATH: u32 = 5;
+pub const CMD_FIND: u32 = 6;
+pub const CMD_BACK: u32 = 7;
+pub const CMD_FORWARD: u32 = 8;
+pub const CMD_UP: u32 = 9;
+pub const CMD_THEME: u32 = 10;
+pub const CMD_DENSITY: u32 = 11;
+pub const CMD_ZEBRA: u32 = 12;
+pub const CMD_REFRESH: u32 = 13;
+/// non-global: only when no widget took the key
+pub const CMD_SELECT_ALL: u32 = 20;
+pub const CMD_ESCAPE: u32 = 21;
+pub const CMD_BACKSPACE_UP: u32 = 22;
 
-/// Explorer-style selection: one range from the anchor, XOR Ctrl-toggled
-/// rows. Never one entry per selected row, so Shift+End over 1M rows is two
-/// numbers. (Spike model; tsubame-core's selection replaces it.)
+/// What main.rs must do with the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WinCmd {
+    Minimize,
+    MaxRestore,
+    Close,
+}
+
+/// Binds the keyboard shortcuts (global ones run even in a text field).
+pub fn bind_shortcuts(ui: &mut Ui) {
+    let s = &mut ui.shortcuts;
+    s.bind(Key::Char('T'), Mods::CTRL, CMD_NEW_TAB, true);
+    s.bind(Key::Char('W'), Mods::CTRL, CMD_CLOSE_TAB, true);
+    s.bind(Key::F(4), Mods::CTRL, CMD_CLOSE_TAB, true);
+    s.bind(Key::Tab, Mods::CTRL, CMD_NEXT_TAB, true);
+    s.bind(Key::Tab, Mods::CTRL_SHIFT, CMD_PREV_TAB, true);
+    s.bind(Key::Char('L'), Mods::CTRL, CMD_FOCUS_PATH, true);
+    s.bind(Key::F(4), Mods::NONE, CMD_FOCUS_PATH, true);
+    s.bind(Key::Char('D'), Mods::ALT, CMD_FOCUS_PATH, true);
+    s.bind(Key::Char('F'), Mods::CTRL, CMD_FIND, true);
+    s.bind(Key::Left, Mods::ALT, CMD_BACK, true);
+    s.bind(Key::Right, Mods::ALT, CMD_FORWARD, true);
+    s.bind(Key::Up, Mods::ALT, CMD_UP, true);
+    s.bind(Key::Char('L'), Mods::CTRL_SHIFT, CMD_THEME, true);
+    s.bind(Key::Char('D'), Mods::CTRL_SHIFT, CMD_DENSITY, true);
+    s.bind(Key::Char('Z'), Mods::CTRL_SHIFT, CMD_ZEBRA, true);
+    s.bind(Key::F(5), Mods::NONE, CMD_REFRESH, true);
+    s.bind(Key::Char('R'), Mods::CTRL, CMD_REFRESH, true);
+    s.bind(Key::Char('A'), Mods::CTRL, CMD_SELECT_ALL, false);
+    s.bind(Key::Escape, Mods::NONE, CMD_ESCAPE, false);
+    s.bind(Key::Backspace, Mods::NONE, CMD_BACKSPACE_UP, false);
+}
+
+/// Breadcrumbs of the shown path with their text widths (recomputed only
+/// when the path or the text size changes).
 #[derive(Default)]
-pub struct Selection {
-    anchor: usize,
-    range: Option<(usize, usize)>,
-    toggled: BTreeSet<usize>,
-}
-
-impl Selection {
-    pub fn contains(&self, i: usize) -> bool {
-        self.range.is_some_and(|(a, b)| i >= a && i <= b) ^ self.toggled.contains(&i)
-    }
-    pub fn clear(&mut self) {
-        self.range = None;
-        self.toggled.clear();
-    }
-    pub fn single(&mut self, i: usize) {
-        self.range = Some((i, i));
-        self.toggled.clear();
-        self.anchor = i;
-    }
-    fn toggle(&mut self, i: usize) {
-        if !self.toggled.remove(&i) {
-            self.toggled.insert(i);
-        }
-        self.anchor = i;
-    }
-    pub fn apply(&mut self, i: usize, mods: Mods, by: SelectBy) {
-        match by {
-            SelectBy::Click | SelectBy::Key if mods.shift => {
-                self.range = Some((self.anchor.min(i), self.anchor.max(i)));
-                self.toggled.clear();
-            }
-            SelectBy::Click if mods.ctrl => self.toggle(i),
-            SelectBy::Key if mods.ctrl => {} // Ctrl+arrows move the cursor only
-            SelectBy::Space if mods.ctrl => self.toggle(i),
-            SelectBy::Space | SelectBy::RightClick if self.contains(i) => {}
-            _ => self.single(i),
-        }
-    }
-    /// Approximate count for the status bar.
-    pub fn count(&self) -> usize {
-        let r = self.range.map(|(a, b)| b - a + 1).unwrap_or(0);
-        let inside = self.toggled.iter().filter(|&&i| self.range.is_some_and(|(a, b)| i >= a && i <= b)).count();
-        r - inside + (self.toggled.len() - inside)
-    }
-    /// The first `n` selected rows, in order.
-    pub fn first_n(&self, n: usize, len: usize) -> Vec<usize> {
-        let mut c: Vec<usize> = self.toggled.iter().copied().collect();
-        if let Some((a, b)) = self.range {
-            c.extend((a..=b).take(n + self.toggled.len()));
-        }
-        c.sort_unstable();
-        c.dedup();
-        c.into_iter().filter(|&i| i < len && self.contains(i)).take(n).collect()
-    }
-}
-
-/// Column x positions for a rows rect.
-#[derive(Clone, Copy)]
-struct Cols {
-    name_w: f32,
-    size_x: f32,
-    mod_x: f32,
-    type_x: f32,
-}
-
-impl Cols {
-    fn new(x: f32, w: f32) -> Cols {
-        let type_x = x + w - COL_TYPE_W;
-        let mod_x = type_x - COL_MOD_W;
-        let size_x = mod_x - COL_SIZE_W;
-        Cols { name_w: (size_x - x - NAME_X - PAD).max(40.0), size_x, mod_x, type_x }
-    }
+struct CrumbCache {
+    path: String,
+    size: u32,
+    crumbs: Vec<Crumb>,
+    widths: Vec<f32>,
 }
 
 pub struct View {
-    pub list: ListState,
+    pub tabs: Tabs<Tab>,
+    next_tab_id: u64,
+    strip: TabStrip,
     pub filter: TextInput,
-    pub source: Source,
-    pub sel: Selection,
-    /// rows of `source` that match the filter (None: no filter, all rows)
-    filtered: Option<Vec<u32>>,
-    filtered_for: String,
-    pub filter_ms: f64,
+    path_text: TextInput,
+    /// the path bar is a text field
+    pub editing: bool,
+    edit_frames: u32,
+    /// path-bar error shown under the field
+    path_error: Option<String>,
+    /// a typed path is being opened: (tab id, folder before, typed path)
+    edit_nav: Option<(u64, String, String)>,
+    pub cols: Columns,
+    pub density: Density,
+    pub dark: bool,
+    pub zebra: bool,
+    pub side: Sidebar,
+    wake: Wake,
+    rowbuf: Box<RowBuf>,
     text: String,
+    crumbs: CrumbCache,
+    focus_list: bool,
+    /// a failed typed path re-opens the field: focus it on the next frame
+    focus_path: bool,
+    pub maximized: bool,
+    /// y of the list's top edge (keyboard menus)
+    list_top: f32,
     /// rows drawn by the last paint (first, last+1)
     pub last_range: (usize, usize),
-    rowbuf: Box<RowBuf>,
+    /// the volume of the shown folder changed: main re-reads the drives
+    pub want_drives: bool,
+    /// the last `pump` stopped at its time budget: pump again soon
+    pub pump_more: bool,
+    last_drive: char,
+
     /// the list asked for a context menu: (view row, DIP point); Shift+F10 /
-    /// Menu key give (cursor row, None)
+    /// the Menu key give (cursor row, None)
     pub menu_request: Option<(usize, Option<Pt>)>,
+    /// files to open with their default handler (main runs them on a worker)
+    pub open_paths: Vec<String>,
+    pub win_cmd: Option<WinCmd>,
+    /// last tab closed: the window should close
+    pub quit: bool,
 }
 
 impl View {
-    pub fn new(source: Source) -> Self {
+    pub fn new(start: &str, wake: Wake, dark: bool, density: Density) -> View {
+        let mut tab = Tab::new(1, start, density.row_h());
+        tab.start(start, wake.clone());
         View {
-            list: ListState::new(ROW_H),
+            tabs: Tabs::new(tab),
+            next_tab_id: 2,
+            strip: TabStrip::default(),
             filter: TextInput::default(),
-            source,
-            sel: Selection::default(),
-            filtered: None,
-            filtered_for: String::new(),
-            filter_ms: 0.0,
-            text: String::with_capacity(32),
-            last_range: (0, 0),
+            path_text: TextInput::default(),
+            editing: false,
+            edit_frames: 0,
+            path_error: None,
+            edit_nav: None,
+            cols: Columns::default(),
+            density,
+            dark,
+            zebra: false,
+            side: Sidebar::default(),
+            wake,
             rowbuf: Box::new(RowBuf::new()),
+            text: String::with_capacity(64),
+            crumbs: CrumbCache::default(),
+            focus_list: true,
+            focus_path: false,
+            maximized: false,
+            list_top: 0.0,
+            last_range: (0, 0),
+            want_drives: true,
+            pump_more: false,
+            last_drive: start.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('C'),
             menu_request: None,
+            open_paths: Vec::new(),
+            win_cmd: None,
+            quit: false,
         }
     }
 
-    /// Rows shown (after the filter).
-    pub fn len(&self) -> usize {
-        self.filtered.as_ref().map(|f| f.len()).unwrap_or_else(|| self.source.len())
-    }
-    /// Source row of view row `i`.
-    pub fn src_row(&self, i: usize) -> usize {
-        self.filtered.as_ref().map(|f| f[i] as usize).unwrap_or(i)
-    }
-    pub fn path(&self, i: usize) -> Option<String> {
-        (i < self.len()).then(|| self.source.path(self.src_row(i))).flatten()
-    }
-    pub fn cursor(&self) -> usize {
-        self.list.cursor
-    }
-    pub fn set_cursor(&mut self, i: usize) {
-        self.list.cursor = i;
-        self.sel.single(i);
-    }
-    pub fn max_scroll(&self) -> f64 {
-        self.list.max_scroll(self.len())
-    }
-    pub fn page_rows(&self) -> usize {
-        self.list.page_rows()
-    }
-    pub fn set_scroll(&mut self, s: f64) -> bool {
-        let n = self.len();
-        self.list.set_scroll(s, n)
-    }
-    /// A new data source (folder listed): back to the top, no filter result.
-    pub fn set_source(&mut self, s: Source) {
-        self.source = s;
-        self.filtered_for.clear();
-        self.filtered = None;
-        self.refilter();
-        self.list.scroll = 0.0;
-        self.list.cursor = 0;
-        self.sel.clear();
+    pub fn base_theme(&self) -> Theme {
+        Theme::with_density(if self.dark { &DARK } else { &LIGHT }, self.density)
     }
 
-    /// Client y (DIP) of the middle of view row `i` (for keyboard menus).
+    /// Pushes theme and density into the kit and every tab's list.
+    pub fn apply_theme(&mut self, ui: &mut Ui) {
+        ui.theme = self.base_theme();
+        let rh = ui.theme.height_list_row;
+        for t in &mut self.tabs.items {
+            if t.list.row_h != rh {
+                t.list.scroll = t.list.scroll / t.list.row_h as f64 * rh as f64;
+                t.list.row_h = rh;
+            }
+        }
+        ui.request_repaint();
+    }
+
+    pub fn tab(&self) -> &Tab {
+        &self.tabs.items[self.tabs.active]
+    }
+    pub fn tab_mut(&mut self) -> &mut Tab {
+        let i = self.tabs.active;
+        &mut self.tabs.items[i]
+    }
+
+    // ---- navigation ------------------------------------------------------
+
+    /// Opens `path` in the current tab and records it in the history.
+    pub fn go(&mut self, path: &str) {
+        let wake = self.wake.clone();
+        let t = self.tab_mut();
+        t.history.push(path);
+        t.start(path, wake);
+        self.after_nav();
+    }
+
+    fn after_nav(&mut self) {
+        self.filter.set_text("");
+        self.editing = false;
+        self.path_error = None;
+        self.focus_list = true;
+        let d = self.tab().path.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('C');
+        if d != self.last_drive {
+            self.last_drive = d;
+            self.want_drives = true;
+        }
+    }
+
+    pub fn back(&mut self) {
+        let wake = self.wake.clone();
+        let t = self.tab_mut();
+        if let Some(p) = t.history.back().map(str::to_string) {
+            t.start(&p, wake);
+            self.after_nav();
+        }
+    }
+    pub fn forward(&mut self) {
+        let wake = self.wake.clone();
+        let t = self.tab_mut();
+        if let Some(p) = t.history.forward().map(str::to_string) {
+            t.start(&p, wake);
+            self.after_nav();
+        }
+    }
+    pub fn up(&mut self) {
+        if let Some(p) = nav::parent(&self.tab().path) {
+            self.go(&p);
+        }
+    }
+    pub fn refresh(&mut self) {
+        let wake = self.wake.clone();
+        let t = self.tab_mut();
+        let p = t.path.clone();
+        t.start(&p, wake);
+        self.after_nav();
+        self.want_drives = true;
+    }
+
+    pub fn new_tab(&mut self) {
+        let path = self.tab().path.clone();
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let mut t = Tab::new(id, &path, self.density.row_h());
+        t.start(&path, self.wake.clone());
+        self.tabs.add(t);
+        self.filter.set_text("");
+        self.editing = false;
+        self.focus_list = true;
+    }
+
+    /// Closes tab `i`: its store is freed and its enumeration cancelled
+    /// (the tab drops). The last tab closing ends the window.
+    pub fn close_tab(&mut self, i: usize) {
+        drop(self.tabs.close(i));
+        if self.tabs.is_empty() {
+            self.quit = true;
+        } else {
+            self.switched();
+        }
+    }
+
+    pub fn switch_tab(&mut self, i: usize) {
+        self.tabs.activate(i);
+        self.switched();
+    }
+
+    fn switched(&mut self) {
+        let f = self.tab().filter.clone();
+        self.filter.set_text(&f);
+        self.editing = false;
+        self.path_error = None;
+        self.focus_list = true;
+    }
+
+    /// Enter / double click on view row `pos`: a folder opens in this tab, a
+    /// file goes to the shell on a worker.
+    pub fn activate(&mut self, pos: usize) {
+        if let Some((path, dir)) = self.tab().entry_at(pos) {
+            if dir { self.go(&path) } else { self.open_paths.push(path) }
+        }
+    }
+
+    /// Moves everything the enumerators delivered into the stores. UI thread,
+    /// no disk. True when something visible changed.
+    pub fn pump(&mut self) -> bool {
+        let mut changed = false;
+        self.pump_more = false;
+        for t in &mut self.tabs.items {
+            let p = t.pump();
+            changed |= p.changed;
+            self.pump_more |= p.more;
+        }
+        // a typed path that failed to open: back to the old folder, error shown
+        if let Some((id, prev, typed)) = self.edit_nav.take() {
+            let wake = self.wake.clone();
+            match self.tabs.items.iter_mut().find(|t| t.id == id) {
+                Some(t) if matches!(t.load, Load::Failed(_)) => {
+                    let msg = match &t.load {
+                        Load::Failed(m) => m.clone(),
+                        _ => String::new(),
+                    };
+                    t.history.undo_push();
+                    t.start(&prev, wake);
+                    let is_active = self.tabs.items[self.tabs.active].id == id;
+                    if is_active {
+                        self.editing = true;
+                        self.edit_frames = 0;
+                        self.path_text.set_text(&typed);
+                        self.path_text.select_all();
+                        self.path_error = Some(format!("Can't open \"{typed}\": {msg}"));
+                        self.focus_list = false;
+                        self.focus_path = true;
+                    }
+                }
+                Some(t) if t.is_loading() => self.edit_nav = Some((id, prev, typed)),
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    fn begin_edit(&mut self, ui: &mut Ui) {
+        let p = self.tab().path.clone();
+        self.path_text.set_text(&p);
+        self.path_text.select_all();
+        self.editing = true;
+        self.edit_frames = 0;
+        self.path_error = None;
+        ui.set_focus(Some(ID_PATH_EDIT));
+        ui.request_repaint();
+    }
+
+    fn submit_path(&mut self) {
+        let typed = self.path_text.text.trim().to_string();
+        match nav::normalize(&typed) {
+            Some(p) => {
+                let prev = self.tab().path.clone();
+                let id = self.tab().id;
+                self.go(&p);
+                self.edit_nav = Some((id, prev, typed));
+            }
+            None => self.path_error = Some("Type a full path, like C:\\Users\\you\\Documents.".into()),
+        }
+    }
+
+    fn set_dark(&mut self, ui: &mut Ui, dark: bool) {
+        self.dark = dark;
+        self.apply_theme(ui);
+    }
+
+    fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
+        match cmd {
+            CMD_NEW_TAB => self.new_tab(),
+            CMD_CLOSE_TAB => self.close_tab(self.tabs.active),
+            CMD_NEXT_TAB => {
+                self.tabs.next();
+                self.switched();
+            }
+            CMD_PREV_TAB => {
+                self.tabs.prev();
+                self.switched();
+            }
+            CMD_FOCUS_PATH => self.begin_edit(ui),
+            CMD_FIND => {
+                ui.set_focus(Some(ID_FILTER));
+                self.filter.select_all();
+            }
+            CMD_BACK => self.back(),
+            CMD_FORWARD => self.forward(),
+            CMD_UP | CMD_BACKSPACE_UP => self.up(),
+            CMD_THEME => self.set_dark(ui, !self.dark),
+            CMD_DENSITY => {
+                self.density = self.density.next();
+                self.apply_theme(ui);
+            }
+            CMD_ZEBRA => self.zebra = !self.zebra,
+            CMD_REFRESH => self.refresh(),
+            CMD_SELECT_ALL => {
+                let t = self.tab_mut();
+                t.sel.select_all(&t.store);
+            }
+            CMD_ESCAPE => {
+                if !self.tab().filter.is_empty() {
+                    self.filter.set_text("");
+                    self.tab_mut().set_filter("");
+                } else {
+                    self.tab_mut().sel.clear();
+                }
+            }
+            _ => {}
+        }
+        ui.request_repaint();
+    }
+
+    /// Client y (DIP) of the middle of view row `i` (keyboard menus).
     pub fn row_mid_y(&self, i: usize) -> f32 {
-        TOOLBAR_H + HEADER_H + self.list.row_top(i) as f32 + ROW_H / 2.0
+        let l = &self.tab().list;
+        self.list_top + l.row_top(i) as f32 + l.row_h / 2.0
     }
 
     /// Paths for a context menu on `row`: the selection if `row` is in it,
-    /// else just `row` (at most 64). Empty for fake rows.
+    /// else just `row` (at most 64).
     pub fn menu_paths(&self, row: usize) -> Vec<String> {
-        let rows = if self.sel.contains(row) { self.sel.first_n(64, self.len()) } else { vec![row] };
-        rows.into_iter().filter_map(|r| self.path(r)).collect()
-    }
-
-    /// Re-runs the filter when its text changed. Typing one more char only
-    /// searches the previous result.
-    fn refilter(&mut self) {
-        let needle = self.filter.text.to_ascii_lowercase();
-        if needle == self.filtered_for && (self.filtered.is_some() || needle.is_empty()) {
-            return;
-        }
-        let t = std::time::Instant::now();
-        if needle.is_empty() {
-            self.filtered = None;
+        let t = self.tab();
+        if t.store.at(row).is_some_and(|id| t.sel.contains(id)) {
+            t.selected_paths(64)
         } else {
-            let narrow = !self.filtered_for.is_empty() && needle.contains(self.filtered_for.as_str());
-            let row = &mut *self.rowbuf;
-            let src = &self.source;
-            let keep = |i: usize, row: &mut RowBuf| {
-                src.row(i, row);
-                contains_ci(&row.name[..row.name_len], needle.as_bytes())
-            };
-            let out: Vec<u32> = match (&self.filtered, narrow) {
-                (Some(prev), true) => prev.iter().copied().filter(|&i| keep(i as usize, row)).collect(),
-                _ => (0..src.len()).filter(|&i| keep(i, row)).map(|i| i as u32).collect(),
-            };
-            self.filtered = Some(out);
+            t.entry_at(row).map(|e| vec![e.0]).unwrap_or_default()
         }
-        self.filtered_for = needle;
-        self.filter_ms = t.elapsed().as_secs_f64() * 1000.0;
-        self.list.scroll = 0.0;
-        self.list.cursor = 0;
-        self.sel.clear();
     }
 
-    // ---- drawing ----
+    // ---- drawing ---------------------------------------------------------
+
     /// One frame. None when there is no render target.
-    pub fn paint(&mut self, ui: &mut Ui, g: &mut Gfx, shell: &mut ShellUi) -> Option<Output> {
+    pub fn paint(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi) -> Option<Output> {
         let (w, h) = g.size();
         if !g.begin(ui.theme.bg) {
             return None;
         }
         ui.begin_frame((w, h));
-        if ui.commands().contains(&CMD_FIND) {
-            ui.set_focus(Some(FILTER_ID));
-            self.filter.select_all();
+        if !ui.commands().is_empty() {
+            for cmd in ui.commands().to_vec() {
+                self.run_command(ui, cmd);
+            }
         }
-        let mut r = Rect::new(0.0, 0.0, w, h);
-        let toolbar = r.cut_top(TOOLBAR_H);
-        let status = r.cut_bottom(STATUS_H);
-        let header = r.cut_top(HEADER_H);
-        let list_r = r;
-        let t = ui.theme.clone();
+        if self.tabs.is_empty() {
+            self.quit = true;
+            let out = ui.end_frame();
+            g.end();
+            return Some(out);
+        }
+        if std::mem::take(&mut self.focus_path) {
+            ui.set_focus(Some(ID_PATH_EDIT));
+        } else if std::mem::take(&mut self.focus_list) {
+            ui.set_focus(Some(ID_LIST));
+        }
+        let t = ui.theme;
+        let mut r = tsubame_ui::Rect::new(0.0, 0.0, w, h);
+        let titlebar = r.cut_top(t.height_titlebar);
+        let toolbar = r.cut_top(t.height_toolbar);
+        let status = r.cut_bottom(t.height_status_bar);
+        let sidebar = r.cut_left(t.layout_sidebar_width);
+        let main = r;
 
-        // toolbar: the filter box
-        g.fill(toolbar, t.panel);
-        let fr = Rect::new(toolbar.x + PAD, toolbar.y + (TOOLBAR_H - t.input_h) / 2.0, FILTER_W.min(toolbar.w - 2.0 * PAD), t.input_h);
-        let fresp = text_input(ui, g, FILTER_ID, fr, &mut self.filter, "Filter (Ctrl+F)");
-        if fresp.changed {
-            self.refilter();
+        // body first: the later widgets (toolbar, title bar) win hit tests
+        if let Some(p) = self.side.paint(ui, g, sidebar, &self.tabs.items[self.tabs.active].path) {
+            self.go(&p);
         }
-        if fresp.cancelled {
-            if self.filter.text.is_empty() {
-                ui.set_focus(Some(LIST_ID));
-            } else {
+        self.paint_main(ui, g, shell, main, &t);
+        self.paint_status(g, status, &t);
+        self.paint_toolbar(ui, g, toolbar, &t);
+        self.paint_titlebar(ui, g, titlebar, &t);
+        self.paint_path_error(g, toolbar, &t);
+
+        let n_global = ui.commands().len();
+        let mut out = ui.end_frame();
+        // commands of keys no widget used (Ctrl+A, Esc, Backspace)
+        let late: Vec<u32> = ui.commands()[n_global..].to_vec();
+        let mut again = false;
+        for cmd in late {
+            self.run_command(ui, cmd);
+            again = true;
+        }
+        // typing in the list starts the filter
+        let typed: Vec<char> = ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect();
+        for c in typed {
+            if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
+                continue;
+            }
+            if !ui.has_focus(ID_FILTER) {
+                ui.set_focus(Some(ID_FILTER));
                 self.filter.set_text("");
-                self.refilter();
             }
+            let mut b = [0u8; 4];
+            self.filter.insert(c.encode_utf8(&mut b));
+            let text = self.filter.text.clone();
+            self.tab_mut().set_filter(&text);
+            again = true;
         }
-        if fresp.submitted {
-            ui.set_focus(Some(LIST_ID));
+        if again {
+            out.repaint = true;
         }
-        if !self.filter.text.is_empty() {
-            self.text.clear();
-            use std::fmt::Write;
-            let _ = write!(self.text, "{} of {} match  ({:.1} ms)", self.len(), self.source.len(), self.filter_ms);
-            g.text(&self.text, Rect::new(fr.r() + PAD, toolbar.y, 320.0, TOOLBAR_H), t.font_small, t.dim);
-        }
-
-        // header
-        let cols = Cols::new(list_r.x, list_r.w - t.sb_w);
-        g.fill(header, t.header);
-        g.fill(Rect::new(0.0, header.b() - 1.0, w, 1.0), t.sep);
-        let (hy, hh) = (header.y, HEADER_H - 1.0);
-        g.text("Name", Rect::new(NAME_X, hy, cols.name_w, hh), t.font_bold, t.dim);
-        g.text("Size", Rect::new(cols.size_x, hy, COL_SIZE_W - PAD, hh), FONT_HDR_R, t.dim);
-        g.text("Modified", Rect::new(cols.mod_x + PAD, hy, COL_MOD_W - PAD, hh), t.font_bold, t.dim);
-        g.text("Type", Rect::new(cols.type_x + PAD, hy, COL_TYPE_W - PAD, hh), t.font_bold, t.dim);
-
-        // the list
-        let root = match &self.source {
-            Source::Dir(d) => Some(d.root.as_str()),
-            _ => None,
-        };
-        let mut rows = Rows { source: &self.source, filtered: self.filtered.as_deref(), sel: &mut self.sel, shell, row: &mut self.rowbuf, text: &mut self.text, cols, root };
-        let lr = list(ui, g, LIST_ID, list_r, &mut self.list, &mut rows);
-        self.last_range = lr.range;
-        if let Some((row, pos)) = lr.context {
-            match row {
-                Some(r) => self.menu_request = Some((r, Some(pos))),
-                None => self.sel.clear(),
-            }
-        }
-        if lr.context_key {
-            self.menu_request = Some((self.list.cursor, None));
-        }
-        if let Source::Loading(p) = &self.source {
-            g.text(&format!("listing {p} on a worker thread..."), Rect::new(NAME_X, list_r.y + 10.0, w - 2.0 * NAME_X, ROW_H), t.font, t.dim);
-        }
-
-        if shell.thumbs.on {
-            paint_thumb(g, &t, shell, list_r);
-        }
-
-        // status bar
-        g.fill(status, t.header);
-        g.fill(Rect::new(0.0, status.y, w, 1.0), t.sep);
-        self.text.clear();
-        {
-            use std::fmt::Write;
-            let _ = write!(
-                self.text,
-                "Item {} of {}   |   {} selected   |   showing {}-{}   |   {} data, {} render   |   icons {} cached, {} pending   |   {}",
-                if self.len() == 0 { 0 } else { self.list.cursor + 1 },
-                self.len(),
-                self.sel.count(),
-                lr.range.0 + 1,
-                lr.range.1,
-                self.source.label(),
-                g.path(),
-                shell.icons.len(),
-                shell.pending(),
-                shell.menu_status
-            );
-        }
-        g.text(&self.text, Rect::new(PAD, status.y + 1.0, w - 2.0 * PAD, STATUS_H - 1.0), t.font_small, t.dim);
-
-        let out = ui.end_frame();
         g.end();
         Some(out)
     }
 
-    /// Keys and chars no widget used: the S4 letter commands.
-    pub fn leftover_chars(ui: &Ui) -> Vec<char> {
-        ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(c.to_ascii_lowercase()) } else { None }).collect()
+    fn paint_titlebar(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme) {
+        g.fill(r, t.bg);
+        // app mark
+        let mark = Rect::new(r.x + 12.0, r.y + (r.h - 18.0) / 2.0, 18.0, 18.0);
+        g.round(mark, t.radius_md, tsubame_ui::theme::BRAND_NAVY);
+        g.round_stroke(mark, t.radius_md, t.border, 1.0);
+        g.text("\u{2197}", mark, f(12.0).b().c(), tsubame_ui::theme::BRAND_CREAM);
+        // window controls
+        let cw = t.layout_window_control_width;
+        let ctl = Rect::new(r.r() - 3.0 * cw, r.y, 3.0 * cw, r.h);
+        let glyphs = ["\u{E921}", if self.maximized { "\u{E923}" } else { "\u{E922}" }, "\u{E8BB}"];
+        let cmds = [WinCmd::Minimize, WinCmd::MaxRestore, WinCmd::Close];
+        for i in 0..3 {
+            let b = Rect::new(ctl.x + i as f32 * cw, ctl.y, cw, ctl.h);
+            let it = ui.interact(ID_WIN.with(i as u64), b, Sense::click());
+            let close = i == 2;
+            if it.hovered {
+                g.fill(b, if close { t.danger_fill } else { t.hover });
+            }
+            g.text(glyphs[i], b, f(t.icon_window_control).icon().c(), if close && it.hovered { t.on_danger } else { t.text });
+            if it.clicked == Some(Button::Left) {
+                self.win_cmd = Some(cmds[i]);
+            }
+        }
+        // tabs
+        let strip_r = Rect::new(r.x + 40.0, r.y, (ctl.x - r.x - 40.0 - 8.0).max(0.0), r.h);
+        let titles: Vec<&str> = self.tabs.items.iter().map(|t| t.title()).collect();
+        let resp = tab_strip(ui, g, ID_TABS, strip_r, &mut self.strip, &titles, self.tabs.active);
+        if let Some(i) = resp.select {
+            self.switch_tab(i);
+        }
+        if let Some((from, to)) = resp.moved {
+            self.tabs.move_tab(from, to);
+        }
+        if let Some(i) = resp.close {
+            self.close_tab(i);
+        }
+        if resp.add {
+            self.new_tab();
+        }
+    }
+
+    fn paint_toolbar(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme) {
+        g.fill(r, t.panel);
+        let by = r.y + (r.h - t.height_button) / 2.0;
+        let bs = t.height_button;
+        let (can_back, can_fwd, can_up) = {
+            let tab = self.tab();
+            (tab.history.can_back(), tab.history.can_forward(), nav::parent(&tab.path).is_some())
+        };
+        let mut x = r.x + t.space_4;
+        if icon_button(ui, g, t, ID_BACK, Rect::new(x, by, bs, bs), "\u{E72B}", can_back) {
+            self.back();
+        }
+        x += bs + 2.0;
+        if icon_button(ui, g, t, ID_FWD, Rect::new(x, by, bs, bs), "\u{E72A}", can_fwd) {
+            self.forward();
+        }
+        x += bs + 2.0;
+        if icon_button(ui, g, t, ID_UP, Rect::new(x, by, bs, bs), "\u{E74A}", can_up) {
+            self.up();
+        }
+        x += bs + t.space_4;
+
+        // filter box on the right, path bar takes the rest
+        let fw = t.layout_filter_width.min((r.w - x) / 2.0).max(60.0);
+        let fr = Rect::new(r.r() - t.space_4 - fw, r.y + (r.h - t.height_path_bar) / 2.0, fw, t.height_path_bar);
+        let bar = Rect::new(x, fr.y, (fr.x - t.space_4 - x).max(40.0), t.height_path_bar);
+        self.paint_path_bar(ui, g, bar, t);
+        self.paint_filter(ui, g, fr, t);
+
+        // loading line under the toolbar: grows with the entries delivered
+        let tab = self.tab();
+        if tab.is_loading() {
+            let frac = 1.0 - (-(tab.delivered as f32) / 20_000.0).exp();
+            let lw = (r.w * frac).max(r.w * 0.02);
+            g.fill(Rect::new(r.x, r.b() - t.height_progress_line, lw, t.height_progress_line), t.accent);
+        }
+    }
+
+    fn paint_filter(&mut self, ui: &mut Ui, g: &mut dyn Canvas, fr: Rect, t: &Theme) {
+        self.filter.pad_left = 20.0;
+        let resp = text_input(ui, g, ID_FILTER, fr, &mut self.filter, "Filter");
+        g.text("\u{E721}", Rect::new(fr.x + 8.0, fr.y, 14.0, fr.h), f(12.0).icon().c(), t.text_dim);
+        if self.filter.text.is_empty() && !resp.focused {
+            let badge = Rect::new(fr.r() - 54.0, fr.y + 4.0, 48.0, fr.h - 8.0);
+            g.round_stroke(badge, t.radius_sm, t.border, 1.0);
+            g.text("Ctrl+F", badge, t.font_mono().c(), t.text_dim);
+        }
+        if resp.changed {
+            let text = self.filter.text.clone();
+            self.tab_mut().set_filter(&text);
+        }
+        if resp.cancelled {
+            if self.filter.text.is_empty() {
+                ui.set_focus(Some(ID_LIST));
+            } else {
+                self.filter.set_text("");
+                self.tab_mut().set_filter("");
+            }
+            ui.request_repaint();
+        }
+        if resp.submitted {
+            ui.set_focus(Some(ID_LIST));
+            ui.request_repaint();
+        }
+    }
+
+    fn paint_path_bar(&mut self, ui: &mut Ui, g: &mut dyn Canvas, bar: Rect, t: &Theme) {
+        if self.editing {
+            self.edit_frames += 1;
+            self.path_text.pad_left = 22.0;
+            let resp = text_input(ui, g, ID_PATH_EDIT, bar, &mut self.path_text, "Type a path");
+            g.text("\u{E8B7}", Rect::new(bar.x + 8.0, bar.y, 16.0, bar.h), f(13.0).icon().c(), t.folder);
+            if self.path_error.is_some() {
+                g.round_stroke(bar, t.radius_md, t.danger, 1.0);
+            }
+            if resp.changed {
+                self.path_error = None;
+            }
+            if resp.submitted {
+                self.submit_path();
+                ui.request_repaint();
+            } else if resp.cancelled {
+                self.editing = false;
+                self.path_error = None;
+                ui.set_focus(Some(ID_LIST));
+                ui.request_repaint();
+            } else if !resp.focused && self.edit_frames > 2 {
+                // clicked elsewhere
+                self.editing = false;
+                self.path_error = None;
+                ui.request_repaint();
+            }
+            return;
+        }
+        // breadcrumb mode
+        g.round(bar, t.radius_md, t.field);
+        g.round_stroke(bar, t.radius_md, t.border, 1.0);
+        let it = ui.interact(ID_PATH, bar, Sense::click().cursor(Cursor::IBeam));
+        if it.clicked == Some(Button::Left) {
+            self.begin_edit(ui);
+            return;
+        }
+        // cache crumbs and their widths
+        let size = t.font_size_md as u32;
+        {
+            let path = &self.tabs.items[self.tabs.active].path;
+            if self.crumbs.path != *path || self.crumbs.size != size {
+                self.crumbs.path.clone_from(path);
+                self.crumbs.size = size;
+                self.crumbs.crumbs = nav::crumbs(path);
+                let n = self.crumbs.crumbs.len();
+                self.crumbs.widths = self
+                    .crumbs
+                    .crumbs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| g.measure(&c.label, if i + 1 == n { t.font_md().b() } else { t.font_md() }))
+                    .collect();
+            }
+        }
+        g.text("\u{EDA2}", Rect::new(bar.x + 8.0, bar.y, 16.0, bar.h), f(13.0).icon().c(), t.text_dim);
+        let first_x = bar.x + 8.0 + 16.0 + 6.0;
+        let avail = bar.r() - 8.0 - first_x;
+        let n = self.crumbs.crumbs.len();
+        let first = first_visible_crumb(&self.crumbs.widths, avail);
+        g.clip(bar);
+        let mut x = first_x;
+        if first > 0 && n > 0 {
+            let r = Rect::new(x, bar.y + 3.0, ELLIPSIS_W, bar.h - 6.0);
+            let hit = ui.interact(ID_PATH.child("more"), r, Sense::click().cursor(Cursor::Hand));
+            if hit.hovered {
+                g.round(r, t.radius_sm, t.hover);
+            }
+            g.text("\u{2026}", r, t.font_md().c(), t.text_dim);
+            if hit.clicked == Some(Button::Left) {
+                let p = self.crumbs.crumbs[first - 1].path.clone();
+                g.unclip();
+                self.go(&p);
+                return;
+            }
+            x += ELLIPSIS_W;
+            g.text("\u{E76C}", Rect::new(x, bar.y, SEP_W, bar.h), f(8.0).icon().c(), t.text_dim);
+            x += SEP_W;
+        }
+        let mut go = None;
+        for i in first..n {
+            let last = i + 1 == n;
+            let wd = self.crumbs.widths[i] + 2.0 * CRUMB_PAD;
+            let r = Rect::new(x, bar.y + 3.0, wd, bar.h - 6.0);
+            let hit = ui.interact(ID_PATH.child("crumb").with(i as u64), r, Sense::click().cursor(Cursor::Hand));
+            if hit.hovered {
+                g.round(r, t.radius_sm, t.hover);
+            }
+            let font = if last { t.font_md().b() } else { t.font_md() };
+            g.text(&self.crumbs.crumbs[i].label, Rect::new(x + CRUMB_PAD, bar.y, self.crumbs.widths[i] + 2.0, bar.h), font, if last { t.text } else { t.text_dim });
+            if hit.clicked == Some(Button::Left) {
+                go = Some(self.crumbs.crumbs[i].path.clone());
+            }
+            x += wd;
+            if !last {
+                g.text("\u{E76C}", Rect::new(x, bar.y, SEP_W, bar.h), f(8.0).icon().c(), t.text_dim);
+                x += SEP_W;
+            }
+        }
+        g.unclip();
+        if let Some(p) = go {
+            self.go(&p);
+        }
+    }
+
+    /// The path-bar error box, under the bar (drawn last: on top).
+    fn paint_path_error(&mut self, g: &mut dyn Canvas, toolbar: Rect, t: &Theme) {
+        let Some(msg) = &self.path_error else { return };
+        if !self.editing {
+            return;
+        }
+        let r = Rect::new(toolbar.x + 8.0 + 3.0 * (t.height_button + 2.0) + t.space_4, toolbar.b() + 2.0, (toolbar.w - 400.0).clamp(240.0, 720.0), 28.0);
+        g.round(r, t.radius_md, t.popup);
+        g.round_stroke(r, t.radius_md, t.danger, 1.0);
+        g.text("\u{E783}", Rect::new(r.x + 8.0, r.y, 16.0, r.h), f(13.0).icon().c(), t.danger);
+        g.text(msg, Rect::new(r.x + 30.0, r.y, r.w - 38.0, r.h), t.font(), t.text);
+    }
+
+    fn paint_main(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, main: Rect, t: &Theme) {
+        let mut area = main;
+        let header_r = area.cut_top(t.height_column_header);
+        let list_r = area;
+        self.list_top = list_r.y;
+        let total = main.w - t.layout_scrollbar_width;
+        let spans = self.cols.spans(total);
+
+        // header: sort and resize
+        let hc = Col::ALL.map(|c| tsubame_ui::HeaderCol { label: c.label(), right: c.right_aligned() });
+        let hc: [HeaderCol; 4] = hc;
+        let tab = &mut self.tabs.items[self.tabs.active];
+        let sorted = Col::ALL.iter().position(|c| c.sort_column() == tab.sort.column).map(|i| (i, tab.sort.descending));
+        let hr = column_header(ui, g, ID_HEADER, header_r, &hc, &spans, sorted);
+        if let Some(i) = hr.sort {
+            tab.sort_by(Col::ALL[i].sort_column());
+        }
+        if let Some((i, x)) = hr.resize
+            && let Some(&col) = Col::ALL.get(i)
+        {
+            self.cols.drag_left_edge(col, x, total);
+        }
+        let spans = self.cols.spans(total);
+
+        // the list
+        g.fill(list_r, t.row);
+        let tab = &mut self.tabs.items[self.tabs.active];
+        tab.list.row_h = t.height_list_row;
+        let (lr, activated) = {
+            let Tab { store, sel, list: lstate, path, synthetic, .. } = &mut *tab;
+            let root = if *synthetic { None } else { Some(path.as_str()) };
+            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root };
+            let lr = list(ui, g, ID_LIST, list_r, lstate, &mut rows);
+            (lr, lr.activated)
+        };
+        self.last_range = lr.range;
+        if let Some((row, pt)) = lr.context
+            && let Some(row) = row
+        {
+            self.menu_request = Some((row, Some(pt)));
+        }
+        if lr.context_key {
+            self.menu_request = Some((self.tabs.items[self.tabs.active].list.cursor, None));
+        }
+        // empty and failed folders
+        let tab = &self.tabs.items[self.tabs.active];
+        if tab.shown() == 0 {
+            let body = Rect::new(list_r.x, list_r.y, list_r.w - t.layout_scrollbar_width, list_r.h);
+            match &tab.load {
+                Load::Done if tab.store.is_empty() => empty_state(g, t, body, "\u{E8B7}", "This folder is empty", None),
+                Load::Done => empty_state(g, t, body, "\u{E721}", "No items match the filter", Some("Press Esc to clear it.")),
+                Load::Failed(m) => empty_state(g, t, body, "\u{E783}", "Can't open this folder", Some(m)),
+                Load::Loading => {}
+            }
+        }
+        if let Some(pos) = activated {
+            self.activate(pos);
+            ui.request_repaint();
+        }
+    }
+
+    fn paint_status(&mut self, g: &mut dyn Canvas, r: Rect, t: &Theme) {
+        g.fill(r, t.panel);
+        g.fill(Rect::new(r.x, r.y, r.w, 1.0), t.border);
+        let tab = &self.tabs.items[self.tabs.active];
+        let f = t.font_small();
+        let mut s = std::mem::take(&mut self.text);
+        s.clear();
+        {
+            use std::fmt::Write;
+            let shown = tab.shown();
+            match &tab.load {
+                Load::Loading => {
+                    let _ = write!(s, "Reading folder... {} items", count(tab.delivered));
+                }
+                Load::Failed(_) => s.push_str("Can't open this folder"),
+                Load::Done if shown != tab.store.len() => {
+                    let _ = write!(s, "{} of {} items", count(shown), count(tab.store.len()));
+                }
+                Load::Done => {
+                    let _ = write!(s, "{} {}", count(shown), if shown == 1 { "item" } else { "items" });
+                }
+            }
+        }
+        let left = Rect::new(r.x + 12.0, r.y + 1.0, 360.0, r.h - 1.0);
+        g.text(&s, left, f, if matches!(tab.load, Load::Failed(_)) { t.danger } else { t.text_dim });
+        let mut x = r.x + 12.0 + g.measure(&s, f) + 24.0;
+        if tab.sel.count() > 0 {
+            s.clear();
+            let mut sz = String::new();
+            data::fmt_size(tab.sel.total_size().min(u64::MAX as u128) as u64, &mut sz);
+            use std::fmt::Write;
+            let _ = write!(s, "{} selected  {}", count(tab.sel.count()), sz);
+            g.text(&s, Rect::new(x, r.y + 1.0, 300.0, r.h - 1.0), f, t.text);
+            x += 300.0;
+        }
+        let _ = x;
+        if let Some((free, total)) = self.side.volume_of(&tab.path) {
+            s.clear();
+            let (mut a, mut b) = (String::new(), String::new());
+            data::fmt_volume(free, &mut a);
+            data::fmt_volume(total, &mut b);
+            use std::fmt::Write;
+            let _ = write!(s, "{a} free of {b}");
+            g.text(&s, Rect::new(r.r() - 12.0 - 260.0, r.y + 1.0, 260.0, r.h - 1.0), f.r(), t.text_dim);
+        }
+        self.text = s;
     }
 }
 
-/// ASCII-case-insensitive substring search (`needle` already lowercase).
-fn contains_ci(hay: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
+const ELLIPSIS_W: f32 = 22.0;
+const SEP_W: f32 = 14.0;
+const CRUMB_PAD: f32 = 6.0;
+
+/// Index of the first breadcrumb to show so the last ones fit in `avail`
+/// DIPs (the last crumb is always shown). Each crumb takes its text width
+/// plus padding and a separator; a hidden head costs one "…" button.
+pub fn first_visible_crumb(widths: &[f32], avail: f32) -> usize {
+    let n = widths.len();
+    if n == 0 {
+        return 0;
     }
-    if needle.len() > hay.len() {
-        return false;
+    let cost = |i: usize| widths[i] + 2.0 * CRUMB_PAD + if i + 1 < n { SEP_W } else { 0.0 };
+    let total: f32 = (0..n).map(cost).sum();
+    if total <= avail {
+        return 0;
     }
-    hay.windows(needle.len()).any(|w| w.iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == *b))
+    let room = avail - (ELLIPSIS_W + SEP_W);
+    let mut used = 0.0;
+    let mut first = n - 1;
+    for i in (0..n).rev() {
+        if i < n - 1 && used + cost(i) > room {
+            break;
+        }
+        used += cost(i);
+        first = i;
+    }
+    first
 }
 
-/// The list's view of the data for one frame.
+/// 12480 -> "12,480"
+fn count(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn icon_button(ui: &mut Ui, c: &mut dyn Canvas, t: &Theme, id: Id, r: Rect, glyph: &str, enabled: bool) -> bool {
+    let it = ui.interact(id, r, Sense::click());
+    if enabled && it.hovered {
+        c.round(r, t.radius_md, if it.active { t.selected_inactive } else { t.hover });
+    }
+    c.text(glyph, r, f(t.icon_toolbar).icon().c(), if enabled { t.text } else { t.text_disabled });
+    enabled && it.clicked == Some(Button::Left)
+}
+
+fn empty_state(g: &mut dyn Canvas, t: &Theme, body: Rect, glyph: &str, title: &str, hint: Option<&str>) {
+    let cy = body.y + body.h * 0.42;
+    g.text(glyph, Rect::new(body.x + body.w / 2.0 - 30.0, cy - t.icon_empty_state, 60.0, t.icon_empty_state + 8.0), f(t.icon_empty_state).icon().c(), t.folder);
+    g.text(title, Rect::new(body.x, cy + 14.0, body.w, 22.0), t.font_md().c(), t.text);
+    if let Some(h) = hint {
+        g.text(h, Rect::new(body.x + 24.0, cy + 36.0, body.w - 48.0, 20.0), t.font().c(), t.text_dim);
+    }
+}
+
+/// The list's view of one tab for a frame.
 struct Rows<'a> {
-    source: &'a Source,
-    filtered: Option<&'a [u32]>,
+    store: &'a EntryStore,
     sel: &'a mut Selection,
     shell: &'a mut ShellUi,
     row: &'a mut RowBuf,
     text: &'a mut String,
-    cols: Cols,
+    spans: crate::cols::Spans,
+    zebra: bool,
+    /// folder of the rows (None for the bench's synthetic rows: no real files)
     root: Option<&'a str>,
 }
 
 impl ListSource for Rows<'_> {
     fn len(&self) -> usize {
-        self.filtered.map(|f| f.len()).unwrap_or_else(|| self.source.len())
+        self.store.view().len()
     }
     fn is_selected(&self, i: usize) -> bool {
-        self.sel.contains(i)
+        self.store.at(i).is_some_and(|id| self.sel.contains(id))
     }
     fn select(&mut self, i: usize, mods: Mods, by: SelectBy) {
-        self.sel.apply(i, mods, by);
+        let Some(id) = self.store.at(i) else { return };
+        match by {
+            SelectBy::Click | SelectBy::Key if mods.shift => self.sel.extend(self.store, i),
+            SelectBy::Click if mods.ctrl => self.sel.toggle(self.store, i),
+            SelectBy::Key if mods.ctrl => {} // Ctrl+arrows move the cursor only
+            SelectBy::Space if mods.ctrl => self.sel.toggle(self.store, i),
+            SelectBy::Space | SelectBy::RightClick if self.sel.contains(id) => {}
+            _ => self.sel.single(self.store, i),
+        }
     }
     fn select_none(&mut self) {
         self.sel.clear();
     }
-    fn draw_row(&mut self, g: &mut dyn Canvas, t: &Theme, i: usize, r: Rect, _st: RowState) {
-        let si = self.filtered.map(|f| f[i] as usize).unwrap_or(i);
+    fn draw_row(&mut self, g: &mut dyn Canvas, t: &Theme, i: usize, r: Rect, st: RowState) {
+        let Some(id) = self.store.at(i) else { return };
+        if self.zebra && i % 2 == 1 && !st.selected && !st.hot {
+            g.fill(r, t.row_alt);
+        }
         let row = &mut *self.row;
-        self.source.row(si, row);
-        let (x, y) = (r.x, r.y);
-        let c = self.cols;
+        row.fill(self.store, id);
+        let sp = &self.spans;
+        let x = r.x;
+        // icon: the shell's, else a placeholder until it arrives
+        let ir = Rect::new(x + 8.0, r.y + (r.h - ICON_DIP) / 2.0, ICON_DIP, ICON_DIP);
         match self.shell.row_icon(row, self.root) {
-            Some(img) => {
-                let ir = Rect::new(x + 11.0, y + (ROW_H - ICON_DIP) / 2.0, ICON_DIP, ICON_DIP);
-                g.image(&img.key, img.w, img.h, &img.px, ir);
-            }
+            Some(img) => g.image(&img.key, img.w, img.h, &img.px, ir),
             None => {
-                // placeholder until the shell icon arrives
-                let (ic, icol) = if row.is_dir() { (Rect::new(x + 12.0, y + 6.0, 14.0, 10.0), ICON_DIR) } else { (Rect::new(x + 14.0, y + 4.0, 10.0, 14.0), ICON_FILE) };
-                g.round_a(ic, 2.0, icol, 0.35);
+                let (ic, col) = if row.is_dir() { (Rect::new(ir.x, ir.y + 3.0, 16.0, 11.0), t.folder) } else { (Rect::new(ir.x + 2.0, ir.y, 12.0, 16.0), t.text_dim) };
+                g.round_a(ic, 2.0, col, 0.35);
             }
         }
-        g.text(row.name_str(), Rect::new(x + NAME_X, y, c.name_w, ROW_H), t.font, t.text);
+        let name_c = if row.hidden { t.text_dim } else { t.text };
+        g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, (sp[0].1 - 32.0 - 8.0).max(0.0), r.h), t.font(), name_c);
+        data::fmt_date(row.mtime, self.text);
+        g.text(self.text, Rect::new(x + sp[1].0 + 8.0, r.y, (sp[1].1 - 12.0).max(0.0), r.h), t.font(), t.text_dim);
+        row.type_text(self.text);
+        g.text(self.text, Rect::new(x + sp[2].0 + 8.0, r.y, (sp[2].1 - 12.0).max(0.0), r.h), t.font(), t.text_dim);
         if !row.is_dir() {
             data::fmt_size(row.size, self.text);
-            g.text(self.text, Rect::new(c.size_x, y, COL_SIZE_W - PAD, ROW_H), FONT_R, t.dim);
+            g.text(self.text, Rect::new(x + sp[3].0, r.y, (sp[3].1 - 8.0).max(0.0), r.h), t.font().r(), t.text_dim);
         }
-        data::fmt_date(row.mtime, self.text);
-        g.text(self.text, Rect::new(c.mod_x + PAD, y, COL_MOD_W - PAD, ROW_H), t.font, t.dim);
-        row.type_text(self.text);
-        g.text(self.text, Rect::new(c.type_x + PAD, y, COL_TYPE_W - PAD, ROW_H), t.font, t.dim);
-    }
-}
-
-fn paint_thumb(g: &mut Gfx, t: &Theme, shell: &mut ShellUi, list_r: Rect) {
-    let (pw, ph) = (THUMB_DIP + 24.0, THUMB_DIP + 64.0);
-    let pr = Rect::new(list_r.r() - t.sb_w - pw - 12.0, list_r.b() - ph - 12.0, pw, ph);
-    g.round(pr, 6.0, t.panel);
-    g.round_stroke(pr, 6.0, PANEL_BORDER, 1.0);
-    let title = shell.thumbs.path.as_deref().and_then(|p| p.rsplit('\\').next()).unwrap_or("(no file)").to_string();
-    g.text(&title, Rect::new(pr.x + 12.0, pr.y + 4.0, pw - 24.0, 22.0), t.font_bold, t.text);
-    let status = shell.thumbs.status.clone();
-    g.text(&status, Rect::new(pr.x + 12.0, pr.b() - 28.0, pw - 24.0, 22.0), f(10.5), t.dim);
-    let area = Rect::new(pr.x + 12.0, pr.y + 30.0, THUMB_DIP, THUMB_DIP);
-    if let Some(img) = shell.thumb_image() {
-        // fit, keep aspect
-        let s = (area.w / img.w as f32).min(area.h / img.h as f32);
-        let (dw, dh) = (img.w as f32 * s, img.h as f32 * s);
-        let r = Rect::new(area.x + (area.w - dw) / 2.0, area.y + (area.h - dh) / 2.0, dw, dh);
-        g.image(&img.key, img.w, img.h, &img.px, r);
-    } else {
-        g.round_a(area, 4.0, PANEL_BORDER, 0.3);
     }
 }
 
@@ -438,32 +976,220 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selection_model() {
-        let mut s = Selection::default();
-        s.apply(5, Mods::NONE, SelectBy::Click);
-        s.apply(9, Mods::SHIFT, SelectBy::Click);
-        assert_eq!(s.count(), 5);
-        s.apply(7, Mods::CTRL, SelectBy::Click);
-        assert!(!s.contains(7) && s.contains(8));
-        s.apply(20, Mods::CTRL, SelectBy::Click);
-        assert_eq!(s.first_n(10, 100), vec![5, 6, 8, 9, 20]);
-        assert_eq!(s.count(), 5);
-        // Shift+End over a million rows is two numbers
-        s.apply(0, Mods::NONE, SelectBy::Key);
-        s.apply(999_999, Mods::SHIFT, SelectBy::Key);
-        assert_eq!(s.count(), 1_000_000);
-        assert_eq!(s.first_n(3, 1_000_000), vec![0, 1, 2]);
-        // a right click inside the selection keeps it
-        s.apply(42, Mods::NONE, SelectBy::RightClick);
-        assert_eq!(s.count(), 1_000_000);
-        s.apply(3, Mods::CTRL, SelectBy::Key);
-        assert_eq!(s.count(), 1_000_000, "Ctrl+arrow moves the cursor only");
+    fn breadcrumbs_truncate_from_the_left() {
+        // everything fits
+        assert_eq!(first_visible_crumb(&[20.0, 40.0, 60.0], 400.0), 0);
+        // too narrow: the head collapses, the last crumb stays
+        let w = [80.0, 80.0, 80.0, 80.0];
+        let first = first_visible_crumb(&w, 200.0);
+        assert!(first >= 1, "{first}");
+        assert!(first <= 3);
+        // even a tiny bar keeps the last crumb
+        assert_eq!(first_visible_crumb(&w, 10.0), 3);
+        assert_eq!(first_visible_crumb(&[], 100.0), 0);
     }
 
     #[test]
-    fn filter_case_insensitive() {
-        assert!(contains_ci(b"Report-Photo-12.TXT", b"photo"));
-        assert!(contains_ci(b"abc", b""));
-        assert!(!contains_ci(b"ab", b"abc"));
+    fn counts_get_separators() {
+        assert_eq!(count(0), "0");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(12_480), "12,480");
+        assert_eq!(count(1_000_000), "1,000,000");
+    }
+
+    // ---- whole-frame tests on the kit's recording canvas -----------------
+
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tsubame_ui::TestCanvas;
+
+    struct Rig {
+        v: View,
+        ui: Ui,
+        c: TestCanvas,
+        shell: ShellUi,
+        dir: std::path::PathBuf,
+    }
+
+    impl Rig {
+        fn new(tag: &str) -> Rig {
+            let dir = std::env::temp_dir().join(format!("tsubame-u2-view-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("Docs")).unwrap();
+            std::fs::write(dir.join("alpha.txt"), b"a").unwrap();
+            std::fs::write(dir.join("beta.txt"), b"bb").unwrap();
+            let wake: Wake = Arc::new(|| {});
+            let v = View::new(dir.to_str().unwrap(), wake, true, Density::Compact);
+            let mut ui = Ui::new(v.base_theme());
+            bind_shortcuts(&mut ui);
+            let mut r = Rig { v, ui, c: TestCanvas::new(1120.0, 720.0), shell: ShellUi::new(16), dir };
+            r.settle();
+            r
+        }
+        fn settle(&mut self) {
+            let t0 = Instant::now();
+            while self.v.tabs.items.iter().any(|t| t.is_loading()) {
+                self.v.pump();
+                assert!(t0.elapsed() < Duration::from_secs(10), "listing did not finish");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            self.v.pump();
+            self.frame();
+        }
+        /// two frames: hit-testing uses the previous frame's widgets
+        fn frame(&mut self) {
+            for _ in 0..2 {
+                self.c.clear();
+                self.shell.begin_frame();
+                assert!(self.v.paint(&mut self.ui, &mut self.c, &mut self.shell).is_some());
+            }
+        }
+        fn key(&mut self, key: Key, mods: Mods) {
+            self.ui.push(Event::KeyDown { key, mods, repeat: false });
+            self.frame();
+        }
+        fn click(&mut self, x: f32, y: f32) {
+            let pos = Pt::new(x, y);
+            self.ui.push(Event::MouseMove { pos });
+            self.frame();
+            self.ui.push(Event::MouseDown { pos, button: Button::Left, mods: Mods::NONE, double: false });
+            self.frame();
+            self.ui.push(Event::MouseUp { pos, button: Button::Left, mods: Mods::NONE });
+            self.frame();
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn frame_shows_rows_crumbs_and_status() {
+        let r = Rig::new("frame");
+        for name in ["Docs", "alpha.txt", "beta.txt"] {
+            assert!(r.c.has_text(name), "{name} missing: {:?}", r.c.texts());
+        }
+        assert!(r.c.has_text("3 items"), "{:?}", r.c.texts());
+        assert!(r.c.has_text("Name") && r.c.has_text("Date modified") && r.c.has_text("Type") && r.c.has_text("Size"));
+        assert!(r.c.texts().iter().any(|t| t.starts_with("tsubame-u2-view-frame")), "crumb of the folder: {:?}", r.c.texts());
+        assert_eq!(r.c.clip_depth(), 0);
+    }
+
+    #[test]
+    fn typing_in_the_list_filters_and_escape_clears() {
+        let mut r = Rig::new("typing");
+        r.ui.push(Event::Char('b'));
+        r.frame();
+        assert_eq!(r.v.tab().filter, "b");
+        assert_eq!(r.v.tab().shown(), 1, "only beta.txt has a b");
+        assert!(r.c.has_text("1 of 3 items"), "{:?}", r.c.texts());
+        r.key(Key::Escape, Mods::NONE);
+        assert_eq!(r.v.tab().filter, "");
+        assert_eq!(r.v.tab().shown(), 3);
+    }
+
+    #[test]
+    fn tabs_open_close_and_keep_their_own_state() {
+        let mut r = Rig::new("tabs");
+        assert_eq!(r.v.tabs.len(), 1);
+        r.key(Key::Char('T'), Mods::CTRL);
+        r.settle();
+        assert_eq!(r.v.tabs.len(), 2);
+        assert_eq!(r.v.tabs.active, 1);
+        // sort in tab 2 does not touch tab 1
+        r.v.tab_mut().sort_by(tsubame_core::Column::Size);
+        r.key(Key::Tab, Mods::CTRL);
+        assert_eq!(r.v.tabs.active, 0);
+        assert_eq!(r.v.tab().sort.column, tsubame_core::Column::Name);
+        r.key(Key::Char('W'), Mods::CTRL);
+        assert_eq!(r.v.tabs.len(), 1);
+        assert!(!r.v.quit);
+        r.key(Key::Char('W'), Mods::CTRL);
+        assert!(r.v.quit, "closing the last tab ends the window");
+    }
+
+    #[test]
+    fn history_buttons_and_keys() {
+        let mut r = Rig::new("hist");
+        let root = r.v.tab().path.clone();
+        let docs = format!("{root}\\Docs");
+        r.v.go(&docs);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+        assert!(r.c.has_text("This folder is empty"));
+        r.key(Key::Left, Mods::ALT);
+        r.settle();
+        assert_eq!(r.v.tab().path, root);
+        r.key(Key::Right, Mods::ALT);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+        r.key(Key::Up, Mods::ALT);
+        r.settle();
+        assert_eq!(r.v.tab().path, root);
+        // Enter on a folder row opens it
+        r.v.activate(0);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+    }
+
+    #[test]
+    fn path_edit_navigates_or_shows_an_error() {
+        let mut r = Rig::new("pathedit");
+        r.key(Key::Char('L'), Mods::CTRL);
+        assert!(r.v.editing);
+        // a bad path: the bar stays in edit mode with an error
+        r.v.path_text.set_text("C:\\definitely\\not\\here");
+        r.key(Key::Enter, Mods::NONE);
+        r.settle();
+        r.settle();
+        assert!(r.v.editing, "error keeps the field open");
+        assert!(r.c.texts().iter().any(|t| t.starts_with("Can't open")), "{:?}", r.c.texts());
+        assert_eq!(r.v.tab().path, r.dir.to_str().unwrap(), "back on the old folder");
+        // Escape cancels
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.editing);
+    }
+
+    #[test]
+    fn theme_and_density_switch_at_runtime() {
+        let mut r = Rig::new("theme");
+        assert!(r.v.dark);
+        r.key(Key::Char('L'), Mods::CTRL_SHIFT);
+        assert!(!r.v.dark);
+        assert_eq!(r.ui.theme.bg, LIGHT.bg);
+        assert_eq!(r.ui.theme.height_list_row, 22.0);
+        r.key(Key::Char('D'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.density, Density::Comfortable);
+        assert_eq!(r.ui.theme.height_list_row, 26.0);
+        assert_eq!(r.v.tab().list.row_h, 26.0);
+        r.key(Key::Char('D'), Mods::CTRL_SHIFT);
+        r.key(Key::Char('D'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.density, Density::Compact);
+    }
+
+    #[test]
+    fn selection_counts_show_in_the_status_bar() {
+        let mut r = Rig::new("sel");
+        r.key(Key::Char('A'), Mods::CTRL);
+        assert_eq!(r.v.tab().sel.count(), 3);
+        assert!(r.c.texts().iter().any(|t| t.starts_with("3 selected")), "{:?}", r.c.texts());
+        r.key(Key::Escape, Mods::NONE);
+        assert_eq!(r.v.tab().sel.count(), 0);
+    }
+
+    #[test]
+    fn sidebar_click_navigates() {
+        let mut r = Rig::new("side");
+        let target = r.dir.join("Docs").to_str().unwrap().to_string();
+        r.v.side.places = vec![tsubame_win::places::Place { name: "Desktop", path: target.clone() }];
+        r.frame();
+        // the Desktop row is the second quick-access entry, below the title bar and toolbar
+        let t = r.ui.theme;
+        let y = t.height_titlebar + t.height_toolbar + t.space_2 + t.height_sidebar_header + t.height_sidebar_item * 1.5;
+        r.click(60.0, y);
+        r.settle();
+        assert_eq!(r.v.tab().path, target);
     }
 }
