@@ -18,7 +18,7 @@ use ed25519_compact::PublicKey;
 ///
 /// MAINTAINER: run `tools\release-keygen.ps1`, paste the printed public key here,
 /// commit. See docs/release.md. The private key is never committed.
-pub const RELEASE_PUBLIC_KEYS_HEX: &[&str] = &[];
+pub const RELEASE_PUBLIC_KEYS_HEX: &[&str] = &["bdefd9c3cc9efdbf105d1b8bc8976d20133f087b1f8abf69ecd20ceab6645e85"];
 
 /// A pinned Authenticode signer. Used only once the project has a code-signing
 /// certificate: when this list is non-empty every extracted exe must also pass
