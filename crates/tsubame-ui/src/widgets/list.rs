@@ -41,6 +41,9 @@ pub enum SelectBy {
 
 pub trait ListSource {
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn is_selected(&self, _i: usize) -> bool {
         false
     }

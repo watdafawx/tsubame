@@ -15,6 +15,7 @@ pub enum Split {
 
 /// Splits `area`, draws the bar, handles its drag. Returns (first, second,
 /// changed). `pos` is clamped so both panes keep `min_a` / `min_b`.
+#[allow(clippy::too_many_arguments)]
 pub fn splitter(ui: &mut Ui, c: &mut dyn Canvas, id: Id, area: Rect, split: Split, pos: &mut f32, min_a: f32, min_b: f32) -> (Rect, Rect, bool) {
     let bw = ui.theme.splitter_w;
     let len = if split == Split::LeftRight { area.w } else { area.h };

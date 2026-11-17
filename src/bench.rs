@@ -169,7 +169,7 @@ impl Bench {
                     self.rows = v.len();
                     // small real folders start at the top and wrap around
                     self.start_row = if v.len() > 2 * START_ROW { START_ROW } else { 0 };
-                    v.selected = self.start_row + 3;
+                    v.set_cursor(self.start_row + 3);
                     v.set_scroll(self.start_row as f64 * ROW_H as f64);
                     self.state = State::Running(Instant::now());
                     self.just_started = true;

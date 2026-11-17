@@ -1,5 +1,7 @@
 #![windows_subsystem = "windows"]
-//! S1 + S4 spike: a details-view list on Direct2D, fed by shell workers.
+//! S1 + S4 spike on the `tsubame-ui` kit (U1): a details-view list on
+//! Direct2D, fed by shell workers, with a filter box (Ctrl+F; Tab moves
+//! the focus between the filter and the list).
 //!
 //! `tsubame.exe [--dir <path>] [--store] [--bench [--hang]] [--stress menu|thumbs] [--workers N]`
 //!   --dir <path>  list a real folder (on a worker thread); rows get real
@@ -22,6 +24,7 @@
 //! icons, TSUBAME_HANG_MS sets the hung-worker threshold (default 3000).
 
 mod bench;
+mod clip;
 mod data;
 mod lru;
 mod shellui;
@@ -32,12 +35,13 @@ use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Instant;
 use tsubame_d2d::Gfx;
+use tsubame_ui::{Button, Cursor, Event, Key, Mods, Pt, Theme, Ui};
 use tsubame_win::shell::{Pool, Request};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_F10, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
@@ -47,11 +51,21 @@ const WM_APP_SHELL: u32 = WM_APP + 1;
 const WM_APP_DIR: u32 = WM_APP + 2;
 /// Hung-worker watchdog: armed only while the pool has icon/thumbnail work.
 const WATCH_TIMER: usize = 2;
+/// not exported by the windows crate features we use
+const WM_MOUSELEAVE: u32 = 0x02A3;
 const WATCH_MS: u32 = 1000;
 const HANG_MS: u32 = 20_000;
 
 struct App {
     view: view::View,
+    ui: Ui,
+    /// we hold the mouse capture for a kit drag
+    captured: bool,
+    /// WM_MOUSELEAVE is armed (TrackMouseEvent)
+    tracking: bool,
+    /// first half of a UTF-16 surrogate pair from WM_CHAR
+    hi_surrogate: Option<u16>,
+    cursor_kind: Cursor,
     gfx: Gfx,
     bench: Option<bench::Bench>,
     first_done: bool,
@@ -105,6 +119,7 @@ fn main() {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinst,
+            style: CS_DBLCLKS,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap(),
             lpszClassName: class,
             ..Default::default()
@@ -139,9 +154,19 @@ fn main() {
             rx
         });
 
+        let mut ui = Ui::new(Theme::dark());
+        ui.shortcuts.bind(Key::Char('F'), Mods::CTRL, view::CMD_FIND, true);
+        ui.clipboard = Box::new(clip::WinClipboard(hwnd.0 as isize));
+        ui.set_focus(Some(view::LIST_ID));
+
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
                 view: view::View::new(source),
+                ui,
+                captured: false,
+                tracking: false,
+                hi_surrogate: None,
+                cursor_kind: Cursor::Arrow,
                 gfx,
                 bench,
                 first_done: false,
@@ -205,8 +230,8 @@ fn arm_watch(hwnd: HWND, a: &mut App) {
 fn after_paint(hwnd: HWND, a: &mut App) {
     a.shell.end_frame(&mut a.pool);
     if a.shell.thumbs.on {
-        let sel = a.view.selected;
-        let path = a.view.source.path(sel);
+        let sel = a.view.cursor();
+        let path = a.view.path(sel);
         let px = (view::THUMB_DIP * a.gfx.dpi / 96.0) as u32;
         a.shell.want_thumb(&mut a.pool, sel, path, px);
     }
@@ -219,16 +244,19 @@ unsafe fn on_paint(hwnd: HWND) {
     let info = with(|a| {
         let t0 = Instant::now();
         a.shell.begin_frame();
-        a.view.paint(&mut a.gfx, &mut a.shell);
+        let out = a.view.paint(&mut a.ui, &mut a.gfx, &mut a.shell);
         let total = t0.elapsed().as_secs_f32() * 1000.0;
         after_paint(hwnd, a);
         if let Some(s) = a.stress.as_mut() {
             s.painted(total);
         }
-        (total, a.gfx.end_ms, a.gfx.path())
+        (total, a.gfx.end_ms, a.gfx.path(), out)
     });
     let _ = unsafe { EndPaint(hwnd, &ps) };
-    let Some((total_ms, end_ms, path)) = info else { return };
+    let Some((total_ms, end_ms, path, out)) = info else { return };
+    if let Some(out) = out {
+        after_frame(hwnd, out);
+    }
 
     // first completed paint: time from process start
     let first = with(|a| {
@@ -339,17 +367,11 @@ unsafe fn on_stress_tick(hwnd: HWND) {
     }
 }
 
-/// Context menu for the row at client px (x, y), at that screen point.
-fn menu_at(hwnd: HWND, x: i32, y: i32, wrong_owner: bool) {
+/// Context menu for view row `row`, at client px (x, y).
+fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32, wrong_owner: bool) {
     let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     let (sx, sy) = screen_pt(hwnd, x, y);
     with(|a| {
-        let s = a.gfx.dpi / 96.0;
-        let Some(row) = a.view.row_at(x as f32 / s, y as f32 / s) else { return };
-        if !a.view.marked.contains(&row) {
-            a.view.marked.clear();
-            a.view.selected = row;
-        }
         let paths = a.view.menu_paths(row);
         if paths.is_empty() {
             a.shell.menu_status = "fake rows have no file: run with --dir <path>".into();
@@ -360,14 +382,144 @@ fn menu_at(hwnd: HWND, x: i32, y: i32, wrong_owner: bool) {
     invalidate(hwnd);
 }
 
-/// Keyboard-invoked menu, at the selected row.
+/// Keyboard-invoked menu, at the cursor row.
 fn key_menu(hwnd: HWND, wrong_owner: bool) {
     let p = with(|a| {
         let s = a.gfx.dpi / 96.0;
-        ((60.0 * s) as i32, (a.view.row_mid_y(a.view.selected) * s) as i32)
+        let row = a.view.cursor();
+        if a.view.len() > 0 && !a.view.sel.contains(row) {
+            a.view.sel.single(row);
+        }
+        (row, (60.0 * s) as i32, (a.view.row_mid_y(row) * s) as i32)
     });
-    if let Some((x, y)) = p {
-        menu_at(hwnd, x, y, wrong_owner);
+    if let Some((row, x, y)) = p {
+        open_menu(hwnd, row, x, y, wrong_owner);
+    }
+}
+
+/// What the kit asked for after a frame: another frame, mouse capture, the
+/// cursor, the IME position; then the S4 menu and the letter commands.
+fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
+    let r = with(|a| {
+        a.cursor_kind = out.cursor;
+        let cap = (out.capture != a.captured).then(|| {
+            a.captured = out.capture;
+            out.capture
+        });
+        let s = a.gfx.dpi / 96.0;
+        let ime = out.ime_caret.map(|r| ((r.x * s) as i32, (r.y * s) as i32, (r.h * s) as i32));
+        let menu = a.view.menu_request.take().map(|(row, pt)| match pt {
+            Some(p) => (row, (p.x * s) as i32, (p.y * s) as i32),
+            None => (row, (60.0 * s) as i32, (a.view.row_mid_y(row) * s) as i32),
+        });
+        (cap, ime, menu, view::View::leftover_chars(&a.ui))
+    });
+    let Some((cap, ime, menu, chars)) = r else { return };
+    match cap {
+        Some(true) => unsafe {
+            SetCapture(hwnd);
+        },
+        Some(false) => unsafe {
+            let _ = ReleaseCapture();
+        },
+        None => {}
+    }
+    if let Some((x, y, h)) = ime {
+        clip::place_ime(hwnd, x, y, h);
+    }
+    if let Some((row, x, y)) = menu {
+        open_menu(hwnd, row, x, y, false);
+    }
+    for c in chars {
+        on_letter(hwnd, c);
+    }
+    if out.repaint {
+        invalidate(hwnd);
+    }
+}
+
+/// Feeds one event to the kit; paints only if it can change the screen.
+fn push(hwnd: HWND, ev: Event) {
+    if with(|a| a.ui.push(ev)).unwrap_or(false) {
+        invalidate(hwnd);
+    }
+}
+
+fn mods() -> Mods {
+    let down = |vk: VIRTUAL_KEY| unsafe { GetKeyState(vk.0 as i32) } < 0;
+    Mods { ctrl: down(VK_CONTROL), shift: down(VK_SHIFT), alt: down(VK_MENU) }
+}
+
+fn dpi_scale() -> f32 {
+    with(|a| a.gfx.dpi / 96.0).unwrap_or(1.0)
+}
+
+/// Client px in `lp` to DIPs.
+fn dip_pt(lp: LPARAM) -> Pt {
+    let s = dpi_scale();
+    Pt::new(lo(lp) as f32 / s, hi(lp) as f32 / s)
+}
+
+fn map_key(vk: u16) -> Key {
+    match VIRTUAL_KEY(vk) {
+        VK_LEFT => Key::Left,
+        VK_RIGHT => Key::Right,
+        VK_UP => Key::Up,
+        VK_DOWN => Key::Down,
+        VK_HOME => Key::Home,
+        VK_END => Key::End,
+        VK_PRIOR => Key::PageUp,
+        VK_NEXT => Key::PageDown,
+        VK_RETURN => Key::Enter,
+        VK_ESCAPE => Key::Escape,
+        VK_TAB => Key::Tab,
+        VK_BACK => Key::Backspace,
+        VK_DELETE => Key::Delete,
+        VK_INSERT => Key::Insert,
+        VK_SPACE => Key::Space,
+        v if (VK_F1.0..=VK_F24.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
+        v if (0x30..=0x39).contains(&v.0) || (0x41..=0x5a).contains(&v.0) => Key::Char(v.0 as u8 as char),
+        v => Key::Other(v.0 as u32),
+    }
+}
+
+fn button_event(hwnd: HWND, msg: u32, lp: LPARAM) {
+    let pos = dip_pt(lp);
+    let mods = mods();
+    let down = |button, double| Event::MouseDown { pos, button, mods, double };
+    let ev = match msg {
+        WM_LBUTTONDOWN => down(Button::Left, false),
+        WM_LBUTTONDBLCLK => down(Button::Left, true),
+        WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => down(Button::Right, false),
+        WM_MBUTTONDOWN | WM_MBUTTONDBLCLK => down(Button::Middle, false),
+        WM_LBUTTONUP => Event::MouseUp { pos, button: Button::Left, mods },
+        WM_RBUTTONUP => Event::MouseUp { pos, button: Button::Right, mods },
+        _ => Event::MouseUp { pos, button: Button::Middle, mods },
+    };
+    push(hwnd, ev);
+}
+
+/// Letter commands (chars no widget took): T thumbnail panel, H hang a
+/// worker in a "shell call", W wrong-owner menu (owner = this UI window).
+fn on_letter(hwnd: HWND, c: char) {
+    match c {
+        't' => {
+            with(|a| {
+                a.shell.thumbs.on = !a.shell.thumbs.on;
+                a.shell.thumbs.row = None;
+            });
+            invalidate(hwnd);
+        }
+        'h' => {
+            with(|a| {
+                a.pool.submit(Request::Hang { ms: HANG_MS });
+                a.shell.menu_status = format!("a worker sleeps {} s; watchdog replaces it after {} ms", HANG_MS / 1000, a.pool.hang_after.as_millis());
+                arm_watch(hwnd, a);
+            });
+            invalidate(hwnd);
+        }
+        'w' => key_menu(hwnd, true),
+        _ => {}
     }
 }
 
@@ -427,9 +579,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         match rx.try_recv() {
                             Ok(Ok(d)) => {
                                 a.shell.menu_status = format!("listed {} entries in {:.1} ms on a worker ({:.2} MB store)", d.len(), d.list_ms, d.bytes() as f64 / 1048576.0);
-                                a.view.source = data::Source::Dir(d);
-                                a.view.selected = 0;
-                                a.view.scroll = 0.0;
+                                a.view.set_source(data::Source::Dir(d));
                             }
                             Ok(Err(e)) => a.shell.menu_status = format!("listing failed: {e}"),
                             Err(_) => a.dir_rx = Some(rx),
@@ -440,36 +590,85 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
-                let notches = ((wp.0 >> 16) as u16 as i16) as f32 / 120.0;
-                if with(|a| a.view.wheel(notches)).unwrap_or(false) {
-                    invalidate(hwnd);
+                let dy = ((wp.0 >> 16) as u16 as i16) as f32 / 120.0;
+                // wheel positions are screen px
+                let mut p = POINT { x: lo(lp), y: hi(lp) };
+                let _ = ScreenToClient(hwnd, &mut p);
+                let s = dpi_scale();
+                push(hwnd, Event::Wheel { pos: Pt::new(p.x as f32 / s, p.y as f32 / s), dy, dx: 0.0, mods: mods() });
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
+                button_event(hwnd, msg, lp);
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                if with(|a| !std::mem::replace(&mut a.tracking, true)).unwrap_or(false) {
+                    let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                    let _ = TrackMouseEvent(&mut tme);
+                }
+                push(hwnd, Event::MouseMove { pos: dip_pt(lp) });
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE => {
+                with(|a| a.tracking = false);
+                push(hwnd, Event::MouseLeave);
+                LRESULT(0)
+            }
+            WM_CAPTURECHANGED => {
+                // another window took a capture we still wanted: end the drag
+                if with(|a| std::mem::replace(&mut a.captured, false)).unwrap_or(false) {
+                    let pos = with(|a| a.ui.mouse()).unwrap_or_default();
+                    push(hwnd, Event::MouseUp { pos, button: Button::Left, mods: Mods::NONE });
                 }
                 LRESULT(0)
             }
-            WM_LBUTTONDOWN => {
-                let ctrl = wp.0 & 0x0008 != 0; // MK_CONTROL
-                let changed = with(|a| {
-                    let s = a.gfx.dpi / 96.0;
-                    let (x, y) = (lo(lp) as f32 / s, hi(lp) as f32 / s);
-                    let ch = if ctrl { a.view.toggle_mark(x, y) } else { a.view.mouse_down(x, y) };
-                    (ch, a.view.dragging())
-                });
-                if let Some((ch, drag)) = changed {
-                    if drag {
-                        SetCapture(hwnd);
+            WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
+                let id = match with(|a| a.cursor_kind).unwrap_or(Cursor::Arrow) {
+                    Cursor::Arrow => IDC_ARROW,
+                    Cursor::IBeam => IDC_IBEAM,
+                    Cursor::Hand => IDC_HAND,
+                    Cursor::SizeWE => IDC_SIZEWE,
+                    Cursor::SizeNS => IDC_SIZENS,
+                };
+                if let Ok(c) = LoadCursorW(None, id) {
+                    SetCursor(Some(c));
+                }
+                LRESULT(1)
+            }
+            WM_SETFOCUS => {
+                push(hwnd, Event::FocusGained);
+                LRESULT(0)
+            }
+            WM_KILLFOCUS => {
+                push(hwnd, Event::FocusLost);
+                LRESULT(0)
+            }
+            // the text field draws the composition inline: no IME window
+            WM_IME_STARTCOMPOSITION => LRESULT(0),
+            WM_IME_COMPOSITION => {
+                if let Some(s) = clip::ime_string(hwnd, lp, false) {
+                    with(|a| a.ui.set_composition(""));
+                    for c in s.chars() {
+                        push(hwnd, Event::Char(c));
                     }
-                    if ch {
+                    invalidate(hwnd);
+                }
+                if let Some(s) = clip::ime_string(hwnd, lp, true) {
+                    if with(|a| a.ui.set_composition(&s)).unwrap_or(false) {
                         invalidate(hwnd);
                     }
                 }
                 LRESULT(0)
             }
-            WM_RBUTTONUP => {
-                menu_at(hwnd, lo(lp), hi(lp), false);
-                LRESULT(0)
+            WM_IME_ENDCOMPOSITION => {
+                if with(|a| a.ui.set_composition("")).unwrap_or(false) {
+                    invalidate(hwnd);
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_CONTEXTMENU if lp.0 == -1 => {
-                // keyboard (menu key): at the selected row
+                // keyboard (menu key): at the cursor row
                 key_menu(hwnd, false);
                 LRESULT(0)
             }
@@ -482,58 +681,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 LRESULT(0)
             }
-            WM_MOUSEMOVE => {
-                if with(|a| {
-                    let s = a.gfx.dpi / 96.0;
-                    a.view.mouse_move(hi(lp) as f32 / s)
-                })
-                .unwrap_or(false)
-                {
-                    invalidate(hwnd);
-                }
-                LRESULT(0)
-            }
-            WM_LBUTTONUP | WM_CAPTURECHANGED => {
-                if with(|a| a.view.mouse_up()).unwrap_or(false) {
-                    if msg == WM_LBUTTONUP {
-                        let _ = ReleaseCapture();
-                    }
-                    invalidate(hwnd);
-                }
-                LRESULT(0)
-            }
             WM_KEYDOWN => {
-                if with(|a| a.view.key(wp.0 as u16)).unwrap_or(false) {
-                    invalidate(hwnd);
-                }
+                let repeat = lp.0 & (1 << 30) != 0;
+                push(hwnd, Event::KeyDown { key: map_key(wp.0 as u16), mods: mods(), repeat });
                 LRESULT(0)
             }
-            // letter commands as characters: injected input (VK_PACKET) and
-            // other layouts arrive here, not as a 'T' virtual key
+            WM_KEYUP => {
+                push(hwnd, Event::KeyUp { key: map_key(wp.0 as u16), mods: mods() });
+                LRESULT(0)
+            }
+            // text as characters (injected VK_PACKET input and every layout
+            // arrive here); a surrogate pair comes as two messages
             WM_CHAR => {
-                match char::from_u32(wp.0 as u32).map(|c| c.to_ascii_lowercase()) {
-                    Some('t') => {
-                        // thumbnail panel
-                        with(|a| {
-                            a.shell.thumbs.on = !a.shell.thumbs.on;
-                            a.shell.thumbs.row = None;
-                        });
-                        invalidate(hwnd);
-                    }
-                    Some('h') => {
-                        // hang one worker in a "shell call"
-                        with(|a| {
-                            a.pool.submit(Request::Hang { ms: HANG_MS });
-                            a.shell.menu_status = format!("a worker sleeps {} s; watchdog replaces it after {} ms", HANG_MS / 1000, a.pool.hang_after.as_millis());
-                            arm_watch(hwnd, a);
-                        });
-                        invalidate(hwnd);
-                    }
-                    Some('w') => {
-                        // wrong-owner menu (owner = this UI window, on another thread)
-                        key_menu(hwnd, true);
-                    }
-                    _ => {}
+                let u = wp.0 as u16;
+                let ch = if (0xd800..0xdc00).contains(&u) {
+                    with(|a| a.hi_surrogate = Some(u));
+                    None
+                } else if (0xdc00..0xe000).contains(&u) {
+                    with(|a| a.hi_surrogate.take()).flatten().and_then(|h| char::decode_utf16([h, u]).next()?.ok())
+                } else {
+                    char::from_u32(u as u32)
+                };
+                // control chars (backspace, tab, enter, ctrl+letters) come as KeyDown
+                if let Some(c) = ch.filter(|c| !c.is_control()) {
+                    push(hwnd, Event::Char(c));
                 }
                 LRESULT(0)
             }
