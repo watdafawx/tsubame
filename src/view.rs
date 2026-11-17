@@ -132,6 +132,8 @@ pub struct View {
     pub last_range: (usize, usize),
     /// the volume of the shown folder changed: main re-reads the drives
     pub want_drives: bool,
+    /// the last `pump` stopped at its time budget: pump again soon
+    pub pump_more: bool,
     last_drive: char,
 
     /// the list asked for a context menu: (view row, DIP point); Shift+F10 /
@@ -173,6 +175,7 @@ impl View {
             list_top: 0.0,
             last_range: (0, 0),
             want_drives: true,
+            pump_more: false,
             last_drive: start.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('C'),
             menu_request: None,
             open_paths: Vec::new(),
@@ -307,8 +310,11 @@ impl View {
     /// no disk. True when something visible changed.
     pub fn pump(&mut self) -> bool {
         let mut changed = false;
+        self.pump_more = false;
         for t in &mut self.tabs.items {
-            changed |= t.pump().changed;
+            let p = t.pump();
+            changed |= p.changed;
+            self.pump_more |= p.more;
         }
         // a typed path that failed to open: back to the old folder, error shown
         if let Some((id, prev, typed)) = self.edit_nav.take() {

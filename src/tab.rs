@@ -74,7 +74,13 @@ pub struct Pumped {
     pub changed: bool,
     /// this call handled the Done message
     pub done: bool,
+    /// stopped at the time budget with messages still waiting: call again
+    pub more: bool,
 }
+
+/// One `pump` call works at most this long, so a fast worker cannot keep the
+/// UI thread from painting while a big folder streams in.
+pub const PUMP_BUDGET: Duration = Duration::from_millis(6);
 
 fn flags_of(attrs: u32, is_dir: bool, reparse: bool) -> u16 {
     let mut f = 0;
@@ -174,7 +180,12 @@ impl Tab {
     /// Moves everything the worker has delivered into the store. UI thread.
     pub fn pump(&mut self) -> Pumped {
         let mut out = Pumped::default();
+        let t0 = Instant::now();
         loop {
+            if t0.elapsed() >= PUMP_BUDGET {
+                out.more = true;
+                break;
+            }
             let Some(rx) = &self.rx else { break };
             match rx.try_recv() {
                 Ok(msg) => {

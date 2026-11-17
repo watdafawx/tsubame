@@ -102,6 +102,8 @@ struct App {
     /// the blink stopped for lack of input (caret solid until the next key)
     caret_idle: bool,
     last_input: Instant,
+    /// start of the last paint (streaming listings repaint at most ~60/s)
+    last_paint: Instant,
 }
 
 thread_local! {
@@ -252,6 +254,7 @@ fn main() {
                 caret_timer: false,
                 caret_idle: false,
                 last_input: Instant::now(),
+                last_paint: Instant::now(),
             })
         });
 
@@ -360,6 +363,7 @@ unsafe fn on_paint(hwnd: HWND) {
     unsafe { BeginPaint(hwnd, &mut ps) };
     let info = with(|a| {
         let t0 = Instant::now();
+        a.last_paint = t0;
         a.shell.begin_frame();
         let out = a.view.paint(&mut a.ui, &mut a.gfx, &mut a.shell);
         let total = t0.elapsed().as_secs_f32() * 1000.0;
@@ -789,8 +793,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_APP_WAKE => {
                 // clear first: a worker that posts after this point gets a new message
                 WAKE_PENDING.store(false, Ordering::Release);
-                if with(|a| a.view.pump()).unwrap_or(false) {
+                // WM_PAINT is lowest priority: a worker that keeps posting wakes would
+                // starve it until the listing is done. Paint right away (at most
+                // ~60 frames/s) so the first rows and the streaming show at once.
+                let r = with(|a| (a.view.pump(), a.view.pump_more, a.last_paint.elapsed() >= Duration::from_millis(16)));
+                if let Some((_, true, _)) = r {
+                    // budget used up with batches still queued: come back after the paint
+                    if !WAKE_PENDING.swap(true, Ordering::AcqRel) {
+                        let _ = PostMessageW(Some(hwnd), WM_APP_WAKE, WPARAM(0), LPARAM(0));
+                    }
+                }
+                if let Some((true, _, stale)) = r {
                     invalidate(hwnd);
+                    if stale {
+                        let _ = UpdateWindow(hwnd);
+                    }
                 }
                 LRESULT(0)
             }
