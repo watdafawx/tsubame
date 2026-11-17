@@ -914,6 +914,7 @@ version = "0.0.1"
 dependencies = [
  "embed-resource",
  "tsubame-d2d",
+ "tsubame-win",
  "windows",
 ]
 
@@ -954,6 +955,9 @@ version = "0.0.1"
 [[package]]
 name = "tsubame-win"
 version = "0.0.1"
+dependencies = [
+ "windows",
+]
 
 [[package]]
 name = "typenum"

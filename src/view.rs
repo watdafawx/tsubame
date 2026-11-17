@@ -3,7 +3,9 @@
 //!
 //! Only the rows that intersect the viewport are fetched and drawn.
 
-use crate::data::{self, KINDS, N, RowBuf, Source};
+use crate::data::{self, RowBuf, Source};
+use crate::shellui::ShellUi;
+use std::collections::BTreeSet;
 use tsubame_d2d::{Font, Gfx, Rect, f};
 
 pub const ROW_H: f32 = 22.0;
@@ -30,6 +32,11 @@ const SB_THUMB: u32 = 0x4b5468;
 const SB_THUMB_DRAG: u32 = 0x6b7690;
 const ICON_DIR: u32 = 0xe6b84d;
 const ICON_FILE: u32 = 0x6f7a91;
+const MARK: u32 = 0x284060;
+const PANEL_BG: u32 = 0x161a21;
+const PANEL_BORDER: u32 = 0x3a4252;
+pub const ICON_DIP: f32 = 16.0;
+pub const THUMB_DIP: f32 = 256.0;
 
 const FONT: Font = f(12.0);
 const FONT_R: Font = f(12.0).r();
@@ -48,18 +55,59 @@ pub struct View {
     text: String,
     /// rows drawn by the last paint (first, last+1)
     pub last_range: (usize, usize),
+    /// Ctrl+click multi-selection (for multi-item context menus)
+    pub marked: BTreeSet<usize>,
+    rowbuf: Box<RowBuf>,
 }
 
 impl View {
     pub fn new(source: Source) -> Self {
-        View { scroll: 0.0, selected: 0, w: 1120.0, h: 720.0, source, drag_grab: None, text: String::with_capacity(32), last_range: (0, 0) }
+        View { scroll: 0.0, selected: 0, w: 1120.0, h: 720.0, source, drag_grab: None, text: String::with_capacity(32), last_range: (0, 0), marked: BTreeSet::new(), rowbuf: Box::new(RowBuf::new()) }
+    }
+
+    pub fn len(&self) -> usize {
+        self.source.len()
+    }
+
+    /// Row under client point (DIP), if any.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        if y < HEADER_H || y >= HEADER_H + self.viewport_h() || x >= self.w - SB_W {
+            return None;
+        }
+        let row = ((self.scroll + (y - HEADER_H) as f64) / ROW_H as f64) as usize;
+        (row < self.len()).then_some(row)
+    }
+
+    /// Client y (DIP) of the middle of row `i`.
+    pub fn row_mid_y(&self, i: usize) -> f32 {
+        (HEADER_H as f64 + i as f64 * ROW_H as f64 - self.scroll) as f32 + ROW_H / 2.0
+    }
+
+    /// Paths for a context menu on `row`: the marked set if `row` is in it,
+    /// else just `row`. Empty for fake rows.
+    pub fn menu_paths(&self, row: usize) -> Vec<String> {
+        let rows: Vec<usize> = if self.marked.contains(&row) { self.marked.iter().copied().collect() } else { vec![row] };
+        rows.into_iter().filter_map(|r| self.source.path(r)).collect()
+    }
+
+    /// Ctrl+click: toggles the row under the point in the multi-selection.
+    pub fn toggle_mark(&mut self, x: f32, y: f32) -> bool {
+        let Some(row) = self.row_at(x, y) else { return false };
+        if self.marked.is_empty() {
+            self.marked.insert(self.selected);
+        }
+        if !self.marked.remove(&row) {
+            self.marked.insert(row);
+        }
+        self.selected = row;
+        true
     }
 
     pub fn viewport_h(&self) -> f32 {
         (self.h - HEADER_H - STATUS_H).max(ROW_H)
     }
     fn content_h(&self) -> f64 {
-        N as f64 * ROW_H as f64
+        self.len() as f64 * ROW_H as f64
     }
     pub fn max_scroll(&self) -> f64 {
         (self.content_h() - self.viewport_h() as f64).max(0.0)
@@ -107,10 +155,13 @@ impl View {
         }
         if y >= HEADER_H && y < HEADER_H + self.viewport_h() && x < self.w - SB_W {
             let row = ((self.scroll + (y - HEADER_H) as f64) / ROW_H as f64) as usize;
-            if row < N && row != self.selected {
+            let had_marks = !self.marked.is_empty();
+            self.marked.clear();
+            if row < self.len() && row != self.selected {
                 self.selected = row;
                 return true;
             }
+            return had_marks;
         }
         false
     }
@@ -132,8 +183,8 @@ impl View {
         self.drag_grab.take().is_some()
     }
 
-    fn select(&mut self, row: usize) -> bool {
-        let row = row.min(N - 1);
+    pub fn select(&mut self, row: usize) -> bool {
+        let row = row.min(self.len().saturating_sub(1));
         let moved = row != self.selected;
         self.selected = row;
         // keep it on screen
@@ -160,14 +211,14 @@ impl View {
             VK_PRIOR => self.select(sel.saturating_sub(page)),
             VK_NEXT => self.select(sel + page),
             VK_HOME => self.select(0),
-            VK_END => self.select(N - 1),
+            VK_END => self.select(self.len().saturating_sub(1)),
             _ => false,
         }
     }
 
     // ---- drawing ----
     /// One frame. Returns false when there is no render target.
-    pub fn paint(&mut self, g: &mut Gfx) -> bool {
+    pub fn paint(&mut self, g: &mut Gfx, shell: &mut ShellUi) -> bool {
         let (w, h) = g.size();
         self.w = w;
         self.h = h;
@@ -197,21 +248,36 @@ impl View {
         let first = (self.scroll / ROW_H as f64) as usize;
         let off = (self.scroll - first as f64 * ROW_H as f64) as f32;
         let count = ((vh + off) / ROW_H).ceil() as usize + 0;
-        let last = (first + count).min(N);
+        let last = (first + count).min(self.len());
+        let first = first.min(last);
         self.last_range = (first, last);
 
         g.clip(Rect::new(0.0, HEADER_H, w, vh));
-        let mut row = RowBuf::new();
+        let row = &mut *self.rowbuf;
+        let root = match &self.source {
+            Source::Dir(d) => Some(d.root.as_str()),
+            _ => None,
+        };
         for i in first..last {
             let y = HEADER_H + (i - first) as f32 * ROW_H - off;
             let r = Rect::new(0.0, y, list_w, ROW_H);
             if i == self.selected {
                 g.fill(r, SEL);
+            } else if self.marked.contains(&i) {
+                g.fill(r, MARK);
             }
-            self.source.row(i, &mut row);
-            // icon stand-in: folder = amber tab, file = grey page
-            let (ic, icol) = if row.is_dir() { (Rect::new(12.0, y + 6.0, 14.0, 10.0), ICON_DIR) } else { (Rect::new(14.0, y + 4.0, 10.0, 14.0), ICON_FILE) };
-            g.round(ic, 2.0, icol);
+            self.source.row(i, row);
+            match shell.row_icon(row, root) {
+                Some(img) => {
+                    let ir = Rect::new(11.0, y + (ROW_H - ICON_DIP) / 2.0, ICON_DIP, ICON_DIP);
+                    g.image(&img.key, img.w, img.h, &img.px, ir);
+                }
+                None => {
+                    // placeholder until the shell icon arrives
+                    let (ic, icol) = if row.is_dir() { (Rect::new(12.0, y + 6.0, 14.0, 10.0), ICON_DIR) } else { (Rect::new(14.0, y + 4.0, 10.0, 14.0), ICON_FILE) };
+                    g.round_a(ic, 2.0, icol, 0.35);
+                }
+            }
             g.text(row.name_str(), Rect::new(NAME_X, y, name_w, ROW_H), FONT, TEXT);
             if !row.is_dir() {
                 data::fmt_size(row.size, &mut self.text);
@@ -219,9 +285,17 @@ impl View {
             }
             data::fmt_date(row.mtime, &mut self.text);
             g.text(&self.text, Rect::new(mod_x + PAD, y, COL_MOD_W - PAD, ROW_H), FONT, DIM);
-            g.text(KINDS[row.kind as usize].1, Rect::new(type_x + PAD, y, COL_TYPE_W - PAD, ROW_H), FONT, DIM);
+            row.type_text(&mut self.text);
+            g.text(&self.text, Rect::new(type_x + PAD, y, COL_TYPE_W - PAD, ROW_H), FONT, DIM);
         }
         g.unclip();
+        if let Source::Loading(p) = &self.source {
+            g.text(&format!("listing {p} on a worker thread..."), Rect::new(NAME_X, HEADER_H + 10.0, w - 2.0 * NAME_X, ROW_H), FONT, DIM);
+        }
+
+        if shell.thumbs.on {
+            self.paint_thumb(g, shell);
+        }
 
         // scrollbar
         let t = self.track();
@@ -238,18 +312,42 @@ impl View {
             use std::fmt::Write;
             let _ = write!(
                 self.text,
-                "Item {} of {}   |   showing {}-{}   |   {} data, {} render",
+                "Item {} of {}   |   showing {}-{}   |   {} data, {} render   |   icons {} cached, {} pending   |   {}",
                 self.selected + 1,
-                N,
+                self.len(),
                 first + 1,
                 last,
                 self.source.label(),
-                g.path()
+                g.path(),
+                shell.icons.len(),
+                shell.pending(),
+                shell.menu_status
             );
         }
         g.text(&self.text, Rect::new(PAD, sy + 1.0, w - 2.0 * PAD, STATUS_H - 1.0), f(11.0), DIM);
 
         g.end();
         true
+    }
+
+    fn paint_thumb(&mut self, g: &mut Gfx, shell: &mut ShellUi) {
+        let (pw, ph) = (THUMB_DIP + 24.0, THUMB_DIP + 64.0);
+        let pr = Rect::new(self.w - SB_W - pw - 12.0, HEADER_H + self.viewport_h() - ph - 12.0, pw, ph);
+        g.round(pr, 6.0, PANEL_BG);
+        g.round_stroke(pr, 6.0, PANEL_BORDER, 1.0);
+        let title = shell.thumbs.path.as_deref().and_then(|p| p.rsplit('\\').next()).unwrap_or("(no file)").to_string();
+        g.text(&title, Rect::new(pr.x + 12.0, pr.y + 4.0, pw - 24.0, 22.0), FONT_HDR, TEXT);
+        let status = shell.thumbs.status.clone();
+        g.text(&status, Rect::new(pr.x + 12.0, pr.b() - 28.0, pw - 24.0, 22.0), f(10.5), DIM);
+        let area = Rect::new(pr.x + 12.0, pr.y + 30.0, THUMB_DIP, THUMB_DIP);
+        if let Some(img) = shell.thumb_image() {
+            // fit, keep aspect
+            let s = (area.w / img.w as f32).min(area.h / img.h as f32);
+            let (dw, dh) = (img.w as f32 * s, img.h as f32 * s);
+            let r = Rect::new(area.x + (area.w - dw) / 2.0, area.y + (area.h - dh) / 2.0, dw, dh);
+            g.image(&img.key, img.w, img.h, &img.px, r);
+        } else {
+            g.round_a(area, 4.0, PANEL_BORDER, 0.3);
+        }
     }
 }

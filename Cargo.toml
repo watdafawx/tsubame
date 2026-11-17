@@ -37,6 +37,7 @@ embed-resource = "3.0.12"
 
 [dependencies]
 tsubame-d2d.workspace = true
+tsubame-win.workspace = true
 
 [dependencies.windows]
 workspace = true

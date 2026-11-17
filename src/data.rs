@@ -1,11 +1,13 @@
-//! Fake directory data for the spike: 1,000,000 rows, never as `String` objects.
+//! Directory data for the spikes, never as one `String` per row.
 //!
-//! Two sources behind one call, `Source::row(i, &mut RowBuf)`:
+//! Sources behind one call, `Source::row(i, &mut RowBuf)`:
 //! - `Procedural`: every field is a pure function of the row index. Zero bytes
 //!   of storage, zero startup cost. Measures the renderer alone.
 //! - `Store`: the architecture rule from PLAN.md section 3 (rule 2): one
 //!   contiguous name buffer plus fixed 24-byte records. Measures what a real
 //!   entry store costs.
+//! - `Dir` (S4, `--dir <path>`): a real folder, listed on a worker thread into
+//!   one name buffer + 24-byte records + a sort index.
 
 pub const N: usize = 1_000_000;
 
@@ -25,6 +27,9 @@ pub const KINDS: [(&str, &str); 12] = [
     ("md", "Markdown document"),
 ];
 
+/// `RowBuf::kind` of a real file whose extension is not in `KINDS`.
+pub const KIND_OTHER: u8 = 255;
+
 const WORDS: [&str; 16] = [
     "report", "photo", "backup", "draft", "invoice", "holiday", "project", "notes", "design", "archive", "render", "budget", "screen", "export", "sample", "build",
 ];
@@ -35,23 +40,49 @@ const DATE_SPAN: u64 = 8 * 365 * 86_400;
 
 /// One row, decoded and ready to draw. Lives on the stack, reused per row.
 pub struct RowBuf {
-    pub name: [u8; 56],
+    /// UTF-8; real names reach 255 UTF-16 units (up to 765 bytes)
+    pub name: [u8; 768],
     pub name_len: usize,
     pub size: u64,
     pub mtime: u32,
+    /// index into `KINDS`, or `KIND_OTHER`
     pub kind: u8,
+    /// Win32 file attributes (real folders only, else 0)
+    pub attrs: u32,
 }
 
 impl RowBuf {
     pub const fn new() -> Self {
-        RowBuf { name: [0; 56], name_len: 0, size: 0, mtime: 0, kind: 0 }
+        RowBuf { name: [0; 768], name_len: 0, size: 0, mtime: 0, kind: 0, attrs: 0 }
     }
     pub fn name_str(&self) -> &str {
-        // names are ASCII by construction
         std::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
     }
     pub fn is_dir(&self) -> bool {
         self.kind == 0
+    }
+    /// ".txt" as written (not lowercased), or "" when there is none.
+    pub fn ext(&self) -> &str {
+        let n = self.name_str();
+        match n.rfind('.') {
+            Some(i) if i > 0 && !self.is_dir() => &n[i..],
+            _ => "",
+        }
+    }
+    /// Type column text into `out`.
+    pub fn type_text(&self, out: &mut String) {
+        out.clear();
+        if self.kind != KIND_OTHER {
+            out.push_str(KINDS[self.kind as usize].1);
+            return;
+        }
+        let e = self.ext();
+        if e.is_empty() {
+            out.push_str("File");
+        } else {
+            out.extend(e[1..].chars().map(|c| c.to_ascii_uppercase()));
+            out.push_str(" File");
+        }
     }
 }
 
@@ -101,6 +132,7 @@ pub fn gen_row(i: usize, out: &mut RowBuf) {
         out.size = 0;
     }
     out.mtime = (DATE_BASE + (h >> 11) % DATE_SPAN) as u32;
+    out.attrs = 0;
 }
 
 #[repr(C)]
@@ -142,25 +174,173 @@ impl Store {
         out.size = r.size;
         out.mtime = r.mtime;
         out.kind = r.kind;
+        out.attrs = 0;
+    }
+}
+
+/// 24-byte record of a real directory entry.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DirRec {
+    name_off: u32,
+    attrs: u32,
+    size: u64,
+    mtime: u32,
+    name_len: u16,
+    kind: u8,
+    _pad: u8,
+}
+
+const _: () = assert!(size_of::<DirRec>() == 24);
+
+const ATTR_DIRECTORY: u32 = 0x10;
+
+/// A real folder: one UTF-8 name buffer, fixed records, a sort index
+/// (folders first, then by name, case-insensitive).
+pub struct DirStore {
+    pub root: String,
+    recs: Vec<DirRec>,
+    names: Vec<u8>,
+    order: Vec<u32>,
+    /// enumerate + sort time on the worker
+    pub list_ms: f64,
+}
+
+/// FILETIME (100 ns since 1601) to unix seconds.
+fn filetime_to_unix(ft: u64) -> u32 {
+    (ft / 10_000_000).saturating_sub(11_644_473_600).min(u32::MAX as u64) as u32
+}
+
+fn kind_of(name: &str, dir: bool) -> u8 {
+    if dir {
+        return 0;
+    }
+    let ext = match name.rfind('.') {
+        Some(i) if i > 0 => &name[i + 1..],
+        _ => return KIND_OTHER,
+    };
+    KINDS.iter().skip(1).position(|(e, _)| e.eq_ignore_ascii_case(ext)).map(|p| p as u8 + 1).unwrap_or(KIND_OTHER)
+}
+
+impl DirStore {
+    /// Lists `root`. Worker threads only: touches the disk.
+    pub fn load(root: &str) -> Result<DirStore, String> {
+        let t = std::time::Instant::now();
+        let mut root_s = root.trim_end_matches(['\\', '/']).to_string();
+        if !root_s.contains('\\') {
+            root_s.push('\\'); // "C:" -> "C:\"
+        }
+        let mut recs = Vec::new();
+        let mut names: Vec<u8> = Vec::new();
+        tsubame_win::enumerate::list_dir(&root_s, |e| {
+            let name = String::from_utf16_lossy(e.name);
+            let dir = e.attrs & ATTR_DIRECTORY != 0;
+            recs.push(DirRec {
+                name_off: names.len() as u32,
+                attrs: e.attrs,
+                size: if dir { 0 } else { e.size },
+                mtime: filetime_to_unix(e.mtime),
+                name_len: name.len().min(u16::MAX as usize) as u16,
+                kind: kind_of(&name, dir),
+                _pad: 0,
+            });
+            names.extend_from_slice(name.as_bytes());
+        })
+        .map_err(|e| format!("{root}: {}", e.message()))?;
+        let mut st = DirStore { root: root_s, recs, names, order: Vec::new(), list_ms: 0.0 };
+        let lower: Vec<String> = (0..st.recs.len()).map(|i| st.raw_name(i).to_lowercase()).collect();
+        let mut order: Vec<u32> = (0..st.recs.len() as u32).collect();
+        order.sort_by(|&a, &b| {
+            let (ra, rb) = (&st.recs[a as usize], &st.recs[b as usize]);
+            (ra.kind != 0).cmp(&(rb.kind != 0)).then_with(|| lower[a as usize].cmp(&lower[b as usize]))
+        });
+        st.order = order;
+        st.list_ms = t.elapsed().as_secs_f64() * 1000.0;
+        Ok(st)
+    }
+
+    fn raw_name(&self, rec: usize) -> &str {
+        let r = &self.recs[rec];
+        let off = r.name_off as usize;
+        std::str::from_utf8(&self.names[off..off + r.name_len as usize]).unwrap_or("")
+    }
+
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn name(&self, i: usize) -> &str {
+        self.raw_name(self.order[i] as usize)
+    }
+
+    /// Full path of row `i`.
+    pub fn path(&self, i: usize) -> String {
+        let mut p = String::with_capacity(self.root.len() + 64);
+        p.push_str(&self.root);
+        if !p.ends_with('\\') {
+            p.push('\\');
+        }
+        p.push_str(self.name(i));
+        p
+    }
+
+    pub fn is_dir(&self, i: usize) -> bool {
+        self.recs[self.order[i] as usize].kind == 0
+    }
+
+    fn row(&self, i: usize, out: &mut RowBuf) {
+        let ri = self.order[i] as usize;
+        let r = self.recs[ri];
+        let n = self.raw_name(ri).as_bytes();
+        out.name_len = n.len().min(out.name.len());
+        out.name[..out.name_len].copy_from_slice(&n[..out.name_len]);
+        out.size = r.size;
+        out.mtime = r.mtime;
+        out.kind = r.kind;
+        out.attrs = r.attrs;
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.recs.len() * size_of::<DirRec>() + self.names.len() + self.order.len() * 4
     }
 }
 
 pub enum Source {
     Procedural,
     Store(Store),
+    Dir(DirStore),
+    /// `--dir` while the worker lists it (zero rows)
+    Loading(String),
 }
 
 impl Source {
     pub fn row(&self, i: usize, out: &mut RowBuf) {
         match self {
-            Source::Procedural => gen_row(i, out),
+            Source::Procedural | Source::Loading(_) => gen_row(i, out),
             Source::Store(s) => s.row(i, out),
+            Source::Dir(d) => d.row(i, out),
+        }
+    }
+    pub fn len(&self) -> usize {
+        match self {
+            Source::Dir(d) => d.len(),
+            Source::Loading(_) => 0,
+            _ => N,
+        }
+    }
+    /// Full path of row `i` (real folders only).
+    pub fn path(&self, i: usize) -> Option<String> {
+        match self {
+            Source::Dir(d) if i < d.len() => Some(d.path(i)),
+            _ => None,
         }
     }
     pub fn label(&self) -> &'static str {
         match self {
             Source::Procedural => "procedural",
             Source::Store(_) => "store",
+            Source::Dir(_) => "dir",
+            Source::Loading(_) => "loading",
         }
     }
 }
@@ -231,5 +411,39 @@ mod tests {
         assert_eq!(s, "1.5 KB");
         fmt_size(7, &mut s);
         assert_eq!(s, "7 B");
+    }
+
+    #[test]
+    fn real_kinds_and_type_text() {
+        assert_eq!(kind_of("a.TXT", false), 1);
+        assert_eq!(kind_of("folder.txt", true), 0);
+        assert_eq!(kind_of("notepad.exe", false), 6);
+        assert_eq!(kind_of("x.weird", false), KIND_OTHER);
+        let mut b = RowBuf::new();
+        b.name[..7].copy_from_slice(b"a.weird");
+        b.name_len = 7;
+        b.kind = KIND_OTHER;
+        let mut s = String::new();
+        b.type_text(&mut s);
+        assert_eq!(s, "WEIRD File");
+        assert_eq!(b.ext(), ".weird");
+        assert_eq!(filetime_to_unix(116_444_736_000_000_000), 0);
+    }
+
+    #[test]
+    fn dir_store_lists_a_real_folder() {
+        let tmp = std::env::temp_dir().join(format!("tsubame-s4-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Sub")).unwrap();
+        std::fs::write(tmp.join("b.txt"), b"hi").unwrap();
+        std::fs::write(tmp.join("A.md"), b"hello").unwrap();
+        let d = DirStore::load(tmp.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(d.len(), 3);
+        assert_eq!(d.name(0), "Sub", "folders first");
+        assert_eq!(d.name(1), "A.md", "then by name, case-insensitive");
+        assert!(d.path(2).ends_with("\\b.txt"));
+        let mut r = RowBuf::new();
+        Source::Dir(d).row(2, &mut r);
+        assert_eq!(r.size, 2);
     }
 }
