@@ -89,3 +89,9 @@ U2 waits for U1, M1 (approved), C1, C2. B1 waits for U2.
 ## Update 5 (2026-11-18)
 - U2 on Claude Sonnet hit the Claude 5-hour limit (resets 01:10 Cairo). Partial work is committed on branch `t3/u2-browsable-file-manager` (head `be1aba2`, kept until the continuation merges). Substituted a **Codex gpt-6.1-sol (medium)** continuation child per the user's limit rule; it merges that branch first, then finishes and verifies on rig. Old task cancelled.
 - Still waiting on the user: public-repo push decision (scrub history e-mail and local paths first).
+
+## Update 6: U2 merged, B1 started (2026-11-18)
+- U2 merged (Codex gpt-6.1-sol continuation of the Claude child). Working file manager skeleton: tabs, breadcrumbs/path edit, back/forward/up, filter, sort, selection, sidebar (drives, known folders), density presets, dark/light, status bar, loading line, native shell menu. `docs/u2-views.md`. Tests green (workspace), screenshots checked on rig (dark, light, tabs, selection).
+- U2 numbers (rig 4K release): 100k first rows 2.1-18.3 ms (pass), sorted 62-168 ms (pass), scroll p95 2.8 ms (pass), first paint 72 ms (pass), idle CPU 0 (pass), leak smoke +0.25 MB, exe 0.60 MB. **Fails: private bytes after scroll 149.6 MiB (budget 110; 96.8 MiB idle before scroll passes; 180.9 MiB after repeated 100k navigations); startup navigation first rows 53.6 ms when counted from tab creation (includes window creation; navigation after startup meets 30 ms); filter highlight rectangles missing.** Not measured: cold cache, full 10,000/1,000 leak gate (B1), wake-ups via ETW.
+- B1 (DeepSeek) running: full leak gate in the real GUI app + bench harness + `docs/bench-log.md`.
+- Open card needed: **memory** (private bytes). Contributors per U2/U1: GPU render target and driver heaps, DirectWrite heap during scroll, warm-up WARP target. Ideas: glyph-run text, smaller layout cache, release the software target after the GPU swap, cap icon cache. Run after B1 gives a baseline.
