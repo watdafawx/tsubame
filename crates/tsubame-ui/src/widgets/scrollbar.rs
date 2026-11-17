@@ -43,7 +43,7 @@ pub fn scroll_for_thumb(ty: f32, th: f32, thumb_h: f32, m: &ScrollMetrics, top: 
 /// `scroll` changed.
 pub fn vscrollbar(ui: &mut Ui, c: &mut dyn Canvas, id: Id, track: Rect, m: ScrollMetrics, scroll: &mut f64) -> bool {
     let before = *scroll;
-    let min_thumb = ui.theme.sb_min_thumb;
+    let min_thumb = ui.theme.layout_scrollbar_thumb_min;
     let it = ui.interact(id, track, Sense::click());
     let (ty, th) = thumb_geom(track.y, track.h, &m, *scroll, min_thumb);
     if let Some(p) = it.pressed {
@@ -62,19 +62,17 @@ pub fn vscrollbar(ui: &mut Ui, c: &mut dyn Canvas, id: Id, track: Rect, m: Scrol
     *scroll = scroll.clamp(0.0, m.max_scroll());
 
     let t = &ui.theme;
-    c.fill(track, t.sb_track);
+    c.fill(track, t.row);
     if m.content > m.view {
         let (ty, th) = thumb_geom(track.y, track.h, &m, *scroll, min_thumb);
         let dragging = it.active && !ui.drag_f64.is_nan();
         let over_thumb = it.hovered && ui.mouse().y >= ty && ui.mouse().y < ty + th;
-        let col = if dragging {
-            t.sb_thumb_drag
-        } else if over_thumb {
-            t.sb_thumb_hot
+        let col = if dragging || over_thumb {
+            t.scrollbar_hover
         } else {
-            t.sb_thumb
+            t.scrollbar
         };
-        c.round(Rect::new(track.x + 3.0, ty, (track.w - 6.0).max(2.0), th), t.radius, col);
+        c.round(Rect::new(track.x + 3.0, ty, (track.w - 6.0).max(2.0), th), t.radius_md, col);
     }
     *scroll != before
 }

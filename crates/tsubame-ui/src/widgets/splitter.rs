@@ -17,7 +17,7 @@ pub enum Split {
 /// changed). `pos` is clamped so both panes keep `min_a` / `min_b`.
 #[allow(clippy::too_many_arguments)]
 pub fn splitter(ui: &mut Ui, c: &mut dyn Canvas, id: Id, area: Rect, split: Split, pos: &mut f32, min_a: f32, min_b: f32) -> (Rect, Rect, bool) {
-    let bw = ui.theme.splitter_w;
+    let bw = ui.theme.splitter_w();
     let len = if split == Split::LeftRight { area.w } else { area.h };
     let clamp = |p: f32| p.clamp(min_a.min(len - bw), (len - bw - min_b).max(min_a.min(len - bw))).max(0.0);
     let before = *pos;
@@ -38,7 +38,7 @@ pub fn splitter(ui: &mut Ui, c: &mut dyn Canvas, id: Id, area: Rect, split: Spli
     }
     let b = bar(*pos);
     let t = &ui.theme;
-    let col = if it.active || it.hovered { t.splitter_hot } else { t.splitter };
+    let col = if it.active || it.hovered { t.accent } else { t.border };
     match split {
         Split::LeftRight => c.fill(Rect::new(b.x + (bw / 2.0).floor(), b.y, 1.0, b.h), col),
         Split::TopBottom => c.fill(Rect::new(b.x, b.y + (bw / 2.0).floor(), b.w, 1.0), col),

@@ -38,6 +38,7 @@ license.workspace = true
 embed-resource = "3.0.12"
 
 [dependencies]
+tsubame-core.workspace = true
 tsubame-d2d.workspace = true
 tsubame-ui.workspace = true
 tsubame-win.workspace = true
@@ -53,6 +54,7 @@ features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
