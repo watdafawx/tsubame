@@ -62,3 +62,9 @@ Start now, in parallel (check PLAN.md sections 6 and 7 for models):
 - U1 (Opus): `tsubame-ui` core. Uses S1's `gfx.rs` surface (docs/spike-d2d.md, last section) and S4's `src/shellui.rs`, `src/lru.rs`.
 C1 and C2 edit different crates. U1 edits `tsubame-ui` and may touch `tsubame-d2d`.
 U2 waits for U1, M1 (approved), C1, C2. B1 waits for U2.
+
+## Update (P1 in progress, same master session)
+- U1 merged: `tsubame-ui` kit + `Canvas` trait, `impl Canvas for Gfx`, app list/filter/scrollbar on the kit. Paint p95 3.6-3.8 ms, first paint 55-74 ms, idle 0. **Private bytes at 4K end of scroll 113-116 MB, over the 110 MB budget** (old app is the same, 115-117 MB; DirectWrite heap). Fix idea: draw row text as glyph runs; layout cache 256 gives 106 MB but p95 4.7 ms. Open: accept ~116 MB or schedule the glyph-run task. `docs/ui-kit.md`.
+- User answers on the M1 mock (2026-11-17): accent blue OK; **ship all basic themes** (copy the theme sets from hopper and spotifast); **density switchable on the fly**; **own-drawn context menu, entries user-editable, with import from Nilesoft Shell config**; zebra on with a toggle; no shadows OK for now; loading line OK if it looks decent; solid caret: user asked for an explanation (blink-while-focused-then-stop proposed, pending answer).
+- Context menu source: entries come from the Windows shell itself (`IContextMenu::QueryContextMenu` fills an `HMENU`; the S4 code already does this). Own-drawn menu = read that `HMENU` (text, id, flags, icon bitmap, submenus) and draw it ourselves, `InvokeCommand` with the chosen id. Editable layer on top (hide, reorder, rename, own commands). Needs a W1-time spike; legacy-menu items only, Win11 `IExplorerCommand` items may be missing.
+- Remaining P1: U2 (details view, path bar, tabs; needs the kit, the mock, C1, C2: all merged), B1 after U2.
