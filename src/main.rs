@@ -191,8 +191,10 @@ fn main() {
 
         let scale = GetDpiForSystem() as f32 / 96.0;
         let (w, h) = ((1120.0 * scale) as i32, (720.0 * scale) as i32);
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("Tsubame"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).unwrap();
+        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("Tsubame"), WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).unwrap();
 
+        // no WS_CAPTION: the kit draws the title bar (WM_NCCALCSIZE gives it the whole window)
+        let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         let mut gfx = Gfx::new(hwnd).unwrap();
         let dpi = GetDpiForWindow(hwnd) as f32;
         gfx.set_dpi(dpi);
