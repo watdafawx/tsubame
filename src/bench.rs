@@ -79,8 +79,7 @@ pub fn ms_since_process_start() -> f64 {
 /// (private bytes, working set, peak pagefile/commit)
 pub fn memory() -> (usize, usize, usize) {
     unsafe {
-        let mut c = PROCESS_MEMORY_COUNTERS_EX::default();
-        c.cb = size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+        let mut c = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
         let _ = GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut _ as *mut PROCESS_MEMORY_COUNTERS, c.cb);
         (c.PrivateUsage, c.WorkingSetSize, c.PeakPagefileUsage)
     }

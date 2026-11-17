@@ -69,7 +69,7 @@ impl Sidebar {
         let cur = self.current(current);
         let mut go = None;
         let mut y = r.y + t.space_2;
-        for sec in 0..3 {
+        for (sec, title) in SECTIONS.iter().enumerate() {
             // section header: chevron + title, click folds it
             let hr = Rect::new(r.x, y, inner.w, t.height_sidebar_header);
             let hid = ID.child("sec").with(sec as u64);
@@ -80,7 +80,7 @@ impl Sidebar {
             }
             let chev = if self.collapsed[sec] { "\u{E76C}" } else { "\u{E70D}" };
             c.text(chev, Rect::new(hr.x + 6.0, hr.y, 14.0, hr.h), f(8.0).icon().c(), t.text_dim);
-            c.text(SECTIONS[sec], Rect::new(hr.x + 24.0, hr.y, hr.w - 30.0, hr.h), t.font(), t.text_dim);
+            c.text(title, Rect::new(hr.x + 24.0, hr.y, hr.w - 30.0, hr.h), t.font(), t.text_dim);
             y += hr.h;
             if self.collapsed[sec] {
                 y += t.space_2;

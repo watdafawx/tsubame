@@ -194,8 +194,13 @@ impl Tab {
                     }
                     match msg {
                         Message::Batch(b) => {
+                            let first = self.timing.first_batch.is_none();
                             self.push(&b);
                             out.changed = true;
+                            if first {
+                                out.more = true;
+                                break; // present the first 256 rows before consuming later batches
+                            }
                         }
                         Message::Done(d) => {
                             self.finish(d);
@@ -224,7 +229,12 @@ impl Tab {
             b.iter().map(|(name, e)| EntryInput { name, size: e.size, modified: e.mtime as i64, flags: flags_of(e.attrs, e.is_dir(), e.is_reparse_point()) }).collect();
         // generation is the store's own (bumped by `start`): only this tab's
         // current listing ever gets here, so it always matches
-        let _ = self.store.push_batch(self.store.generation(), &inputs);
+        if let Err(e) = self.store.push_batch(self.store.generation(), &inputs) {
+            self.load = Load::Failed(format!("Cannot store directory entries: {e:?}"));
+            self.enumerator = None;
+            self.rx = None;
+            return;
+        }
         self.delivered += b.len();
         if self.timing.first_batch.is_none() {
             self.timing.first_batch = Some(self.timing.t_nav.elapsed());

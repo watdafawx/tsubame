@@ -798,7 +798,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 // WM_PAINT is lowest priority: a worker that keeps posting wakes would
                 // starve it until the listing is done. Paint right away (at most
                 // ~60 frames/s) so the first rows and the streaming show at once.
-                let r = with(|a| (a.view.pump(), a.view.pump_more, a.last_paint.elapsed() >= Duration::from_millis(16)));
+                let r = with(|a| (a.view.pump(), a.view.pump_more, (a.view.tab().timing.first_frame.is_none() && a.view.tab().shown() > 0) || a.last_paint.elapsed() >= Duration::from_millis(16)));
                 if let Some((_, true, _)) = r {
                     // budget used up with batches still queued: come back after the paint
                     if !WAKE_PENDING.swap(true, Ordering::AcqRel) {
@@ -889,11 +889,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     }
                     invalidate(hwnd);
                 }
-                if let Some(s) = clip::ime_string(hwnd, lp, true) {
-                    if with(|a| a.ui.set_composition(&s)).unwrap_or(false) {
+                if let Some(s) = clip::ime_string(hwnd, lp, true)
+                    && with(|a| a.ui.set_composition(&s)).unwrap_or(false) {
                         invalidate(hwnd);
                     }
-                }
                 LRESULT(0)
             }
             WM_IME_ENDCOMPOSITION => {

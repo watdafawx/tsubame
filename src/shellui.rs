@@ -19,8 +19,6 @@ use tsubame_win::shell::{IconSource, MenuResult, Payload, Pool, Reply, Request, 
 /// Icon cache caps. 32 px icons are 4 KB each: 2048 icons = 8 MB worst case.
 pub const ICON_CAP_ITEMS: usize = 2048;
 pub const ICON_CAP_BYTES: usize = 8 << 20;
-/// Thumbnail cache caps (up to ~1 MB each at 512 px).
-
 pub struct Image {
     /// Gfx bitmap cache key
     pub key: Arc<str>,

@@ -148,11 +148,10 @@ mod warm {
                 let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(HWND(hwnd as *mut _)), None, false);
             }
         };
-        if std::thread::Builder::new().name("gpu warm-up".into()).spawn(work).is_err() {
-            if let Ok(mut s) = SLOT.lock() {
+        if std::thread::Builder::new().name("gpu warm-up".into()).spawn(work).is_err()
+            && let Ok(mut s) = SLOT.lock() {
                 s.1 = State::Failed(E_FAIL);
             }
-        }
     }
 
     /// Forget the warm device, and any being made.
@@ -306,14 +305,13 @@ impl Gfx {
         // not the stand-in)
         static LAST: std::sync::Mutex<&str> = std::sync::Mutex::new("");
         let path = self.path();
-        if let (Ok(mut last), false) = (LAST.lock(), self.warming) {
-            if *last != path {
+        if let (Ok(mut last), false) = (LAST.lock(), self.warming)
+            && *last != path {
                 *last = path;
                 // the software target rasterises with WARP (d3d10warp.dll) and its worker threads
                 let warp = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(w!("d3d10warp.dll")).is_ok() };
                 crate::log(&format!("render: {path} Direct2D target, WARP loaded={warp}, created in {:.1} ms", self.create_ms));
             }
-        }
         Ok(())
     }
 

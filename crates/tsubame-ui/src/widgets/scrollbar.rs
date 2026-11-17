@@ -67,9 +67,7 @@ pub fn vscrollbar(ui: &mut Ui, c: &mut dyn Canvas, id: Id, track: Rect, m: Scrol
         let (ty, th) = thumb_geom(track.y, track.h, &m, *scroll, min_thumb);
         let dragging = it.active && !ui.drag_f64.is_nan();
         let over_thumb = it.hovered && ui.mouse().y >= ty && ui.mouse().y < ty + th;
-        let col = if dragging {
-            t.scrollbar_hover
-        } else if over_thumb {
+        let col = if dragging || over_thumb {
             t.scrollbar_hover
         } else {
             t.scrollbar

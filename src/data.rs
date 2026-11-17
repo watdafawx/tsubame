@@ -212,7 +212,7 @@ pub fn synthetic_store(n: usize) -> EntryStore {
         let end = (i + 4096).min(n);
         for k in i..end {
             let h = mix(k as u64);
-            let dir = h % 9 == 0;
+            let dir = h.is_multiple_of(9);
             let kind = 1 + ((h >> 20) % (KINDS.len() as u64 - 1)) as usize;
             let s = if dir {
                 format!("{}-{}-{k}", WORDS[((h >> 8) & 15) as usize], WORDS[((h >> 12) & 15) as usize])

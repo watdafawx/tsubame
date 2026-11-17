@@ -66,8 +66,8 @@ pub fn column_header(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, cols: 
             hot = Some(i);
         }
     }
-    for i in 1..spans.len().min(cols.len()) {
-        let edge = rect.x + spans[i].0;
+    for (i, span) in spans.iter().enumerate().take(cols.len()).skip(1) {
+        let edge = rect.x + span.0;
         let grab = Rect::new(edge - GRAB / 2.0, body.y, GRAB, body.h);
         let hid = id.child("grip").with(i as u64);
         let it = ui.interact(hid, grab, Sense::click().cursor(Cursor::SizeWE));
