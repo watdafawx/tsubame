@@ -335,7 +335,7 @@ pub fn text_input(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut 
     resp.focused = ui.has_focus(id);
 
     // draw
-    let t = &ui.theme;
+    let t = ui.theme;
     let focused = resp.focused && ui.window_focused();
     c.round(rect, t.radius_md, t.field);
     c.round_stroke(rect, t.radius_md, if focused { t.focus } else { t.border }, 1.0);
@@ -346,7 +346,10 @@ pub fn text_input(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut 
             c.text(placeholder, inner, font, t.text_dim);
         }
         if focused {
-            c.fill(Rect::new(inner.x, inner.y + 4.0, 1.0, inner.h - 8.0), t.text);
+            ui.mark_text_focus();
+            if ui.caret_on {
+                c.fill(Rect::new(inner.x, inner.y + 4.0, 1.0, inner.h - 8.0), t.text);
+            }
             ui.set_ime_caret(Rect::new(inner.x, inner.y + 3.0, 1.0, inner.h - 6.0));
         }
         c.unclip();
@@ -395,7 +398,10 @@ pub fn text_input(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut 
         c.fill(Rect::new(x0 + xa, inner.b() - 5.0, xb - xa, 1.0), t.text);
     }
     let cx = (x0 + caret_px).round();
-    c.fill(Rect::new(cx, inner.y + 4.0, 1.0, inner.h - 8.0), t.text);
+    ui.mark_text_focus();
+    if ui.caret_on {
+        c.fill(Rect::new(cx, inner.y + 4.0, 1.0, inner.h - 8.0), t.text);
+    }
     ui.set_ime_caret(Rect::new(cx, inner.y + 3.0, 1.0, inner.h - 6.0));
     c.unclip();
     resp

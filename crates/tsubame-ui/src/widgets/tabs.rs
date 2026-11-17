@@ -1,8 +1,12 @@
-//! Tab strip: select, close (x box or middle click), add (+), drag to
-//! reorder, and overflow (tabs shrink to `tab_min_w`, then the strip scrolls
-//! with the wheel and keeps the active tab in view). The app owns the tabs;
-//! the strip reports what the user asked for.
+//! Tab strip (title bar tabs, per the mock): select, close (x box or middle
+//! click), add (+), drag to reorder, and overflow (tabs shrink to
+//! `layout_tab_min_width`, then the strip scrolls with the wheel and keeps
+//! the active tab in view). The app owns the tabs; the strip reports what the
+//! user asked for.
 //!
+//! `rect` is the title-bar band the strip may use. Tabs sit on its bottom
+//! edge (`height_tab` high) and the "+" button follows the last tab, so the
+//! empty rest of the band has no widget and stays free to drag the window.
 //! Tabs share one width, so no label is measured, and only tabs inside the
 //! strip are drawn.
 
@@ -30,10 +34,14 @@ pub struct TabResponse {
     pub moved: Option<(usize, usize)>,
 }
 
-const ADD_W: f32 = 30.0;
+/// "+" button size and the gap before it.
+const ADD_SIZE: f32 = 28.0;
+const ADD_GAP: f32 = 4.0;
+/// gap between two tabs
+const TAB_GAP: f32 = 2.0;
 const CLOSE_W: f32 = 18.0;
 
-/// Tab width for `n` tabs in `avail` DIPs.
+/// Tab width (including the gap) for `n` tabs in `avail` DIPs.
 pub fn tab_width(avail: f32, n: usize, min: f32, max: f32) -> f32 {
     if n == 0 {
         return max;
@@ -44,11 +52,12 @@ pub fn tab_width(avail: f32, n: usize, min: f32, max: f32) -> f32 {
 pub fn tab_strip(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut TabStrip, labels: &[&str], active: usize) -> TabResponse {
     let mut resp = TabResponse::default();
     let n = labels.len();
-    let mut area = rect;
-    let add_r = area.cut_right(ADD_W);
     let (min_w, max_w) = (ui.theme.layout_tab_min_width, ui.theme.layout_tab_width);
-    let w = tab_width(area.w, n, min_w, max_w);
+    let avail = (rect.w - ADD_SIZE - ADD_GAP).max(0.0);
+    let w = tab_width(avail, n, min_w, max_w);
     let total = w * n as f32;
+    let tab_h = ui.theme.height_tab;
+    let area = Rect::new(rect.x, rect.b() - tab_h, total.min(avail), tab_h);
     let max_scroll = (total - area.w).max(0.0);
     // keep the active tab in view when it changes
     if st.last_active != Some(active) && n > 0 {
@@ -66,7 +75,7 @@ pub fn tab_strip(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut T
         let i = ((x - x0) / w).floor();
         (i >= 0.0 && (i as usize) < n).then_some(i as usize)
     };
-    let close_box = |i: usize| Rect::new(x0 + (i + 1) as f32 * w - CLOSE_W - 6.0, area.y + (area.h - CLOSE_W) / 2.0, CLOSE_W, CLOSE_W);
+    let close_box = |i: usize| Rect::new(x0 + (i + 1) as f32 * w - TAB_GAP - 4.0 - CLOSE_W, area.y + (area.h - CLOSE_W) / 2.0, CLOSE_W, CLOSE_W);
 
     let it = ui.interact(id, area, Sense::click().wheel().cells_x(x0, w));
     if it.wheel.1 != 0.0 || it.wheel.0 != 0.0 {
@@ -109,14 +118,13 @@ pub fn tab_strip(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut T
     }
 
     // draw visible tabs only
-    let t = &ui.theme;
-    c.fill(rect, t.panel);
+    let t = ui.theme;
     c.clip(area);
     let hot_tab = if it.hovered { tab_at(ui.mouse().x) } else { None };
     let first = (st.scroll / w).floor() as usize;
     let last = (((st.scroll + area.w) / w).ceil() as usize).min(n);
     for (i, label) in labels.iter().enumerate().take(last).skip(first) {
-        let r = Rect::new(x0 + i as f32 * w, area.y, w, area.h).inset(1.0, 0.0);
+        let r = Rect::new(x0 + i as f32 * w, area.y, w - TAB_GAP, area.h);
         let bg = if i == active {
             t.panel
         } else if hot_tab == Some(i) {
@@ -124,28 +132,33 @@ pub fn tab_strip(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut T
         } else {
             t.bg
         };
-        c.round(r.pad4(0.0, 3.0, 0.0, 0.0), t.radius_md, bg);
+        if bg != t.bg {
+            // rounded top corners only: draw a taller rounded rect, clipped
+            c.clip(r);
+            c.round(Rect::new(r.x, r.y, r.w, r.h + t.radius_lg), t.radius_lg, bg);
+            c.unclip();
+        }
         let show_close = i == active || hot_tab == Some(i);
-        let text_r = r.pad4(10.0, 3.0, if show_close { CLOSE_W + 8.0 } else { 8.0 }, 0.0);
-        c.text(label, text_r, t.font(), if i == active { t.text } else { t.text_dim });
+        let text_r = Rect::new(r.x + 8.0, r.y, (r.w - 8.0 - if show_close { CLOSE_W + 4.0 + 6.0 } else { 8.0 }).max(0.0), r.h);
+        c.text(label, text_r, t.font(), if i == active || hot_tab == Some(i) { t.text } else { t.text_dim });
         if show_close {
             let cb = close_box(i);
             if hot_tab == Some(i) && cb.contains_pt(ui.mouse()) {
-                c.round(cb, 3.0, t.hover);
+                c.round(cb, t.radius_sm, if i == active { t.selected_inactive } else { t.hover });
             }
-            c.text("\u{2715}", cb, t.font_small().c(), t.text_dim);
+            c.text("\u{E711}", cb, crate::f(t.icon_window_control).icon().c(), if hot_tab == Some(i) && cb.contains_pt(ui.mouse()) { t.text } else { t.text_dim });
         }
     }
     c.unclip();
 
-    // add button
+    // add button: right after the last tab (pinned at the end when tabs overflow)
+    let add_r = Rect::new(area.x + area.w + ADD_GAP, rect.y + (rect.h - ADD_SIZE) / 2.0, ADD_SIZE, ADD_SIZE);
     if button_behaviour(ui, id.child("add"), add_r) {
         resp.add = true;
     }
-    let t = &ui.theme;
     if ui.hot() == Some(id.child("add")) {
-        c.round(add_r.inset(3.0, 4.0), t.radius_md, t.hover);
+        c.round(add_r, t.radius_md, t.hover);
     }
-    c.text("+", add_r, t.font().c(), t.text_dim);
+    c.text("\u{E710}", add_r, crate::f(t.icon_toolbar - 2.0).icon().c(), if ui.hot() == Some(id.child("add")) { t.text } else { t.text_dim });
     resp
 }

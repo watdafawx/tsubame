@@ -240,6 +240,9 @@ pub struct Output {
     pub cursor: Cursor,
     /// caret rect of the focused text field (position the IME window here)
     pub ime_caret: Option<Rect>,
+    /// a text field has the keyboard focus this frame: the app runs the caret
+    /// blink timer exactly while this is true
+    pub text_focus: bool,
 }
 
 pub struct Ui {
@@ -268,6 +271,9 @@ pub struct Ui {
     /// a value the active widget keeps for its drag (thumb grab offset...)
     pub drag_f64: f64,
     pub drag_pt: Pt,
+    /// The caret is in its visible phase. The app flips it from the blink
+    /// timer (which runs only while `Output::text_focus`); solid by default.
+    pub caret_on: bool,
 
     popups: Vec<Popup>,
     /// `popup_begin` nesting (clip depth to undo)
@@ -280,6 +286,7 @@ pub struct Ui {
     repaint: bool,
     cursor: Cursor,
     ime_caret: Option<Rect>,
+    text_focus: bool,
     size: (f32, f32),
     frame: u64,
     in_frame: bool,
@@ -321,6 +328,7 @@ impl Ui {
             focus: None,
             drag_f64: 0.0,
             drag_pt: Pt::default(),
+            caret_on: true,
             popups: Vec::new(),
             popup_depth: 0,
             composition: String::new(),
@@ -329,6 +337,7 @@ impl Ui {
             repaint: false,
             cursor: Cursor::Arrow,
             ime_caret: None,
+            text_focus: false,
             size: (0.0, 0.0),
             frame: 0,
             in_frame: false,
@@ -431,6 +440,11 @@ impl Ui {
     fn top_hit(&self, p: Pt) -> Option<&Hit> {
         self.hits_prev.iter().rev().find(|h| h.rect.contains_pt(p))
     }
+    /// Is any widget registered at `p` (as of the last frame)? The app uses
+    /// it for window-caption hit testing: empty title-bar space drags the window.
+    pub fn over_widget(&self, p: Pt) -> bool {
+        self.top_hit(p).is_some()
+    }
     fn wheel_target(&self, p: Pt) -> Option<Id> {
         self.hits_prev.iter().rev().filter(|h| h.rect.contains_pt(p)).find(|h| h.sense.wheel).map(|h| h.id)
     }
@@ -451,6 +465,7 @@ impl Ui {
         self.size = size;
         self.repaint = false;
         self.ime_caret = None;
+        self.text_focus = false;
         self.commands.clear();
         self.leftover.clear();
         self.hover_key = if self.mouse_in { self.hover_key_at(self.mouse) } else { None };
@@ -551,7 +566,7 @@ impl Ui {
         if self.active.is_none() {
             self.hover_key = if self.mouse_in { self.hover_key_at(self.mouse) } else { None };
         }
-        Output { repaint: self.repaint, capture: self.active.is_some(), cursor: self.cursor, ime_caret: self.ime_caret }
+        Output { repaint: self.repaint, capture: self.active.is_some(), cursor: self.cursor, ime_caret: self.ime_caret, text_focus: self.text_focus }
     }
 
     /// Ask for another frame after this one (state changed that an earlier
@@ -690,6 +705,11 @@ impl Ui {
         self.frame
     }
     /// Set by the focused text field: where the IME window goes.
+    /// A text field with the focus calls this each frame it draws.
+    pub fn mark_text_focus(&mut self) {
+        self.text_focus = true;
+    }
+
     pub fn set_ime_caret(&mut self, r: Rect) {
         self.ime_caret = Some(r);
     }

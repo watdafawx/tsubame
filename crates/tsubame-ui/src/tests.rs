@@ -674,14 +674,14 @@ fn tabs_select_close_add_reorder() {
     let mut strip = TabStrip::default();
     let labels = ["one", "two", "three"];
     let id = Id::new("tabs");
-    let rect = Rect::new(0.0, 0.0, 400.0, 30.0); // 370 for tabs: 123.3 each
+    let rect = Rect::new(0.0, 0.0, 400.0, 30.0); // 368 for tabs: 122.7 each
     let mut resp = TabResponse::default();
     let mut run = |h: &mut Harness, active: usize| {
         h.frame(|ui, c| resp = tab_strip(ui, c, id, rect, &mut strip, &labels, active));
         resp
     };
     run(&mut h, 0);
-    let w = 370.0 / 3.0;
+    let w = 368.0 / 3.0;
     h.down(w * 1.5 - 30.0, 15.0);
     let r = run(&mut h, 0);
     assert_eq!(r.select, Some(1));
@@ -692,7 +692,7 @@ fn tabs_select_close_add_reorder() {
     h.up(w * 2.0 + 5.0, 15.0);
     run(&mut h, 2);
     // the close box of the active tab
-    let cx = w * 3.0 - 6.0 - 9.0;
+    let cx = w * 3.0 - 2.0 - 4.0 - 9.0;
     h.down(cx, 15.0);
     h.up(cx, 15.0);
     let r = run(&mut h, 2);
@@ -749,4 +749,46 @@ fn splitter_drags_and_clamps() {
     h.up(5000.0, 300.0);
     run(&mut h, &mut pos);
     assert_eq!(h.ui.active(), None);
+}
+
+#[test]
+fn column_header_click_sorts_and_grip_resizes() {
+    let mut h = Harness::new();
+    let id = Id::new("hdr");
+    let rect = Rect::new(0.0, 0.0, 600.0, 24.0);
+    let cols = [
+        HeaderCol { label: "Name", right: false },
+        HeaderCol { label: "Date", right: false },
+        HeaderCol { label: "Size", right: true },
+    ];
+    let spans = [(0.0, 300.0), (300.0, 150.0), (450.0, 150.0)];
+    let mut resp = HeaderResponse::default();
+    let mut run = |h: &mut Harness| {
+        h.frame(|ui, c| {
+            resp = column_header(ui, c, id, rect, &cols, &spans, Some((1, true)));
+        });
+        resp
+    };
+    run(&mut h);
+    // click on a cell sorts by it
+    h.move_to(100.0, 12.0);
+    run(&mut h);
+    h.down(100.0, 12.0);
+    run(&mut h);
+    h.up(100.0, 12.0);
+    let r = run(&mut h);
+    assert_eq!(r.sort, Some(0));
+    assert_eq!(r.resize, None);
+    // drag the grip on the left edge of column 1 (x = 300)
+    h.move_to(301.0, 12.0);
+    run(&mut h);
+    h.down(301.0, 12.0);
+    run(&mut h);
+    h.move_to(340.0, 12.0);
+    let r = run(&mut h);
+    assert_eq!(r.resize, Some((1, 340.0)));
+    assert_eq!(r.sort, None);
+    h.up(340.0, 12.0);
+    let r = run(&mut h);
+    assert_eq!(r.sort, None, "releasing a resize drag is not a sort click");
 }
