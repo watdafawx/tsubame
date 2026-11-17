@@ -5,8 +5,9 @@
 //!   (icons, thumbnails, context menus). The UI thread only submits requests
 //!   and drains replies. See `docs/shell-threading.md`.
 //! - [`bitmap`]: HICON / HBITMAP to premultiplied BGRA.
-//! - [`enumerate`]: a minimal `FindFirstFileExW` directory lister (the real
-//!   enumerator is a later task).
+//! - [`enumerate`]: the streaming directory enumerator (NT query + Find
+//!   fallback on one worker thread, batches with generation cancel). See
+//!   `docs/enumerator.md`.
 //! - [`procinfo`]: process counters for leak checks.
 
 pub mod bitmap;
