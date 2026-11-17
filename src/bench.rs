@@ -54,6 +54,12 @@ pub struct Bench {
     source: &'static str,
     window_px: (i32, i32),
     dpi: f32,
+    start_row: usize,
+    /// set on the tick that starts the scroll run (main submits hang jobs then)
+    pub just_started: bool,
+    /// extra report lines (shell stats, set by main before the report)
+    pub extra: String,
+    pub rows: usize,
 }
 
 fn filetime_u64(ft: FILETIME) -> u64 {
@@ -117,6 +123,10 @@ impl Bench {
             source,
             window_px: (0, 0),
             dpi: 96.0,
+            start_row: START_ROW,
+            just_started: false,
+            extra: String::new(),
+            rows: 0,
         }
     }
 
@@ -153,18 +163,23 @@ impl Bench {
     pub fn tick(&mut self, v: &mut View) -> (bool, bool) {
         match self.state {
             State::WaitGpu(deadline) => {
-                if Instant::now() >= deadline {
+                // --dir: also wait for the worker to finish listing
+                if Instant::now() >= deadline && v.len() > 0 {
                     self.private_before_scroll = memory().0;
-                    v.selected = START_ROW + 3;
-                    v.set_scroll(START_ROW as f64 * ROW_H as f64);
+                    self.rows = v.len();
+                    // small real folders start at the top and wrap around
+                    self.start_row = if v.len() > 2 * START_ROW { START_ROW } else { 0 };
+                    v.selected = self.start_row + 3;
+                    v.set_scroll(self.start_row as f64 * ROW_H as f64);
                     self.state = State::Running(Instant::now());
+                    self.just_started = true;
                     return (false, true);
                 }
                 (false, false)
             }
             State::Running(t0) => {
                 let t = t0.elapsed().as_secs_f64();
-                let start = START_ROW as f64 * ROW_H as f64;
+                let start = self.start_row as f64 * ROW_H as f64;
                 if t >= PHASE_END[2] {
                     self.state = State::Done;
                     return (true, false);
@@ -177,7 +192,8 @@ impl Bench {
                     self.page_scroll_acc += (v.page_rows() as f32 * ROW_H) as f64;
                     start + 2_000.0 * PHASE_END[0] + 20_000.0 * (PHASE_END[1] - PHASE_END[0]) + self.page_scroll_acc
                 };
-                v.set_scroll(s);
+                let max = v.max_scroll();
+                v.set_scroll(if max > 0.0 { s % max } else { 0.0 });
                 (false, true)
             }
             State::Done => (false, false),
@@ -194,7 +210,8 @@ impl Bench {
             out.push_str(&s);
             out.push('\n');
         };
-        line("tsubame S1 bench".into());
+        line("tsubame S1/S4 bench".into());
+        line(format!("rows: {}", self.rows));
         line(format!("build: {}", if cfg!(debug_assertions) { "debug" } else { "release" }));
         line(format!("data_source: {}", self.source));
         if let Some(ms) = self.store_build_ms {
@@ -223,6 +240,7 @@ impl Bench {
         line(format!("working_set_end: {} ({:.1} MB)", ws_end, ws_end as f64 / 1048576.0));
         line(format!("peak_commit: {} ({:.1} MB)", peak_commit, peak_commit as f64 / 1048576.0));
         line(format!("exe_size_bytes: {exe_bytes} ({:.2} MB)", exe_bytes as f64 / 1048576.0));
+        out.push_str(&self.extra);
         out
     }
 
@@ -231,7 +249,8 @@ impl Bench {
         use std::io::Write;
         let text = self.report();
         if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-            let _ = std::fs::write(dir.join("s1-bench.txt"), &text);
+            let name = std::env::var("TSUBAME_BENCH_OUT").unwrap_or_else(|_| "s1-bench.txt".into());
+            let _ = std::fs::write(dir.join(name), &text);
         }
         // a windows-subsystem exe has no stdout: borrow the parent's console
         unsafe {
