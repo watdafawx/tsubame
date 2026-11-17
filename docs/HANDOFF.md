@@ -17,6 +17,8 @@ Updated 2026-11-17 by the P0 master session.
 | S2 | merged | Enumeration bench. `docs/spike-enum.md`. |
 | S3 | merged | Wasmtime host. `docs/spike-wasm.md`. Ran on Sonnet 5.5 because GPT hit its usage limit. |
 | C1 | merged | Core entry store (24-byte record, 50.0 MB at 1M, name sort 100k 9.6 ms / 1M 139 ms, filter 100k 2.6 ms, ID-based selection). See docs/core-store.md. Type sort at 1M is 470 ms (no gate). Selection is by entry ID with bitset + epoch. |
+| M1 | merged | Main-window mocks (dark + light, 16 shots in `mocks/shots`), `mocks/tokens.json`, `tools/gen-tokens.ps1` -> `mocks/tokens.css` + `mocks/generated/theme.rs` (not wired into a crate yet). **Waiting for user approval** of the mock decisions (accent blue, own-drawn context menu, no shadows, solid caret, loading line). |
+| C2 | merged | Streaming enumerator in `tsubame-win` (`Enumerator::start`, NT 64 KB, Find fallback, cancel token, 64-byte `RawEntry` batches). 100k NVMe warm: first batch 0.50 ms, done 33.6 ms. 24 tests pass. See docs/enumerator.md. Cold not re-measured (S2: 13 / 175 ms). |
 | S4 | merged | Shell on STA workers. `docs/shell-threading.md`. Opus 5.5. |
 
 ## Measured numbers against PLAN.md section 2
