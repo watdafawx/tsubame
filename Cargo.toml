@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    ".",
+    "crates/tsubame-core",
+    "crates/tsubame-win",
+    "crates/tsubame-ui",
+    "crates/tsubame-d2d",
+    "crates/tsubame-ext-api",
+    "crates/tsubame-plughost",
+    "crates/tsubame-bench",
+]
+default-members = ["."]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+tsubame-core = { path = "crates/tsubame-core" }
+tsubame-win = { path = "crates/tsubame-win" }
+tsubame-ui = { path = "crates/tsubame-ui" }
+tsubame-d2d = { path = "crates/tsubame-d2d" }
+tsubame-ext-api = { path = "crates/tsubame-ext-api" }
+windows = "0.61"
+
+[package]
+name = "tsubame"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
