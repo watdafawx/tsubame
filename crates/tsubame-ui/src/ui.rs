@@ -754,8 +754,8 @@ impl Ui {
         // swallows clicks and wheel over the panel that no child takes
         self.interact(id, rect, Sense::click().wheel());
         let t = &self.theme;
-        c.round(rect, t.radius, t.popup_bg);
-        c.round_stroke(rect, t.radius, t.popup_border, 1.0);
+        c.round(rect, t.radius_md, t.popup);
+        c.round_stroke(rect, t.radius_md, t.popup_border, 1.0);
         c.clip(rect);
         self.popup_depth += 1;
         true

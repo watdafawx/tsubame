@@ -153,8 +153,20 @@ foreach ($tn in $themeNames) {
 $rsPath = Join-Path $genDir 'theme.rs'
 [IO.File]::WriteAllText($rsPath, ($rs.ToString() -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
 
+# ---- the kit's copy: same Theme + DARK/LIGHT, inside crates/tsubame-ui (used by the app) ----
+# (only written for the default output dir; -OutDir runs, e.g. tests, leave the crate alone)
+$kitPath = ''
+if (-not $PSBoundParameters.ContainsKey('OutDir')) {
+  $kitPath = Join-Path $root 'crates\tsubame-ui\src\theme_generated.rs'
+  $kit = $rs.ToString()
+  $kit = $kit.Replace('// the render target applies the DPI. Not part of any crate yet: a later task wires it in.', '// the render target applies the DPI. Hand-written helpers live in theme.rs.')
+  $kit = $kit.Replace('#![allow(dead_code)]', '#![allow(dead_code)]')
+  [IO.File]::WriteAllText($kitPath, ($kit -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
+}
+
 Write-Host "wrote $cssPath"
 Write-Host "wrote $rsPath"
+if ($kitPath) { Write-Host "wrote $kitPath" }
 
 # ---------------------------------------------------------------- contrast check
 function Get-Lum($hex) {

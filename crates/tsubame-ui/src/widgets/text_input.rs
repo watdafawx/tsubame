@@ -257,7 +257,7 @@ impl TextInput {
 /// The text field in `rect`. `placeholder` shows while it is empty.
 pub fn text_input(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut TextInput, placeholder: &str) -> TextResponse {
     let mut resp = TextResponse::default();
-    let font = ui.theme.font;
+    let font = ui.theme.font();
     let inner = rect.pad4(6.0, 0.0, 6.0, 0.0);
     let it = ui.interact(id, rect, Sense::click().focusable().cursor(Cursor::IBeam));
     st.caret = floor_char(&st.text, st.caret);
@@ -337,16 +337,16 @@ pub fn text_input(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut 
     // draw
     let t = &ui.theme;
     let focused = resp.focused && ui.window_focused();
-    c.round(rect, t.radius, t.input_bg);
-    c.round_stroke(rect, t.radius, if focused { t.input_focus } else { t.input_border }, 1.0);
+    c.round(rect, t.radius_md, t.field);
+    c.round_stroke(rect, t.radius_md, if focused { t.focus } else { t.border }, 1.0);
     c.clip(inner);
     if st.text.is_empty() && ui.composition().is_empty() || !resp.focused && st.text.is_empty() {
         st.scroll_x = 0.0;
         if !placeholder.is_empty() {
-            c.text(placeholder, inner, font, t.placeholder);
+            c.text(placeholder, inner, font, t.text_dim);
         }
         if focused {
-            c.fill(Rect::new(inner.x, inner.y + 4.0, 1.0, inner.h - 8.0), t.caret);
+            c.fill(Rect::new(inner.x, inner.y + 4.0, 1.0, inner.h - 8.0), t.text);
             ui.set_ime_caret(Rect::new(inner.x, inner.y + 3.0, 1.0, inner.h - 6.0));
         }
         c.unclip();
@@ -386,7 +386,7 @@ pub fn text_input(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut 
     if st.has_selection() && comp_range.is_none() {
         let (a, b) = st.sel();
         let (xa, xb) = (c.caret_x(&shown, font, a), c.caret_x(&shown, font, b));
-        c.fill(Rect::new(x0 + xa, inner.y + 3.0, xb - xa, inner.h - 6.0), t.text_sel);
+        c.fill(Rect::new(x0 + xa, inner.y + 3.0, xb - xa, inner.h - 6.0), t.selected);
     }
     // wide box: the text never trims, the clip cuts it
     c.text(&shown, Rect::new(x0, inner.y, full_w + 8.0, inner.h), font, t.text);
@@ -395,7 +395,7 @@ pub fn text_input(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut 
         c.fill(Rect::new(x0 + xa, inner.b() - 5.0, xb - xa, 1.0), t.text);
     }
     let cx = (x0 + caret_px).round();
-    c.fill(Rect::new(cx, inner.y + 4.0, 1.0, inner.h - 8.0), t.caret);
+    c.fill(Rect::new(cx, inner.y + 4.0, 1.0, inner.h - 8.0), t.text);
     ui.set_ime_caret(Rect::new(cx, inner.y + 3.0, 1.0, inner.h - 6.0));
     c.unclip();
     resp

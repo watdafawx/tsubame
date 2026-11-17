@@ -46,7 +46,7 @@ pub fn tab_strip(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut T
     let n = labels.len();
     let mut area = rect;
     let add_r = area.cut_right(ADD_W);
-    let (min_w, max_w) = (ui.theme.tab_min_w, ui.theme.tab_max_w);
+    let (min_w, max_w) = (ui.theme.layout_tab_min_width, ui.theme.layout_tab_width);
     let w = tab_width(area.w, n, min_w, max_w);
     let total = w * n as f32;
     let max_scroll = (total - area.w).max(0.0);
@@ -118,22 +118,22 @@ pub fn tab_strip(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut T
     for (i, label) in labels.iter().enumerate().take(last).skip(first) {
         let r = Rect::new(x0 + i as f32 * w, area.y, w, area.h).inset(1.0, 0.0);
         let bg = if i == active {
-            t.tab_active
+            t.panel
         } else if hot_tab == Some(i) {
-            t.tab_hot
+            t.hover
         } else {
-            t.tab
+            t.bg
         };
-        c.round(r.pad4(0.0, 3.0, 0.0, 0.0), t.radius, bg);
+        c.round(r.pad4(0.0, 3.0, 0.0, 0.0), t.radius_md, bg);
         let show_close = i == active || hot_tab == Some(i);
         let text_r = r.pad4(10.0, 3.0, if show_close { CLOSE_W + 8.0 } else { 8.0 }, 0.0);
-        c.text(label, text_r, t.font, if i == active { t.text } else { t.dim });
+        c.text(label, text_r, t.font(), if i == active { t.text } else { t.text_dim });
         if show_close {
             let cb = close_box(i);
             if hot_tab == Some(i) && cb.contains_pt(ui.mouse()) {
-                c.round(cb, 3.0, t.button_hot);
+                c.round(cb, 3.0, t.hover);
             }
-            c.text("\u{2715}", cb, t.font_small.c(), t.dim);
+            c.text("\u{2715}", cb, t.font_small().c(), t.text_dim);
         }
     }
     c.unclip();
@@ -144,8 +144,8 @@ pub fn tab_strip(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut T
     }
     let t = &ui.theme;
     if ui.hot() == Some(id.child("add")) {
-        c.round(add_r.inset(3.0, 4.0), t.radius, t.button_hot);
+        c.round(add_r.inset(3.0, 4.0), t.radius_md, t.hover);
     }
-    c.text("+", add_r, t.font.c(), t.dim);
+    c.text("+", add_r, t.font().c(), t.text_dim);
     resp
 }

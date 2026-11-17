@@ -229,7 +229,7 @@ impl ListSource for Rows {
     }
     fn draw_row(&mut self, c: &mut dyn Canvas, t: &Theme, i: usize, r: Rect, _st: RowState) {
         self.drawn.push(i);
-        c.text("row", r, t.font, t.text);
+        c.text("row", r, t.font(), t.text);
     }
     // a tiny Explorer-style model: plain = one, Ctrl = toggle, Shift = range
     fn select(&mut self, i: usize, mods: Mods, by: SelectBy) {
@@ -277,7 +277,7 @@ fn list_draws_only_visible_rows() {
     assert_eq!(rows.drawn, (500_000..500_020).collect::<Vec<_>>());
     assert_eq!(h.c.texts().len(), 20, "one text per drawn row, no off-screen draw calls");
     // every row draw call lies inside the clip
-    let clip = Rect::new(LIST_RECT.x, LIST_RECT.y, LIST_RECT.w - h.ui.theme.sb_w, LIST_RECT.h);
+    let clip = Rect::new(LIST_RECT.x, LIST_RECT.y, LIST_RECT.w - h.ui.theme.layout_scrollbar_width, LIST_RECT.h);
     for op in &h.c.ops {
         if let Op::Text(_, r, ..) = op {
             assert!(r.intersects(&clip));
