@@ -3,7 +3,7 @@
 Updated 2026-11-17 by the P0 master session.
 
 ## State
-- Phase **P0 (spikes) is finished**. Every task is merged into `main`. P1 has not started: the user must say go and answer the decisions below first.
+- P0 finished. User approved all four decisions (2026-11-17) and said go; they are now written into PLAN.md (P0 outcome block, relaxed memory budget). **P1 started in this same master session**: M1, C1, C2, U1 running in parallel. U2 waits for U1 + M1 (user approves the mock) + C1 + C2; B1 waits for U2.
 - `cargo check --workspace` passes on `main`. Nothing was pushed.
 - Disk: main `target` 740 MB. No worktrees left. Six empty folders remain under `C:\Users\MIcha\.t3\worktrees\tsubame\` (git removed the worktrees but T3 holds the folders open; delete them by hand, they are 0 MB).
 - Rig is clean: no tsubame processes, fixtures deleted. `G:\rig-test\tsubame` still has the S3 wasm host exes and `.cwasm` (small).

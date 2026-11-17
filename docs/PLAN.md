@@ -24,7 +24,16 @@ File Pilot itself is C with a custom immediate-mode UI and moved its renderer to
 
 **Plugins:** three tiers, section 4.
 
-### Things the spikes must confirm (not yet measured)
+### P0 outcome (2026-11-17, user-approved)
+Spikes measured in `docs/spike-*.md` and `docs/shell-threading.md`. Decisions that now bind every task:
+- **Enumeration:** `NtQueryDirectoryFile` class `FileIdExtdDirectoryInformation`, 64 KB buffer, streamed. `FindFirstFileExW` only as fallback (no file id). Never 1 MB or 16 KB buffers. Cold sorted 100k is 187 of 200 ms: stream and sort incrementally.
+- **Entry record:** 24 bytes plus one name buffer (1M rows = 45 MB), not S2's 48-byte bench record.
+- **Memory budget:** relaxed as in the section 2 table. Keep the layout cache at 1024 entries / 4 frames. Scroll offsets are `f64` (or row index + sub-row offset).
+- **Wasm host:** ship `tsubame-plughost` without Cranelift (0.86 MB), load only `.cwasm` files our own install step compiled (never from a plugin package), plain `list<string>` API, batches capped at about 2,000 paths.
+- **Shell:** workers on STA threads exactly as `docs/shell-threading.md` says (F10 handled in the app, foreground handed back after a worker menu, menu HWNDs owned by the worker).
+- **Icon:** both cuts stay (small cut for 16 and 24 px).
+
+### Things the spikes had to confirm (measured in P0; kept for history)
 These are targets, not facts. Phase 0 measures them and the plan changes if they fail.
 - Directory enumeration: no source benchmarks `NtQueryDirectoryFile` (`FileIdExtdDirectoryInformation`, large buffer) against `FindFirstFileExW` (`FindExInfoBasic` + `FIND_FIRST_EX_LARGE_FETCH`). Both are candidates.
 - Wasmtime: host size, cold spawn time and per-call cost for our call pattern are unmeasured.
@@ -38,7 +47,7 @@ These are targets, not facts. Phase 0 measures them and the plan changes if they
 | Open a 100,000-entry folder (NVMe): first rows / complete and sorted | < 30 ms / < 200 ms |
 | Scroll paint, 4K, details view | p95 < 5 ms |
 | Idle CPU | 0 wake-ups (no timers; event-driven only) |
-| Private bytes, one tab, small folder | < 40 MB |
+| Private bytes, one tab, small folder (GPU render target) | < 90 MB windowed, < 110 MB at 4K (changed 2026-11-17 from 40 MB: the GPU target alone costs 45-50 MB, see `docs/spike-d2d.md`). The leak gate below is the real guard. |
 | Main exe (no wasm host) | < 6 MB |
 | **Leak gate:** navigate 10,000 folders, open and close 1,000 tabs | private bytes return to within 5% of the start |
 
