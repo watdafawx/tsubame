@@ -920,6 +920,9 @@ dependencies = [
 [[package]]
 name = "tsubame-bench"
 version = "0.0.1"
+dependencies = [
+ "windows",
+]
 
 [[package]]
 name = "tsubame-core"
