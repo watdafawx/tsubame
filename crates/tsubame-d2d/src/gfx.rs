@@ -2,6 +2,7 @@
 //! text formats created lazily and cached by (size, weight, family, alignment).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -10,74 +11,10 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows_numerics::Vector2 as D2D_POINT_2F;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Align {
-    Left,
-    Right,
-    Center,
-}
+pub use tsubame_ui::{Align, Canvas, Face, Font, Rect, Weight, f};
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Font {
-    pub size10: u32,
-    pub bold: bool,
-    pub mono: bool,
-    pub icon: bool,
-    pub align: Align,
-}
-
-pub const fn f(size: f32) -> Font {
-    Font { size10: (size * 10.0) as u32, bold: false, mono: false, icon: false, align: Align::Left }
-}
-impl Font {
-    pub const fn b(mut self) -> Self {
-        self.bold = true;
-        self
-    }
-    pub const fn m(mut self) -> Self {
-        self.mono = true;
-        self
-    }
-    pub const fn icon(mut self) -> Self {
-        self.icon = true;
-        self
-    }
-    pub const fn r(mut self) -> Self {
-        self.align = Align::Right;
-        self
-    }
-    pub const fn c(mut self) -> Self {
-        self.align = Align::Center;
-        self
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-impl Rect {
-    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
-        Rect { x, y, w, h }
-    }
-    pub fn r(&self) -> f32 {
-        self.x + self.w
-    }
-    pub fn b(&self) -> f32 {
-        self.y + self.h
-    }
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.r() && py >= self.y && py < self.b()
-    }
-    pub fn inset(&self, dx: f32, dy: f32) -> Rect {
-        Rect::new(self.x + dx, self.y + dy, (self.w - 2.0 * dx).max(0.0), (self.h - 2.0 * dy).max(0.0))
-    }
-    fn d2(&self) -> D2D_RECT_F {
-        D2D_RECT_F { left: self.x, top: self.y, right: self.r(), bottom: self.b() }
-    }
+fn d2(r: Rect) -> D2D_RECT_F {
+    D2D_RECT_F { left: r.x, top: r.y, right: r.r(), bottom: r.b() }
 }
 
 pub fn rgb(c: u32) -> D2D1_COLOR_F {
@@ -105,7 +42,7 @@ pub struct Gfx {
     /// frame counter for `layouts` eviction
     frame: u32,
     /// images (process icons) by cache key; tied to the render target
-    bitmaps: HashMap<std::sync::Arc<str>, ID2D1Bitmap>,
+    bitmaps: HashMap<Arc<str>, ID2D1Bitmap>,
     hwnd: HWND,
     pub dpi: f32,
     /// last frame's EndDraw (rasterise + present) and render-target creation
@@ -420,8 +357,79 @@ impl Gfx {
         }
     }
 
+    fn br(&self, c: D2D1_COLOR_F) -> &ID2D1SolidColorBrush {
+        let b = self.brush.as_ref().unwrap();
+        unsafe { b.SetColor(&c) };
+        b
+    }
+    fn rt(&self) -> &ID2D1HwndRenderTarget {
+        self.rt.as_ref().unwrap()
+    }
+
+    fn format(&mut self, font: Font) -> IDWriteTextFormat {
+        if let Some(f) = self.formats.get(&font) {
+            return f.clone();
+        }
+        let fam = match font.face {
+            Face::Icon => w!("Segoe Fluent Icons"),
+            Face::Mono => w!("Cascadia Mono"),
+            Face::Ui => w!("Segoe UI Variable Text"),
+        };
+        let weight = match font.weight {
+            Weight::Semibold => DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            Weight::Normal => DWRITE_FONT_WEIGHT_NORMAL,
+        };
+        unsafe {
+            let fmt = self
+                .dw
+                .CreateTextFormat(fam, None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, font.size10 as f32 / 10.0, w!("en-us"))
+                .or_else(|_| {
+                    let fb = if font.face == Face::Icon { w!("Segoe MDL2 Assets") } else { w!("Segoe UI") };
+                    self.dw.CreateTextFormat(fb, None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, font.size10 as f32 / 10.0, w!("en-us"))
+                })
+                .unwrap();
+            let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = fmt.SetTextAlignment(match font.align {
+                Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+                Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
+                Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+            });
+            if let Ok(sign) = self.dw.CreateEllipsisTrimmingSign(&fmt) {
+                let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
+                let _ = fmt.SetTrimming(&trim, &sign);
+            }
+            self.formats.insert(font, fmt.clone());
+            fmt
+        }
+    }
+
+    /// Shaped layout of `s` (cached like `text`, box `w` x `h`).
+    fn layout(&mut self, s: &str, font: Font, w: f32, h: f32) -> Option<IDWriteTextLayout> {
+        use std::hash::{Hash, Hasher};
+        // box size in quarter DIPs: the layout's max width / height
+        let (w4, h4) = ((w * 4.0).round() as u32, (h * 4.0).round() as u32);
+        let mut hs = std::collections::hash_map::DefaultHasher::new();
+        (s, font, w4, h4).hash(&mut hs);
+        let key = hs.finish();
+        let frame = self.frame;
+        if let Some(l) = self.layouts.get_mut(&key).filter(|l| &*l.s == s && l.font == font && l.w4 == w4 && l.h4 == h4) {
+            l.used = frame;
+            return Some(l.l.clone());
+        }
+        let fmt = self.format(font);
+        let wide: Vec<u16> = s.encode_utf16().collect();
+        let l = unsafe { self.dw.CreateTextLayout(&wide, &fmt, w4 as f32 / 4.0, h4 as f32 / 4.0) }.ok()?;
+        if layout_cap() > 0 {
+            self.layouts.insert(key, Layout { s: s.into(), font, w4, h4, l: l.clone(), used: frame });
+        }
+        Some(l)
+    }
+}
+
+impl Canvas for Gfx {
     /// Logical (DIP) size of the client area.
-    pub fn size(&self) -> (f32, f32) {
+    fn size(&self) -> (f32, f32) {
         let mut rc = RECT::default();
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd, &mut rc);
@@ -430,7 +438,7 @@ impl Gfx {
         (rc.right as f32 * s, rc.bottom as f32 * s)
     }
 
-    pub fn begin(&mut self, bg: u32) -> bool {
+    fn begin(&mut self, bg: u32) -> bool {
         if self.ensure_target().is_err() {
             return false;
         }
@@ -451,7 +459,7 @@ impl Gfx {
         true
     }
 
-    pub fn end(&mut self) {
+    fn end(&mut self) {
         let Some(rt) = &self.rt else { return };
         let t0 = std::time::Instant::now();
         let r = unsafe { rt.EndDraw(None, None) };
@@ -499,34 +507,19 @@ impl Gfx {
         ));
     }
 
-    fn br(&self, c: D2D1_COLOR_F) -> &ID2D1SolidColorBrush {
-        let b = self.brush.as_ref().unwrap();
-        unsafe { b.SetColor(&c) };
-        b
+    fn fill_a(&mut self, r: Rect, c: u32, a: f32) {
+        unsafe { self.rt().FillRectangle(&d2(r), self.br(rgba(c, a))) }
     }
-    fn rt(&self) -> &ID2D1HwndRenderTarget {
-        self.rt.as_ref().unwrap()
-    }
-
-    pub fn fill(&self, r: Rect, c: u32) {
-        self.fill_a(r, c, 1.0)
-    }
-    pub fn fill_a(&self, r: Rect, c: u32, a: f32) {
-        unsafe { self.rt().FillRectangle(&r.d2(), self.br(rgba(c, a))) }
-    }
-    pub fn round(&self, r: Rect, rad: f32, c: u32) {
-        self.round_a(r, rad, c, 1.0)
-    }
-    pub fn round_a(&self, r: Rect, rad: f32, c: u32, a: f32) {
-        let rr = D2D1_ROUNDED_RECT { rect: r.d2(), radiusX: rad, radiusY: rad };
+    fn round_a(&mut self, r: Rect, rad: f32, c: u32, a: f32) {
+        let rr = D2D1_ROUNDED_RECT { rect: d2(r), radiusX: rad, radiusY: rad };
         unsafe { self.rt().FillRoundedRectangle(&rr, self.br(rgba(c, a))) }
     }
-    pub fn round_stroke(&self, r: Rect, rad: f32, c: u32, w: f32) {
+    fn round_stroke(&mut self, r: Rect, rad: f32, c: u32, w: f32) {
         let r = r.inset(w / 2.0, w / 2.0);
-        let rr = D2D1_ROUNDED_RECT { rect: r.d2(), radiusX: rad, radiusY: rad };
+        let rr = D2D1_ROUNDED_RECT { rect: d2(r), radiusX: rad, radiusY: rad };
         unsafe { self.rt().DrawRoundedRectangle(&rr, self.br(rgb(c)), w, None) }
     }
-    pub fn line(&self, x0: f32, y0: f32, x1: f32, y1: f32, c: u32, w: f32) {
+    fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, c: u32, w: f32) {
         unsafe {
             self.rt().DrawLine(
                 D2D_POINT_2F { X: x0, Y: y0 },
@@ -537,81 +530,22 @@ impl Gfx {
             )
         }
     }
-    pub fn circle(&self, x: f32, y: f32, r: f32, c: u32) {
+    fn circle(&mut self, x: f32, y: f32, r: f32, c: u32) {
         let e = D2D1_ELLIPSE { point: D2D_POINT_2F { X: x, Y: y }, radiusX: r, radiusY: r };
         unsafe { self.rt().FillEllipse(&e, self.br(rgb(c))) }
     }
 
-    fn format(&mut self, font: Font) -> IDWriteTextFormat {
-        if let Some(f) = self.formats.get(&font) {
-            return f.clone();
-        }
-        let fam = if font.icon {
-            w!("Segoe Fluent Icons")
-        } else if font.mono {
-            w!("Cascadia Mono")
-        } else {
-            w!("Segoe UI Variable Text")
-        };
-        let weight = if font.bold { DWRITE_FONT_WEIGHT_SEMI_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL };
-        unsafe {
-            let fmt = self
-                .dw
-                .CreateTextFormat(fam, None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, font.size10 as f32 / 10.0, w!("en-us"))
-                .or_else(|_| {
-                    let fb = if font.icon { w!("Segoe MDL2 Assets") } else { w!("Segoe UI") };
-                    self.dw.CreateTextFormat(fb, None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, font.size10 as f32 / 10.0, w!("en-us"))
-                })
-                .unwrap();
-            let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            let _ = fmt.SetTextAlignment(match font.align {
-                Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
-                Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
-                Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
-            });
-            if let Ok(sign) = self.dw.CreateEllipsisTrimmingSign(&fmt) {
-                let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
-                let _ = fmt.SetTrimming(&trim, &sign);
-            }
-            self.formats.insert(font, fmt.clone());
-            fmt
-        }
-    }
-
     /// Draws single-line text vertically centred in `r`, clipped and ellipsised.
-    pub fn text(&mut self, s: &str, r: Rect, font: Font, c: u32) {
+    fn text(&mut self, s: &str, r: Rect, font: Font, c: u32) {
         if s.is_empty() || r.w <= 1.0 {
             return;
         }
-        use std::hash::{Hash, Hasher};
-        // box size in quarter DIPs: the layout's max width / height
-        let (w4, h4) = ((r.w * 4.0).round() as u32, (r.h * 4.0).round() as u32);
-        let mut hs = std::collections::hash_map::DefaultHasher::new();
-        (s, font, w4, h4).hash(&mut hs);
-        let key = hs.finish();
-        let frame = self.frame;
-        let hit = self.layouts.get_mut(&key).filter(|l| &*l.s == s && l.font == font && l.w4 == w4 && l.h4 == h4).map(|l| {
-            l.used = frame;
-            l.l.clone()
-        });
-        let layout = match hit {
-            Some(l) => l,
-            None => {
-                let fmt = self.format(font);
-                let wide: Vec<u16> = s.encode_utf16().collect();
-                let Ok(l) = (unsafe { self.dw.CreateTextLayout(&wide, &fmt, w4 as f32 / 4.0, h4 as f32 / 4.0) }) else { return };
-                if layout_cap() > 0 {
-                    self.layouts.insert(key, Layout { s: s.into(), font, w4, h4, l: l.clone(), used: frame });
-                }
-                l
-            }
-        };
+        let Some(layout) = self.layout(s, font, r.w, r.h) else { return };
         unsafe { self.rt().DrawTextLayout(D2D_POINT_2F { X: r.x, Y: r.y }, &layout, self.br(rgb(c)), D2D1_DRAW_TEXT_OPTIONS_CLIP) }
     }
 
     /// Width of `s` in DIPs.
-    pub fn measure(&mut self, s: &str, font: Font) -> f32 {
+    fn measure(&mut self, s: &str, font: Font) -> f32 {
         let fmt = self.format(font);
         let wide: Vec<u16> = s.encode_utf16().collect();
         unsafe {
@@ -626,9 +560,51 @@ impl Gfx {
         }
     }
 
+    /// Caret position from the shaped run (kerning and ligatures included).
+    fn caret_x(&mut self, s: &str, font: Font, idx: usize) -> f32 {
+        let idx = tsubame_ui::canvas::floor_char(s, idx);
+        if idx == 0 || s.is_empty() {
+            return 0.0;
+        }
+        let Some(l) = self.layout(s, font.left(), 100_000.0, 100.0) else { return 0.0 };
+        let i16 = s[..idx].encode_utf16().count() as u32;
+        let (mut x, mut y) = (0.0f32, 0.0f32);
+        let mut m = DWRITE_HIT_TEST_METRICS::default();
+        // the leading edge of char idx, or the trailing edge of the last one
+        let r = if idx >= s.len() {
+            let last = s[..idx].chars().next_back().map(|c| c.len_utf16() as u32).unwrap_or(1);
+            unsafe { l.HitTestTextPosition(i16 - last, true, &mut x, &mut y, &mut m) }
+        } else {
+            unsafe { l.HitTestTextPosition(i16, false, &mut x, &mut y, &mut m) }
+        };
+        if r.is_err() { self.measure(&s[..idx], font) } else { x }
+    }
+
+    fn hit_index(&mut self, s: &str, font: Font, x: f32) -> usize {
+        if s.is_empty() || x <= 0.0 {
+            return 0;
+        }
+        let Some(l) = self.layout(s, font.left(), 100_000.0, 100.0) else { return 0 };
+        let (mut trailing, mut inside) = (BOOL(0), BOOL(0));
+        let mut m = DWRITE_HIT_TEST_METRICS::default();
+        if unsafe { l.HitTestPoint(x, 50.0, &mut trailing, &mut inside, &mut m) }.is_err() {
+            return 0;
+        }
+        let pos16 = m.textPosition as usize + if trailing.as_bool() { m.length as usize } else { 0 };
+        // UTF-16 position back to a byte index
+        let mut n16 = 0usize;
+        for (b, c) in s.char_indices() {
+            if n16 >= pos16 {
+                return b;
+            }
+            n16 += c.len_utf16();
+        }
+        s.len()
+    }
+
     /// Draws premultiplied BGRA pixels scaled into `r`. The D2D bitmap is
     /// made once per `key` and kept until the render target goes.
-    pub fn image(&mut self, key: &std::sync::Arc<str>, w: u32, h: u32, px: &[u32], r: Rect) {
+    fn image(&mut self, key: &str, w: u32, h: u32, px: &[u32], r: Rect) {
         if !self.bitmaps.contains_key(key) {
             if self.bitmaps.len() >= 320 {
                 self.bitmaps.clear();
@@ -639,17 +615,17 @@ impl Gfx {
                 dpiY: 96.0,
             };
             let Ok(b) = (unsafe { self.rt().CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(px.as_ptr() as *const _), w * 4, &props) }) else { return };
-            self.bitmaps.insert(key.clone(), b);
+            self.bitmaps.insert(Arc::from(key), b);
         }
         if let Some(b) = self.bitmaps.get(key) {
-            unsafe { self.rt().DrawBitmap(b, Some(&r.d2()), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+            unsafe { self.rt().DrawBitmap(b, Some(&d2(r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
         }
     }
 
-    pub fn clip(&self, r: Rect) {
-        unsafe { self.rt().PushAxisAlignedClip(&r.d2(), D2D1_ANTIALIAS_MODE_ALIASED) }
+    fn clip(&mut self, r: Rect) {
+        unsafe { self.rt().PushAxisAlignedClip(&d2(r), D2D1_ANTIALIAS_MODE_ALIASED) }
     }
-    pub fn unclip(&self) {
+    fn unclip(&mut self) {
         unsafe { self.rt().PopAxisAlignedClip() }
     }
 }
