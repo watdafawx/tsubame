@@ -1,0 +1,13 @@
+package tsubame:column@0.1.0;
+
+/// Spike world: one column provider, two encodings of the same batch call.
+world column {
+    /// N paths in, N values out (canonical ABI list<string>).
+    export column-values: func(paths: list<string>) -> list<string>;
+
+    /// Same call, packed into one buffer.
+    /// Layout (all u32 little endian):
+    ///   [n][off_0 .. off_n][utf8 bytes]   offsets are relative to the start of the bytes
+    /// The result uses the same layout.
+    export column-values-packed: func(buf: list<u8>) -> list<u8>;
+}
