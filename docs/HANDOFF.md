@@ -95,3 +95,8 @@ U2 waits for U1, M1 (approved), C1, C2. B1 waits for U2.
 - U2 numbers (rig 4K release): 100k first rows 2.1-18.3 ms (pass), sorted 62-168 ms (pass), scroll p95 2.8 ms (pass), first paint 72 ms (pass), idle CPU 0 (pass), leak smoke +0.25 MB, exe 0.60 MB. **Fails: private bytes after scroll 149.6 MiB (budget 110; 96.8 MiB idle before scroll passes; 180.9 MiB after repeated 100k navigations); startup navigation first rows 53.6 ms when counted from tab creation (includes window creation; navigation after startup meets 30 ms); filter highlight rectangles missing.** Not measured: cold cache, full 10,000/1,000 leak gate (B1), wake-ups via ETW.
 - B1 (DeepSeek) running: full leak gate in the real GUI app + bench harness + `docs/bench-log.md`.
 - Open card needed: **memory** (private bytes). Contributors per U2/U1: GPU render target and driver heaps, DirectWrite heap during scroll, warm-up WARP target. Ideas: glyph-run text, smaller layout cache, release the software target after the GPU swap, cap icon cache. Run after B1 gives a baseline.
+
+## Update 7: public repo + update signing (2026-11-18)
+- Repo public: https://github.com/watdafawx/tsubame (MIT). Local paths scrubbed.
+- Release public key pinned in `crates/tsubame-update/src/keys.rs` (`bdefd9c3...5e85`). Private key at `%USERPROFILE%\.tsubame\update-signing.key`, repo secret `UPDATE_SIGNING_KEY` set. User must back up the private key; losing it means no more signed updates.
+- ci.yml / release.yml not yet run on GitHub.
