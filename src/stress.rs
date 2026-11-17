@@ -11,7 +11,7 @@
 //!   at once; cached vs generated counts and times.
 
 use crate::shellui::{ShellUi, pcts};
-use crate::view::View;
+use crate::tab::Tab;
 use std::time::{Duration, Instant};
 use tsubame_win::procinfo::{Counters, counters};
 use tsubame_win::shell::{Payload, Pool, Request};
@@ -21,6 +21,7 @@ pub const TICK_MS: u32 = 10;
 
 const MENUS: usize = 200;
 const THUMBS: usize = 500;
+const THUMB_PX: u32 = 512;
 const WARMUP: Duration = Duration::from_secs(3);
 const SETTLE: Duration = Duration::from_secs(3);
 const IMAGE_EXT: [&str; 9] = ["jpg", "jpeg", "png", "bmp", "gif", "tif", "tiff", "webp", "heic"];
@@ -114,21 +115,21 @@ impl Stress {
 
     /// Timer tick and after every drained batch of replies. `pt` is a screen
     /// point inside the window. Returns (done, repaint).
-    pub fn step(&mut self, view: &mut View, shell: &mut ShellUi, pool: &mut Pool, pt: (i32, i32)) -> (bool, bool) {
+    pub fn step(&mut self, tab: &Tab, shell: &mut ShellUi, pool: &mut Pool, pt: (i32, i32)) -> (bool, bool) {
         self.pt = pt;
         match self.state {
             State::Wait(t) => {
-                if Instant::now() < t || view.len() == 0 {
+                if Instant::now() < t || tab.shown() == 0 || tab.is_loading() {
                     return (false, false);
                 }
-                let crate::data::Source::Dir(d) = &view.source else {
-                    self.log.push("needs --dir <path>".into());
+                if tab.synthetic {
+                    self.log.push("needs a real folder (--dir <path>)".into());
                     self.state = State::Settle(Instant::now());
                     return (false, false);
-                };
+                }
                 match self.mode {
                     Mode::Menu => {
-                        self.paths = (0..d.len()).filter(|&i| !d.is_dir(i)).take(3).map(|i| d.path(i)).collect();
+                        self.paths = (0..tab.shown()).filter_map(|i| tab.entry_at(i)).filter(|e| !e.1).take(3).map(|e| e.0).collect();
                         if self.paths.is_empty() {
                             self.log.push("no files in the folder".into());
                             self.state = State::Settle(Instant::now());
@@ -140,17 +141,15 @@ impl Stress {
                         self.state = State::MenuRun { i: 0 };
                     }
                     Mode::Thumbs => {
-                        self.paths = (0..d.len())
-                            .filter(|&i| {
-                                let n = d.name(i);
-                                !d.is_dir(i) && n.rsplit_once('.').is_some_and(|(_, e)| IMAGE_EXT.iter().any(|x| x.eq_ignore_ascii_case(e)))
-                            })
+                        self.paths = (0..tab.shown())
+                            .filter_map(|i| tab.entry_at(i))
+                            .filter(|(p, dir)| !dir && p.rsplit_once('.').is_some_and(|(_, e)| IMAGE_EXT.iter().any(|x| x.eq_ignore_ascii_case(e))))
                             .take(THUMBS)
-                            .map(|i| d.path(i))
+                            .map(|e| e.0)
                             .collect();
                         self.snap("start (before the first thumbnail)");
                         self.t0 = Instant::now();
-                        let px = (crate::view::THUMB_DIP * 2.0) as u32;
+                        let px = THUMB_PX;
                         for p in &self.paths {
                             pool.submit(Request::Thumb { path: p.clone(), size: px, cache_only: false });
                         }

@@ -11,15 +11,18 @@ impl<T> Tabs<T> {
     pub fn new(first: T) -> Tabs<T> {
         Tabs { items: vec![first], active: 0 }
     }
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.items.len()
     }
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+    #[allow(dead_code)]
     pub fn current(&self) -> Option<&T> {
         self.items.get(self.active)
     }
+    #[allow(dead_code)]
     pub fn current_mut(&mut self) -> Option<&mut T> {
         self.items.get_mut(self.active)
     }
@@ -81,50 +84,6 @@ impl<T> Tabs<T> {
             self.active
         };
     }
-}
-
-/// Width of every tab in a strip `avail` wide holding `n` tabs: `pref` when
-/// they fit, shrinking to `min`; below that the strip overflows and scrolls.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct StripLayout {
-    pub tab_w: f32,
-    pub overflow: bool,
-    /// width of all tabs together
-    pub content_w: f32,
-    pub scroll_max: f32,
-}
-
-pub fn strip_layout(avail: f32, n: usize, pref: f32, min: f32) -> StripLayout {
-    let n_f = n.max(1) as f32;
-    let fit = (avail / n_f).min(pref);
-    if fit >= min {
-        StripLayout { tab_w: fit, overflow: false, content_w: fit * n_f, scroll_max: 0.0 }
-    } else {
-        let content = min * n_f;
-        StripLayout { tab_w: min, overflow: true, content_w: content, scroll_max: (content - avail).max(0.0) }
-    }
-}
-
-/// Scroll offset that keeps tab `idx` fully visible, starting from `scroll`.
-pub fn scroll_to_show(scroll: f32, tab_w: f32, idx: usize, avail: f32, scroll_max: f32) -> f32 {
-    let (l, r) = (idx as f32 * tab_w, (idx + 1) as f32 * tab_w);
-    let s = if l < scroll {
-        l
-    } else if r > scroll + avail {
-        r - avail
-    } else {
-        scroll
-    };
-    s.clamp(0.0, scroll_max)
-}
-
-/// Slot a dragged tab lands in when its centre is at strip x `cx`
-/// (content coordinates, scroll already added).
-pub fn slot_at(cx: f32, tab_w: f32, n: usize) -> usize {
-    if n == 0 || tab_w <= 0.0 {
-        return 0;
-    }
-    ((cx / tab_w).floor().max(0.0) as usize).min(n - 1)
 }
 
 #[cfg(test)]
@@ -190,36 +149,5 @@ mod tests {
         t.move_tab(9, 0);
         t.move_tab(1, 1);
         assert_eq!(t.items, vec![2, 4, 1, 3, 0]);
-    }
-
-    #[test]
-    fn strip_widths_shrink_then_overflow() {
-        let l = strip_layout(1000.0, 3, 176.0, 96.0);
-        assert_eq!((l.tab_w, l.overflow), (176.0, false));
-        let l = strip_layout(600.0, 5, 176.0, 96.0);
-        assert!(!l.overflow);
-        assert!((l.tab_w - 120.0).abs() < 1e-4);
-        let l = strip_layout(600.0, 10, 176.0, 96.0);
-        assert!(l.overflow);
-        assert_eq!(l.tab_w, 96.0);
-        assert_eq!(l.scroll_max, 360.0);
-        assert_eq!(strip_layout(600.0, 0, 176.0, 96.0).tab_w, 176.0);
-    }
-
-    #[test]
-    fn scroll_keeps_active_visible() {
-        // 10 tabs of 96 in a 600 strip, max scroll 360
-        assert_eq!(scroll_to_show(0.0, 96.0, 3, 600.0, 360.0), 0.0);
-        assert_eq!(scroll_to_show(0.0, 96.0, 9, 600.0, 360.0), 264.0);
-        assert_eq!(scroll_to_show(360.0, 96.0, 0, 600.0, 360.0), 0.0);
-        assert_eq!(scroll_to_show(100.0, 96.0, 2, 600.0, 360.0), 100.0);
-    }
-
-    #[test]
-    fn drag_slots() {
-        assert_eq!(slot_at(-30.0, 100.0, 4), 0);
-        assert_eq!(slot_at(150.0, 100.0, 4), 1);
-        assert_eq!(slot_at(999.0, 100.0, 4), 3);
-        assert_eq!(slot_at(10.0, 100.0, 0), 0);
     }
 }

@@ -58,6 +58,9 @@ pub struct Tab {
     /// entries the enumerator delivered so far
     pub delivered: usize,
     pub timing: Timing,
+    title_s: String,
+    /// the bench's fake rows: no real files behind them
+    pub synthetic: bool,
     token: CancelToken,
     enum_gen: u64,
     enumerator: Option<Enumerator>,
@@ -107,6 +110,8 @@ impl Tab {
             load: Load::Done,
             delivered: 0,
             timing: Timing::new(),
+            title_s: Self::make_title(path),
+            synthetic: false,
             token: CancelToken::new(),
             enum_gen: 0,
             enumerator: None,
@@ -114,9 +119,27 @@ impl Tab {
         }
     }
 
-    /// Short title for the tab strip: the folder's own name.
-    pub fn title(&self) -> String {
-        nav::crumbs(&self.path).pop().map(|c| c.label).unwrap_or_else(|| self.path.clone())
+    /// Short title for the tab strip: the folder's own name (cached).
+    pub fn title(&self) -> &str {
+        &self.title_s
+    }
+
+    fn make_title(path: &str) -> String {
+        nav::crumbs(path).pop().map(|c| c.label).unwrap_or_else(|| path.to_string())
+    }
+
+    /// Replaces the listing with a ready-made store (the `--bench` synthetic
+    /// folder): no enumeration runs, the tab is complete at once.
+    pub fn adopt_store(&mut self, label: &str, store: EntryStore) {
+        self.enumerator = None;
+        self.rx = None;
+        self.path = label.to_string();
+        self.title_s = Self::make_title(label);
+        self.delivered = store.len();
+        self.store = store;
+        self.sel = Selection::new();
+        self.load = Load::Done;
+        self.synthetic = true;
     }
 
     pub fn is_loading(&self) -> bool {
@@ -131,6 +154,8 @@ impl Tab {
         self.enumerator = None; // cancels and detaches
         self.rx = None;
         self.path = path.to_string();
+        self.title_s = Self::make_title(path);
+        self.synthetic = false;
         self.store.clear();
         self.store.sort(self.sort);
         self.sel.clear();
@@ -245,6 +270,24 @@ impl Tab {
         self.store.view().iter().enumerate().filter(|(_, id)| self.sel.contains(**id)).take(n).filter_map(|(pos, _)| self.entry_at(pos).map(|e| e.0)).collect()
     }
 
+    /// A frame of this tab was presented: records the first frame that shows
+    /// rows and the first frame after Done (complete + sorted on screen).
+    /// Returns true when the final frame of a listing was just recorded.
+    pub fn frame_presented(&mut self) -> bool {
+        let el = self.timing.t_nav.elapsed();
+        if self.timing.first_frame.is_none() && self.shown() > 0 {
+            self.timing.first_frame = Some(el);
+        }
+        if self.timing.final_frame.is_none() && self.timing.done.is_some() {
+            self.timing.final_frame = Some(el);
+            if self.timing.first_frame.is_none() {
+                self.timing.first_frame = Some(el);
+            }
+            return true;
+        }
+        false
+    }
+
     /// Heap bytes this tab holds in its store (diagnostics).
     pub fn memory_bytes(&self) -> usize {
         self.store.memory_bytes()
@@ -302,7 +345,7 @@ mod tests {
         assert!(t.entry_at(1).unwrap().0.ends_with("b9.txt"));
         // filter refines and clears
         t.set_filter("b");
-        assert_eq!(t.shown(), 2);
+        assert_eq!(t.shown(), 3); // Sub, b9, b10
         t.set_filter("b1");
         assert_eq!(t.shown(), 1);
         t.set_filter("");

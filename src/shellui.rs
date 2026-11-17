@@ -20,8 +20,6 @@ use tsubame_win::shell::{IconSource, MenuResult, Payload, Pool, Reply, Request, 
 pub const ICON_CAP_ITEMS: usize = 2048;
 pub const ICON_CAP_BYTES: usize = 8 << 20;
 /// Thumbnail cache caps (up to ~1 MB each at 512 px).
-pub const THUMB_CAP_ITEMS: usize = 16;
-pub const THUMB_CAP_BYTES: usize = 16 << 20;
 
 pub struct Image {
     /// Gfx bitmap cache key
@@ -77,16 +75,6 @@ pub struct Stats {
     pub max_pending: usize,
 }
 
-pub struct Thumbs {
-    pub on: bool,
-    /// row the panel shows
-    pub row: Option<usize>,
-    pub path: Option<String>,
-    pending: Option<(Ticket, String)>,
-    pub cache: Lru<Arc<str>, Image>,
-    pub status: String,
-}
-
 pub struct ShellUi {
     pub icons: Lru<Arc<str>, Image>,
     pending: HashMap<Arc<str>, Pending>,
@@ -95,7 +83,6 @@ pub struct ShellUi {
     frame: u64,
     pub icon_px: u32,
     pub stats: Stats,
-    pub thumbs: Thumbs,
     pub per_path_all: bool,
     pub use_factory: bool,
     /// last context menu outcome, for the status bar
@@ -125,10 +112,9 @@ impl ShellUi {
             frame: 0,
             icon_px,
             stats: Stats::default(),
-            thumbs: Thumbs { on: false, row: None, path: None, pending: None, cache: Lru::new(THUMB_CAP_ITEMS, THUMB_CAP_BYTES), status: String::new() },
             per_path_all: env_on("TSUBAME_ICON_PER_PATH"),
             use_factory: env_on("TSUBAME_ICON_FACTORY"),
-            menu_status: "right-click a row: shell menu (Shift: extended)   T: thumbnail   H: hang a worker 20 s   W: wrong-owner menu".into(),
+            menu_status: String::new(),
             menu_pending: None,
             menu_asked: None,
             last_menu: None,
@@ -219,10 +205,6 @@ impl ShellUi {
         self.stats.max_pending = self.stats.max_pending.max(self.pending.len());
     }
 
-    pub fn pending(&self) -> usize {
-        self.pending.len()
-    }
-
     /// Jobs a hung worker took with it: forget them so the rows ask again.
     pub fn forget(&mut self, ids: &[u64]) {
         for id in ids {
@@ -232,10 +214,6 @@ impl ShellUi {
             if self.menu_pending == Some(*id) {
                 self.menu_pending = None;
                 self.menu_status = "menu worker was replaced".into();
-            }
-            if self.thumbs.pending.as_ref().is_some_and(|(t, _)| t.id == *id) {
-                self.thumbs.pending = None;
-                self.thumbs.status = "thumbnail worker hung; replaced".into();
             }
         }
     }
@@ -267,27 +245,12 @@ impl ShellUi {
                 true
             }
             Payload::Thumb { .. } => {
-                let mine = self.thumbs.pending.as_ref().is_some_and(|(t, _)| t.id == r.id);
-                if !mine {
-                    if self.collect_other {
-                        self.other_replies.push(r);
-                    } else {
-                        self.stats.stale += 1;
-                    }
-                    return false;
+                if self.collect_other {
+                    self.other_replies.push(r);
+                } else {
+                    self.stats.stale += 1;
                 }
-                let (_, path) = self.thumbs.pending.take().unwrap();
-                let Payload::Thumb { bmp, from_cache, probe_us, error } = r.payload else { unreachable!() };
-                self.thumbs.status = match (&bmp, error) {
-                    (Some(b), _) => format!("{}x{} {} in {:.1} ms (cache probe {:.1} ms)", b.w, b.h, if from_cache { "from cache" } else { "generated" }, r.work_us as f64 / 1000.0, probe_us as f64 / 1000.0),
-                    (None, Some(e)) => format!("no thumbnail: {e}"),
-                    (None, None) => "no thumbnail".into(),
-                };
-                let key: Arc<str> = Arc::from(format!("t:{path}").as_str());
-                let img = Image::from(key.clone(), bmp);
-                let b = img.bytes();
-                self.thumbs.cache.insert(key, img, b);
-                true
+                false
             }
             Payload::Menu(m) => {
                 if self.menu_pending == Some(r.id) {
@@ -311,35 +274,6 @@ impl ShellUi {
         self.menu_pending = Some(t.id);
         self.menu_asked = Some(Instant::now());
         self.menu_status = format!("menu for {n} item(s) requested{}", if owner.is_some() { " (owner = UI window, wrong thread)" } else { "" });
-    }
-
-    /// Thumbnail panel follows the selection: asks for `path` when it changes.
-    pub fn want_thumb(&mut self, pool: &mut Pool, row: usize, path: Option<String>, px: u32) {
-        if !self.thumbs.on || self.thumbs.row == Some(row) {
-            return;
-        }
-        self.thumbs.row = Some(row);
-        self.thumbs.path = path.clone();
-        if let Some((t, _)) = self.thumbs.pending.take() {
-            t.cancel();
-        }
-        let Some(path) = path else {
-            self.thumbs.status = "fake rows have no file: run with --dir <path>".into();
-            return;
-        };
-        if self.thumbs.cache.contains(format!("t:{path}").as_str()) {
-            self.thumbs.status = "cached in the app".into();
-            return;
-        }
-        let t = pool.submit(Request::Thumb { path: path.clone(), size: px, cache_only: false });
-        self.thumbs.pending = Some((t, path));
-        self.thumbs.status = "loading...".into();
-    }
-
-    pub fn thumb_image(&mut self) -> Option<&Image> {
-        let p = self.thumbs.path.as_ref()?;
-        let k = format!("t:{p}");
-        self.thumbs.cache.get(k.as_str()).filter(|i| !i.px.is_empty())
     }
 }
 

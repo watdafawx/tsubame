@@ -13,7 +13,7 @@
 //!   B 2-4 s   fast fling, 20,000 DIP/s   (~900 rows/s, ~15 new rows per frame)
 //!   C 4-5 s   one full page per frame    (every string on screen is new)
 
-use crate::view::{ROW_H, View};
+use crate::tab::{Load, Tab};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
@@ -160,17 +160,20 @@ impl Bench {
     }
 
     /// Timer tick. Returns (run over, repaint needed).
-    pub fn tick(&mut self, v: &mut View) -> (bool, bool) {
+    pub fn tick(&mut self, v: &mut Tab) -> (bool, bool) {
+        let row_h = v.list.row_h;
+        let len = v.shown();
         match self.state {
             State::WaitGpu(deadline) => {
-                // --dir: also wait for the worker to finish listing
-                if Instant::now() >= deadline && v.len() > 0 {
+                // a real folder: also wait for the worker to finish listing
+                if Instant::now() >= deadline && len > 0 && v.load == Load::Done {
                     self.private_before_scroll = memory().0;
-                    self.rows = v.len();
+                    self.rows = len;
                     // small real folders start at the top and wrap around
-                    self.start_row = if v.len() > 2 * START_ROW { START_ROW } else { 0 };
-                    v.set_cursor(self.start_row + 3);
-                    v.set_scroll(self.start_row as f64 * ROW_H as f64);
+                    self.start_row = if len > 2 * START_ROW { START_ROW } else { 0 };
+                    v.list.cursor = self.start_row + 3;
+                    v.sel.single(&v.store, self.start_row + 3);
+                    v.list.set_scroll(self.start_row as f64 * row_h as f64, len);
                     self.state = State::Running(Instant::now());
                     self.just_started = true;
                     return (false, true);
@@ -179,7 +182,7 @@ impl Bench {
             }
             State::Running(t0) => {
                 let t = t0.elapsed().as_secs_f64();
-                let start = self.start_row as f64 * ROW_H as f64;
+                let start = self.start_row as f64 * row_h as f64;
                 if t >= PHASE_END[2] {
                     self.state = State::Done;
                     return (true, false);
@@ -189,11 +192,11 @@ impl Bench {
                 } else if t < PHASE_END[1] {
                     start + 2_000.0 * PHASE_END[0] + 20_000.0 * (t - PHASE_END[0])
                 } else {
-                    self.page_scroll_acc += (v.page_rows() as f32 * ROW_H) as f64;
+                    self.page_scroll_acc += (v.list.page_rows() as f32 * row_h) as f64;
                     start + 2_000.0 * PHASE_END[0] + 20_000.0 * (PHASE_END[1] - PHASE_END[0]) + self.page_scroll_acc
                 };
-                let max = v.max_scroll();
-                v.set_scroll(if max > 0.0 { s % max } else { 0.0 });
+                let max = v.list.max_scroll(len);
+                v.list.set_scroll(if max > 0.0 { s % max } else { 0.0 }, len);
                 (false, true)
             }
             State::Done => (false, false),
@@ -246,19 +249,23 @@ impl Bench {
 
     /// stdout (the parent's console, if any) and `s1-bench.txt` next to the exe.
     pub fn write_report(&self) {
-        use std::io::Write;
-        let text = self.report();
-        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-            let name = std::env::var("TSUBAME_BENCH_OUT").unwrap_or_else(|_| "s1-bench.txt".into());
-            let _ = std::fs::write(dir.join(name), &text);
-        }
-        // a windows-subsystem exe has no stdout: borrow the parent's console
-        unsafe {
-            use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
-            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-        }
-        if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
-            let _ = con.write_all(text.as_bytes());
-        }
+        let name = std::env::var("TSUBAME_BENCH_OUT").unwrap_or_else(|_| "s1-bench.txt".into());
+        write_text_report(&name, &self.report());
+    }
+}
+
+/// Writes `text` to `name` next to the exe and to the parent's console (a
+/// windows-subsystem exe has no stdout of its own).
+pub fn write_text_report(name: &str, text: &str) {
+    use std::io::Write;
+    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        let _ = std::fs::write(dir.join(name), text);
+    }
+    unsafe {
+        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+    if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+        let _ = con.write_all(text.as_bytes());
     }
 }

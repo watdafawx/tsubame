@@ -19,6 +19,8 @@ pub struct TextInput {
     pub anchor: usize,
     /// horizontal scroll of the text inside the box
     pub scroll_x: f32,
+    /// extra left padding (room for an icon the app draws), DIPs
+    pub pad_left: f32,
     /// a drag started by a double click selects whole words; the word it
     /// started on
     word_drag: Option<(usize, usize)>,
@@ -258,7 +260,7 @@ impl TextInput {
 pub fn text_input(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut TextInput, placeholder: &str) -> TextResponse {
     let mut resp = TextResponse::default();
     let font = ui.theme.font();
-    let inner = rect.pad4(6.0, 0.0, 6.0, 0.0);
+    let inner = rect.pad4(6.0 + st.pad_left, 0.0, 6.0, 0.0);
     let it = ui.interact(id, rect, Sense::click().focusable().cursor(Cursor::IBeam));
     st.caret = floor_char(&st.text, st.caret);
     st.anchor = floor_char(&st.text, st.anchor);

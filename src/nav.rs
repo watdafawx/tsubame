@@ -31,6 +31,13 @@ impl History {
         }
         self.pos = self.entries.len() - 1;
     }
+    /// Takes back the last `push` (the folder turned out not to open).
+    pub fn undo_push(&mut self) {
+        if self.pos > 0 {
+            self.entries.truncate(self.pos);
+            self.pos -= 1;
+        }
+    }
     pub fn can_back(&self) -> bool {
         self.pos > 0
     }
@@ -53,6 +60,7 @@ impl History {
             None
         }
     }
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -135,6 +143,7 @@ pub fn normalize(input: &str) -> Option<String> {
 /// Splits the path-bar text at its last separator: (folder to list, the
 /// fragment being typed). `C:\Us` gives (`C:\`, `Us`); `C:\Users\` gives
 /// (`C:\Users\`, ``).
+#[cfg(test)]
 pub fn split_fragment(text: &str) -> (&str, &str) {
     match text.rfind(['\\', '/']) {
         Some(i) => (&text[..=i], &text[i + 1..]),
