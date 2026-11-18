@@ -1025,6 +1025,7 @@ version = "0.0.1"
 dependencies = [
  "tsubame-core",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

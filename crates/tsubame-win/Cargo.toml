@@ -32,3 +32,7 @@ features = [
 [dev-dependencies.windows]
 workspace = true
 features = ["Win32_System_Com", "Win32_System_Diagnostics_ToolHelp"]
+
+# The `implement` macro for COM sinks (IFileOperationProgressSink) emits `::windows_core` paths.
+[dependencies.windows-core]
+version = "0.61"
