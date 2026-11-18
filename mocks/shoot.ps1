@@ -28,6 +28,33 @@ foreach ($th in 'dark', 'light') {
   $shots += , @("filter-$th",    'mock-states.html', "theme=$th&only=filter",    1280, 520)
   $shots += , @("menu-$th",      'mock-states.html', "theme=$th&only=menu",      1280, 640)
 }
+# ---- U3: sidebar, dual pane, drag states (mock-sidebar-panes.html) and inline rename (mock-rename.html). Prefix u3-
+foreach ($th in 'dark', 'light') {
+  $shots += , @("u3-sidebar-$th",           'mock-sidebar-panes.html', "theme=$th&only=sidebar",           1280, 840)
+  $shots += , @("u3-sidebar-menu-$th",      'mock-sidebar-panes.html', "theme=$th&only=sidebar-menu",      1280, 840)
+  $shots += , @("u3-sidebar-reorder-$th",   'mock-sidebar-panes.html', "theme=$th&only=sidebar-reorder",   1280, 840)
+  $shots += , @("u3-sidebar-collapsed-$th", 'mock-sidebar-panes.html', "theme=$th&only=sidebar-collapsed", 1280, 720)
+  $shots += , @("u3-sidebar-resize-$th",    'mock-sidebar-panes.html', "theme=$th&only=sidebar-resize",    1280, 720)
+  $shots += , @("u3-dual-v-$th",            'mock-sidebar-panes.html', "theme=$th&only=dual-v",            1280, 720)
+  $shots += , @("u3-dual-h-$th",            'mock-sidebar-panes.html', "theme=$th&only=dual-h",            1280, 860)
+  $shots += , @("u3-dual-drag-$th",         'mock-sidebar-panes.html', "theme=$th&only=dual-drag",         1280, 720)
+  $shots += , @("u3-drag-folder-$th",       'mock-sidebar-panes.html', "theme=$th&only=drag-folder",       1280, 720)
+  $shots += , @("u3-drag-bookmark-$th",     'mock-sidebar-panes.html', "theme=$th&only=drag-bookmark",     1280, 720)
+  $shots += , @("u3-drag-pane-$th",         'mock-sidebar-panes.html', "theme=$th&only=drag-pane",         1280, 720)
+  $shots += , @("u3-keys-$th",              'mock-sidebar-panes.html', "theme=$th&only=keys",              1130, 174)
+  $shots += , @("u3-rename-$th",            'mock-rename.html',        "theme=$th&only=rename",            1280, 720)
+  $shots += , @("u3-rename-states-$th",     'mock-rename.html',        "theme=$th&only=rename-states",     1000, 384)
+  $shots += , @("u3-batch-$th",             'mock-rename.html',        "theme=$th&only=batch",             1280, 720)
+  $shots += , @("u3-batch-conflict-$th",    'mock-rename.html',        "theme=$th&only=batch-conflict",    1280, 720)
+}
+# U3 density variants (comfortable 26, spacious 30)
+$shots += , @('u3-sidebar-dark-d30',      'mock-sidebar-panes.html', 'theme=dark&density=30&only=sidebar',  1280, 840)
+$shots += , @('u3-dual-v-dark-d26',       'mock-sidebar-panes.html', 'theme=dark&density=26&only=dual-v',   1280, 720)
+$shots += , @('u3-dual-v-light-d30',      'mock-sidebar-panes.html', 'theme=light&density=30&only=dual-v',  1280, 720)
+$shots += , @('u3-drag-folder-dark-d26',  'mock-sidebar-panes.html', 'theme=dark&density=26&only=drag-folder', 1280, 720)
+$shots += , @('u3-rename-dark-d30',       'mock-rename.html',        'theme=dark&density=30&only=rename',   1280, 720)
+$shots += , @('u3-rename-light-d26',      'mock-rename.html',        'theme=light&density=26&only=rename',  1280, 720)
+# ---- end U3
 $pattern = if ($args.Count -gt 0) { $args[0] } else { "*" }
 $shots = @($shots | Where-Object { $_[0] -like $pattern })
 

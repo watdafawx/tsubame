@@ -319,6 +319,9 @@
       one('focus + selected', 'sel focus') + one('focus + hover', 'hover focus') + '</div>';
   }
 
+  /* U3: internals shared with mock-u3.js (sidebar, panes, rename mocks). Nothing above changed. */
+  window.TsuParts = { ic: ic, folderIcon: folderIcon, fileIcon: fileIcon, fmtSize: fmtSize, esc: esc, mark: mark, sortArrow: sortArrow, winctl: winctl, logo: logo, titlebar: titlebar, pathbar: pathbar, filterbox: filterbox, scrollbar: scrollbar };
+
   /* ---------- page wiring ---------- */
   function qs(k, d) { var m = new RegExp('[?&]' + k + '=([^&]*)').exec(location.search); return m ? decodeURIComponent(m[1]) : d; }
   function setTheme(t) {
