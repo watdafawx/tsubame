@@ -235,8 +235,9 @@ impl Stress {
                 // the same files to the clipboard (cut on odd cycles), then read back
                 let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
                 let paths = self.paths[..n].iter().map(std::path::PathBuf::from).collect();
+                // the read goes out when the set is done (two workers at once
+                // would race for the clipboard)
                 pool.submit(Request::Clip(ClipJob::SetFiles { paths, cut: !i.is_multiple_of(2) }));
-                pool.submit(Request::Clip(ClipJob::Read { staging: self.staging.clone(), cap: 1 << 20, consume_cut: false }));
                 self.state = State::ClipRun { i, clip: 1 };
                 (false, true)
             }
@@ -246,6 +247,12 @@ impl Stress {
                     if let Payload::Clip(c) = r.payload {
                         got += 1;
                         self.clip_us.push(r.work_us);
+                        if matches!(c, ClipReply::Set(Ok(_))) {
+                            pool.submit(Request::Clip(ClipJob::Read { staging: self.staging.clone(), cap: 1 << 20, consume_cut: false }));
+                        } else if matches!(c, ClipReply::Set(Err(_))) {
+                            // no read follows a failed set
+                            got += 1;
+                        }
                         let err = match c {
                             ClipReply::Set(Err(e)) | ClipReply::Read(Err(e)) => Some(e),
                             ClipReply::Read(Ok(rd)) if rd.info.paths.is_empty() => Some("read back no files".into()),

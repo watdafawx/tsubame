@@ -78,11 +78,34 @@ pub fn set(obj: IDataObject) -> Result<u32, String> {
             Err(e) => {
                 // CLIPBRD_E_CANT_OPEN: someone else has it open right now
                 last = format!("{:?} {}", e.code(), e.message());
-                unsafe { windows::Win32::System::Threading::Sleep(20) };
+                pump_wait(20);
             }
         }
     }
     Err(last)
+}
+
+/// Waits `ms` while dispatching messages. Never a plain `Sleep` here: the
+/// clipboard's previous owner may be this thread's OLE clipboard window, and
+/// `EmptyClipboard` in another thread sends it a message; without a pump both
+/// threads wait for each other until the retries run out.
+fn pump_wait(ms: u32) {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let end = std::time::Instant::now() + std::time::Duration::from_millis(ms as u64);
+    loop {
+        unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        unsafe { MsgWaitForMultipleObjectsEx(None, left.as_millis() as u32, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
+    }
 }
 
 pub fn read(staging: &Path, cap: u64, consume_cut: bool) -> Result<ClipRead, String> {
@@ -95,7 +118,7 @@ pub fn read(staging: &Path, cap: u64, consume_cut: bool) -> Result<ClipRead, Str
             Ok(o) => break o,
             Err(e) if e.code() == windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN && tries < 10 => {
                 tries += 1;
-                unsafe { windows::Win32::System::Threading::Sleep(20) };
+                pump_wait(20);
             }
             Err(e) => return Err(format!("OleGetClipboard {:?}", e.code())),
         }
