@@ -148,3 +148,33 @@ pwsh X:\Dev\tools\push-to-rig.ps1 -Project <worktree> -BuildOnRig -Exe tsubame -
 - **Stress:**
   - `--stress menu --dir C:\Windows\System32` writes `s4-stress-menu.txt`.
   - `--stress thumbs --dir <folder of images>` writes `s4-stress-thumbs.txt`.
+
+## PERF1 recheck (2026-11-18)
+
+The S4 negative gate was masked by delayed rendering-memory release. On rig,
+S4 `e2fa069` repeated 200 menus: menu 10/100/200 private MB =
+89.4/82.3/84.9 (10->200 -5.1%, yet 100->200 +2.6 MB). Extending that
+same source's stress count to 1,000 gives 88.3/82.4/107.3 MB at 10/100/1000.
+Thus growth already exists at the historical endpoint; a binary search for a
+new per-menu leak between S4 and main has no passing long-run endpoint.
+
+Main `e230e30`, diagnostic release, System32, 200 menus: 72.39->77.98 MB
+at 10->200 (+7.7%); process heap commit 13.20->13.66 MB, busy
+9.77->10.02 MB; outside-heap commit 19.23->24.00 MB, allocation count
+127->318; Rust live 0.63->0.64 MB, mapped writable 34.85 MB unchanged.
+This contradicts process-heap fragmentation or Rust cache growth as the
+primary contributor. Attribution to a particular shell extension or native
+allocation stack is **not established** by VirtualQuery alone.
+
+Main 1,000 menus: 71.8/74.6/98.6 MB at 10/100/1000; outside-heap
+18.89->42.39 MB, allocations 116->1101, Rust live 0.62->0.69 MB.
+No plateau. Do not relax either gate or claim shell heap fragmentation.
+`TSUBAME_FLIP=0` restores the misleading negative 200-menu gate (-3.8%)
+while its menu 100->200 still grows 82.7->85.5 MB. MEM1 removed a
+masking transient; these results do not prove MEM1 introduced allocations.
+
+Stress now honors `TSUBAME_MEMDIAG=1` at counter snapshots and
+`TSUBAME_STRESS_MENUS=1000` (200..10000, default 200), retaining checkpoint
+100 and adding 200/500 for longer runs. Diagnostic snapshots perturb timing;
+use production allocator for speed comparisons. Gate B still starts at 10.
+Exact allocation owner, native-stack tracing and clip-mode recheck remain open.

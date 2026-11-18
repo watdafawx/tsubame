@@ -170,6 +170,10 @@ $up = [int]((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime)
 # cmd waits too, so the app's exit code lands in <run dir>\_exit.txt.
 function Start-RigApp([string] $exe, [string] $argLine, [switch] $Wait, [int] $TimeoutSec = 300, [string] $Report = '') {
   if (-not $script:RunDir) { throw 'no run dir yet' }
+  # A previous report must not make a delayed scheduled launch look complete.
+  if ($Report -and (Test-Path -LiteralPath (Join-Path $script:RunShare $Report))) {
+    Remove-Item -LiteralPath (Join-Path $script:RunShare $Report) -ErrorAction Stop
+  }
   $cmd = @('@echo off', "cd /d `"$script:RunDir`"")
   # `pwsh -File` passes an array as one comma-joined string: split it again
   foreach ($e in @($AppEnv | ForEach-Object { $_ -split ',' } | Where-Object { $_ })) { if ($e -match '^[A-Za-z_][A-Za-z0-9_]*=') { $cmd += "set `"$e`"" } else { throw "-AppEnv wants NAME=value, got '$e'" } }

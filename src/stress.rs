@@ -76,12 +76,16 @@ pub struct Stress {
     clip_us: Vec<u64>,
     clip_errors: Vec<String>,
     staging: std::path::PathBuf,
+    memdiag: String,
+    menus: usize,
 }
 
 impl Stress {
     pub fn new(mode: Mode) -> Stress {
         Stress {
             mode,
+            memdiag: String::new(),
+            menus: std::env::var("TSUBAME_STRESS_MENUS").ok().and_then(|s| s.parse().ok()).filter(|n| (200..=10000).contains(n)).unwrap_or(MENUS),
             state: State::Wait(Instant::now() + WARMUP),
             pt: (200, 200),
             paths: Vec::new(),
@@ -111,6 +115,7 @@ impl Stress {
 
     fn snap(&mut self, label: &str) {
         self.c.push((label.to_string(), counters()));
+        self.memdiag.push_str(&crate::memdiag::sample(label));
     }
 
     /// The UI thread painted (ms): recorded while a menu is held open.
@@ -197,12 +202,15 @@ impl Stress {
                 } else if i == 100 {
                     self.snap("after menu 100");
                 }
-                if i < MENUS {
+                if (i == 200 || i == 500) && i < self.menus {
+                    self.snap(&format!("after menu {i}"));
+                }
+                if i < self.menus {
                     self.submit_menu(pool, i, None);
                     self.state = State::MenuRun { i };
                 } else {
-                    self.snap("after menu 200");
-                    self.log.push(format!("{MENUS} menus in {:.1} s", self.t0.elapsed().as_secs_f64()));
+                    self.snap(&format!("after menu {}", self.menus));
+                    self.log.push(format!("{} menus in {:.1} s", self.menus, self.t0.elapsed().as_secs_f64()));
                     self.submit_menu(pool, 0, Some(2000));
                     self.hold = Some((Instant::now(), 0.0));
                     self.state = State::MenuHold;
@@ -280,12 +288,15 @@ impl Stress {
                 } else if i == 100 {
                     self.snap("after menu 100");
                 }
-                if i < MENUS {
+                if (i == 200 || i == 500) && i < self.menus {
+                    self.snap(&format!("after menu {i}"));
+                }
+                if i < self.menus {
                     self.submit_menu(pool, i, None);
                     self.state = State::ClipRun { i, clip: 0 };
                 } else {
-                    self.snap("after menu 200");
-                    self.log.push(format!("{MENUS} menu + clipboard cycles in {:.1} s", self.t0.elapsed().as_secs_f64()));
+                    self.snap(&format!("after menu {}", self.menus));
+                    self.log.push(format!("{} menu + clipboard cycles in {:.1} s", self.menus, self.t0.elapsed().as_secs_f64()));
                     let _ = std::fs::remove_dir_all(&self.staging);
                     self.state = State::Settle(Instant::now() + SETTLE);
                 }
@@ -348,6 +359,7 @@ impl Stress {
         line(format!("tsubame S4 stress: {}", self.mode.label()));
         line(format!("build: {}", if cfg!(debug_assertions) { "debug" } else { "release" }));
         line(format!("items: {}", self.paths.len()));
+        line(self.memdiag.clone());
         for l in &self.log {
             line(l.clone());
         }
@@ -382,16 +394,16 @@ impl Stress {
             // warm) to the last item; a per-item leak shows up here
             let at = |label: &str| self.c.iter().find(|(l, _)| l.starts_with(label)).map(|(_, c)| *c);
             let mut gate = gate_total;
-            if let (Some(b), Some(e)) = (at("after menu 10"), at("after menu 200")) {
+            if let (Some(b), Some(e)) = (at("after menu 10"), at(&format!("after menu {}", self.menus))) {
                 let (pp, ph) = (pct(e.private_bytes, b.private_bytes), pct(e.handles as usize, b.handles as usize));
                 let ok = pp <= 5.0 && ph <= 5.0;
                 gate &= ok;
                 line(format!(
-                    "leak gate B (menu 10 -> 200, 190 cycles, growth <= 5%): private {pp:+.1}%, handles {ph:+.1}% ({:+}), gdi {:+}, user {:+} {}",
+                    "leak gate B (menu 10 -> {end}, {cycles} cycles, growth <= 5%): private {pp:+.1}%, handles {ph:+.1}% ({:+}), gdi {:+}, user {:+} {}",
                     e.handles as i64 - b.handles as i64,
                     e.gdi as i64 - b.gdi as i64,
                     e.user as i64 - b.user as i64,
-                    if ok { "PASS" } else { "FAIL" }
+                    if ok { "PASS" } else { "FAIL" }, end = self.menus, cycles = self.menus - 10
                 ));
             }
             line(format!("leak gate: {}", if gate { "PASS" } else { "FAIL" }));

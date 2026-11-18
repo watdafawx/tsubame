@@ -90,11 +90,13 @@ pub struct Timing {
     pub final_frame: Option<Duration>,
     /// worker time inside the enumerator (not UI)
     pub worker: Option<Duration>,
+    /// UI time converting and inserting batches (including incremental sort).
+    pub store_cpu: Duration,
 }
 
 impl Timing {
     fn new() -> Timing {
-        Timing { t_nav: Instant::now(), first_batch: None, done: None, first_frame: None, final_frame: None, worker: None }
+        Timing { t_nav: Instant::now(), first_batch: None, done: None, first_frame: None, final_frame: None, worker: None, store_cpu: Duration::ZERO }
     }
 }
 
@@ -506,6 +508,7 @@ impl Tab {
     }
 
     fn push(&mut self, b: &Batch) {
+        let started = Instant::now();
         let inputs: Vec<EntryInput> =
             b.iter().map(|(name, e)| EntryInput { name, size: e.size, modified: e.mtime as i64, flags: flags_of(e.attrs, e.is_dir(), e.is_reparse_point()) }).collect();
         // generation is the store's own (bumped by `start`): only this tab's
@@ -516,6 +519,7 @@ impl Tab {
             self.rx = None;
             return;
         }
+        self.timing.store_cpu += started.elapsed();
         self.delivered += b.len();
         if self.timing.first_batch.is_none() {
             self.timing.first_batch = Some(self.timing.t_nav.elapsed());
