@@ -37,6 +37,22 @@ struct Sample {
     phase: usize,
     total_ms: f32,
     end_ms: f32,
+    cost: FrameCost,
+}
+
+/// Where one frame's time went, beyond the total and EndDraw+Present (main
+/// fills it from the renderer): Present alone, and the text layouts the frame
+/// had to make (layout cache misses) with the time spent making them.
+#[derive(Clone, Copy, Default)]
+pub struct FrameCost {
+    pub present_ms: f32,
+    pub layouts: u32,
+    pub layout_ms: f32,
+    pub text_calls: u32,
+    pub text_clipped: u32,
+    pub text_ms: f32,
+    pub image_ms: f32,
+    pub bitmaps: u32,
 }
 
 pub struct Bench {
@@ -111,6 +127,12 @@ fn stats(label: &str, mut v: Vec<f32>) -> String {
     )
 }
 
+fn counts(label: &str, mut n: Vec<u32>) -> String {
+    n.sort_unstable();
+    let at = |p: f64| if n.is_empty() { 0 } else { n[((p * n.len() as f64).ceil() as usize).clamp(1, n.len()) - 1] };
+    format!("{label}: n={} p50={} p95={} max={}", n.len(), at(0.5), at(0.95), n.last().copied().unwrap_or(0))
+}
+
 impl Bench {
     pub fn new(source: &'static str, store_build_ms: Option<f64>, store_bytes: usize) -> Bench {
         Bench {
@@ -150,7 +172,7 @@ impl Bench {
     }
 
     /// Called after every completed paint.
-    pub fn painted(&mut self, total_ms: f32, end_ms: f32, path: &'static str) {
+    pub fn painted(&mut self, total_ms: f32, end_ms: f32, cost: FrameCost, path: &'static str) {
         match self.state {
             State::WaitGpu(_) if path == "hardware" => {
                 self.gpu_swap_ms = Some(ms_since_process_start());
@@ -161,7 +183,7 @@ impl Bench {
             State::Running(t0) => {
                 let t = t0.elapsed().as_secs_f64();
                 let phase = PHASE_END.iter().position(|&e| t < e).unwrap_or(2);
-                self.samples.push(Sample { phase, total_ms, end_ms });
+                self.samples.push(Sample { phase, total_ms, end_ms, cost });
                 self.final_path = path;
             }
             _ => {}
@@ -261,6 +283,23 @@ impl Bench {
             line(stats(&format!("paint_phase_{name}"), self.samples.iter().filter(|s| s.phase == i).map(|s| s.total_ms).collect()));
         }
         line(stats("enddraw_all", self.samples.iter().map(|s| s.end_ms).collect()));
+        // where a frame's time goes (the scroll budget's regression guard,
+        // docs/bench.md "PERF3"): building the frame on the CPU (everything
+        // before EndDraw), Present alone, and the text layouts made per frame
+        line(stats("cpu_build_all", self.samples.iter().map(|s| s.total_ms - s.end_ms).collect()));
+        line(stats("present_all", self.samples.iter().map(|s| s.cost.present_ms).collect()));
+        for (i, name) in ["A", "B", "C"].iter().enumerate() {
+            let ph = || self.samples.iter().filter(move |s| s.phase == i);
+            line(stats(&format!("cpu_build_phase_{name}"), ph().map(|s| s.total_ms - s.end_ms).collect()));
+            line(stats(&format!("enddraw_phase_{name}"), ph().map(|s| s.end_ms).collect()));
+            line(stats(&format!("layout_ms_phase_{name}"), ph().map(|s| s.cost.layout_ms).collect()));
+            line(stats(&format!("text_ms_phase_{name}"), ph().map(|s| s.cost.text_ms).collect()));
+            line(stats(&format!("image_ms_phase_{name}"), ph().map(|s| s.cost.image_ms).collect()));
+            line(counts(&format!("layouts_made_phase_{name}"), ph().map(|s| s.cost.layouts).collect()));
+            line(counts(&format!("text_calls_phase_{name}"), ph().map(|s| s.cost.text_calls).collect()));
+            line(counts(&format!("text_clipped_phase_{name}"), ph().map(|s| s.cost.text_clipped).collect()));
+            line(counts(&format!("bitmaps_made_phase_{name}"), ph().map(|s| s.cost.bitmaps).collect()));
+        }
         line(format!("private_bytes_first_paint: {} ({:.1} MB)", self.private_first, self.private_first as f64 / 1048576.0));
         line(format!("private_bytes_before_scroll (after GPU swap, idle): {} ({:.1} MB)", self.private_before_scroll, self.private_before_scroll as f64 / 1048576.0));
         line(format!("private_bytes_end: {} ({:.1} MB)", private_end, private_end as f64 / 1048576.0));

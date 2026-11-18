@@ -856,7 +856,18 @@ unsafe fn on_paint(hwnd: HWND) {
     } else {
         with(|a| {
             if let Some(b) = a.bench.as_mut() {
-                b.painted(total_ms, end_ms, path);
+                let g = &a.gfx;
+                let cost = bench::FrameCost {
+                    present_ms: g.present_ms,
+                    layouts: g.layouts_made,
+                    layout_ms: g.layout_ms,
+                    text_calls: g.text_calls,
+                    text_clipped: g.text_clipped,
+                    text_ms: g.text_ms,
+                    image_ms: g.image_ms,
+                    bitmaps: g.bitmaps_made,
+                };
+                b.painted(total_ms, end_ms, cost, path);
             }
         });
     }
