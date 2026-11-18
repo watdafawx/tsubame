@@ -7261,8 +7261,9 @@ prints the shipped exe's size, SHA-256 prefix and commit. Sections now also carr
 `- Exe: <bytes> B (<KB>), SHA-256 ...`, and `tsubame-bench app` prints a WARNING when the exe size
 moves more than 10% against the previous row (the 6 MB budget still decides PASS/FAIL).
 
-Real release sizes (`-BuildOnRig -Profile release` on rig; the same commit built twice is byte
-identical):
+Real release sizes (`-BuildOnRig -Profile release` on rig; rebuilding identical source gives the same
+size, but the PE carries a link timestamp, so two builds of the same commit do not have the same
+sha256 - which is why the staleness guard keys on mtime, not on the hash):
 
 | Build | Main exe |
 |---|---|
@@ -7270,6 +7271,7 @@ identical):
 | `d6990cd` U4: updater wired into `main.rs` | +459 KB over pre-U4 |
 | `231d929` Merge U4 | 2.60 MB (2662 KB) |
 | `701c3ab` main | 2,750,976 B (2687 KB) |
+| `b25e4cf` main + this fix | 2,779,648 B (2715 KB) |
 
 So the U4 row's "the updater crate and U4 add 50 KB" has the sign and the scale wrong: making the
 `tsubame-update` stack reachable from the app (WinHTTP, WinTrust, bcrypt, ed25519, `serde_json`,
