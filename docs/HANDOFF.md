@@ -62,3 +62,6 @@ Earlier P0/P1 numbers worth keeping: C1 name sort 100k 9.6 ms / 1M 139 ms, 1M st
 
 ## Next batch (P2), after the user says go
 From PLAN section 7 P2: C3 file-op queue (GPT), C4 directory watcher (GPT), W1 shell menu/drag-drop/clipboard (Opus), W2 icon/thumbnail pipeline + grid view (Sonnet), U3 sidebar/dual pane/inline rename (Sonnet, mock first), U4 command palette/keys/settings (Sonnet, mock first), D1 config/session restore/CLI args (DeepSeek). Add these queued cards: memory (above, first or in parallel with C3/C4), updater wiring, T1 themes, editable context menu + Nilesoft import (needs spike), default-explorer opt-in, filter highlight fix, cold-cache bench hook. Two tasks that edit the same crate must not run together (W1 and W2 both touch `tsubame-win`/shell). Check GPT quota before launching C3/C4; substitute per the limit rule.
+
+## Update 8: P2 started (2026-11-18)
+- MEM1 (Opus, memory), C3 (GPT stopped early: base only, branch `t3/fileops-queue-undo-journal` @ 8d8b0cd) continued as C3b (Sonnet; GPT quota kept for later), C4 (Sonnet instead of GPT) launched. C4 merged: `tsubame-win::watch` (one IOCP thread for all watchers, 60 ms debounce, 0 idle CPU, apply 10k into 100k store ~4 ms), core store incremental API (`EntryStore::apply` etc.; `len()` is now the live count). UI hookup to tabs not done (docs/watcher.md).
