@@ -3,6 +3,7 @@ use tsubame_core::*;
 fn main() {
     for n in [100_000, 1_000_000] {
         streamed(n);
+        skewed(n);
     }
     for n in [100_000, 1_000_000] {
         let t = Instant::now();
@@ -103,6 +104,24 @@ fn streamed(n: usize) {
             t.elapsed()
         );
     }
+}
+/// Camera folder: every name shares one prefix key ("img_" + a digit run),
+/// the worst case for the sample sort's buckets.
+fn skewed(n: usize) {
+    let names: Vec<Vec<u16>> = (0..n).map(|i| format!("IMG_{:07}.JPG", (i * 7919) % n).encode_utf16().collect()).collect();
+    let inputs: Vec<_> = names.iter().enumerate().map(|(i, n)| EntryInput { name: n, size: i as u64, modified: i as i64, flags: 0 }).collect();
+    let mut s = EntryStore::new();
+    s.begin_stream();
+    s.push_batch(0, &inputs).unwrap();
+    let t = Instant::now();
+    s.end_stream();
+    print!("{n} camera names: end sort {:?}", t.elapsed());
+    for column in [Column::Name, Column::Type, Column::Size] {
+        let t = Instant::now();
+        s.sort(Sort { column, descending: false, folders_first: true });
+        print!("  {column:?} {:?}", t.elapsed());
+    }
+    println!();
 }
 fn s_push(s: &mut EntryStore, b: &[EntryInput<'_>]) {
     s.push_batch(0, b).unwrap();
