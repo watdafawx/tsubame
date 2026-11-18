@@ -87,7 +87,19 @@ pub fn set(obj: IDataObject) -> Result<u32, String> {
 
 pub fn read(staging: &Path, cap: u64, consume_cut: bool) -> Result<ClipRead, String> {
     let seq = unsafe { GetClipboardSequenceNumber() };
-    let obj = unsafe { OleGetClipboard() }.map_err(|e| format!("OleGetClipboard {:?}", e.code()))?;
+    // CLIPBRD_E_CANT_OPEN: another process (clipboard history, a clipboard
+    // listener) has it open right after a change; retry briefly like `set`
+    let mut tries = 0;
+    let obj = loop {
+        match unsafe { OleGetClipboard() } {
+            Ok(o) => break o,
+            Err(e) if e.code() == windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN && tries < 10 => {
+                tries += 1;
+                unsafe { windows::Win32::System::Threading::Sleep(20) };
+            }
+            Err(e) => return Err(format!("OleGetClipboard {:?}", e.code())),
+        }
+    };
     let info = read_info(&obj);
     let effect = match info.preferred {
         Some(e) if e & formats::EFFECT_MOVE != 0 && e & formats::EFFECT_COPY == 0 => formats::EFFECT_MOVE,
