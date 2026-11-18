@@ -90,6 +90,23 @@ fn name_of(p: &std::path::Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string_lossy().into_owned())
 }
 
+/// Names of the items `ops` (journal forwards) put into `folder`, in order:
+/// the real targets, after "keep both" gave some a new name.
+fn landed<'a>(ops: impl Iterator<Item = &'a Operation>, folder: &str) -> Vec<String> {
+    fn target(op: &Operation) -> Option<&PathBuf> {
+        match op {
+            Operation::Copy { target, .. } | Operation::Move { target, .. } | Operation::Rename { target, .. } => Some(target),
+            Operation::NewFolder(p) | Operation::NewFile(p) => Some(p),
+            Operation::Sequence(v) => v.last().and_then(target),
+            _ => None,
+        }
+    }
+    ops.filter_map(target)
+        .filter(|t| t.to_str().and_then(nav::parent).is_some_and(|p| p.eq_ignore_ascii_case(folder)))
+        .map(|t| name_of(t))
+        .collect()
+}
+
 /// Parent folders of everything `op` touches.
 fn touched(op: &Operation, out: &mut Vec<String>) {
     let mut add = |p: &PathBuf| {
@@ -280,6 +297,19 @@ impl Ops {
                     });
                 }
                 self.message = Some(result_text(&job, cancelled));
+                let mut job = job;
+                if !job.select.is_empty()
+                    && let Some(folder) = &job.folder
+                    && let Some((q, _)) = &self.queue
+                {
+                    // "keep both" may have renamed targets: select what really landed
+                    let j = q.journal();
+                    let j = j.lock().unwrap_or_else(|e| e.into_inner());
+                    let names = landed(j.undo_entries().iter().filter(|e| e.group == id).map(|e| &e.forward), folder);
+                    if !names.is_empty() {
+                        job.select = names;
+                    }
+                }
                 self.finished.push(Finished { folder: job.folder, select: job.select, touched: job.touched, history: job.history });
             }
         }
@@ -339,6 +369,19 @@ mod tests {
         touched(&Operation::Rename { source: "C:\\a\\y".into(), target: "C:\\A\\z".into() }, &mut v);
         touched(&Operation::Sequence(vec![Operation::Delete { path: "E:\\q\\r".into(), permanent: false }]), &mut v);
         assert_eq!(v, vec!["C:\\a".to_string(), "D:\\b".to_string(), "E:\\q".to_string()]);
+    }
+
+    #[test]
+    fn keep_both_names_are_what_gets_selected() {
+        let ops = [
+            Operation::Copy { source: "C:\\a\\x.txt".into(), target: "C:\\b\\x (2).txt".into() },
+            Operation::Sequence(vec![
+                Operation::Delete { path: "C:\\b\\y.txt".into(), permanent: false },
+                Operation::Move { source: "C:\\a\\y.txt".into(), target: "C:\\b\\y.txt".into() },
+            ]),
+            Operation::Copy { source: "C:\\a\\z.txt".into(), target: "C:\\other\\z.txt".into() },
+        ];
+        assert_eq!(landed(ops.iter(), "C:\\B"), ["x (2).txt", "y.txt"]);
     }
 
     #[test]

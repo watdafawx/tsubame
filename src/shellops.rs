@@ -70,7 +70,7 @@ pub struct ShellOps {
 enum ClipCtx {
     Set(String),
     Paste { folder: String },
-    Links { folder: String, names: Vec<String> },
+    Links { folder: String },
 }
 
 struct MenuCtx {
@@ -352,10 +352,10 @@ fn on_clip(a: &mut App, id: u64, reply: ClipReply) {
             (ClipCtx::Set(_), ClipReply::Set(Err(e))) => status(a, format!("Clipboard busy: {e}")),
             (ClipCtx::Paste { folder }, ClipReply::Read(Ok(r))) => paste_read(a, folder, r),
             (ClipCtx::Paste { .. }, ClipReply::Read(Err(e))) => status(a, format!("Can't read the clipboard: {e}")),
-            (ClipCtx::Links { folder, names }, ClipReply::Links(Ok(n))) => {
+            (ClipCtx::Links { folder }, ClipReply::Links(Ok(made))) => {
+                let n = made.len();
                 status(a, format!("Made {n} {}", if n == 1 { "shortcut" } else { "shortcuts" }));
-                let names = names.into_iter().map(|n| format!("{n}.lnk")).collect();
-                a.view.ops.changed(&folder, names);
+                a.view.ops.changed(&folder, made);
                 a.view.after_ops();
             }
             (ClipCtx::Links { folder, .. }, ClipReply::Links(Err(e))) => status(a, format!("Can't make shortcuts in {folder}: {e}")),
@@ -707,7 +707,7 @@ impl DropEvents for Drops {
 /// A drop (or paste) of `paths` into `folder` with effect `e`.
 fn drop_into(a: &mut App, paths: &[PathBuf], folder: String, e: u32, rejected: usize) {
     if e == EFFECT_LINK {
-        clip(a, ClipJob::Links { targets: paths.to_vec(), folder: PathBuf::from(&folder) }, ClipCtx::Links { folder, names: names_of(paths) });
+        clip(a, ClipJob::Links { targets: paths.to_vec(), folder: PathBuf::from(&folder) }, ClipCtx::Links { folder });
         return;
     }
     let target = PathBuf::from(&folder);
