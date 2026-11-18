@@ -109,7 +109,7 @@ impl Stress {
     fn submit_menu(&mut self, pool: &mut Pool, i: usize, hold_ms: Option<u32>) {
         let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
         let paths = self.paths[..n].to_vec();
-        pool.submit(Request::Menu { paths, x: self.pt.0, y: self.pt.1, extended: false, auto_close: Some(hold_ms.unwrap_or(0)), owner: None });
+        pool.submit(Request::Menu { paths, x: self.pt.0, y: self.pt.1, extended: false, auto_close: Some(hold_ms.unwrap_or(0)), owner: None, opts: Default::default() });
         self.asked = Some(Instant::now());
     }
 

@@ -26,7 +26,7 @@ mod menu;
 mod thumb;
 
 pub use icon::IconSource;
-pub use menu::MenuResult;
+pub use menu::{MenuOpts, MenuResult};
 
 use crate::bitmap::Bitmap;
 use std::collections::VecDeque;
@@ -53,7 +53,11 @@ pub enum Request {
     /// itself `ms` after it is shown (stress tests). `owner` overrides the
     /// menu owner window (wrong-owner experiment: pass a window of another
     /// thread).
-    Menu { paths: Vec<String>, x: i32, y: i32, extended: bool, auto_close: Option<u32>, owner: Option<isize> },
+    /// `opts`: background menu of a folder, extra entries on top, verbs the
+    /// app handles itself (see [`MenuOpts`]).
+    Menu { paths: Vec<String>, x: i32, y: i32, extended: bool, auto_close: Option<u32>, owner: Option<isize>, opts: MenuOpts },
+    /// Clipboard work and shortcut creation (`crate::dnd::clipboard`).
+    Clip(crate::dnd::clipboard::ClipJob),
     /// Simulates a hung shell call: `Sleep(ms)` without pumping.
     Hang { ms: u32 },
 }
@@ -65,6 +69,7 @@ impl Request {
             Request::Thumb { .. } => K_THUMB,
             Request::Menu { .. } => K_MENU,
             Request::Hang { .. } => K_HANG,
+            Request::Clip(_) => K_CLIP,
         }
     }
 }
@@ -74,6 +79,9 @@ const K_ICON: u8 = 1;
 const K_THUMB: u8 = 2;
 const K_MENU: u8 = 3;
 const K_HANG: u8 = 4;
+/// clipboard / shortcut jobs: not replaced as hung (a slow source app or a
+/// big virtual file is not a hang), like menus
+const K_CLIP: u8 = 5;
 
 #[derive(Clone)]
 pub struct Ticket {
@@ -93,6 +101,7 @@ pub enum Payload {
     /// probe found it (no generation).
     Thumb { bmp: Option<Bitmap>, from_cache: bool, probe_us: u64, error: Option<String> },
     Menu(MenuResult),
+    Clip(crate::dnd::clipboard::ClipReply),
     Hang,
 }
 
@@ -257,6 +266,8 @@ impl Pool {
         self.next_id += 1;
         let cancel = Arc::new(AtomicBool::new(false));
         let lane_thumb = self.thumb_workers > 0 && matches!(req, Request::Thumb { .. });
+        // clipboard jobs go to the back: they keep their order (the app submits
+        // one at a time) and the in-flight icon limit keeps the queue short
         let front = matches!(req, Request::Menu { .. } | Request::Thumb { .. }) && !lane_thumb;
         let job = Job { id, cancel: cancel.clone(), req, queued: Instant::now() };
         if lane_thumb {
@@ -310,7 +321,7 @@ impl Pool {
             let since = st.busy_since.load(Acquire);
             let kind = st.kind.load(Relaxed);
             let limit = self.hang_after.as_millis() as u64 * if kind == K_THUMB { self.thumb_hang_factor.max(1) as u64 } else { 1 };
-            if since == 0 || kind == K_MENU || now.saturating_sub(since) < limit {
+            if since == 0 || kind == K_MENU || kind == K_CLIP || now.saturating_sub(since) < limit {
                 continue;
             }
             if self.stats.workers_replaced as usize >= self.max_replaced {
@@ -423,7 +434,8 @@ fn run(req: Request, host: Option<HWND>, ui: HWND) -> Payload {
     match req {
         Request::Icon { src, size } => Payload::Icon(icon::get(&src, size)),
         Request::Thumb { path, size, cache_only } => thumb::get(&path, size, cache_only),
-        Request::Menu { paths, x, y, extended, auto_close, owner } => Payload::Menu(menu::show(host, &paths, x, y, extended, auto_close, owner, ui)),
+        Request::Menu { paths, x, y, extended, auto_close, owner, opts } => Payload::Menu(menu::show(host, &paths, x, y, extended, auto_close, owner, ui, &opts)),
+        Request::Clip(job) => Payload::Clip(crate::dnd::clipboard::run(job)),
         Request::Hang { ms } => {
             unsafe { Sleep(ms) };
             Payload::Hang

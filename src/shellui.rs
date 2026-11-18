@@ -184,7 +184,7 @@ pub struct ShellUi {
     pub use_factory: bool,
     /// last context menu outcome, for the status bar
     pub menu_status: String,
-    menu_pending: Option<u64>,
+    pub menu_pending: Option<u64>,
     menu_asked: Option<Instant>,
     /// set when a menu reply arrives (stress drivers read it)
     pub last_menu: Option<(MenuResult, u64)>,
@@ -612,6 +612,8 @@ impl ShellUi {
                 self.menu_status = "hung job finished".into();
                 true
             }
+            // clipboard replies belong to shellops (it takes them before this)
+            Payload::Clip(_) => false,
         }
     }
 
@@ -629,9 +631,10 @@ impl ShellUi {
         }
     }
 
-    pub fn open_menu(&mut self, pool: &mut Pool, paths: Vec<String>, x: i32, y: i32, extended: bool, owner: Option<isize>) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_menu(&mut self, pool: &mut Pool, paths: Vec<String>, x: i32, y: i32, extended: bool, owner: Option<isize>, opts: tsubame_win::shell::MenuOpts) {
         let n = paths.len();
-        let t = pool.submit(Request::Menu { paths, x, y, extended, auto_close: None, owner });
+        let t = pool.submit(Request::Menu { paths, x, y, extended, auto_close: None, owner, opts });
         self.menu_pending = Some(t.id);
         self.menu_asked = Some(Instant::now());
         self.menu_status = format!("menu for {n} item(s) requested{}", if owner.is_some() { " (owner = UI window, wrong thread)" } else { "" });

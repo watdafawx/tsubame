@@ -51,7 +51,9 @@ mod leak;
 mod lru;
 mod memdiag;
 mod nav;
+mod ole_glue;
 mod session;
+mod shellops;
 mod shellui;
 mod sidebar;
 mod single;
@@ -143,6 +145,8 @@ struct App {
     last_input: Instant,
     /// start of the last paint (streaming listings repaint at most ~60/s)
     last_paint: Instant,
+    /// menu entries, drag and drop, clipboard, delete (`src/shellops.rs`)
+    ops: shellops::ShellOps,
 }
 
 thread_local! {
@@ -355,6 +359,8 @@ fn main() {
         // no WS_CAPTION: the kit draws the title bar (WM_NCCALCSIZE gives it the whole window)
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         single::set_main(hwnd);
+        // OLE STA + drop target, before anything else uses COM on this thread
+        let drop_target = shellops::init(hwnd);
 
         // the saved geometry: the session first (when restoring), else the config
         let saved_geom = if restore_session && session_loaded.status == LoadStatus::Loaded {
@@ -481,8 +487,10 @@ fn main() {
                 caret_idle: false,
                 last_input: Instant::now(),
                 last_paint: Instant::now(),
+                ops: Default::default(),
             })
         });
+        with(|a| shellops::attach(a, hwnd, drop_target));
 
         // bench and timing runs measure at full screen (4K on rig); a restored
         // maximized window comes back maximized
@@ -876,7 +884,7 @@ fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32) {
         if paths.is_empty() {
             return;
         }
-        a.shell.open_menu(&mut a.pool, paths, sx, sy, extended, None);
+        shellops::open_item_menu(a, paths, sx, sy, extended);
     });
     invalidate(hwnd);
 }
@@ -933,6 +941,7 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
     if let Some((row, x, y)) = menu {
         open_menu(hwnd, row, x, y);
     }
+    shellops::after_frame(hwnd);
     for p in open {
         places::open_async(p);
     }
@@ -1119,7 +1128,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let r = with(|a| {
                     let mut repaint = false;
                     for r in a.pool.drain() {
-                        repaint |= a.shell.apply(r);
+                        match shellops::on_reply(a, r) {
+                            Some(r) => repaint |= a.shell.apply(r),
+                            None => repaint = true,
+                        }
                     }
                     // replies free lane slots: the queued misses go out now
                     a.shell.refill(&mut a.pool);
@@ -1188,6 +1200,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
+                // a press on a selected row waits: click or drag (shellops)
+                if msg == WM_LBUTTONDOWN && shellops::mouse_down(lp) {
+                    return LRESULT(0);
+                }
+                if msg == WM_LBUTTONUP {
+                    shellops::mouse_up(hwnd);
+                }
                 button_event(hwnd, msg, lp);
                 LRESULT(0)
             }
@@ -1195,6 +1214,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if with(|a| !std::mem::replace(&mut a.tracking, true)).unwrap_or(false) {
                     let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                     let _ = TrackMouseEvent(&mut tme);
+                }
+                if shellops::mouse_move(hwnd, lp, wp) {
+                    return LRESULT(0);
                 }
                 push(hwnd, Event::MouseMove { pos: dip_pt(lp) });
                 LRESULT(0)
@@ -1277,6 +1299,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if matches!(VIRTUAL_KEY(wp.0 as u16), VK_MENU | VK_LMENU | VK_RMENU) {
                     return LRESULT(0);
                 }
+                // file shortcuts of the list (copy, paste, delete, undo)
+                if !repeat && shellops::on_key(hwnd, wp.0 as u16, mods()) {
+                    return LRESULT(0);
+                }
                 push(hwnd, Event::KeyDown { key, mods: mods(), repeat });
                 LRESULT(0)
             }
@@ -1329,6 +1355,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 invalidate(hwnd);
                 LRESULT(0)
             }
+            WM_TIMER if wp.0 == shellops::OPS_TIMER => {
+                shellops::on_timer(hwnd);
+                LRESULT(0)
+            }
+            shellops::WM_APP_SHELLOPS => {
+                shellops::on_app(hwnd);
+                LRESULT(0)
+            }
             WM_TIMER if wp.0 == SAVE_TIMER => {
                 // the debounce window of a config/session change is over
                 save_flush(hwnd, false);
@@ -1358,6 +1392,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_DESTROY => {
                 // also reached when the app closes itself (last tab, leak gate)
                 save_flush(hwnd, true);
+                shellops::destroy(hwnd);
                 PostQuitMessage(0);
                 LRESULT(0)
             }
