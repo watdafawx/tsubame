@@ -25,7 +25,9 @@
 //!                 `--gate-sample N` (ops per counter sample, 1,000),
 //!                 `--gate-settle S` (idle seconds before the end sample, 5)
 //!   --stress m    S4 stress run (menu: 200 context menus; thumbs: 500 thumbnails)
-//!   --workers N   shell STA workers (default 2)
+//!   --workers N   shell STA workers for icons and menus (default 2)
+//!   --thumb-workers N  STA workers for thumbnails (default 2)
+//!   --view M      details (default), grid-small or grid-large
 //! Env: TSUBAME_ICON_PER_PATH=1 asks every real file's icon by path (worst
 //! case), TSUBAME_ICON_FACTORY=1 uses IShellItemImageFactory for per-path
 //! icons, TSUBAME_HANG_MS sets the hung-worker threshold (default 3000).
@@ -172,10 +174,10 @@ fn main() {
     let timing_mode = flag("--timing");
     let gate_mode = flag("--leak-gate");
     let stress_mode = arg_value(&args, "--stress").map(|m| if m == "thumbs" { stress::Mode::Thumbs } else { stress::Mode::Menu });
-    let workers = arg_value(&args, "--workers").and_then(|v| v.parse().ok()).unwrap_or(2usize);
+    let workers = arg_value(&args, "--workers").and_then(|v| v.parse().ok()).unwrap_or(shellui::ICON_WORKERS);
     let timing_dirs: Vec<String> = arg_value(&args, "--timing-dirs").map(|s| s.split(';').filter(|p| !p.is_empty()).map(str::to_string).collect()).unwrap_or_default();
     // first bare argument that is not a flag value is the folder to open
-    const VALUE_FLAGS: [&str; 12] = ["--dir", "--theme", "--density", "--stress", "--workers", "--timing-dirs", "--reps", "--gate-fixture", "--gate-navs", "--gate-tabs", "--gate-sample", "--gate-settle"];
+    const VALUE_FLAGS: [&str; 14] = ["--view", "--thumb-workers", "--dir", "--theme", "--density", "--stress", "--workers", "--timing-dirs", "--reps", "--gate-fixture", "--gate-navs", "--gate-tabs", "--gate-sample", "--gate-settle"];
     let positional = args.iter().enumerate().skip(1).find(|(i, a)| !a.starts_with("--") && !VALUE_FLAGS.contains(&args[i - 1].as_str())).map(|(_, a)| a.clone());
     let explicit_dir = arg_value(&args, "--dir").or(positional);
     let synthetic = bench_mode && explicit_dir.is_none();
@@ -219,7 +221,8 @@ fn main() {
         gfx.set_dpi(dpi);
 
         // shell workers: all COM and disk work happens there
-        let mut pool = Pool::new(workers, hwnd.0 as isize, WM_APP_SHELL);
+        let thumb_workers = arg_value(&args, "--thumb-workers").and_then(|v| v.parse().ok()).unwrap_or(shellui::THUMB_WORKERS);
+        let mut pool = Pool::with_lanes(workers, thumb_workers, hwnd.0 as isize, WM_APP_SHELL);
         if let Some(ms) = std::env::var("TSUBAME_HANG_MS").ok().and_then(|v| v.parse().ok()) {
             pool.hang_after = Duration::from_millis(ms);
         }
@@ -252,6 +255,13 @@ fn main() {
         ui.clipboard = Box::new(clip::WinClipboard(hwnd.0 as isize));
         ui.set_focus(Some(view::ID_LIST));
         view.zebra = flag("--zebra");
+        view.dpi = dpi;
+        if let Some(m) = arg_value(&args, "--view").and_then(|v| view::ViewMode::parse(&v)) {
+            view.set_mode(m);
+        }
+        if let Some(b) = bench_state.as_mut() {
+            b.grid = view.mode.is_grid();
+        }
 
         let timing = timing_mode.then(|| timing::Run::new(if timing_dirs.is_empty() { vec![start.clone()] } else { timing_dirs.clone() }, arg_value(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(3)));
         let gate = gate_mode.then(|| {
@@ -395,6 +405,7 @@ fn after_paint(hwnd: HWND, a: &mut App) {
 
 unsafe fn on_paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
+    let mut animating = false;
     unsafe { BeginPaint(hwnd, &mut ps) };
     let info = with(|a| {
         let t0 = Instant::now();
@@ -403,6 +414,7 @@ unsafe fn on_paint(hwnd: HWND) {
         let out = a.view.paint(&mut a.ui, &mut a.gfx, &mut a.shell);
         let total = t0.elapsed().as_secs_f32() * 1000.0;
         after_paint(hwnd, a);
+        animating = a.shell.needs_frame();
         if let Some(g) = a.gate.as_mut() {
             g.painted(a.gfx.path());
         }
@@ -414,6 +426,10 @@ unsafe fn on_paint(hwnd: HWND) {
         (total, a.gfx.end_ms, a.gfx.path(), out, final_frame)
     });
     let _ = unsafe { EndPaint(hwnd, &ps) };
+    // a thumbnail is fading in (or uploads were postponed): one more frame, which ends by itself
+    if animating {
+        invalidate(hwnd);
+    }
     let Some((total_ms, end_ms, path, out, final_frame)) = info else { return };
     if let Some(out) = out {
         after_frame(hwnd, out);
@@ -546,6 +562,18 @@ unsafe fn on_bench_tick(hwnd: HWND) {
                 a.pool.leaked_alive()
             ));
             extra.push_str(&format!("icon cache: {} entries, {:.2} MB, evictions {}\n", a.shell.icons.len(), a.shell.icons.bytes() as f64 / 1048576.0, a.shell.icons.evictions));
+            extra.push_str(&format!(
+                "thumb cache: {} entries, {:.2} MB (cap {} MB), evictions {}; device bitmaps {:.2} MB; view {} (thumbnail request {} px; at end {} in flight, {} queued)\n",
+                a.shell.thumbs.len(),
+                a.shell.thumbs.bytes() as f64 / 1048576.0,
+                shellui::THUMB_CAP_BYTES >> 20,
+                a.shell.thumbs.evictions,
+                a.gfx.bitmap_bytes() as f64 / 1048576.0,
+                a.view.mode.name(),
+                a.shell.thumb_px(),
+                a.shell.load().0,
+                a.shell.load().1
+            ));
             let (layouts, formats, bitmaps) = a.gfx.cache_counts();
             extra.push_str(&format!("gfx caches: {layouts} layouts, {formats} formats, {bitmaps} bitmaps\n"));
             if a.hang_bench {
@@ -832,6 +860,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 with(|a| {
                     a.gfx.set_dpi(dpi);
                     a.shell.set_icon_px(icon_px(dpi));
+                    a.view.dpi = dpi;
                 });
                 let r = &*(lp.0 as *const RECT);
                 let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -844,6 +873,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     for r in a.pool.drain() {
                         repaint |= a.shell.apply(r);
                     }
+                    // replies free lane slots: the queued misses go out now
+                    a.shell.refill(&mut a.pool);
                     let st = {
                         let App { view, shell, pool, stress, .. } = &mut *a;
                         stress.as_mut().map(|s| s.step(view.tab(), shell, pool, pt))

@@ -118,10 +118,21 @@ struct SendHandle(HANDLE);
 unsafe impl Send for SendHandle {}
 unsafe impl Sync for SendHandle {}
 
+/// Worker lanes. The icon lane takes icons, menus and the hang test (and
+/// thumbnails too while no thumbnail lane is configured); the thumbnail lane
+/// takes thumbnails only, so a screen of slow decodes never delays icons or a
+/// context menu. Each lane has its own queue and semaphore (a worker only
+/// ever waits for jobs it can take).
+const LANE_ICON: u8 = 0;
+const LANE_THUMB: u8 = 1;
+
 struct Shared {
     queue: Mutex<VecDeque<Job>>,
     /// count = jobs in `queue` (+ quit tokens)
     sem: SendHandle,
+    /// the thumbnail lane's queue and semaphore
+    tqueue: Mutex<VecDeque<Job>>,
+    tsem: SendHandle,
     hwnd: isize,
     wake_msg: u32,
     /// a wake message is in flight (cleared by `drain`)
@@ -150,6 +161,7 @@ struct WorkerState {
 
 struct Slot {
     state: Arc<WorkerState>,
+    lane: u8,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -171,6 +183,13 @@ pub struct Pool {
     pub hang_after: Duration,
     /// stop replacing hung workers after this many (each one is a leaked thread)
     pub max_replaced: usize,
+    /// thumbnail decodes legitimately take longer than icons: a thumbnail
+    /// worker is replaced after `hang_after * thumb_hang_factor`
+    pub thumb_hang_factor: u32,
+    /// size of the thumbnail lane; its threads start with the first thumbnail
+    /// request (a details-only session never pays for them)
+    thumb_workers: usize,
+    thumb_started: bool,
     stats: PoolStats,
 }
 
@@ -178,9 +197,12 @@ impl Pool {
     /// `workers` STA threads that post `wake_msg` to `hwnd` when replies are ready.
     pub fn new(workers: usize, hwnd: isize, wake_msg: u32) -> Pool {
         let sem = unsafe { CreateSemaphoreW(None, 0, i32::MAX, None).expect("CreateSemaphoreW") };
+        let tsem = unsafe { CreateSemaphoreW(None, 0, i32::MAX, None).expect("CreateSemaphoreW") };
         let shared = Arc::new(Shared {
             queue: Mutex::new(VecDeque::new()),
             sem: SendHandle(sem),
+            tqueue: Mutex::new(VecDeque::new()),
+            tsem: SendHandle(tsem),
             hwnd,
             wake_msg,
             posted: AtomicBool::new(false),
@@ -189,35 +211,74 @@ impl Pool {
             epoch: Instant::now(),
         });
         let (tx, rx) = channel();
-        let mut p = Pool { shared, rx, tx, slots: Vec::new(), abandoned: Vec::new(), next_id: 1, hang_after: Duration::from_secs(3), max_replaced: 8, stats: PoolStats::default() };
+        let mut p = Pool {
+            shared,
+            rx,
+            tx,
+            slots: Vec::new(),
+            abandoned: Vec::new(),
+            next_id: 1,
+            hang_after: Duration::from_secs(3),
+            max_replaced: 8,
+            thumb_hang_factor: 3,
+            thumb_workers: 0,
+            thumb_started: false,
+            stats: PoolStats::default(),
+        };
         for i in 0..workers.max(1) {
-            let s = p.spawn(i);
+            let s = p.spawn(i, LANE_ICON);
             p.slots.push(s);
         }
         p
     }
 
-    fn spawn(&self, idx: usize) -> Slot {
-        let state = Arc::new(WorkerState { busy_since: AtomicU64::new(0), kind: AtomicU8::new(K_IDLE), job: AtomicU64::new(0), abandoned: AtomicBool::new(false), tid: AtomicU32::new(0) });
-        let (sh, st, tx) = (self.shared.clone(), state.clone(), self.tx.clone());
-        std::thread::Builder::new().name(format!("shell-sta-{idx}")).stack_size(1 << 20).spawn(move || worker(idx, sh, st, tx)).expect("spawn shell worker");
-        Slot { state }
+    /// `workers` icon-lane threads (icons, menus) and `thumb_workers`
+    /// thumbnail-lane threads (started on the first thumbnail request, below
+    /// normal priority). `thumb_workers == 0`: thumbnails share the icon lane.
+    pub fn with_lanes(workers: usize, thumb_workers: usize, hwnd: isize, wake_msg: u32) -> Pool {
+        let mut p = Pool::new(workers, hwnd, wake_msg);
+        p.thumb_workers = thumb_workers;
+        p
     }
 
-    /// Queues a request. Never blocks on a worker. Context menus and
-    /// thumbnails go to the front of the queue, icons to the back.
+    fn spawn(&self, idx: usize, lane: u8) -> Slot {
+        let state = Arc::new(WorkerState { busy_since: AtomicU64::new(0), kind: AtomicU8::new(K_IDLE), job: AtomicU64::new(0), abandoned: AtomicBool::new(false), tid: AtomicU32::new(0) });
+        let (sh, st, tx) = (self.shared.clone(), state.clone(), self.tx.clone());
+        std::thread::Builder::new().name(format!("shell-sta-{idx}")).stack_size(1 << 20).spawn(move || worker(idx, lane, sh, st, tx)).expect("spawn shell worker");
+        Slot { state, lane }
+    }
+
+    /// Queues a request. Never blocks on a worker. Context menus go to the
+    /// front of the icon queue, icons to its back. Thumbnails go to the back
+    /// of the thumbnail lane (FIFO: the caller orders them, nearest first); if
+    /// the pool has no thumbnail lane they take the front of the icon queue.
     pub fn submit(&mut self, req: Request) -> Ticket {
         let id = self.next_id;
         self.next_id += 1;
         let cancel = Arc::new(AtomicBool::new(false));
-        let front = matches!(req, Request::Menu { .. } | Request::Thumb { .. });
+        let lane_thumb = self.thumb_workers > 0 && matches!(req, Request::Thumb { .. });
+        let front = matches!(req, Request::Menu { .. } | Request::Thumb { .. }) && !lane_thumb;
         let job = Job { id, cancel: cancel.clone(), req, queued: Instant::now() };
-        {
-            let mut q = self.shared.queue.lock().unwrap();
-            if front { q.push_front(job) } else { q.push_back(job) }
-        }
-        unsafe {
-            let _ = ReleaseSemaphore(self.shared.sem.0, 1, None);
+        if lane_thumb {
+            if !self.thumb_started {
+                self.thumb_started = true;
+                for i in 0..self.thumb_workers {
+                    let s = self.spawn(self.slots.len() + i, LANE_THUMB);
+                    self.slots.push(s);
+                }
+            }
+            self.shared.tqueue.lock().unwrap().push_back(job);
+            unsafe {
+                let _ = ReleaseSemaphore(self.shared.tsem.0, 1, None);
+            }
+        } else {
+            {
+                let mut q = self.shared.queue.lock().unwrap();
+                if front { q.push_front(job) } else { q.push_back(job) }
+            }
+            unsafe {
+                let _ = ReleaseSemaphore(self.shared.sem.0, 1, None);
+            }
         }
         self.stats.submitted += 1;
         Ticket { id, cancel }
@@ -236,7 +297,7 @@ impl Pool {
     /// user). The UI arms its hang watchdog only while this is true, so an
     /// idle app has no timer.
     pub fn busy(&self) -> bool {
-        !self.shared.queue.lock().unwrap().is_empty() || self.slots.iter().any(|s| matches!(s.state.kind.load(Relaxed), K_ICON | K_THUMB | K_HANG))
+        !self.shared.queue.lock().unwrap().is_empty() || !self.shared.tqueue.lock().unwrap().is_empty() || self.slots.iter().any(|s| matches!(s.state.kind.load(Relaxed), K_ICON | K_THUMB | K_HANG))
     }
 
     /// Replaces workers stuck in one job for longer than `hang_after`.
@@ -248,7 +309,8 @@ impl Pool {
             let st = &self.slots[i].state;
             let since = st.busy_since.load(Acquire);
             let kind = st.kind.load(Relaxed);
-            if since == 0 || kind == K_MENU || now.saturating_sub(since) < self.hang_after.as_millis() as u64 {
+            let limit = self.hang_after.as_millis() as u64 * if kind == K_THUMB { self.thumb_hang_factor.max(1) as u64 } else { 1 };
+            if since == 0 || kind == K_MENU || now.saturating_sub(since) < limit {
                 continue;
             }
             if self.stats.workers_replaced as usize >= self.max_replaced {
@@ -256,7 +318,8 @@ impl Pool {
             }
             st.abandoned.store(true, SeqCst);
             lost.push(st.job.load(Relaxed));
-            let fresh = self.spawn(i);
+            let lane = self.slots[i].lane;
+            let fresh = self.spawn(i, lane);
             let old = std::mem::replace(&mut self.slots[i], fresh);
             self.abandoned.push(old.state);
             self.stats.workers_replaced += 1;
@@ -283,7 +346,9 @@ impl Drop for Pool {
         // workers exit when they next wake; hung ones are left to ExitProcess
         self.shared.quit.store(true, SeqCst);
         unsafe {
-            let _ = ReleaseSemaphore(self.shared.sem.0, self.slots.len() as i32, None);
+            let n = self.slots.len() as i32;
+            let _ = ReleaseSemaphore(self.shared.sem.0, n, None);
+            let _ = ReleaseSemaphore(self.shared.tsem.0, n, None);
         }
         for s in &self.slots {
             let tid = s.state.tid.load(Relaxed);
@@ -296,19 +361,25 @@ impl Drop for Pool {
     }
 }
 
-fn worker(idx: usize, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sender<Reply>) {
+fn worker(idx: usize, lane: u8, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sender<Reply>) {
     unsafe {
         let _ = OleInitialize(None);
         st.tid.store(GetCurrentThreadId(), Relaxed);
+        let thumb_lane = lane == LANE_THUMB;
+        if thumb_lane {
+            // decodes must not compete with the UI thread's frames
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        }
+        let (sem, queue) = if thumb_lane { (sh.tsem.0, &sh.tqueue) } else { (sh.sem.0, &sh.queue) };
         let host = menu::host_window();
         icon::warm_up();
         loop {
-            let r = MsgWaitForMultipleObjectsEx(Some(&[sh.sem.0]), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            let r = MsgWaitForMultipleObjectsEx(Some(&[sem]), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             if r == WAIT_OBJECT_0 {
                 if sh.quit.load(SeqCst) {
                     break;
                 }
-                let Some(job) = sh.queue.lock().unwrap().pop_front() else { continue };
+                let Some(job) = queue.lock().unwrap().pop_front() else { continue };
                 if job.cancel.load(Relaxed) {
                     sh.skipped.fetch_add(1, Relaxed);
                     continue;

@@ -100,32 +100,48 @@ impl Sense {
     }
     /// Rows of height `h` starting at `y0`.
     pub const fn cells(mut self, y0: f32, h: f32) -> Sense {
-        self.cells = Some(Cells { horizontal: false, origin: y0, size: h });
+        self.cells = Some(Cells { horizontal: false, origin: y0, size: h, cross: None });
         self
     }
     /// Columns of width `w` starting at `x0`.
     pub const fn cells_x(mut self, x0: f32, w: f32) -> Sense {
-        self.cells = Some(Cells { horizontal: true, origin: x0, size: w });
+        self.cells = Some(Cells { horizontal: true, origin: x0, size: w, cross: None });
+        self
+    }
+    /// A grid of `w` x `h` cells starting at (`x0`, `y0`): hover changes
+    /// per cell in both axes (the thumbnail grid).
+    pub const fn cells_2d(mut self, x0: f32, w: f32, y0: f32, h: f32) -> Sense {
+        self.cells = Some(Cells { horizontal: false, origin: y0, size: h, cross: Some((x0, w)) });
         self
     }
 }
 
-/// Equal cells along one axis (see `Sense::cells`).
+/// Equal cells along one axis (see `Sense::cells`), or a 2D grid when
+/// `cross` (x origin, width) is set: then `origin`/`size` are the rows (y).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cells {
     pub horizontal: bool,
     pub origin: f32,
     pub size: f32,
+    pub cross: Option<(f32, f32)>,
 }
 
 impl Cells {
-    /// Cell index of `p` (may be negative or past the end).
+    /// Cell index of `p` (may be negative or past the end). In 2D, one
+    /// number per (row, column) pair: only equality of two results matters.
     pub fn index(&self, p: Pt) -> i64 {
         if self.size <= 0.0 {
             return 0;
         }
         let v = if self.horizontal { p.x } else { p.y };
-        ((v - self.origin) / self.size).floor() as i64
+        let a = ((v - self.origin) / self.size).floor() as i64;
+        match self.cross {
+            Some((x0, w)) if w > 0.0 => {
+                let b = ((p.x - x0) / w).floor() as i64;
+                (a << 24) ^ (b.clamp(-1, 0xff_fffe) + 1)
+            }
+            _ => a,
+        }
     }
 }
 

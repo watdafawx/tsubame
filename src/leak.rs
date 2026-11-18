@@ -688,6 +688,7 @@ impl Gate {
             Phase::Trim => {
                 let before = shell.icons.len();
                 shell.icons = crate::lru::Lru::new(crate::shellui::ICON_CAP_ITEMS, crate::shellui::ICON_CAP_BYTES);
+                shell.thumbs = crate::lru::Lru::new(crate::shellui::THUMB_CAP_ITEMS, crate::shellui::THUMB_CAP_BYTES);
                 self.trim_note = format!("icon cache cleared ({before} entries, cap {} items / {} MB)", crate::shellui::ICON_CAP_ITEMS, crate::shellui::ICON_CAP_BYTES / 1048576);
                 self.trim = Some(Snap::take());
                 self.memdiag.push_str(&crate::memdiag::sample_opt("gate_trim"));

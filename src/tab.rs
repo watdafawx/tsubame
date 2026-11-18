@@ -10,7 +10,7 @@ use crate::nav::{self, History};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use tsubame_core::{EntryInput, EntryStore, FOLDER, FilterMode, HIDDEN, READONLY, REPARSE, SYSTEM, Selection, Sort};
-use tsubame_ui::ListState;
+use tsubame_ui::{GridState, ListState};
 use tsubame_win::enumerate::{Batch, CancelToken, Done, Enumerator, Message, Wake};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +54,10 @@ pub struct Tab {
     /// text in the filter box (applied to the store)
     pub filter: String,
     pub list: ListState,
+    /// scroll and cursor of the grid view (the details view keeps `list`)
+    pub grid: GridState,
+    /// selection before a Ctrl+rubber-band started (the band adds to it)
+    pub band_base: Vec<tsubame_core::EntryId>,
     pub load: Load,
     /// entries the enumerator delivered so far
     pub delivered: usize,
@@ -113,6 +117,8 @@ impl Tab {
             sort: Sort { column: tsubame_core::Column::Name, descending: false, folders_first: true },
             filter: String::new(),
             list: ListState::new(row_h),
+            grid: GridState::new(96.0, 118.0),
+            band_base: Vec::new(),
             load: Load::Done,
             delivered: 0,
             timing: Timing::new(),
@@ -166,8 +172,7 @@ impl Tab {
         self.store.sort(self.sort);
         self.sel.clear();
         self.filter.clear();
-        self.list.scroll = 0.0;
-        self.list.cursor = 0;
+        self.reset_view();
         self.delivered = 0;
         self.load = Load::Loading;
         self.timing = Timing::new();
@@ -257,6 +262,22 @@ impl Tab {
         self.sort = if self.sort.column == col { Sort { descending: !self.sort.descending, ..self.sort } } else { Sort { column: col, descending: false, folders_first: true } };
         self.store.sort(self.sort);
         self.list.scroll = 0.0;
+        self.grid.scroll = 0.0;
+    }
+
+    /// Changes whenever this tab shows another folder or listing (or another
+    /// tab becomes the active one): the shell drops its pending work then.
+    pub fn nav_key(&self) -> u64 {
+        self.id.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.enum_gen
+    }
+
+    /// Scroll and cursor back to the top (a new listing, a new filter).
+    fn reset_view(&mut self) {
+        self.list.scroll = 0.0;
+        self.list.cursor = 0;
+        self.grid.scroll = 0.0;
+        self.grid.cursor = 0;
+        self.band_base.clear();
     }
 
     /// Applies the filter box text. Typing one more character only searches
@@ -268,8 +289,7 @@ impl Tab {
         let mode = if text.contains(['*', '?']) { FilterMode::Glob } else { FilterMode::Substring };
         self.filter = text.to_string();
         self.store.filter(text, mode);
-        self.list.scroll = 0.0;
-        self.list.cursor = 0;
+        self.reset_view();
         self.sel.clear();
     }
 

@@ -792,3 +792,309 @@ fn column_header_click_sorts_and_grip_resizes() {
     let r = run(&mut h);
     assert_eq!(r.sort, None, "releasing a resize drag is not a sort click");
 }
+
+// -------------------------------------------------------------------- grid
+
+struct Tiles {
+    n: usize,
+    drawn: Vec<usize>,
+    selected: std::collections::BTreeSet<usize>,
+    base: std::collections::BTreeSet<usize>,
+    anchor: usize,
+    ended: usize,
+}
+
+impl Tiles {
+    fn new(n: usize) -> Tiles {
+        Tiles { n, drawn: Vec::new(), selected: Default::default(), base: Default::default(), anchor: 0, ended: 0 }
+    }
+    fn sel(&self) -> Vec<usize> {
+        self.selected.iter().copied().collect()
+    }
+}
+
+impl GridSource for Tiles {
+    fn len(&self) -> usize {
+        self.n
+    }
+    fn is_selected(&self, i: usize) -> bool {
+        self.selected.contains(&i)
+    }
+    fn draw_cell(&mut self, c: &mut dyn Canvas, t: &Theme, i: usize, r: Rect, _st: RowState) {
+        self.drawn.push(i);
+        c.text("cell", r, t.font(), t.text);
+    }
+    fn select(&mut self, i: usize, mods: Mods, by: SelectBy) {
+        if mods.shift {
+            self.selected = (self.anchor.min(i)..=self.anchor.max(i)).collect();
+        } else if mods.ctrl && by != SelectBy::Key {
+            if !self.selected.remove(&i) {
+                self.selected.insert(i);
+            }
+            self.anchor = i;
+        } else if !mods.ctrl {
+            self.selected = [i].into();
+            self.anchor = i;
+        }
+    }
+    fn select_none(&mut self) {
+        self.selected.clear();
+    }
+    fn band_begin(&mut self, additive: bool) {
+        if !additive {
+            self.selected.clear();
+        }
+        self.base = self.selected.clone();
+    }
+    fn band_update(&mut self, cells: Option<BandCells>, cols: usize) {
+        self.selected = self.base.clone();
+        if let Some(b) = cells {
+            self.selected.extend(b.indices(cols, self.n));
+        }
+    }
+    fn band_end(&mut self) {
+        self.ended += 1;
+    }
+}
+
+const GRID: Id = Id::new("grid");
+// cells area 586 x 440: 5 columns of 100, 4.4 rows of 100
+const GRID_RECT: Rect = Rect::new(0.0, 40.0, 600.0, 440.0);
+
+fn grid_frame(h: &mut Harness, st: &mut GridState, src: &mut Tiles) -> GridResponse {
+    src.drawn.clear();
+    let mut resp = GridResponse::default();
+    h.frame(|ui, c| resp = grid(ui, c, GRID, GRID_RECT, st, src));
+    resp
+}
+
+/// Centre of cell `i` on screen for a grid scrolled to the top.
+fn tile_pt(i: usize) -> (f32, f32) {
+    ((i % 5) as f32 * 100.0 + 50.0, GRID_RECT.y + (i / 5) as f32 * 100.0 + 50.0)
+}
+
+#[test]
+fn grid_draws_only_visible_cells_and_reflows() {
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = Tiles::new(1_000_000);
+    let r = grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(r.cols, 5);
+    assert_eq!(r.range, (0, 25), "5 columns x 5 rows touch the viewport");
+    assert_eq!(src.drawn, (0..25).collect::<Vec<_>>());
+    assert_eq!(h.c.texts().len(), 25, "one draw per visible cell");
+    // far down at a million cells: only that window
+    st.scroll = 100_000.0 * 100.0;
+    let r = grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(r.range, (500_000, 500_025));
+    // prefetch margin: 4 rows more on each side
+    let (a, b) = st.visible_with(src.n, 4);
+    assert_eq!((a, b), (500_000 - 20, 500_025 + 20));
+    // narrower: 3 columns; the top visible cell stays on screen
+    st.scroll = 10.0 * 100.0; // top row 10 = cell 50
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.top_index(), 50);
+    let narrow = Rect::new(0.0, 40.0, 14.0 + 300.0, 440.0);
+    let mut resp = GridResponse::default();
+    h.frame(|ui, c| resp = grid(ui, c, GRID, narrow, &mut st, &mut src));
+    assert_eq!(resp.cols, 3);
+    assert!(st.top_index() <= 50 && st.top_index() + 3 > 50, "cell 50 stays in the top row: {}", st.top_index());
+    // empty grid draws nothing
+    let mut none = Tiles::new(0);
+    let mut st2 = GridState::new(100.0, 100.0);
+    let r = grid_frame(&mut h, &mut st2, &mut none);
+    assert_eq!(r.range, (0, 0));
+    assert!(none.drawn.is_empty());
+}
+
+#[test]
+fn grid_navigation_targets() {
+    use Key::*;
+    // 5 columns, 12 cells: rows 0..=2, the last row has cells 10, 11
+    let t = |k, cur| nav_target(k, cur, 5, 12, 2);
+    assert_eq!(t(Right, 4), Some(5), "wraps to the next row");
+    assert_eq!(t(Left, 5), Some(4));
+    assert_eq!(t(Left, 0), Some(0));
+    assert_eq!(t(Down, 3), Some(8));
+    assert_eq!(t(Down, 8), Some(11), "short last row: its last cell");
+    assert_eq!(t(Down, 11), Some(11), "already on the last row");
+    assert_eq!(t(Up, 7), Some(2));
+    assert_eq!(t(Up, 2), Some(2), "top row stays");
+    assert_eq!(t(PageDown, 1), Some(11), "two rows down is cell 11 (col 1)");
+    assert_eq!(t(PageDown, 3), Some(11), "clamps to the last cell of the last row");
+    assert_eq!(t(PageUp, 11), Some(1));
+    assert_eq!(t(PageUp, 3), Some(3), "top row: same column");
+    assert_eq!(t(Home, 9), Some(0));
+    assert_eq!(t(End, 0), Some(11));
+    assert_eq!(t(Enter, 0), None);
+    assert_eq!(nav_target(Down, 0, 5, 0, 2), None);
+}
+
+#[test]
+fn grid_click_keys_and_activation() {
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = Tiles::new(40);
+    grid_frame(&mut h, &mut st, &mut src);
+    let (x, y) = tile_pt(7);
+    h.down(x, y);
+    h.up(x, y);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!((st.cursor, src.sel()), (7, vec![7]));
+    assert_eq!(h.ui.focus(), Some(GRID), "a press focuses the grid");
+    // Shift+click: range in index order; Ctrl+click toggles
+    let (x, y) = tile_pt(11);
+    h.down_m(x, y, Mods::SHIFT, false);
+    h.up(x, y);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(src.sel(), vec![7, 8, 9, 10, 11]);
+    let (x, y) = tile_pt(9);
+    h.down_m(x, y, Mods::CTRL, false);
+    h.up(x, y);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(src.sel(), vec![7, 8, 10, 11]);
+    // arrows: Down moves a row, Shift+Right extends
+    h.key(Key::Down, Mods::NONE);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!((st.cursor, src.sel()), (14, vec![14]));
+    h.key(Key::Right, Mods::SHIFT);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!((st.cursor, src.sel()), (15, vec![14, 15]));
+    // End scrolls the last row into view, Home goes back
+    h.key(Key::End, Mods::NONE);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.cursor, 39);
+    assert!(st.scroll > 0.0 && st.scroll == st.max_scroll(40), "last row visible: {}", st.scroll);
+    h.key(Key::Home, Mods::NONE);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!((st.cursor, st.scroll), (0, 0.0));
+    // Enter and double click activate
+    h.key(Key::Enter, Mods::NONE);
+    let r = grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(r.activated, Some(0));
+    let (x, y) = tile_pt(3);
+    h.down_m(x, y, Mods::NONE, true);
+    h.up(x, y);
+    let r = grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(r.activated, Some(3));
+    // right click: context at the cell
+    let (x, y) = tile_pt(2);
+    h.push(Event::MouseDown { pos: Pt::new(x, y), button: Button::Right, mods: Mods::NONE, double: false });
+    h.push(Event::MouseUp { pos: Pt::new(x, y), button: Button::Right, mods: Mods::NONE });
+    let r = grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(r.context.map(|c| c.0), Some(Some(2)));
+}
+
+#[test]
+fn grid_hover_changes_per_cell_in_both_axes() {
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = Tiles::new(40);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert!(h.move_to(50.0, 90.0));
+    grid_frame(&mut h, &mut st, &mut src);
+    assert!(!h.move_to(60.0, 95.0), "same cell: no repaint");
+    assert!(h.move_to(150.0, 95.0), "next column: repaint");
+    grid_frame(&mut h, &mut st, &mut src);
+    assert!(h.move_to(150.0, 145.0), "next row: repaint");
+}
+
+#[test]
+fn grid_rubber_band_selects_covered_cells_and_autoscrolls() {
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = Tiles::new(40);
+    grid_frame(&mut h, &mut st, &mut src);
+    src.selected = [30].into(); // an old selection
+    // press on empty space right of the 5th column, drag up-left
+    h.down(550.0, 45.0);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert!(src.selected.is_empty(), "a press on empty space clears");
+    assert!(!st.banding(), "not past the dead zone yet");
+    h.move_to(150.0, 160.0);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert!(st.banding());
+    // x 150..550 -> columns 1..=4, y 5..120 -> rows 0..=1
+    assert_eq!(src.sel(), vec![1, 2, 3, 4, 6, 7, 8, 9]);
+    let accent = h.ui.theme.accent;
+    let band = h.c.ops.iter().filter(|o| matches!(o, Op::Fill(_, c, a) if *c == accent && *a < 1.0)).count();
+    assert_eq!(band, 1, "the band rectangle is drawn");
+    // shrink the band: the selection follows
+    h.move_to(250.0, 100.0);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(src.sel(), vec![2, 3, 4], "x 250..550 -> cols 2..=4, y 5..60 -> row 0");
+    // drag below the area: it scrolls on its own and asks for frames
+    let before = st.scroll;
+    h.move_to(250.0, 500.0);
+    src.drawn.clear();
+    let out = h.frame(|ui, c| {
+        grid(ui, c, GRID, GRID_RECT, &mut st, &mut src);
+    });
+    assert!(st.scroll > before, "autoscroll moved: {} -> {}", before, st.scroll);
+    assert!(out.repaint, "asks for the next frame");
+    let out2 = h.frame(|ui, c| {
+        grid(ui, c, GRID, GRID_RECT, &mut st, &mut src);
+    });
+    assert!(out2.capture, "mouse stays captured while the band is held");
+    assert!(src.selected.len() > 3, "newly covered rows join: {:?}", src.sel());
+    // release ends the band; the selection stays
+    let n = src.selected.len();
+    h.up(250.0, 500.0);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(src.ended, 1);
+    assert!(!st.banding());
+    assert_eq!(src.selected.len(), n);
+}
+
+#[test]
+fn grid_ctrl_band_keeps_the_old_selection_and_a_plain_click_is_not_a_band() {
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = Tiles::new(40);
+    grid_frame(&mut h, &mut st, &mut src);
+    src.selected = [30].into();
+    h.down_m(550.0, 45.0, Mods::CTRL, false);
+    grid_frame(&mut h, &mut st, &mut src);
+    h.move_to(450.0, 45.0 + 70.0);
+    grid_frame(&mut h, &mut st, &mut src);
+    // x 450..550 -> column 4, y 5..75 -> row 0
+    assert_eq!(src.sel(), vec![4, 30]);
+    h.up(450.0, 115.0);
+    grid_frame(&mut h, &mut st, &mut src);
+    let ended = src.ended;
+    // a plain click on empty space: clears, no band (the dead zone)
+    src.selected = [5].into();
+    h.down(550.0, 300.0);
+    h.up(550.0, 300.0);
+    grid_frame(&mut h, &mut st, &mut src);
+    assert!(src.selected.is_empty());
+    assert_eq!(src.ended, ended, "no band ended for a plain click");
+}
+
+#[test]
+fn grid_wheel_scrolls_and_clamps() {
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = Tiles::new(100); // 20 rows = 2000 tall
+    grid_frame(&mut h, &mut st, &mut src);
+    h.push(Event::Wheel { pos: Pt::new(100.0, 200.0), dy: -1.0, dx: 0.0, mods: Mods::NONE });
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.scroll, 66.0, "one notch = 3 detail rows, never less");
+    h.push(Event::Wheel { pos: Pt::new(100.0, 200.0), dy: 100.0, dx: 0.0, mods: Mods::NONE });
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.scroll, 0.0);
+    h.push(Event::Wheel { pos: Pt::new(100.0, 200.0), dy: -1000.0, dx: 0.0, mods: Mods::NONE });
+    grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.scroll, st.max_scroll(100));
+}
+
+#[test]
+fn image_a_and_device_cache_in_the_test_canvas() {
+    let mut c = TestCanvas::new(100.0, 100.0);
+    c.device = Some(Default::default());
+    assert!(!c.has_image("k"));
+    c.image_a("k", 1, 1, &[0], Rect::new(0.0, 0.0, 10.0, 10.0), 0.5);
+    assert!(c.has_image("k"));
+    assert!(matches!(c.ops.last(), Some(Op::ImageA(k, _, a)) if k == "k" && *a == 0.5));
+    assert_eq!(c.images(), vec!["k"]);
+}

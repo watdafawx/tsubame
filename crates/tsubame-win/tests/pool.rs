@@ -75,3 +75,20 @@ fn icon_sizes_direct() {
         eprintln!("{src:?} {size}: {:?} in {} us", b.as_ref().map(|b| (b.w, b.h)), t.elapsed().as_micros());
     }
 }
+
+#[test]
+fn thumbnail_lane_is_independent_of_the_icon_lane() {
+    // one icon worker stuck in a long job: a thumbnail still comes back,
+    // because thumbnails run on their own lane (its threads start lazily)
+    let mut pool = Pool::with_lanes(1, 1, 0, 0x8001);
+    pool.submit(Request::Hang { ms: 1_500 });
+    std::thread::sleep(Duration::from_millis(100));
+    let t = Instant::now();
+    let th = pool.submit(Request::Thumb { path: r"C:\Windows\explorer.exe".into(), size: 64, cache_only: false });
+    let replies = wait(&mut pool, 1, Duration::from_secs(10));
+    assert!(replies.iter().any(|r| r.id == th.id), "thumbnail answered while the icon worker hangs");
+    assert!(t.elapsed() < Duration::from_millis(1_200), "did not wait behind the hang: {:?}", t.elapsed());
+    let Some(Payload::Thumb { bmp, .. }) = replies.iter().find(|r| r.id == th.id).map(|r| &r.payload) else { panic!() };
+    let b = bmp.as_ref().expect("a bitmap for explorer.exe");
+    assert!(b.w.max(b.h) <= 64, "cut to the size asked: {}x{}", b.w, b.h);
+}

@@ -19,15 +19,67 @@ use crate::shellui::ShellUi;
 use crate::sidebar::Sidebar;
 use crate::tab::{Load, Tab};
 use crate::tabs::Tabs;
-use tsubame_core::{EntryStore, Selection};
+use crate::shellui::GridPic;
+use tsubame_core::{EntryId, EntryStore, Selection};
 use tsubame_ui::{
-    Button, Canvas, Cursor, DARK, Density, Event, HeaderCol, Id, Key, LIGHT, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, TabStrip, TextInput, Theme, Ui, column_header, f, list, tab_strip, text_input,
+    BandCells, Button, Canvas, Cursor, DARK, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, LIGHT, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, TabStrip, TextInput, Theme, Ui, column_header, f, grid, list, tab_strip, text_input,
 };
 use tsubame_win::enumerate::Wake;
 
 pub const ICON_DIP: f32 = 16.0;
 
+/// How a folder is shown. One global setting (all tabs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Details,
+    GridSmall,
+    GridLarge,
+}
+
+impl ViewMode {
+    pub fn is_grid(self) -> bool {
+        self != ViewMode::Details
+    }
+    /// (cell width, cell height, picture box, type icon) in DIPs. The cell is
+    /// the picture box, a 6 DIP gap, two label lines and 8 DIP of padding.
+    pub fn dims(self) -> (f32, f32, f32, f32) {
+        match self {
+            ViewMode::GridLarge => (152.0, 182.0, 128.0, 64.0),
+            _ => (96.0, 118.0, 64.0, 48.0),
+        }
+    }
+    pub fn next(self) -> ViewMode {
+        match self {
+            ViewMode::Details => ViewMode::GridSmall,
+            ViewMode::GridSmall => ViewMode::GridLarge,
+            ViewMode::GridLarge => ViewMode::Details,
+        }
+    }
+    pub fn parse(s: &str) -> Option<ViewMode> {
+        match s.to_ascii_lowercase().as_str() {
+            "details" | "list" => Some(ViewMode::Details),
+            "grid-small" | "small" | "grid" => Some(ViewMode::GridSmall),
+            "grid-large" | "large" => Some(ViewMode::GridLarge),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewMode::Details => "details",
+            ViewMode::GridSmall => "grid-small",
+            ViewMode::GridLarge => "grid-large",
+        }
+    }
+}
+
+/// Height of one label line in the grid (DIPs).
+const LABEL_LINE: f32 = 16.0;
+/// Slots of the direct-mapped label split cache (16 bytes each).
+const LABEL_SLOTS: usize = 1024;
+
 const ID_TABS: Id = Id::new("tabs");
+const ID_VIEW: Id = Id::new("view-mode");
 pub const ID_LIST: Id = Id::new("details");
 pub const ID_FILTER: Id = Id::new("filter");
 const ID_PATH: Id = Id::new("pathbar");
@@ -52,6 +104,9 @@ pub const CMD_THEME: u32 = 10;
 pub const CMD_DENSITY: u32 = 11;
 pub const CMD_ZEBRA: u32 = 12;
 pub const CMD_REFRESH: u32 = 13;
+pub const CMD_VIEW_DETAILS: u32 = 14;
+pub const CMD_VIEW_GRID_SMALL: u32 = 15;
+pub const CMD_VIEW_GRID_LARGE: u32 = 16;
 /// non-global: only when no widget took the key
 pub const CMD_SELECT_ALL: u32 = 20;
 pub const CMD_ESCAPE: u32 = 21;
@@ -85,6 +140,9 @@ pub fn bind_shortcuts(ui: &mut Ui) {
     s.bind(Key::Char('Z'), Mods::CTRL_SHIFT, CMD_ZEBRA, true);
     s.bind(Key::F(5), Mods::NONE, CMD_REFRESH, true);
     s.bind(Key::Char('R'), Mods::CTRL, CMD_REFRESH, true);
+    s.bind(Key::Char('1'), Mods::CTRL_SHIFT, CMD_VIEW_DETAILS, true);
+    s.bind(Key::Char('2'), Mods::CTRL_SHIFT, CMD_VIEW_GRID_SMALL, true);
+    s.bind(Key::Char('3'), Mods::CTRL_SHIFT, CMD_VIEW_GRID_LARGE, true);
     s.bind(Key::Char('A'), Mods::CTRL, CMD_SELECT_ALL, false);
     s.bind(Key::Escape, Mods::NONE, CMD_ESCAPE, false);
     s.bind(Key::Backspace, Mods::NONE, CMD_BACKSPACE_UP, false);
@@ -117,6 +175,12 @@ pub struct View {
     pub density: Density,
     pub dark: bool,
     pub zebra: bool,
+    /// details or grid (one setting for every tab)
+    pub mode: ViewMode,
+    /// window DPI (main sets it): thumbnails are made for this
+    pub dpi: f32,
+    /// direct-mapped cache of where a grid label breaks: (hash, first line bytes)
+    labels: Vec<(u64, u32)>,
     pub side: Sidebar,
     wake: Wake,
     rowbuf: Box<RowBuf>,
@@ -164,6 +228,9 @@ impl View {
             density,
             dark,
             zebra: false,
+            mode: ViewMode::Details,
+            dpi: 96.0,
+            labels: vec![(0, 0); LABEL_SLOTS],
             side: Sidebar::default(),
             wake,
             rowbuf: Box::new(RowBuf::new()),
@@ -401,6 +468,9 @@ impl View {
             }
             CMD_ZEBRA => self.zebra = !self.zebra,
             CMD_REFRESH => self.refresh(),
+            CMD_VIEW_DETAILS => self.set_mode(ViewMode::Details),
+            CMD_VIEW_GRID_SMALL => self.set_mode(ViewMode::GridSmall),
+            CMD_VIEW_GRID_LARGE => self.set_mode(ViewMode::GridLarge),
             CMD_SELECT_ALL => {
                 let t = self.tab_mut();
                 t.sel.select_all(&t.store);
@@ -418,8 +488,39 @@ impl View {
         ui.request_repaint();
     }
 
-    /// Client y (DIP) of the middle of view row `i` (keyboard menus).
+    /// Switches between details and the grids. The cursor row follows: it is
+    /// the same entry in both, and both scroll it into view.
+    pub fn set_mode(&mut self, mode: ViewMode) {
+        if mode == self.mode {
+            return;
+        }
+        let was_grid = self.mode.is_grid();
+        self.mode = mode;
+        for t in &mut self.tabs.items {
+            let len = t.store.view().len();
+            if mode.is_grid() {
+                if !was_grid {
+                    t.grid.cursor = t.list.cursor;
+                }
+                let (cw, ch, _, _) = mode.dims();
+                t.grid.cell_w = cw;
+                t.grid.cell_h = ch;
+                t.grid.reveal = true;
+            } else if was_grid {
+                t.list.cursor = t.grid.cursor.min(len.saturating_sub(1));
+                let c = t.list.cursor;
+                t.list.ensure_visible(c, len);
+            }
+        }
+        self.focus_list = true;
+    }
+
+    /// Client position (DIP) of the middle of view row/cell `i` (keyboard menus).
     pub fn row_mid_y(&self, i: usize) -> f32 {
+        if self.mode.is_grid() {
+            let g = &self.tab().grid;
+            return self.list_top + g.cell_origin(i).1 + g.cell_h / 2.0;
+        }
         let l = &self.tab().list;
         self.list_top + l.row_top(i) as f32 + l.row_h / 2.0
     }
@@ -577,7 +678,18 @@ impl View {
         // filter box on the right, path bar takes the rest
         let fw = t.layout_filter_width.min((r.w - x) / 2.0).max(60.0);
         let fr = Rect::new(r.r() - t.space_4 - fw, r.y + (r.h - t.height_path_bar) / 2.0, fw, t.height_path_bar);
-        let bar = Rect::new(x, fr.y, (fr.x - t.space_4 - x).max(40.0), t.height_path_bar);
+        // view mode toggle between the path bar and the filter box
+        let vb = Rect::new(fr.x - t.space_4 - bs, by, bs, bs);
+        let glyph = match self.mode {
+            ViewMode::Details => "\u{E8FD}",
+            ViewMode::GridSmall => "\u{F0E2}",
+            ViewMode::GridLarge => "\u{E8A9}",
+        };
+        if icon_button(ui, g, t, ID_VIEW, vb, glyph, true) {
+            let m = self.mode.next();
+            self.set_mode(m);
+        }
+        let bar = Rect::new(x, fr.y, (vb.x - t.space_4 - x).max(40.0), t.height_path_bar);
         self.paint_path_bar(ui, g, bar, t);
         self.paint_filter(ui, g, fr, t);
 
@@ -736,6 +848,12 @@ impl View {
     }
 
     fn paint_main(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, main: Rect, t: &Theme) {
+        // a new folder / another tab: pending shell work and thumbnails go
+        shell.sync_generation(self.tabs.items[self.tabs.active].nav_key());
+        if self.mode.is_grid() {
+            self.paint_grid_main(ui, g, shell, main, t);
+            return;
+        }
         let mut area = main;
         let header_r = area.cut_top(t.height_column_header);
         let list_r = area;
@@ -768,6 +886,8 @@ impl View {
             let root = if *synthetic { None } else { Some(path.as_str()) };
             let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root };
             let lr = list(ui, g, ID_LIST, list_r, lstate, &mut rows);
+            // one page of icons beyond the viewport, nearest first
+            rows.prefetch(lr.range, lstate.page_rows());
             (lr, lr.activated)
         };
         self.last_range = lr.range;
@@ -779,7 +899,15 @@ impl View {
         if lr.context_key {
             self.menu_request = Some((self.tabs.items[self.tabs.active].list.cursor, None));
         }
-        // empty and failed folders
+        self.paint_empty(g, list_r, t);
+        if let Some(pos) = activated {
+            self.activate(pos);
+            ui.request_repaint();
+        }
+    }
+
+    /// Empty and failed folders.
+    fn paint_empty(&self, g: &mut dyn Canvas, list_r: Rect, t: &Theme) {
         let tab = &self.tabs.items[self.tabs.active];
         if tab.shown() == 0 {
             let body = Rect::new(list_r.x, list_r.y, list_r.w - t.layout_scrollbar_width, list_r.h);
@@ -790,8 +918,86 @@ impl View {
                 Load::Loading => {}
             }
         }
+    }
+
+    /// The grid views: a sort strip (there are no columns) over the cells.
+    fn paint_grid_main(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, main: Rect, t: &Theme) {
+        let mut area = main;
+        let strip_r = area.cut_top(t.height_column_header);
+        let grid_r = area;
+        self.list_top = grid_r.y;
+        self.sort_strip(ui, g, strip_r, t);
+
+        let (cw, ch, box_dip, icon_dip) = self.mode.dims();
+        let dpi = self.dpi;
+        g.fill(grid_r, t.row);
+        let tab = &mut self.tabs.items[self.tabs.active];
+        tab.grid.cell_w = cw;
+        tab.grid.cell_h = ch;
+        // cells one screen shows (thumbnail size is chosen so they all fit the cache)
+        let cols = tab.grid.cols_for(grid_r.w - t.layout_scrollbar_width);
+        let rows_vis = (grid_r.h / ch).ceil() as usize + 1;
+        shell.set_grid(GridPic { box_dip, icon_dip, dpi }, cols * rows_vis);
+        let label_font = t.font().c();
+        let (gr, activated) = {
+            let Tab { store, sel, grid: gstate, band_base, path, synthetic, .. } = &mut *tab;
+            let root = if *synthetic { None } else { Some(path.as_str()) };
+            let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, labels: &mut self.labels, box_dip, font: label_font };
+            let gr = grid(ui, g, ID_LIST, grid_r, gstate, &mut tiles);
+            tiles.prefetch(gstate);
+            (gr, gr.activated)
+        };
+        self.last_range = gr.range;
+        if let Some((cell, pt)) = gr.context
+            && let Some(cell) = cell
+        {
+            self.menu_request = Some((cell, Some(pt)));
+        }
+        if gr.context_key {
+            self.menu_request = Some((self.tabs.items[self.tabs.active].grid.cursor, None));
+        }
+        self.paint_empty(g, grid_r, t);
         if let Some(pos) = activated {
             self.activate(pos);
+            ui.request_repaint();
+        }
+    }
+
+    /// "Sort by  Name  Date modified  Type  Size": chips that sort like the
+    /// details header's columns (a second click flips the direction).
+    fn sort_strip(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme) {
+        g.fill(r, t.panel);
+        g.fill(Rect::new(r.x, r.b() - 1.0, r.w, 1.0), t.border);
+        let font = t.font_small();
+        let mut x = r.x + 12.0;
+        g.text("Sort by", Rect::new(x, r.y, 56.0, r.h - 1.0), font, t.text_dim);
+        x += 60.0;
+        let (sorted_col, desc) = {
+            let tab = self.tab();
+            (tab.sort.column, tab.sort.descending)
+        };
+        let mut clicked = None;
+        for (i, col) in Col::ALL.iter().enumerate() {
+            let is_sorted = col.sort_column() == sorted_col;
+            let w = g.measure(col.label(), font) + 16.0 + if is_sorted { 14.0 } else { 0.0 };
+            let cell = Rect::new(x, r.y + 3.0, w, r.h - 7.0);
+            let it = ui.interact(ID_HEADER.with(i as u64), cell, Sense::click());
+            if it.hovered {
+                g.round(cell, t.radius_sm, t.hover);
+            }
+            let color = if is_sorted || it.hovered { t.text } else { t.text_dim };
+            g.text(col.label(), Rect::new(cell.x + 8.0, cell.y, w - 8.0, cell.h), font, color);
+            if is_sorted {
+                let glyph = if desc { "\u{E70D}" } else { "\u{E70E}" };
+                g.text(glyph, Rect::new(cell.r() - 18.0, cell.y, 12.0, cell.h), f(9.0).icon().c(), t.text);
+            }
+            if it.clicked == Some(Button::Left) {
+                clicked = Some(col.sort_column());
+            }
+            x += w + 2.0;
+        }
+        if let Some(c) = clicked {
+            self.tab_mut().sort_by(c);
             ui.request_repaint();
         }
     }
@@ -919,6 +1125,35 @@ struct Rows<'a> {
     root: Option<&'a str>,
 }
 
+/// Click / key / space selection rules, shared by the list and the grid.
+fn select_entry(store: &EntryStore, sel: &mut Selection, i: usize, mods: Mods, by: SelectBy) {
+    let Some(id) = store.at(i) else { return };
+    match by {
+        SelectBy::Click | SelectBy::Key if mods.shift => sel.extend(store, i),
+        SelectBy::Click if mods.ctrl => sel.toggle(store, i),
+        SelectBy::Key if mods.ctrl => {} // Ctrl+arrows move the cursor only
+        SelectBy::Space if mods.ctrl => sel.toggle(store, i),
+        SelectBy::Space | SelectBy::RightClick if sel.contains(id) => {}
+        _ => sel.single(store, i),
+    }
+}
+
+impl Rows<'_> {
+    /// Asks for the icons of one page of rows above and below `range`, the
+    /// nearest first (priority = rows away). Only registers wants; the
+    /// shell's scheduler decides when they run.
+    fn prefetch(&mut self, range: (usize, usize), page: usize) {
+        let len = self.store.view().len();
+        let (a, b) = range;
+        for j in (a.saturating_sub(page)..a).chain(b..(b + page).min(len)) {
+            let Some(id) = self.store.at(j) else { continue };
+            self.row.fill(self.store, id);
+            let dist = if j < a { a - j } else { j - b + 1 };
+            self.shell.want_row(self.row, self.root, dist as f32);
+        }
+    }
+}
+
 impl ListSource for Rows<'_> {
     fn len(&self) -> usize {
         self.store.view().len()
@@ -927,15 +1162,7 @@ impl ListSource for Rows<'_> {
         self.store.at(i).is_some_and(|id| self.sel.contains(id))
     }
     fn select(&mut self, i: usize, mods: Mods, by: SelectBy) {
-        let Some(id) = self.store.at(i) else { return };
-        match by {
-            SelectBy::Click | SelectBy::Key if mods.shift => self.sel.extend(self.store, i),
-            SelectBy::Click if mods.ctrl => self.sel.toggle(self.store, i),
-            SelectBy::Key if mods.ctrl => {} // Ctrl+arrows move the cursor only
-            SelectBy::Space if mods.ctrl => self.sel.toggle(self.store, i),
-            SelectBy::Space | SelectBy::RightClick if self.sel.contains(id) => {}
-            _ => self.sel.single(self.store, i),
-        }
+        select_entry(self.store, self.sel, i, mods, by);
     }
     fn select_none(&mut self) {
         self.sel.clear();
@@ -967,6 +1194,119 @@ impl ListSource for Rows<'_> {
         if !row.is_dir() {
             data::fmt_size(row.size, self.text);
             g.text(self.text, Rect::new(x + sp[3].0, r.y, (sp[3].1 - 8.0).max(0.0), r.h), t.font().r(), t.text_dim);
+        }
+    }
+}
+
+/// Where the first label line of `name` ends for a box `w` DIPs wide. Backends
+/// shape text to answer, so the answer is cached (direct mapped, fixed size).
+fn label_split(cache: &mut [(u64, u32)], g: &mut dyn Canvas, name: &str, font: Font, w: f32) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+    }
+    h = (h ^ ((w.to_bits() as u64) << 20) ^ font.size10 as u64).wrapping_mul(0x0100_0000_01b3) | 1;
+    let slot = (h >> 11) as usize % cache.len();
+    if cache[slot].0 == h {
+        let n = cache[slot].1 as usize;
+        if n <= name.len() && name.is_char_boundary(n) {
+            return n;
+        }
+    }
+    let n = g.first_line_len(name, font, w).min(name.len());
+    cache[slot] = (h, n as u32);
+    n
+}
+
+/// The grid's view of one tab for a frame.
+struct Tiles<'a> {
+    store: &'a EntryStore,
+    sel: &'a mut Selection,
+    shell: &'a mut ShellUi,
+    row: &'a mut RowBuf,
+    /// folder of the cells (None for the bench's synthetic rows)
+    root: Option<&'a str>,
+    /// selection before a rubber band started (a Ctrl band adds to it)
+    base: &'a mut Vec<EntryId>,
+    labels: &'a mut [(u64, u32)],
+    box_dip: f32,
+    font: Font,
+}
+
+impl Tiles<'_> {
+    /// Asks for the pictures of up to a page of cells on each side of the
+    /// viewport (fewer when the thumbnail cache could not hold them), nearest
+    /// first. Only registers wants; the shell's scheduler decides.
+    fn prefetch(&mut self, st: &GridState) {
+        let len = self.store.view().len();
+        let (a, b) = st.visible(len);
+        let cols = st.cols.max(1);
+        let spare = self.shell.thumb_budget_cells().saturating_sub(b - a);
+        let margin = st.page_rows().min(spare / 2 / cols);
+        if margin == 0 {
+            return;
+        }
+        let (pa, pb) = st.visible_with(len, margin);
+        let (first_row, last_row) = (a / cols, b.div_ceil(cols));
+        for j in (pa..a).chain(b..pb) {
+            let Some(id) = self.store.at(j) else { continue };
+            self.row.fill(self.store, id);
+            let r = j / cols;
+            let dist = if j < a { first_row - r } else { r + 1 - last_row.min(r) };
+            self.shell.want_cell(self.row, self.root, dist.max(1) as f32);
+        }
+    }
+}
+
+impl GridSource for Tiles<'_> {
+    fn len(&self) -> usize {
+        self.store.view().len()
+    }
+    fn is_selected(&self, i: usize) -> bool {
+        self.store.at(i).is_some_and(|id| self.sel.contains(id))
+    }
+    fn select(&mut self, i: usize, mods: Mods, by: SelectBy) {
+        select_entry(self.store, self.sel, i, mods, by);
+    }
+    fn select_none(&mut self) {
+        self.sel.clear();
+    }
+    fn band_begin(&mut self, additive: bool) {
+        self.base.clear();
+        if additive {
+            let sel = &*self.sel;
+            self.base.extend(self.store.view().iter().copied().filter(|&id| sel.contains(id)));
+        } else {
+            self.sel.clear();
+        }
+    }
+    fn band_update(&mut self, cells: Option<BandCells>, cols: usize) {
+        let store = self.store;
+        let len = store.view().len();
+        let covered = cells.into_iter().flat_map(move |b| b.indices(cols, len)).filter_map(move |i| store.at(i));
+        let ids = self.base.iter().copied().chain(covered);
+        self.sel.replace_with(store, ids);
+    }
+    fn band_end(&mut self) {
+        self.base.clear();
+        self.base.shrink_to(256);
+    }
+    fn draw_cell(&mut self, c: &mut dyn Canvas, t: &Theme, i: usize, r: Rect, _st: RowState) {
+        let Some(id) = self.store.at(i) else { return };
+        let row = &mut *self.row;
+        row.fill(self.store, id);
+        let boxr = Rect::new(r.x + (r.w - self.box_dip) / 2.0, r.y + 8.0, self.box_dip, self.box_dip);
+        self.shell.paint_pic(c, t, row, self.root, boxr);
+        // name: at most two lines, centred, the second one ends in an ellipsis
+        let name = row.name_str();
+        let lw = r.w - 8.0;
+        let n = label_split(self.labels, c, name, self.font, lw);
+        let color = if row.hidden { t.text_dim } else { t.text };
+        let y = boxr.b() + 6.0;
+        let (l1, l2) = name.split_at(n);
+        c.text(l1, Rect::new(r.x + 4.0, y, lw, LABEL_LINE), self.font, color);
+        if !l2.is_empty() {
+            c.text(l2, Rect::new(r.x + 4.0, y + LABEL_LINE, lw, LABEL_LINE), self.font, color);
         }
     }
 }
@@ -1177,6 +1517,94 @@ mod tests {
         assert!(r.c.texts().iter().any(|t| t.starts_with("3 selected")), "{:?}", r.c.texts());
         r.key(Key::Escape, Mods::NONE);
         assert_eq!(r.v.tab().sel.count(), 0);
+    }
+
+    #[test]
+    fn view_mode_shortcuts_switch_and_keep_the_cursor() {
+        let mut r = Rig::new("mode");
+        assert_eq!(r.v.mode, ViewMode::Details);
+        r.key(Key::Down, Mods::NONE);
+        assert_eq!(r.v.tab().list.cursor, 1);
+        r.key(Key::Char('2'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::GridSmall);
+        assert_eq!(r.v.tab().grid.cursor, 1, "same entry in the grid");
+        assert_eq!((r.v.tab().grid.cell_w, r.v.tab().grid.cell_h), (96.0, 118.0));
+        for name in ["Docs", "alpha.txt", "beta.txt"] {
+            assert!(r.c.has_text(name), "{name} missing in grid: {:?}", r.c.texts());
+        }
+        assert!(r.c.has_text("Sort by"), "{:?}", r.c.texts());
+        r.key(Key::Right, Mods::NONE);
+        assert_eq!(r.v.tab().grid.cursor, 2);
+        r.key(Key::Char('3'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::GridLarge);
+        assert_eq!((r.v.tab().grid.cell_w, r.v.tab().grid.cell_h), (152.0, 182.0));
+        r.key(Key::Char('1'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::Details);
+        assert_eq!(r.v.tab().list.cursor, 2, "back in details on the same entry");
+        assert_eq!(r.c.clip_depth(), 0);
+    }
+
+    #[test]
+    fn grid_selects_with_clicks_and_rubber_band() {
+        let mut r = Rig::new("band");
+        r.v.set_mode(ViewMode::GridSmall);
+        r.frame();
+        let t = r.ui.theme;
+        let top = t.height_titlebar + t.height_toolbar + t.height_column_header;
+        let left = t.layout_sidebar_width;
+        // first cell: click selects one
+        r.click(left + 40.0, top + 40.0);
+        assert_eq!(r.v.tab().sel.count(), 1);
+        // a rubber band from empty space (right of the cells) back across all three cells
+        let pos = Pt::new(left + 600.0, top + 100.0);
+        r.ui.push(Event::MouseMove { pos });
+        r.frame();
+        r.ui.push(Event::MouseDown { pos, button: Button::Left, mods: Mods::NONE, double: false });
+        r.frame();
+        for p in [Pt::new(left + 300.0, top + 60.0), Pt::new(left + 10.0, top + 20.0)] {
+            r.ui.push(Event::MouseMove { pos: p });
+            r.frame();
+        }
+        assert_eq!(r.v.tab().sel.count(), 3, "the band covers all three cells");
+        r.ui.push(Event::MouseUp { pos: Pt::new(left + 10.0, top + 20.0), button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert_eq!(r.v.tab().sel.count(), 3, "the selection stays after release");
+        assert!(r.v.tab().band_base.is_empty(), "base released");
+    }
+
+    #[test]
+    fn grid_sort_chips_sort_like_the_header() {
+        let mut r = Rig::new("chips");
+        r.v.set_mode(ViewMode::GridSmall);
+        r.frame();
+        let t = r.ui.theme;
+        let y = t.height_titlebar + t.height_toolbar + t.height_column_header / 2.0;
+        // "Sort by" is 60 DIPs wide, "Name" is the first chip, the sidebar comes first
+        r.click(t.layout_sidebar_width + 12.0 + 60.0 + 14.0, y);
+        assert!(r.v.tab().sort.descending, "a second click on the sorted column flips it");
+        assert_eq!(r.v.tab().sort.column, tsubame_core::Column::Name);
+    }
+
+    #[test]
+    fn labels_wrap_to_two_lines_and_the_split_is_cached() {
+        let mut c = TestCanvas::new(400.0, 300.0);
+        let mut cache = vec![(0u64, 0u32); 8];
+        let font = f(12.0);
+        let name = "a-very-long-file-name-without-spaces-that-needs-two-lines.png";
+        let n = label_split(&mut cache, &mut c, name, font, 80.0);
+        assert!(n > 0 && n < name.len(), "{n}");
+        assert!(name.is_char_boundary(n));
+        assert_eq!(label_split(&mut cache, &mut c, name, font, 80.0), n, "cache hit gives the same split");
+        assert_eq!(label_split(&mut cache, &mut c, "short.txt", font, 80.0), "short.txt".len(), "fits one line");
+    }
+
+    #[test]
+    fn view_mode_names_round_trip() {
+        for m in [ViewMode::Details, ViewMode::GridSmall, ViewMode::GridLarge] {
+            assert_eq!(ViewMode::parse(m.name()), Some(m));
+        }
+        assert_eq!(ViewMode::parse("nope"), None);
+        assert_eq!(ViewMode::Details.next().next().next(), ViewMode::Details);
     }
 
     #[test]

@@ -84,7 +84,9 @@ pub fn get(src: &IconSource, size: u32) -> Option<Bitmap> {
     unsafe {
         let _ = DestroyIcon(hicon);
     }
-    b
+    // the system lists come in 16/32/48/256 px: cut to the size asked, so a
+    // 96 px cell icon does not sit in the cache as a 256 px jumbo (256 KB)
+    b.map(|b| b.fit_within(size))
 }
 
 pub fn by_factory(path: &str, size: u32) -> Option<Bitmap> {

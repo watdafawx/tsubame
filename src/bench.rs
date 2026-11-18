@@ -57,6 +57,8 @@ pub struct Bench {
     start_row: usize,
     /// set on the tick that starts the scroll run (main submits hang jobs then)
     pub just_started: bool,
+    /// scroll the grid instead of the details list (main sets it from the view mode)
+    pub grid: bool,
     /// extra report lines (shell stats, set by main before the report)
     pub extra: String,
     pub rows: usize,
@@ -128,6 +130,7 @@ impl Bench {
             dpi: 96.0,
             start_row: START_ROW,
             just_started: false,
+            grid: false,
             extra: String::new(),
             rows: 0,
             memdiag: String::new(),
@@ -180,7 +183,12 @@ impl Bench {
                     self.start_row = if len > 2 * START_ROW { START_ROW } else { 0 };
                     v.list.cursor = self.start_row + 3;
                     v.sel.single(&v.store, self.start_row + 3);
-                    v.list.set_scroll(self.start_row as f64 * row_h as f64, len);
+                    if self.grid {
+                        v.grid.cursor = self.start_row + 3;
+                        v.grid.set_scroll(self.start_row as f64 * row_h as f64, len);
+                    } else {
+                        v.list.set_scroll(self.start_row as f64 * row_h as f64, len);
+                    }
                     self.state = State::Running(Instant::now());
                     self.just_started = true;
                     return (false, true);
@@ -199,11 +207,17 @@ impl Bench {
                 } else if t < PHASE_END[1] {
                     start + 2_000.0 * PHASE_END[0] + 20_000.0 * (t - PHASE_END[0])
                 } else {
-                    self.page_scroll_acc += (v.list.page_rows() as f32 * row_h) as f64;
+                    let page = if self.grid { v.grid.page_rows() as f32 * v.grid.cell_h } else { v.list.page_rows() as f32 * row_h };
+                    self.page_scroll_acc += page as f64;
                     start + 2_000.0 * PHASE_END[0] + 20_000.0 * (PHASE_END[1] - PHASE_END[0]) + self.page_scroll_acc
                 };
-                let max = v.list.max_scroll(len);
-                v.list.set_scroll(if max > 0.0 { s % max } else { 0.0 }, len);
+                if self.grid {
+                    let max = v.grid.max_scroll(len);
+                    v.grid.set_scroll(if max > 0.0 { s % max } else { 0.0 }, len);
+                } else {
+                    let max = v.list.max_scroll(len);
+                    v.list.set_scroll(if max > 0.0 { s % max } else { 0.0 }, len);
+                }
                 (false, true)
             }
             State::Done => (false, false),

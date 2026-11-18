@@ -27,6 +27,78 @@ impl Bitmap {
     pub fn bytes(&self) -> usize {
         self.px.len() * 4
     }
+
+    /// Area-averaging resize to exactly `w` x `h` (premultiplied pixels stay
+    /// premultiplied). Workers use it to cut big shell bitmaps (256 px
+    /// jumbo icons, cached 256 / 1024 px thumbnails) to the size the cell
+    /// draws, so the caches hold what is shown and nothing more.
+    pub fn scaled(&self, w: u32, h: u32) -> Bitmap {
+        let (w, h) = (w.max(1), h.max(1));
+        if (w, h) == (self.w, self.h) || self.w == 0 || self.h == 0 {
+            return self.clone();
+        }
+        // horizontal pass into f32 channels, then vertical pass
+        let (sw, sh) = (self.w as usize, self.h as usize);
+        let (dw, dh) = (w as usize, h as usize);
+        let mut tmp = vec![[0f32; 4]; dw * sh];
+        let kx = sw as f32 / dw as f32;
+        for y in 0..sh {
+            let row = &self.px[y * sw..(y + 1) * sw];
+            for x in 0..dw {
+                tmp[y * dw + x] = box_avg(|i| row[i], x as f32 * kx, (x + 1) as f32 * kx, sw);
+            }
+        }
+        let mut px = vec![0u32; dw * dh];
+        let ky = sh as f32 / dh as f32;
+        for x in 0..dw {
+            for y in 0..dh {
+                let a = box_avg_f(|i| tmp[i * dw + x], y as f32 * ky, (y + 1) as f32 * ky, sh);
+                let c = |v: f32| (v + 0.5).clamp(0.0, 255.0) as u32;
+                px[y * dw + x] = c(a[3]) << 24 | c(a[2]) << 16 | c(a[1]) << 8 | c(a[0]);
+            }
+        }
+        Bitmap { w, h, px }
+    }
+
+    /// This bitmap fitted inside `max` x `max` (aspect kept); unchanged when
+    /// it already fits.
+    pub fn fit_within(self, max: u32) -> Bitmap {
+        let m = self.w.max(self.h);
+        if m <= max || max == 0 {
+            return self;
+        }
+        let f = max as f32 / m as f32;
+        self.scaled(((self.w as f32 * f).round() as u32).max(1), ((self.h as f32 * f).round() as u32).max(1))
+    }
+}
+
+/// Weighted average of the source pixels covering `[a, b)` (fractional edges
+/// weighted by overlap). Channels are 0 = blue ... 3 = alpha.
+fn box_avg(get: impl Fn(usize) -> u32, a: f32, b: f32, n: usize) -> [f32; 4] {
+    box_avg_f(|i| {
+        let p = get(i);
+        [(p & 255) as f32, ((p >> 8) & 255) as f32, ((p >> 16) & 255) as f32, (p >> 24) as f32]
+    }, a, b, n)
+}
+
+fn box_avg_f(get: impl Fn(usize) -> [f32; 4], a: f32, b: f32, n: usize) -> [f32; 4] {
+    let (i0, i1) = (a.floor() as usize, (b.ceil() as usize).min(n));
+    let mut acc = [0f32; 4];
+    let mut wsum = 0f32;
+    for i in i0..i1.max(i0 + 1).min(n) {
+        let w = (b.min(i as f32 + 1.0) - a.max(i as f32)).max(0.0);
+        let v = get(i);
+        for k in 0..4 {
+            acc[k] += v[k] * w;
+        }
+        wsum += w;
+    }
+    if wsum > 0.0 {
+        for v in &mut acc {
+            *v /= wsum;
+        }
+    }
+    acc
 }
 
 /// Reads any HBITMAP as 32-bit top-down BGRA (alpha as stored). Does not
@@ -170,6 +242,23 @@ mod tests {
         assert_eq!(px[0], 0x8080_4020);
         assert_eq!(px[1], 0, "alpha 0 clears colour");
         assert_eq!(px[2], 0xff12_3456, "opaque unchanged");
+    }
+
+    #[test]
+    fn scaling_averages_and_keeps_premultiplied() {
+        // 4x2 -> 2x1: each output pixel is the mean of a 2x2 block
+        let b = Bitmap { w: 4, h: 2, px: vec![0xff00_0000, 0xffff_ffff, 0x0000_0000, 0x8040_4040, 0xff00_0000, 0xffff_ffff, 0x0000_0000, 0x8040_4040] };
+        let s = b.scaled(2, 1);
+        assert_eq!((s.w, s.h), (2, 1));
+        assert_eq!(s.px[0], 0xff80_8080, "black + white = grey, opaque");
+        assert_eq!(s.px[1], 0x4020_2020, "transparent + half alpha");
+        // same size is a copy, fit_within keeps aspect
+        assert_eq!(b.scaled(4, 2).px, b.px);
+        let f = Bitmap { w: 256, h: 128, px: vec![0xff11_2233; 256 * 128] }.fit_within(64);
+        assert_eq!((f.w, f.h), (64, 32));
+        assert!(f.px.iter().all(|&p| p == 0xff11_2233), "flat colour stays flat");
+        let small = Bitmap { w: 8, h: 8, px: vec![0; 64] }.fit_within(64);
+        assert_eq!((small.w, small.h), (8, 8), "never upscaled");
     }
 
     #[test]

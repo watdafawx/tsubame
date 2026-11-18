@@ -142,8 +142,45 @@ pub trait Canvas {
         bounds[lo]
     }
 
+    /// Byte length of the first line of `s` wrapped to `w` DIPs: `s.len()`
+    /// when it fits one line, else the end of the line (a break after a
+    /// separator when one lies in the second half, else mid-word). File names
+    /// in the grid use it to show two lines. A backend may ask the shaper.
+    fn first_line_len(&mut self, s: &str, font: Font, w: f32) -> usize {
+        if s.is_empty() || self.measure(s, font) <= w {
+            return s.len();
+        }
+        let bounds: Vec<usize> = s.char_indices().map(|(i, _)| i).skip(1).collect();
+        // longest prefix (in chars) that fits
+        let (mut lo, mut hi) = (0usize, bounds.len());
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if self.measure(&s[..bounds[mid - 1]], font) <= w { lo = mid } else { hi = mid - 1 }
+        }
+        let cut = if lo == 0 { bounds.first().copied().unwrap_or(s.len()) } else { bounds[lo - 1] };
+        // prefer a break after a separator in the second half of the line
+        let head = &s[..cut];
+        match head.rfind([' ', '-', '_', '.']) {
+            Some(i) if i + 1 >= cut / 2 && i + 1 < s.len() => i + 1,
+            _ => cut,
+        }
+    }
+
     /// Premultiplied BGRA pixels scaled into `r`, cached by `key`.
     fn image(&mut self, key: &str, w: u32, h: u32, px: &[u32], r: Rect);
+    /// `image` at opacity `a` (0..1); the thumbnail fade-in uses it. The
+    /// default ignores `a` for backends that cannot blend.
+    fn image_a(&mut self, key: &str, w: u32, h: u32, px: &[u32], r: Rect, a: f32) {
+        let _ = a;
+        self.image(key, w, h, px, r)
+    }
+    /// Whether the backend already holds a device copy for `key`, so drawing
+    /// it costs no upload. A view that draws many new images in one frame
+    /// uses this to spread the uploads over frames. Default: always.
+    fn has_image(&self, key: &str) -> bool {
+        let _ = key;
+        true
+    }
 
     fn clip(&mut self, r: Rect);
     fn unclip(&mut self);

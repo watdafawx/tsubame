@@ -22,6 +22,7 @@ pub use theme::{DARK, Density, LIGHT, Theme};
 pub use ui::{Cells, Clipboard, Id, Interaction, MemClipboard, Output, Press, Sense, Shortcut, Shortcuts, Ui};
 pub use widgets::button::{button, button_behaviour};
 pub use widgets::colheader::{HeaderCol, HeaderResponse, column_header};
+pub use widgets::grid::{BAND_DEADZONE, BandCells, GridResponse, GridSource, GridState, grid, nav_target};
 pub use widgets::list::{ListResponse, ListSource, ListState, RowState, SelectBy, list};
 pub use widgets::scrollbar::{ScrollMetrics, vscrollbar};
 pub use widgets::splitter::{Split, splitter};
