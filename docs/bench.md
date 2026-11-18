@@ -20,6 +20,14 @@ PowerShell (push-to-rig, ssh, `schtasks`), while the part that can be wrong in
 interesting ways (parsing, pass/fail, the log format) is Rust with unit tests
 in `crates/tsubame-bench/src/appbench.rs`.
 
+Freshness: `push-to-rig.ps1` mirrors the source with `robocopy`, which preserves
+each file's LastWriteTime, and cargo's fingerprints are mtime-based - so a warm
+rig slot could reuse a stale artifact and ship the previous exe (that is how a
+pre-updater binary once landed in a `Main exe` row). It now refreshes the mtime
+of exactly the files a run copied and puts the source mtimes back after the
+build, so the next sync copies nothing, and it refuses to ship an exe the build
+did not write. Every section also names the binary: `- Exe: <bytes> B, SHA-256`.
+
 ## What a run does
 
 | Step | App mode | What it measures |
@@ -101,7 +109,7 @@ is as large as the threshold (see below).
 | Idle CPU, 10 s | < 50 ms of CPU (the budget is 0 wake-ups; process CPU time is quantised to ~15.6 ms on rig, so one tick reads as 15.6 ms) | plain launch |
 | Private bytes, one tab, small folder, 4K | < 110 MB | gate's idle sample |
 | Private bytes after the 5 s scroll run | < 110 MB | `--bench` |
-| Main exe | < 6 MB | `--bench` |
+| Main exe | < 6 MB | `--bench`; `tsubame-bench app` prints a WARNING (not a fail) when the size moves more than 10% against the previous log row |
 | Leak gate | private bytes within 5% (2 MB floor), handles/GDI/USER/threads within the constants above | `--leak-gate` |
 
 ## Known state, 2026-11-18 (task B1)

@@ -7243,3 +7243,39 @@ fail=-
 exit=0
 ```
 </details>
+
+## Correction - stale-exe sizes in the U4 and 5b1cafb rows (2026-11-19)
+
+Two `Main exe` figures above measured the wrong binary. `tools/push-to-rig.ps1` mirrored the source
+with `robocopy`, which preserves each file's LastWriteTime; cargo's fingerprints are mtime-based, so
+in a warm rig slot a synced commit whose files are older than the slot's artifacts made cargo skip
+both the rebuild and the relink, and the previous exe was copied into the run dir. Evidence from the
+investigation: five consecutive `-BuildOnRig` runs shipped the same 2,660,352 B exe, one attempt
+failed with 51 compile errors from old sources against newer rlibs, and the exe behind the
+`1742 KB` row was the PERF2-line `11fe5f3` binary (1,783,808 B), not a `5b1cafb` build.
+
+`push-to-rig.ps1` now sets LastWriteTime = now on exactly the files a run copied (unchanged files
+keep theirs, so warm incremental builds stay warm), puts those mtimes back after a successful build
+(so the next sync copies nothing), and refuses to ship an exe that the build did not write; it
+prints the shipped exe's size, SHA-256 prefix and commit. Sections now also carry
+`- Exe: <bytes> B (<KB>), SHA-256 ...`, and `tsubame-bench app` prints a WARNING when the exe size
+moves more than 10% against the previous row (the 6 MB budget still decides PASS/FAIL).
+
+Real release sizes (`-BuildOnRig -Profile release` on rig; rebuilding identical source gives the same
+size, but the PE carries a link timestamp, so two builds of the same commit do not have the same
+sha256 - which is why the staleness guard keys on mtime, not on the hash):
+
+| Build | Main exe |
+|---|---|
+| pre-U4 (`11fe5f3`, the PERF2 line) | 1,783,808 B (1742 KB) |
+| `d6990cd` U4: updater wired into `main.rs` | +459 KB over pre-U4 |
+| `231d929` Merge U4 | 2.60 MB (2662 KB) |
+| `701c3ab` main | 2,750,976 B (2687 KB) |
+| `b25e4cf` main + this fix | 2,779,648 B (2715 KB) |
+
+So the U4 row's "the updater crate and U4 add 50 KB" has the sign and the scale wrong: making the
+`tsubame-update` stack reachable from the app (WinHTTP, WinTrust, bcrypt, ed25519, `serde_json`,
+miniz_oxide) costs about **+890 KB**, and that is the whole jump from ~1.75 MB to 2.60 MB. The U4
+section's 1714 KB is in the same class as the 1742 KB row (a pre-U4 binary), as is the figure in
+`docs/u4-settings.md`. The 6 MB budget is met with ~3.2 MB to spare, so the PASS verdicts above
+stand; only the sizes were wrong.
