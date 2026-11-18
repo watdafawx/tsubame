@@ -17,12 +17,16 @@
 //! frame (cold start); it is labelled `startup`.
 //!
 //! A `<purge>` entry in `--timing-dirs` is no folder: it runs
-//! `tsubame-bench.exe purge --mode standby` (next to the exe; the app must
-//! run elevated; `TSUBAME_TIMING_PURGE=working` for the stronger mode)
-//! before the next navigation, so `tiny;<purge>;tiny;big`
+//! `tsubame-bench.exe purge --mode working` (next to the exe; the app must
+//! run elevated; `TSUBAME_TIMING_PURGE` picks another mode) before the next
+//! navigation, so `tiny;<purge>;tiny;big`
 //! measures a cold folder in a warm app: the second `tiny` re-faults the
 //! app's own pages (paint path, enumerator, store) that the purge dropped,
 //! and `big` is then the only cold thing. Its result is printed as `purge:`.
+//!
+//! An `<idle>` entry waits 3 s before the next navigation: after a purge
+//! made from outside and a fresh start, `tiny;<idle>;tiny;big` opens a cold
+//! folder in an app whose startup is over (the cold probe uses this).
 //!
 //! An `<ops>` entry is no folder either: on the folder listed last it times
 //! the UI work of a sort switch per column (Size, Modified, Type, Name, Name
@@ -38,11 +42,11 @@ use std::time::{Duration, Instant};
 
 /// `--timing-dirs` entry that purges the system caches instead of navigating.
 const PURGE: &str = "<purge>";
-/// Purge mode: `TSUBAME_TIMING_PURGE` (`standby` by default: drops the
-/// cached metadata but no process's pages; `working` also empties every
-/// working set and starts a paging storm on the whole box).
+/// Purge mode: `TSUBAME_TIMING_PURGE` (`working` by default, the only mode
+/// that makes NTFS metadata cold on Windows 11; it also empties every
+/// working set, this app's too, and starts a paging storm on the whole box).
 fn purge_mode() -> String {
-    std::env::var("TSUBAME_TIMING_PURGE").unwrap_or_else(|_| "standby".into())
+    std::env::var("TSUBAME_TIMING_PURGE").unwrap_or_else(|_| "working".into())
 }
 /// Wait after a purge: a working-set purge needs its paging storm to pass.
 fn purge_settle(mode: &str) -> Duration {
@@ -50,6 +54,10 @@ fn purge_settle(mode: &str) -> Duration {
 }
 /// `--timing-dirs` entry that times sort switches and filter keystrokes.
 const OPS: &str = "<ops>";
+/// `--timing-dirs` entry that idles before the next navigation, so the
+/// startup tail (GPU paint path, first paints) is over when it starts.
+const IDLE: &str = "<idle>";
+const IDLE_FOR: Duration = Duration::from_secs(3);
 
 /// Runs the bench tool's purge next to the exe and waits for it (bench only).
 fn purge() -> String {
@@ -158,8 +166,10 @@ impl Run {
             return true;
         }
         let mut next = self.dirs[self.n / self.reps].clone();
-        while next == PURGE || next == OPS {
-            if next == OPS {
+        while next == PURGE || next == OPS || next == IDLE {
+            if next == IDLE {
+                std::thread::sleep(IDLE_FOR);
+            } else if next == OPS {
                 for _ in 0..self.reps {
                     ops(&mut self.out, v.tab_mut());
                 }

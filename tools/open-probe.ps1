@@ -7,16 +7,18 @@
   Each build is a folder on rig holding tsubame.exe (and tsubame-bench.exe for
   the purge), e.g. one staged per bisect point. Per run and per build:
 
-    cold: tsubame-bench purge --mode standby (the ssh session on rig is
-          elevated; gsudo -n as fallback; with -PurgeMode working also wait
-          until rig's disks settle: that purge starts a paging storm), then
-          tsubame --timing --timing-dirs "<tiny>;<dir>" --reps 1
-          (the tiny folder takes the process start; the measured row is the
-          navigation into <dir>, timed from the navigation event, but it
-          still overlaps the startup tail: GPU swap, first paints)
+    cold: tsubame-bench purge --mode working (the ssh session on rig is
+          elevated; gsudo -n as fallback), wait until rig's disks settle (the
+          purge starts a paging storm), then
+          tsubame --timing --timing-dirs "<tiny>;<idle>;<tiny>;<dir>" --reps 1
+          (the tiny folder takes the process start, <idle> waits 3 s for the
+          startup tail (GPU paint path) to end, the second tiny warms the
+          paint path; the measured row is the navigation into the still cold
+          <dir>, timed from the navigation event). -StartupNav measures the
+          old way, "<tiny>;<dir>", which overlaps the startup tail.
     navcold: warm app, cold folder: an elevated launch with
           --timing-dirs "<tiny>;<purge>;<tiny>;<dir>"; the app purges itself
-          after startup (standby, TSUBAME_TIMING_PURGE), re-warms on the tiny folder and
+          after startup (working: its own pages too, an artifact), re-warms on the tiny folder and
           then opens <dir>. This is the navigation the budget means.
     warm: tsubame --timing --timing-dirs "<dir>" --reps <WarmReps>
           (row "first" is warm metadata + a cold process; repeats are warm)
@@ -36,11 +38,12 @@ param(
   [int]    $Runs = 6,
   [ValidateSet('cold', 'navcold', 'warm')] [string] $Mode = 'cold',
   [int]    $WarmReps = 10,
-  [string] $PurgeMode = 'standby',                     # standby drops cached metadata only; working also empties every working set
+  [string] $PurgeMode = 'working',                     # the only mode that makes NTFS metadata cold on Win11
   [string] $ExtraArgs = '',                             # more app args, e.g. sort/filter probes
   [string] $Report = 'u2-timing.txt',
   [int]    $SettleDiskPct = 15,                         # cold: after the purge, wait until rig's disks are this idle
   [int]    $SettleMaxSec = 20,
+  [switch] $StartupNav,                                 # cold: navigate right after startup (no <idle>)
   [Parameter(Mandatory)] [string] $Out
 )
 $ErrorActionPreference = 'Stop'
@@ -117,7 +120,8 @@ for ($i = 1; $i -le $Runs; $i++) {
       # measures the storm. The folder's metadata stays cold meanwhile.
       $d = if ($PurgeMode -ne 'working') { 0 } else { Invoke-Rig "`$t0 = Get-Date; do { `$d = (Get-Counter '\PhysicalDisk(_Total)\% Disk Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue } while (`$d -gt $SettleDiskPct -and ((Get-Date) - `$t0).TotalSeconds -lt $SettleMaxSec); [math]::Round(((Get-Date) - `$t0).TotalSeconds, 1)" 120 }
       Write-Host "  settled after $d s"
-      $text = Invoke-Launch $b "--timing --timing-dirs `"$Tiny;$Dir`" --reps 1 $ExtraArgs"
+      $dirs = if ($StartupNav) { "$Tiny;$Dir" } else { "$Tiny;<idle>;$Tiny;$Dir" }
+      $text = Invoke-Launch $b "--timing --timing-dirs `"$dirs`" --reps 1 $ExtraArgs"
     } elseif ($Mode -eq 'navcold') {
       # warm app, cold folder: the app purges (elevated) after its start, lets
       # the storm pass, re-warms itself on the tiny folder, then opens <dir>
@@ -132,7 +136,7 @@ for ($i = 1; $i -le $Runs; $i++) {
       $kind = $Matches[1]
       if ($kind -eq 'startup') { continue }
       if ($Mode -ne 'warm' -and $kind -ne 'first') { continue }
-      if ($Mode -eq 'navcold' -and -not $l.TrimEnd().EndsWith($Dir)) { continue }
+      if ($Mode -ne 'warm' -and -not $l.TrimEnd().EndsWith($Dir)) { continue }
       $row = [ordered]@{ label = $b.Label; run = $i; kind = ($kind -replace ' \d+', ''); entries = [int]$Matches[2] }
       foreach ($k in $keys) { $row[$k] = if ($l -match "$k\s+([\d.]+)") { [double]$Matches[1] } else { $null } }
       $rows.Add([pscustomobject]$row)
