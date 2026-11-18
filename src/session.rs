@@ -70,7 +70,7 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
 pub fn capture(view: &View, window: tsubame_config::WindowState) -> Session {
     let tabs = view.tabs.items.iter().map(|t| tab_state(t, view.mode.to_config())).collect();
     let pane = SessionPane { active_tab: view.tabs.active, tabs };
-    Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: 0, window, panes: vec![pane] }
+    Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: 0, window, panes: vec![pane], recents: Vec::new() }
 }
 
 /// Restores `s` into a view that was created with the session's active folder.

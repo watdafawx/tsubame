@@ -57,12 +57,14 @@ pub struct Session {
     pub last_folder: String,
     pub active_pane: usize,
     pub window: WindowState,
+    /// Recently visited folders, newest first (the sidebar's Recent section).
+    pub recents: Vec<String>,
     pub panes: Vec<SessionPane>,
 }
 
 impl Default for Session {
     fn default() -> Self {
-        Session { version: SESSION_VERSION, last_folder: String::new(), active_pane: 0, window: WindowState::default(), panes: Vec::new() }
+        Session { version: SESSION_VERSION, last_folder: String::new(), active_pane: 0, window: WindowState::default(), recents: Vec::new(), panes: Vec::new() }
     }
 }
 
@@ -241,7 +243,23 @@ mod tests {
             active_pane: 0,
             window: WindowState { x: 10, y: 20, w: 1000, h: 700, maximized: false },
             panes: vec![SessionPane { active_tab: active, tabs: paths.iter().map(|p| tab(p)).collect() }],
+            recents: Vec::new(),
         }
+    }
+
+    #[test]
+    fn two_panes_and_recents_round_trip() {
+        let mut s = session(&["C:\\a", "C:\\b"], 0);
+        s.panes.push(SessionPane { active_tab: 0, tabs: vec![tab("D:\\right")] });
+        s.active_pane = 1;
+        s.recents = vec!["C:\\x".into(), "D:\\y z".into()];
+        let back: Session = toml::from_str(&s.to_toml()).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.panes.len(), 2);
+        assert_eq!(back.recents.len(), 2);
+        // an old file without recents still loads
+        let old: Session = toml::from_str("version = 1\n").unwrap();
+        assert!(old.recents.is_empty());
     }
 
     #[test]

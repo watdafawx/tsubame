@@ -148,6 +148,9 @@ fn yes() -> bool {
 fn one() -> f32 {
     1.0
 }
+fn half() -> f32 {
+    0.5
+}
 pub(crate) fn default_version() -> u32 {
     VERSION
 }
@@ -252,15 +255,37 @@ pub struct Panes {
     pub dual: bool,
     #[serde(default)]
     pub split: Split,
+    /// Share of the area the first pane takes (0.2 to 0.8).
+    #[serde(default = "half")]
+    pub ratio: f32,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    /// The sidebar is the 48 px icon rail (Ctrl+B).
     pub sidebar_collapsed: bool,
 }
 
 impl Default for Panes {
     fn default() -> Self {
-        Panes { dual: false, split: Split::Vertical, sidebar_width: DEFAULT_SIDEBAR_WIDTH, sidebar_collapsed: false }
+        Panes { dual: false, split: Split::Vertical, ratio: 0.5, sidebar_width: DEFAULT_SIDEBAR_WIDTH, sidebar_collapsed: false }
     }
+}
+
+/// One pinned (bookmarked) folder: `[[sidebar.pinned]]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Pinned {
+    /// Label shown in the sidebar (the folder name unless renamed).
+    pub name: String,
+    pub path: String,
+}
+
+/// `[sidebar]`: bookmarks and which sections are folded.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sidebar {
+    pub pinned: Vec<Pinned>,
+    /// Folded sections: any of `"pinned"`, `"quick"`, `"recent"`, `"pc"`, `"network"`.
+    pub closed: Vec<String>,
 }
 
 /// `[updates]`, read by the updater wiring (`docs/updater.md`).
@@ -364,6 +389,7 @@ pub struct Config {
     pub general: General,
     pub appearance: Appearance,
     pub panes: Panes,
+    pub sidebar: Sidebar,
     pub updates: Updates,
     pub keys: Keys,
     pub window: WindowState,
@@ -371,7 +397,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: VERSION, general: General::default(), appearance: Appearance::default(), panes: Panes::default(), updates: Updates::default(), keys: Keys::default(), window: WindowState::default() }
+        Config { version: VERSION, general: General::default(), appearance: Appearance::default(), panes: Panes::default(), sidebar: Sidebar::default(), updates: Updates::default(), keys: Keys::default(), window: WindowState::default() }
     }
 }
 
@@ -748,6 +774,23 @@ maximized = true
         let third: Config = toml::from_str(&again).unwrap();
         assert_eq!(third, l.value.config);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn pinned_closed_and_ratio_round_trip() {
+        let mut c = Config::default();
+        c.panes.dual = true;
+        c.panes.ratio = 0.35;
+        c.sidebar.pinned = vec![Pinned { name: "Work".into(), path: "D:\\work".into() }, Pinned { name: "x \"q\"".into(), path: "C:\\a b".into() }];
+        c.sidebar.closed = vec!["recent".into(), "network".into()];
+        let text = ConfigFile::new(c.clone()).to_toml();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back, c);
+        assert_eq!(back.sidebar.pinned.len(), 2);
+        // an old file with no [sidebar] and no ratio takes defaults
+        let old: Config = toml::from_str("[panes]\ndual = true\n").unwrap();
+        assert!(old.sidebar.pinned.is_empty());
+        assert!((old.panes.ratio - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
