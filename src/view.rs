@@ -30,6 +30,13 @@ use tsubame_ui::{
 };
 use tsubame_win::enumerate::Wake;
 
+#[path = "view_edit.rs"]
+mod edit;
+use crate::batchui::BatchEdit;
+use crate::editing::RenameEdit;
+use crate::ops::Ops;
+use edit::{Drag, PressInfo};
+
 pub const ICON_DIP: f32 = 16.0;
 
 /// How a folder is shown. One global setting (all tabs).
@@ -135,6 +142,7 @@ pub struct PaneState {
     focus_list: bool,
     focus_path: bool,
     list_top: f32,
+    list_r: Rect,
     last_range: (usize, usize),
 }
 
@@ -153,6 +161,7 @@ impl PaneState {
             focus_list: false,
             focus_path: false,
             list_top: 0.0,
+            list_r: Rect::new(0.0, 0.0, 0.0, 0.0),
             last_range: (0, 0),
         }
     }
@@ -219,6 +228,8 @@ pub struct View {
     pub maximized: bool,
     /// y of the list's top edge (keyboard menus)
     list_top: f32,
+    /// the list (or grid) area of the last paint
+    list_r: Rect,
     /// rows drawn by the last paint (first, last+1)
     pub last_range: (usize, usize),
     /// the volume of the shown folder changed: main re-reads the drives
@@ -249,6 +260,27 @@ pub struct View {
     ptr_was_active: bool,
     /// where the two panes were drawn last frame (a press there activates the pane)
     pane_rects: [Rect; 2],
+    /// file operations (copy, move, rename, undo)
+    pub ops: Ops,
+    rename: Option<RenameEdit>,
+    rename_slot: usize,
+    batch: Option<BatchEdit>,
+    batch_slot: usize,
+    batch_bar: Rect,
+    drag: Option<Drag>,
+    press: Option<PressInfo>,
+    /// (row, ms) of the last press on a row
+    last_click: Option<(usize, u64)>,
+    /// the only selected row at the end of the last two frames
+    sole_hist: [Option<usize>; 2],
+    /// names to select once the folder is re-read
+    select_after: Vec<String>,
+    /// modifier keys held now (main sets it each frame)
+    pub cur_mods: Mods,
+    /// main runs the file-operation poll timer
+    pub ops_timer: bool,
+    /// where the sidebar says a drag would land
+    side_target: Option<crate::sidebar::DropTarget>,
 }
 
 impl View {
@@ -283,6 +315,7 @@ impl View {
             focus_path: false,
             maximized: false,
             list_top: 0.0,
+            list_r: Rect::new(0.0, 0.0, 0.0, 0.0),
             last_range: (0, 0),
             want_drives: true,
             pump_more: false,
@@ -298,6 +331,20 @@ impl View {
             ratio: 0.5,
             ptr_was_active: false,
             pane_rects: [Rect::new(0.0, 0.0, 0.0, 0.0); 2],
+            ops: Ops::default(),
+            rename: None,
+            rename_slot: 0,
+            batch: None,
+            batch_slot: 0,
+            batch_bar: Rect::new(0.0, 0.0, 0.0, 0.0),
+            drag: None,
+            press: None,
+            last_click: None,
+            sole_hist: [None, None],
+            select_after: Vec::new(),
+            cur_mods: Mods::default(),
+            ops_timer: false,
+            side_target: None,
         }
     }
 
@@ -366,6 +413,7 @@ impl View {
         std::mem::swap(&mut self.focus_list, &mut o.focus_list);
         std::mem::swap(&mut self.focus_path, &mut o.focus_path);
         std::mem::swap(&mut self.list_top, &mut o.list_top);
+        std::mem::swap(&mut self.list_r, &mut o.list_r);
         std::mem::swap(&mut self.last_range, &mut o.last_range);
         self.live = 1 - self.live;
     }
@@ -402,6 +450,21 @@ impl View {
         } else {
             self.other.as_deref().map(|o| &o.tabs)
         }
+    }
+
+    /// Startup: puts the saved tabs in the other pane (it starts as a copy
+    /// of the first folder). Only the shown tab lists now; the rest stay lazy.
+    pub fn restore_other_pane(&mut self, tabs: Vec<Tab>, active: usize) {
+        let wake = self.wake.clone();
+        let Some(o) = self.other.as_deref_mut() else { return };
+        if tabs.is_empty() {
+            return;
+        }
+        o.tabs.items = tabs;
+        o.tabs.active = active.min(o.tabs.items.len() - 1);
+        o.strip = TabStrip::default();
+        let a = o.tabs.active;
+        o.tabs.items[a].resume(wake);
     }
 
     /// One pane or two, and how they sit (the title-bar switch and the
@@ -461,6 +524,8 @@ impl View {
     }
 
     fn after_nav(&mut self) {
+        self.close_edits();
+        self.ops.message = None;
         let p = self.tab().path.clone();
         self.side.push_recent(&p);
         self.filter.set_text("");
@@ -558,6 +623,7 @@ impl View {
     }
 
     fn switched(&mut self) {
+        self.close_edits();
         let f = self.tab().filter.clone();
         self.filter.set_text(&f);
         self.editing = false;
@@ -568,6 +634,7 @@ impl View {
     /// Enter / double click on view row `pos`: a folder opens in this tab, a
     /// file goes to the shell on a worker.
     pub fn activate(&mut self, pos: usize) {
+        self.press = None;
         if let Some((path, dir)) = self.tab().entry_at(pos) {
             if dir { self.go(&path) } else { self.open_paths.push(path) }
         }
@@ -685,11 +752,12 @@ impl View {
 
     /// With two panes: shows `path` in the other one. With one: a new tab.
     pub fn open_in_other_pane(&mut self, path: &str) {
-        self.open_in_new_tab(path);
+        if self.other.is_none() {
+            return self.open_in_new_tab(path);
+        }
+        let slot = panes::other(self.active);
+        self.with_pane(slot, |v| v.go(path));
     }
-
-    /// Files were dropped on a folder row of the sidebar.
-    pub fn drop_selection_on(&mut self, _folder: &str) {}
 
     fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
         match cmd {
@@ -730,16 +798,97 @@ impl View {
                 t.sel.select_all(&t.store);
             }
             CMD_ESCAPE => {
-                if !self.tab().filter.is_empty() {
+                if self.cancel_edits() {
+                    // a drag, a rename or the batch bar ended
+                } else if !self.tab().filter.is_empty() {
                     self.filter.set_text("");
                     self.tab_mut().set_filter("");
                 } else {
                     self.tab_mut().sel.clear();
                 }
             }
+            CMD_RENAME => self.begin_rename(ui),
+            CMD_SIDEBAR => {
+                self.side.set_rail(!self.side.rail);
+                self.side_act(ui, Some(Act::Layout));
+            }
+            CMD_SPLIT => self.toggle_split(),
+            CMD_SPLIT_ORIENTATION => self.flip_split(),
+            CMD_SWITCH_PANE => {
+                if let Some(e) = self.rename.as_ref() {
+                    if e.valid() || e.unchanged() {
+                        self.finish_rename(ui, crate::editing::RenameOut::CommitNext);
+                    }
+                } else if self.other.is_some() && !ui.has_focus(pid(self.live, ID_FILTER)) && !ui.has_focus(pid(self.live, ID_PATH_EDIT)) {
+                    self.set_active_pane(panes::other(self.active));
+                }
+            }
+            CMD_COPY_OTHER => {
+                if self.other.is_some() {
+                    self.copy_or_move_to_other(false);
+                } else {
+                    self.refresh();
+                }
+            }
+            CMD_MOVE_OTHER => {
+                if self.other.is_some() {
+                    self.copy_or_move_to_other(true);
+                }
+            }
+            CMD_UNDO => self.undo_op(),
+            CMD_REDO => self.redo_op(),
+            CMD_PIN_FOLDER => {
+                let p = self.selected_folder().unwrap_or_else(|| self.tab().path.clone());
+                let n = self.side.pinned.len();
+                if self.side.pin_at(&p, n) {
+                    self.ops.message = Some(format!("Pinned {}", crate::dnd::name_of(&p)));
+                    self.config_dirty = true;
+                }
+            }
+            CMD_OPEN_OTHER => {
+                if let Some(p) = self.selected_folder() {
+                    self.open_in_other_pane(&p);
+                }
+            }
+            CMD_OPEN_NEW_TAB => {
+                if let Some(p) = self.selected_folder() {
+                    self.open_in_new_tab(&p);
+                }
+            }
+            CMD_TAB_TO_OTHER => self.move_tab_to_other(),
+            CMD_SYNC_OTHER => {
+                if self.other.is_some() {
+                    let p = self.tab().path.clone();
+                    let slot = panes::other(self.active);
+                    self.with_pane(slot, |v| v.go(&p));
+                }
+            }
             _ => {}
         }
         ui.request_repaint();
+    }
+
+    /// The folder under the cursor, when the cursor row is a folder.
+    fn selected_folder(&self) -> Option<String> {
+        let t = self.tab();
+        let c = if self.mode.is_grid() { t.grid.cursor } else { t.list.cursor };
+        t.entry_at(c).filter(|(_, dir)| *dir).map(|(p, _)| p)
+    }
+
+    /// Moves the active tab to the other pane (two panes only).
+    fn move_tab_to_other(&mut self) {
+        if self.other.is_none() || self.tabs.items.len() < 2 {
+            return;
+        }
+        let i = self.tabs.active;
+        let Some(tab) = self.tabs.close(i) else { return };
+        self.switched();
+        let slot = panes::other(self.active);
+        self.with_pane(slot, |v| {
+            v.tabs.add(tab);
+            v.switched();
+        });
+        self.set_active_pane(slot);
     }
 
     /// Switches between details and the grids. The cursor row follows: it is
@@ -827,6 +976,7 @@ impl View {
                 self.set_active_pane(slot);
             }
         }
+        let released = self.track_pointer(ui, held);
         self.ptr_was_active = held;
         if std::mem::take(&mut self.focus_path) {
             ui.set_focus(Some(pid(self.live, ID_PATH_EDIT)));
@@ -835,19 +985,22 @@ impl View {
         }
         let t = ui.theme;
         if self.other.is_some() {
-            self.paint_dual(ui, g, shell, (w, h), &t);
+            self.paint_dual(ui, g, shell, (w, h), &t, released);
         } else {
             let mut r = tsubame_ui::Rect::new(0.0, 0.0, w, h);
             let titlebar = r.cut_top(t.height_titlebar);
             let toolbar = r.cut_top(t.height_toolbar);
             let status = r.cut_bottom(t.height_status_bar);
             let sidebar = r.cut_left(t.layout_sidebar_width);
+            let batch_bar = r.cut_top(self.batch_h());
             let main = r;
 
             // body first: the later widgets (toolbar, title bar) win hit tests
-            let so = self.side.paint(ui, g, sidebar, &self.tabs.items[self.tabs.active].path, &DragCtx::NONE);
-            self.side_act(ui, so.act);
+            self.paint_side(ui, g, sidebar, released);
             self.paint_main(ui, g, shell, main, &t);
+            if batch_bar.h > 0.0 {
+                self.paint_batch_bar(ui, g, &t, batch_bar);
+            }
             self.paint_status(g, status, &t, false);
             self.paint_toolbar(ui, g, toolbar, &t, false, false);
             self.paint_titlebar(ui, g, titlebar, &t, true);
@@ -855,6 +1008,10 @@ impl View {
         }
         let oa = self.side.paint_overlay(ui, g, self.other.is_some());
         self.side_act(ui, oa);
+        self.paint_batch_preview(g, &t, (w, h));
+        let target = self.side_target.take();
+        self.finish_drag(ui, g, &t, released, target.as_ref());
+        self.sole_hist = [self.sole_hist[1], self.sole_row()];
 
         let n_global = ui.commands().len();
         let mut out = ui.end_frame();
@@ -888,9 +1045,23 @@ impl View {
         Some(out)
     }
 
+    /// The sidebar, with the drag in progress (if any) so it can take drops.
+    fn paint_side(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, released: bool) {
+        let ctx = DragCtx { payload: self.drag.as_ref().map(|d| &d.payload), folder: self.drag.as_ref().and_then(|d| d.folder.as_deref()), released };
+        let so = self.side.paint(ui, g, r, &self.tabs.items[self.tabs.active].path, &ctx);
+        self.side_target = so.target;
+        self.side_act(ui, so.act);
+    }
+
+    /// The cursor row when it is the only selected one (slow-click rename).
+    fn sole_row(&self) -> Option<usize> {
+        let t = self.tab();
+        (t.sel.count() == 1).then_some(t.list.cursor)
+    }
+
     /// Two panes: the title bar on top, the sidebar down the left, the panes
     /// (each with its own tab strip, toolbar and status bar) split by a bar.
-    fn paint_dual(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, size: (f32, f32), t: &Theme) {
+    fn paint_dual(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, size: (f32, f32), t: &Theme, released: bool) {
         let mut r = Rect::new(0.0, 0.0, size.0, size.1);
         let titlebar = r.cut_top(t.height_titlebar);
         let sidebar = r.cut_left(t.layout_sidebar_width);
@@ -907,9 +1078,7 @@ impl View {
             self.config_dirty = true;
         }
         self.pane_rects = [a, b];
-        let cur = self.tab().path.clone();
-        let so = self.side.paint(ui, g, sidebar, &cur, &DragCtx::NONE);
-        self.side_act(ui, so.act);
+        self.paint_side(ui, g, sidebar, released);
         for slot in 0..2 {
             let rect = self.pane_rects[slot];
             let active = slot == self.active;
@@ -925,8 +1094,12 @@ impl View {
         let strip_r = r.cut_top(PANE_STRIP_H);
         let toolbar = r.cut_top(t.height_toolbar);
         let status = r.cut_bottom(t.height_status_bar);
+        let batch_bar = r.cut_top(self.batch_h());
         g.fill(strip_r, t.bg);
         self.paint_main(ui, g, shell, r, t);
+        if batch_bar.h > 0.0 {
+            self.paint_batch_bar(ui, g, t, batch_bar);
+        }
         self.paint_status(g, status, t, active);
         self.paint_toolbar(ui, g, toolbar, t, panes::compact_toolbar(rect.w), active);
         self.paint_tabs(ui, g, strip_r);
@@ -955,7 +1128,7 @@ impl View {
     /// while two panes or a rename are open; otherwise Tab keeps moving the
     /// keyboard focus along the widgets.
     fn sync_tab_binding(&mut self, ui: &mut Ui) {
-        let want = self.other.is_some();
+        let want = self.other.is_some() || self.rename.is_some();
         let bound = ui.shortcuts.lookup(Key::Tab, Mods::NONE, true).is_some();
         if want != bound {
             ui.shortcuts.bind(Key::Tab, Mods::NONE, CMD_SWITCH_PANE, want);
@@ -1219,6 +1392,7 @@ impl View {
         let header_r = area.cut_top(t.height_column_header);
         let list_r = area;
         self.list_top = list_r.y;
+        self.list_r = list_r;
         let total = main.w - t.layout_scrollbar_width;
         // a narrow pane of two drops the Type column
         let hide_type = self.other.is_some() && panes::hide_type_column(main.w);
@@ -1266,6 +1440,7 @@ impl View {
             self.menu_request = Some((self.tabs.items[self.tabs.active].list.cursor, None));
         }
         self.paint_empty(g, list_r, t);
+        self.paint_rename(ui, g, t, &spans);
         if let Some(pos) = activated {
             self.activate(pos);
             ui.request_repaint();
@@ -1374,6 +1549,7 @@ impl View {
         let tab = &self.tabs.items[self.tabs.active];
         let loading = matches!(tab.load, Load::Loading).then_some(tab.delivered);
         let side = panes::side_name(self.orient, self.live);
+        let mut s = std::mem::take(&mut self.text);
         let info = StatusInfo {
             loading,
             failed: matches!(tab.load, Load::Failed(_)),
@@ -1383,10 +1559,9 @@ impl View {
             selected_bytes: tab.sel.total_size().min(u64::MAX as u128) as u64,
             free: self.side.volume_of(&tab.path),
             other_side: hints.then_some(side),
-            batch: false,
-            message: None,
+            batch: self.batch.is_some() && self.batch_slot == self.live,
+            message: if hints || self.other.is_none() { self.status_message() } else { None },
         };
-        let mut s = std::mem::take(&mut self.text);
         statusbar::paint(g, t, r, &info, &mut s);
         self.text = s;
     }
