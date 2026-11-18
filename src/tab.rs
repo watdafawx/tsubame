@@ -880,7 +880,7 @@ mod tests {
         t.set_visible(true);
         t.start(dir.to_str().unwrap(), wake());
         wait_done(&mut t);
-        assert!(t.watched(), "a shown local folder is watched");
+        pump_until(&mut t, "a shown local folder is watched", |t| t.watched());
         assert_eq!(names(&t), ["b.txt", "d.txt", "f.txt"]);
         // the cursor and the selection sit on d.txt
         t.sel.single(&t.store, 1);

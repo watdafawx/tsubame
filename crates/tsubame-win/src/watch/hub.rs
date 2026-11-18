@@ -575,12 +575,34 @@ pub(crate) fn spawn(
         }),
     });
     let (buffer_bytes, max_buffer_bytes, port) = (opts.buffer_bytes, opts.max_buffer_bytes, hub.port);
-    let w2 = w.clone();
-    std::thread::Builder::new()
-        .name("tsubame-watch-open".into())
-        .spawn(move || open_on_thread(&w2, buffer_bytes, max_buffer_bytes, port))
-        .map_err(|_| Win32Error::win32(8))?; // ERROR_NOT_ENOUGH_MEMORY
+    lock(opener()?).send((w.clone(), buffer_bytes, max_buffer_bytes, port)).map_err(|_| Win32Error::win32(8))?;
     Ok((w, rx))
+}
+
+/// Watch, buffer bytes, max buffer bytes, port.
+type OpenJob = (Arc<Watch>, usize, usize, usize);
+
+/// One process-lifetime thread opens folders for [`spawn`], in order: a thread
+/// per navigation left a little native memory behind each time (leak gate
+/// +1 point). Blocks in the kernel while idle. A slow open (a network share)
+/// delays the opens queued behind it, never the caller.
+fn opener() -> Result<&'static Mutex<Sender<OpenJob>>, Win32Error> {
+    static OPENER: OnceLock<Option<Mutex<Sender<OpenJob>>>> = OnceLock::new();
+    OPENER
+        .get_or_init(|| {
+            let (tx, rx) = channel::<OpenJob>();
+            std::thread::Builder::new()
+                .name("tsubame-watch-open".into())
+                .spawn(move || {
+                    for (w, buffer_bytes, max_buffer_bytes, port) in rx {
+                        open_on_thread(&w, buffer_bytes, max_buffer_bytes, port);
+                    }
+                })
+                .ok()?;
+            Some(Mutex::new(tx))
+        })
+        .as_ref()
+        .ok_or(Win32Error::win32(8)) // ERROR_NOT_ENOUGH_MEMORY
 }
 
 fn open_on_thread(w: &Arc<Watch>, buffer_bytes: usize, max_buffer_bytes: usize, port: usize) {
