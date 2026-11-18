@@ -108,6 +108,8 @@ struct Inner {
     closed: bool,
     /// A terminal message was sent and the handle closed.
     done: bool,
+    /// The first read is pending: changes from now on are reported.
+    armed: bool,
 }
 
 impl Inner {
@@ -522,6 +524,7 @@ pub(crate) fn open(
             in_dirty: false,
             closed: false,
             done: false,
+            armed: false,
         }),
     });
     {
@@ -529,12 +532,133 @@ pub(crate) fn open(
         if let Some(r) = reason {
             g.send(Message::Unreliable(r));
         }
-        if let Err(code) = arm(&w, &mut g) {
+        match arm(&w, &mut g) {
+            Ok(()) => g.armed = true,
+            Err(code) => {
+                let msg = classify(&g, code);
+                g.finish(msg);
+            }
+        }
+    }
+    Ok((w, rx))
+}
+
+/// Like [`open`], but the blocking part (open the folder, query it, arm the
+/// first read: disk reads on a cold folder, a network round trip on a share)
+/// runs on a short-lived thread, so the caller never waits. Until the read is
+/// armed, [`armed`] is false; an open error arrives as `Message::Failed`.
+pub(crate) fn spawn(
+    dir: &Path,
+    opts: &Options,
+    wake: Wake,
+) -> Result<(Arc<Watch>, Receiver<Message>), Win32Error> {
+    let hub = hub()?;
+    let wide = extended_wide(dir)?;
+    let (tx, rx) = channel();
+    let w = Arc::new(Watch {
+        overlapped: UnsafeCell::new(OVERLAPPED::default()),
+        inner: Mutex::new(Inner {
+            handle: None,
+            buf: Vec::new(),
+            max_buf_bytes: 0,
+            scratch: Vec::new(),
+            recursive: opts.recursive,
+            co: Coalescer::new(opts.window, opts.max_delay),
+            tx,
+            wake,
+            baseline: Vec::new(),
+            path: wide,
+            in_dirty: false,
+            closed: false,
+            done: false,
+            armed: false,
+        }),
+    });
+    let (buffer_bytes, max_buffer_bytes, port) = (opts.buffer_bytes, opts.max_buffer_bytes, hub.port);
+    let w2 = w.clone();
+    std::thread::Builder::new()
+        .name("tsubame-watch-open".into())
+        .spawn(move || open_on_thread(&w2, buffer_bytes, max_buffer_bytes, port))
+        .map_err(|_| Win32Error::win32(8))?; // ERROR_NOT_ENOUGH_MEMORY
+    Ok((w, rx))
+}
+
+fn open_on_thread(w: &Arc<Watch>, buffer_bytes: usize, max_buffer_bytes: usize, port: usize) {
+    let wide = lock(&w.inner).path.clone();
+    let opened = (|| -> Result<HANDLE, Win32Error> {
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                None,
+            )
+        }
+        .map_err(|e| Win32Error::from_win_error(&e))?;
+        let close_on_err = |e: Win32Error| {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            e
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(handle, &mut info) }
+            .map_err(|e| close_on_err(Win32Error::from_win_error(&e)))?;
+        if info.dwFileAttributes & 0x10 == 0 {
+            return Err(close_on_err(Win32Error::win32(ERROR_DIRECTORY)));
+        }
+        unsafe { CreateIoCompletionPort(handle, Some(HANDLE(port as *mut c_void)), 0, 0) }
+            .map_err(|e| close_on_err(Win32Error::from_win_error(&e)))?;
+        Ok(handle)
+    })();
+    let reason = reliability(&wide);
+    let baseline = opened.as_ref().ok().and_then(|&h| final_path(h)).unwrap_or_default();
+    let mut g = lock(&w.inner);
+    let handle = match opened {
+        Ok(h) => h,
+        Err(e) => {
+            if !g.closed {
+                g.finish(Message::Failed(e));
+            }
+            return;
+        }
+    };
+    if g.closed {
+        // the DirWatcher was dropped meanwhile: no read was ever armed
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return;
+    }
+    let mut max = max_buffer_bytes.max(buffer_bytes).max(64);
+    let mut start = buffer_bytes.max(64);
+    if reason == Some(Unreliable::Network) {
+        max = max.min(NETWORK_MAX_BUFFER);
+        start = start.min(NETWORK_MAX_BUFFER);
+    }
+    g.handle = Some(handle);
+    g.buf = vec![0u32; start.div_ceil(4)];
+    g.max_buf_bytes = max;
+    g.baseline = baseline;
+    if let Some(r) = reason {
+        g.send(Message::Unreliable(r));
+    }
+    match arm(w, &mut g) {
+        Ok(()) => g.armed = true,
+        Err(code) => {
             let msg = classify(&g, code);
             g.finish(msg);
         }
     }
-    Ok((w, rx))
+}
+
+/// The first read of the watch is pending (always true for [`open`]).
+pub(crate) fn armed(w: &Watch) -> bool {
+    let g = lock(&w.inner);
+    g.armed && !g.done && !g.closed
 }
 
 /// The watched directory is still where it was (not renamed, deleted or unplugged).

@@ -384,16 +384,19 @@ impl Tab {
         }
         let Some(wake) = self.wake.clone() else { return };
         let t0 = Instant::now();
-        if let Ok(w) = DirWatcher::start(&self.path, WatchOptions::default(), wake) {
+        // spawn: opening the folder and arming the read happen off the UI
+        // thread (a cold folder can take hundreds of ms there)
+        if let Ok(w) = DirWatcher::spawn(&self.path, WatchOptions::default(), wake) {
             self.watching.w = Some(w);
         }
         self.timing.watch_start += t0.elapsed();
     }
 
     /// A watcher runs and its notifications can be trusted: changes show up
-    /// by themselves, no relist needed after a file operation.
+    /// by themselves, no relist needed after a file operation. False until
+    /// the watcher's first read is armed.
     pub fn watched(&self) -> bool {
-        self.watching.w.is_some() && !self.watching.unreliable
+        self.watching.w.as_ref().is_some_and(|(w, _)| w.armed()) && !self.watching.unreliable
     }
 
     /// What the watcher asks of the view (relist, go up), once.
@@ -907,7 +910,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(dir.join("i.txt"), b"x").unwrap();
         t.set_visible(true);
-        assert!(t.watched());
+        // the watcher arms off the UI thread
+        pump_until(&mut t, "watcher armed", |t| t.watched());
         assert_eq!(t.take_note(), Some(WatchNote::Relist));
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -126,6 +126,26 @@ impl DirWatcher {
         Ok((DirWatcher { watch }, rx))
     }
 
+    /// Like [`start`](Self::start), but never blocks: opening the folder and
+    /// arming the first read (disk reads on a cold folder, a round trip on a
+    /// share) happen on a short-lived thread. Changes are reported once
+    /// [`armed`](Self::armed) is true; an open error arrives as
+    /// [`Message::Failed`]. Dropping it before then is fine.
+    pub fn spawn(
+        dir: impl AsRef<Path>,
+        options: Options,
+        wake: Wake,
+    ) -> Result<(DirWatcher, Receiver<Message>), Win32Error> {
+        let (watch, rx) = hub::spawn(dir.as_ref(), &options, wake)?;
+        Ok((DirWatcher { watch }, rx))
+    }
+
+    /// Changes are being reported (the first read is pending and the watch
+    /// has not ended). Always true right after a successful [`start`](Self::start).
+    pub fn armed(&self) -> bool {
+        hub::armed(&self.watch)
+    }
+
     /// The folder is still where it was: not deleted, renamed or unplugged. One
     /// cheap syscall; call it when the window regains focus, because a rename of
     /// the watched folder itself raises no event.

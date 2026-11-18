@@ -559,3 +559,85 @@ fn apply_handles_files_gone_before_the_stat() {
     }
     assert!(store.is_empty());
 }
+
+// ------------------------------------------------------- spawn (no blocking)
+
+fn wait_armed(w: &DirWatcher) {
+    let t0 = Instant::now();
+    while !w.armed() {
+        assert!(t0.elapsed() < Duration::from_secs(5), "never armed");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn spawn_errors_arrive_as_messages() {
+    let fx = Fixture::new("spawn-errors");
+    let wake: tsubame_win::enumerate::Wake = Arc::new(|| {});
+    let (w, rx) = DirWatcher::spawn(fx.file("nope"), Options::default(), wake.clone()).expect("spawn");
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Message::Failed(e)) => assert_eq!(e.kind(), ErrorKind::NotFound),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert!(!w.armed());
+    fs::write(fx.file("f.txt"), b"x").unwrap();
+    let (w, rx) = DirWatcher::spawn(fx.file("f.txt"), Options::default(), wake).expect("spawn");
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Message::Failed(e)) => assert_eq!(e.code, 267), // ERROR_DIRECTORY
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert!(!w.armed());
+}
+
+#[test]
+fn spawn_reports_changes_once_armed() {
+    let fx = Fixture::new("spawn");
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let k = wakes.clone();
+    let (watcher, rx) = DirWatcher::spawn(
+        &fx.path,
+        Options::default(),
+        Arc::new(move || {
+            k.fetch_add(1, Ordering::Relaxed);
+        }),
+    )
+    .expect("spawn");
+    wait_armed(&watcher);
+    let wt = Watch { watcher, rx, wakes };
+    fs::write(fx.file("a.txt"), b"hello").unwrap();
+    assert_eq!(wt.changes(), ["+a.txt"]);
+    fs::remove_file(fx.file("a.txt")).unwrap();
+    assert_eq!(wt.changes(), ["-a.txt"]);
+}
+
+#[test]
+fn spawn_then_drop_at_once_releases_everything() {
+    let fx = Fixture::new("spawn-drop");
+    let wake: tsubame_win::enumerate::Wake = Arc::new(|| {});
+    for _ in 0..5 {
+        let (w, _rx) = DirWatcher::spawn(&fx.path, Options::default(), wake.clone()).unwrap();
+        wait_armed(&w);
+        drop(w);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    let before = tsubame_win::procinfo::counters().handles;
+    for round in 0..200 {
+        let dir = fx.file(&format!("d{round}"));
+        fs::create_dir(&dir).unwrap();
+        // dropped before (or while) the opener thread runs
+        drop(DirWatcher::spawn(&dir, Options::default(), wake.clone()).unwrap());
+        if round % 2 == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    std::thread::sleep(Duration::from_millis(500)); // opener threads end, aborted reads freed
+    for round in 0..200 {
+        // no handle left open: the folders delete for real
+        let dir = fx.file(&format!("d{round}"));
+        fs::remove_dir(&dir).unwrap();
+        assert!(!dir.exists());
+    }
+    let after = tsubame_win::procinfo::counters().handles;
+    println!("handles {before} -> {after} over 200 spawn/drop rounds");
+    assert!(after <= before + 4, "handles {before} -> {after}");
+}
