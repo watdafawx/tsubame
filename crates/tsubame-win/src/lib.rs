@@ -15,6 +15,7 @@ pub mod enumerate;
 pub mod places;
 pub mod procinfo;
 pub mod shell;
+pub mod watch;
 
 /// `s` as a NUL-terminated UTF-16 string.
 pub fn wide(s: &str) -> Vec<u16> {
