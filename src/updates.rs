@@ -163,6 +163,16 @@ fn set_phase(p: Phase) {
     wake();
 }
 
+/// The "install updates automatically" switch changed in Settings.
+pub fn set_auto_install(v: bool) {
+    lock().auto_install = v;
+}
+
+/// The environment this run was started with (for the Settings page).
+pub fn current_env() -> Env {
+    lock().env
+}
+
 /// What `init` tells `main` to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartAction {

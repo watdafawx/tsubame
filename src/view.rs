@@ -32,6 +32,8 @@ use tsubame_win::enumerate::Wake;
 
 #[path = "view_edit.rs"]
 mod edit;
+#[path = "view_u4.rs"]
+mod u4;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
 use crate::ops::Ops;
@@ -302,6 +304,27 @@ pub struct View {
     pub ops_timer: bool,
     /// where the sidebar says a drag would land
     side_target: Option<crate::sidebar::DropTarget>,
+    /// the settings as the user has them (U4): Settings edits this, `config_dirty` saves it
+    pub prefs: tsubame_config::Config,
+    /// id of the colour theme (`themes::find`)
+    pub theme_id: String,
+    /// the key map (defaults + `[keys.overrides]`)
+    pub keymap: crate::keymap::KeyMap,
+    /// the command palette, built when it opens and dropped when it closes
+    palette: Option<Box<crate::palette::Palette>>,
+    /// command ids run from the palette, most recent first
+    recents: Vec<u32>,
+    /// the Settings tab's pages, built when the tab opens and dropped when it closes
+    settings: Option<Box<crate::settings::Settings>>,
+    /// where this copy lives (main fills it in)
+    pub env: crate::settings::Env,
+    /// main must restart into the updated version / roll back / reset the config
+    pub want_restart: bool,
+    pub want_rollback: bool,
+    pub want_reset_all: bool,
+    /// private bytes of the process, sampled at most once a second while Settings is shown
+    pub private_bytes: usize,
+    private_at: Option<std::time::Instant>,
 }
 
 impl View {
@@ -372,11 +395,23 @@ impl View {
             cur_mods: Mods::default(),
             ops_timer: false,
             side_target: None,
+            prefs: tsubame_config::Config::default(),
+            theme_id: tsubame_ui::themes::tsubame(dark).id.to_string(),
+            keymap: crate::keymap::KeyMap::defaults(),
+            palette: None,
+            recents: Vec::new(),
+            settings: None,
+            env: crate::settings::Env::default(),
+            want_restart: false,
+            want_rollback: false,
+            want_reset_all: false,
+            private_bytes: 0,
+            private_at: None,
         }
     }
 
     pub fn base_theme(&self) -> Theme {
-        let mut t = Theme::with_density(if self.dark { &DARK } else { &LIGHT }, self.density);
+        let mut t = self.themed();
         t.layout_sidebar_width = if self.side.rail { crate::sidebar::RAIL_W } else { self.sidebar_width };
         t
     }
@@ -543,6 +578,9 @@ impl View {
 
     /// Opens `path` in the current tab and records it in the history.
     pub fn go(&mut self, path: &str) {
+        if self.tab().settings {
+            return self.open_in_new_tab(path);
+        }
         let wake = self.wake.clone();
         let t = self.tab_mut();
         t.history.push(path);
@@ -567,6 +605,9 @@ impl View {
     }
 
     pub fn back(&mut self) {
+        if self.tab().settings {
+            return;
+        }
         let wake = self.wake.clone();
         let t = self.tab_mut();
         if let Some(p) = t.history.back().map(str::to_string) {
@@ -575,6 +616,9 @@ impl View {
         }
     }
     pub fn forward(&mut self) {
+        if self.tab().settings {
+            return;
+        }
         let wake = self.wake.clone();
         let t = self.tab_mut();
         if let Some(p) = t.history.forward().map(str::to_string) {
@@ -588,6 +632,9 @@ impl View {
         }
     }
     pub fn refresh(&mut self) {
+        if self.tab().settings {
+            return;
+        }
         let wake = self.wake.clone();
         let t = self.tab_mut();
         let p = t.path.clone();
@@ -597,7 +644,7 @@ impl View {
     }
 
     pub fn new_tab(&mut self) {
-        let path = self.tab().path.clone();
+        let path = self.folder_path();
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let mut t = Tab::new(id, &path, self.density.row_h());
@@ -611,7 +658,11 @@ impl View {
     /// Closes tab `i`: its store is freed and its enumeration cancelled
     /// (the tab drops). The last tab closing ends the window.
     pub fn close_tab(&mut self, i: usize) {
+        let was_settings = self.tabs.items.get(i).is_some_and(|t| t.settings);
         drop(self.tabs.close(i));
+        if was_settings {
+            self.settings = None;
+        }
         if self.tabs.is_empty() {
             self.quit = true;
         } else {
@@ -781,6 +832,8 @@ impl View {
 
     fn set_dark(&mut self, ui: &mut Ui, dark: bool) {
         self.dark = dark;
+        self.theme_id = tsubame_ui::themes::tsubame(dark).id.to_string();
+        self.pull_appearance();
         self.config_dirty = true;
         self.apply_theme(ui);
     }
@@ -826,6 +879,13 @@ impl View {
     }
 
     fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
+        if self.tab().settings && !u4::settings_tab_allows(cmd) {
+            return;
+        }
+        if self.run_u4(ui, cmd) {
+            ui.request_repaint();
+            return;
+        }
         match cmd {
             CMD_NEW_TAB => self.new_tab(),
             CMD_CLOSE_TAB => self.close_tab(self.tabs.active),
@@ -848,11 +908,13 @@ impl View {
             CMD_THEME => self.set_dark(ui, !self.dark),
             CMD_DENSITY => {
                 self.density = self.density.next();
+                self.pull_appearance();
                 self.config_dirty = true;
                 self.apply_theme(ui);
             }
             CMD_ZEBRA => {
                 self.zebra = !self.zebra;
+                self.pull_appearance();
                 self.config_dirty = true;
             }
             CMD_REFRESH => self.refresh(),
@@ -1034,6 +1096,8 @@ impl View {
             return Some(out);
         }
         self.sync_tab_binding(ui);
+        // the palette and the key recorder set this again while they are painted
+        ui.capture_keys = false;
         // a press that starts in the other pane makes it the active one
         let held = ui.active().is_some();
         if held && !self.ptr_was_active && self.other.is_some() {
@@ -1055,6 +1119,11 @@ impl View {
         let t = ui.theme;
         if self.other.is_some() {
             self.paint_dual(ui, g, shell, (w, h), &t);
+        } else if self.tab().settings {
+            let mut r = tsubame_ui::Rect::new(0.0, 0.0, w, h);
+            let titlebar = r.cut_top(t.height_titlebar);
+            self.paint_settings(ui, g, r);
+            self.paint_titlebar(ui, g, titlebar, &t, true);
         } else {
             let mut r = tsubame_ui::Rect::new(0.0, 0.0, w, h);
             let titlebar = r.cut_top(t.height_titlebar);
@@ -1083,6 +1152,7 @@ impl View {
         let oa = self.side.paint_overlay(ui, g, self.other.is_some());
         self.side_act(ui, oa);
         self.paint_batch_preview(g, &t, (w, h));
+        self.paint_palette(ui, g, (w, h));
         let target = self.side_target.take();
         self.finish_drag(ui, g, &t, target.as_ref());
         self.sole_hist = [self.sole_hist[1], self.sole_row()];
@@ -1098,7 +1168,7 @@ impl View {
             again = true;
         }
         // typing in the list starts the filter
-        let typed: Vec<char> = ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect();
+        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
         for c in typed {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
@@ -1173,6 +1243,12 @@ impl View {
     fn paint_pane(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, rect: Rect, t: &Theme, active: bool) {
         let mut r = rect;
         let strip_r = r.cut_top(PANE_STRIP_H);
+        if self.tab().settings {
+            g.fill(strip_r, t.bg);
+            self.paint_settings(ui, g, r);
+            self.paint_tabs(ui, g, strip_r);
+            return;
+        }
         let toolbar = r.cut_top(t.height_toolbar);
         let status = r.cut_bottom(t.height_status_bar);
         let batch_bar = r.cut_top(self.batch_h());

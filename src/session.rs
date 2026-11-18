@@ -72,7 +72,12 @@ pub fn capture(view: &View, window: tsubame_config::WindowState) -> Session {
     let n = if view.dual() { 2 } else { 1 };
     let panes: Vec<SessionPane> = (0..n)
         .filter_map(|slot| view.pane_tabs(slot))
-        .map(|tabs| SessionPane { active_tab: tabs.active, tabs: tabs.items.iter().map(|t| tab_state(t, mode)).collect() })
+        .map(|tabs| {
+            // the Settings tab is not a folder: it is not restored
+            let active_tab = tabs.items[..tabs.active.min(tabs.items.len())].iter().filter(|t| !t.settings).count();
+            let tabs_v: Vec<SessionTab> = tabs.items.iter().filter(|t| !t.settings).map(|t| tab_state(t, mode)).collect();
+            SessionPane { active_tab: active_tab.min(tabs_v.len().saturating_sub(1)), tabs: tabs_v }
+        })
         .collect();
     Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: view.active.min(n - 1), window, panes, recents: view.side.recents.clone() }
 }
@@ -154,7 +159,14 @@ pub fn tab_folder(path: &str) -> String {
 /// Copies what the user can change in the view into the config (theme,
 /// density, zebra, view mode, sidebar). Called when `View::config_dirty` is set.
 pub fn sync_config(view: &View, cfg: &mut tsubame_config::Config) {
-    cfg.appearance.theme = if view.dark { tsubame_config::DEFAULT_THEME.to_string() } else { "tsubame-light".to_string() };
+    cfg.appearance.theme = view.theme_id.clone();
+    cfg.appearance.accent = view.prefs.appearance.accent.clone();
+    cfg.appearance.font_scale = view.prefs.appearance.font_scale;
+    cfg.general = view.prefs.general.clone();
+    cfg.updates = view.prefs.updates.clone();
+    cfg.keys = view.prefs.keys.clone();
+    cfg.context_menu = view.prefs.context_menu.clone();
+    cfg.advanced = view.prefs.advanced.clone();
     cfg.appearance.density = config_density(view.density);
     cfg.appearance.zebra = view.zebra;
     cfg.appearance.view_mode = view.mode.to_config();

@@ -78,7 +78,7 @@ pub struct MatchRow {
     pub is_dir: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Data {
     /// command ids, most recently used first
     pub recents: Vec<u32>,

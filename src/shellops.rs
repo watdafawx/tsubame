@@ -54,6 +54,99 @@ const ITEM_EXTRAS: [&str; 4] = ["Rename	F2", "Copy path", "Copy name", "Open ter
 // the shell leaves Paste out of a background menu without a view; ours is on top
 const BG_EXTRAS: [&str; 5] = ["Paste", "New folder", "New text file", "Copy path", "Open terminal here"];
 
+// ---- the editable menu (Settings > Context menu) -----------------------------------
+//
+// The native Windows shell menu stays as it is. What the editor changes here: a built-in
+// entry of ours (Rename, Copy as path, Paste) that is hidden is left out, and the enabled
+// custom / imported entries that apply to the click are appended after a separator.
+
+static MENU: std::sync::RwLock<Vec<tsubame_config::MenuEntry>> = std::sync::RwLock::new(Vec::new());
+/// Errors of custom commands that failed to start (shown in the status bar).
+static CUSTOM_ERRS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The saved menu list (empty = the defaults), read on every right click.
+pub fn set_menu_entries(saved: &[tsubame_config::MenuEntry]) {
+    if let Ok(mut m) = MENU.write() {
+        *m = tsubame_config::menu::effective(saved);
+    }
+}
+
+/// What a menu line of ours does.
+#[derive(Clone)]
+enum Extra {
+    Builtin(&'static str),
+    Custom(tsubame_config::MenuEntry),
+}
+
+fn builtin_id(label: &str) -> Option<&'static str> {
+    match label {
+        "Rename\tF2" => Some("builtin.rename"),
+        "Copy path" => Some("builtin.copy-path"),
+        "Paste" => Some("builtin.paste"),
+        _ => None,
+    }
+}
+
+/// The kind of thing right-clicked and (for a file) its lower-case extension.
+fn target_of(background: bool, paths: &[String]) -> (tsubame_config::menu::Target, String) {
+    use tsubame_config::menu::Target;
+    if background {
+        return (Target::Background, String::new());
+    }
+    let first = paths.first().map(String::as_str).unwrap_or("");
+    // a network path is not probed on the UI thread
+    if !first.starts_with("\\\\") && Path::new(first).is_dir() {
+        return (Target::Folder, String::new());
+    }
+    (Target::File, Path::new(first).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default())
+}
+
+/// The lines of ours for this click: labels for the shell menu and what each one does
+/// (`None` = separator).
+fn extras_for(background: bool, paths: &[String]) -> (Vec<String>, Vec<Option<Extra>>) {
+    let base: &[&'static str] = if background { &BG_EXTRAS } else { &ITEM_EXTRAS };
+    let menu = MENU.read().map(|m| m.clone()).unwrap_or_default();
+    let (mut labels, mut acts) = (Vec::new(), Vec::new());
+    for &l in base {
+        if builtin_id(l).is_some_and(|id| menu.iter().any(|e| e.id == id && e.hidden)) {
+            continue;
+        }
+        labels.push(l.to_string());
+        acts.push(Some(Extra::Builtin(l)));
+    }
+    let (target, ext) = target_of(background, paths);
+    let customs = tsubame_config::menu::program_entries(&menu, target, &ext);
+    if !customs.is_empty() {
+        labels.push(String::new());
+        acts.push(None);
+        for (e, label) in customs {
+            labels.push(label);
+            acts.push(Some(Extra::Custom(e)));
+        }
+    }
+    (labels, acts)
+}
+
+/// Runs a custom entry on a short thread (never a shell, never on the UI thread).
+fn run_custom(a: &mut App, e: &tsubame_config::MenuEntry, ctx: &MenuCtx) {
+    let paths: &[String] = if ctx.background { &[] } else { &ctx.paths };
+    match crate::custom_cmd::build_argv(e, &crate::custom_cmd::Ctx { paths, dir: &ctx.folder }) {
+        Ok(argv) => {
+            let h = a.ops.hwnd;
+            crate::custom_cmd::spawn(argv, move |err| {
+                if let Some(m) = err {
+                    if let Ok(mut g) = CUSTOM_ERRS.lock() {
+                        g.push(m);
+                    }
+                    let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_SHELLOPS, WPARAM(0), LPARAM(0)) };
+                }
+            });
+            status(a, format!("Started {}", e.name));
+        }
+        Err(m) => status(a, m),
+    }
+}
+
 #[derive(Default)]
 pub struct ShellOps {
     hwnd: isize,
@@ -78,6 +171,8 @@ struct MenuCtx {
     paths: Vec<String>,
     folder: String,
     background: bool,
+    /// what each line of ours in the menu does, by `MenuResult::extra`
+    extras: Vec<Option<Extra>>,
 }
 
 // ---- setup -------------------------------------------------------------------
@@ -188,6 +283,8 @@ fn start_delete(a: &mut App, paths: Vec<String>, permanent: bool) {
     if paths.is_empty() {
         return;
     }
+    // Settings > General: with "Delete permanently" chosen, Delete is permanent and Shift+Delete recycles
+    let permanent = permanent != !a.view.prefs.general.delete_to_recycle;
     let h = a.ops.hwnd;
     status(a, format!("Checking {} {}...", paths.len(), plural(paths.len())));
     let _ = std::thread::Builder::new().name("tsubame-deletecheck".into()).spawn(move || {
@@ -202,6 +299,11 @@ fn start_delete(a: &mut App, paths: Vec<String>, permanent: bool) {
 
 /// WM_APP_SHELLOPS: confirm permanent deletes, then queue them.
 pub fn on_app(hwnd: HWND) {
+    let errs: Vec<String> = CUSTOM_ERRS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
+    if let Some(m) = errs.into_iter().last() {
+        with(|a| status(a, m));
+    }
+    let confirm_delete = with(|a| a.view.prefs.general.confirm_delete).unwrap_or(true);
     let done: Vec<DeleteResult> = DELETES.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
     for (verdicts, shift) in done {
         let mut recycle = Vec::new();
@@ -243,6 +345,13 @@ pub fn on_app(hwnd: HWND) {
                     IDYES => ops.extend(hazard.into_iter().map(|(path, _)| Operation::Delete { path, permanent: true })),
                     IDNO => {}
                     _ => continue,
+                }
+            }
+            // "Confirm before deleting": the Recycle Bin move asks too
+            if confirm_delete && !recycle.is_empty() {
+                let text = format!("Move {} to the Recycle Bin?", count_text(&recycle));
+                if !confirm(hwnd, &text) {
+                    recycle.clear();
                 }
             }
             ops.extend(recycle.into_iter().map(|path| Operation::Delete { path, permanent: false }));
@@ -513,16 +622,19 @@ pub fn item_opts() -> MenuOpts {
     MenuOpts { background: false, extras: ITEM_EXTRAS.iter().map(|s| s.to_string()).collect(), intercept: INTERCEPT.iter().map(|s| s.to_string()).collect() }
 }
 
-fn bg_opts() -> MenuOpts {
-    MenuOpts { background: true, extras: BG_EXTRAS.iter().map(|s| s.to_string()).collect(), intercept: INTERCEPT.iter().map(|s| s.to_string()).collect() }
+/// The menu options for one click, and what its lines of ours do.
+fn opts_for(background: bool, paths: &[String]) -> (MenuOpts, Vec<Option<Extra>>) {
+    let (extras, acts) = extras_for(background, paths);
+    (MenuOpts { background, extras, intercept: INTERCEPT.iter().map(|s| s.to_string()).collect() }, acts)
 }
 
 /// The item menu for `paths` (screen px), with our entries.
 pub fn open_item_menu(a: &mut App, paths: Vec<String>, sx: i32, sy: i32, extended: bool) {
     let folder = a.view.tab().path.clone();
-    a.shell.open_menu(&mut a.pool, paths.clone(), sx, sy, extended, None, item_opts());
+    let (opts, extras) = opts_for(false, &paths);
+    a.shell.open_menu(&mut a.pool, paths.clone(), sx, sy, extended, None, opts);
     if let Some(id) = a.shell.menu_pending {
-        a.ops.menu = Some(MenuCtx { id, paths, folder, background: false });
+        a.ops.menu = Some(MenuCtx { id, paths, folder, background: false, extras });
     }
 }
 
@@ -539,9 +651,10 @@ pub fn after_frame(hwnd: HWND) {
     let Some((folder, x, y)) = want else { return };
     let (sx, sy) = crate::screen_pt(hwnd, x, y);
     with(|a| {
-        a.shell.open_menu(&mut a.pool, vec![folder.clone()], sx, sy, extended, None, bg_opts());
+        let (opts, extras) = opts_for(true, std::slice::from_ref(&folder));
+        a.shell.open_menu(&mut a.pool, vec![folder.clone()], sx, sy, extended, None, opts);
         if let Some(id) = a.shell.menu_pending {
-            a.ops.menu = Some(MenuCtx { id, paths: vec![folder.clone()], folder, background: true });
+            a.ops.menu = Some(MenuCtx { id, paths: vec![folder.clone()], folder, background: true, extras });
         }
     });
     invalidate(hwnd);
@@ -549,8 +662,16 @@ pub fn after_frame(hwnd: HWND) {
 
 fn on_menu(a: &mut App, m: &MenuResult, ctx: MenuCtx) {
     if let Some(i) = m.extra {
-        let extras: &[&str] = if ctx.background { &BG_EXTRAS } else { &ITEM_EXTRAS };
-        match extras.get(i).copied() {
+        let act = ctx.extras.get(i).cloned().flatten();
+        if let Some(Extra::Custom(e)) = &act {
+            run_custom(a, e, &ctx);
+            return;
+        }
+        let label = match act {
+            Some(Extra::Builtin(l)) => Some(l),
+            _ => None,
+        };
+        match label {
             Some("Rename\tF2") => a.view.rename_request = true,
             Some("Paste") => paste(a, ctx.folder),
             Some("New folder") => new_item(a, false),
