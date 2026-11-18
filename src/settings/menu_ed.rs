@@ -49,9 +49,6 @@ struct ImportForm {
 }
 
 impl State {
-    pub fn editing(&self) -> bool {
-        self.edit.is_some() || self.add.is_some() || self.import.is_some()
-    }
     pub fn reset_transient(&mut self) {
         *self = State::default();
     }

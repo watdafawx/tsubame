@@ -306,7 +306,8 @@ impl KeyMap {
         }
     }
 
-    /// The command a chord runs (global or not), for the palette's "run" and tests.
+    /// The command a chord runs (global or not).
+    #[cfg(test)]
     pub fn lookup(&self, c: Chord) -> Option<u32> {
         COMMANDS.iter().enumerate().find(|(i, _)| self.chords[*i].contains(&c)).map(|(_, cmd)| cmd.id)
     }

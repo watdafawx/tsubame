@@ -361,7 +361,7 @@ fn main() {
         let wake = || {
             let h = UPDATE_HWND.load(Ordering::Acquire);
             if h != 0 {
-                let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(0)) };
+                let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(0));
             }
         };
         if updates::init(upd_env, cfg.updates.auto_install, wake) == updates::StartAction::Exit {
@@ -451,7 +451,6 @@ fn main() {
             install_dir: std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default(),
             exe: std::env::current_exe().unwrap_or_default(),
             portable: cli.portable || loc.portable,
-            dev_run: dev,
             system_dark: system_dark(),
             version: env!("CARGO_PKG_VERSION"),
         };

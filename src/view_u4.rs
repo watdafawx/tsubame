@@ -297,7 +297,7 @@ impl View {
     }
 
     /// True when the palette stays open.
-    fn run_palette_action(&mut self, ui: &mut Ui, act: Action) -> bool {
+    pub(super) fn run_palette_action(&mut self, ui: &mut Ui, act: Action) -> bool {
         match act {
             Action::None => true,
             Action::Close => false,

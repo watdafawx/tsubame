@@ -10,7 +10,7 @@
 //! [`Action`] for `View` to run.
 
 use crate::fuzzy;
-use tsubame_ui::{Canvas, Event, Font, Id, Key, Mods, Rect, Sense, TextInput, Theme, Ui, f, keycap, keycaps_right};
+use tsubame_ui::{Canvas, Event, Font, Id, Key, Rect, Sense, TextInput, Theme, Ui, f, keycap, keycaps_right};
 
 pub const ID_PALETTE: Id = Id::new("palette");
 const ID_INPUT: Id = Id::new("palette.input");
@@ -51,6 +51,7 @@ pub fn mode_for_prefix(c: char) -> Option<Mode> {
 }
 
 /// "> rn" style text (prefix first) to a mode and the rest. No prefix: commands.
+#[cfg(test)]
 pub fn parse_mode(text: &str) -> (Mode, &str) {
     let t = text.trim_start();
     match t.chars().next().and_then(mode_for_prefix) {
@@ -264,14 +265,6 @@ impl Palette {
         self.dirty = true;
     }
 
-    pub fn rows(&self) -> &[Row] {
-        &self.rows
-    }
-
-    pub fn selected(&self) -> Option<&Row> {
-        self.rows.get(self.sel)
-    }
-
     fn rebuild(&mut self) {
         let q = self.input.text.clone();
         self.rows = match self.mode {
@@ -389,6 +382,8 @@ impl Palette {
         let mut tab_key = false;
         let mut delete_key = false;
         let mut esc = false;
+        // the chord that opened the palette also shuts it (the keys are captured here)
+        let mut toggle = false;
         let mut alt_num: Option<usize> = None;
         if let Some(a) = self.prefix_keys(ui) {
             action = a;
@@ -405,6 +400,8 @@ impl Palette {
                     Key::Tab if mods.none() => tab_key = true,
                     Key::Delete if mods.none() && self.mode == Mode::Tabs => delete_key = true,
                     Key::Escape if mods.none() => esc = true,
+                    Key::Char('P') if mods.ctrl && mods.shift && !mods.alt => toggle = true,
+                    Key::Char('K') if mods.ctrl && !mods.shift && !mods.alt => toggle = true,
                     Key::Char(c) if mods.alt && !mods.ctrl && c.is_ascii_digit() && self.mode == Mode::Tabs => alt_num = c.to_digit(10).map(|d| d as usize),
                     _ => take = false,
                 }
@@ -453,10 +450,10 @@ impl Palette {
             }
         }
         // what the keys mean in this mode
-        if esc {
+        if esc || toggle {
             ui.capture_keys = false;
             ui.close_popup(ID_PALETTE);
-            return if self.mode == Mode::Filter { Action::FilterCancel } else { Action::Close };
+            return if esc && self.mode == Mode::Filter { Action::FilterCancel } else { Action::Close };
         }
         if let Some(n) = alt_num
             && let Some(Row::Tab { t, .. }) = self.rows.iter().filter(|r| matches!(r, Row::Tab { .. })).nth(n.saturating_sub(1))

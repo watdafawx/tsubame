@@ -122,10 +122,6 @@ impl<'a> Pg<'a> {
         self.base.with(self.n)
     }
 
-    pub fn gap(&mut self, h: f32) {
-        self.y += h;
-    }
-
     pub fn visible(&self, r: Rect) -> bool {
         r.b() > self.vis.y - 2.0 && r.y < self.vis.b() + 2.0
     }
@@ -219,16 +215,6 @@ impl<'a> Pg<'a> {
         self.row_text(row, title, desc, total + 16.0, true);
         let id = self.id();
         segmented(self.ui, self.g, id, (row.r() - 16.0 - total, row.y + (row.h - 28.0) / 2.0), 28.0, labels, cur).1
-    }
-
-    /// A row with one button on the right.
-    pub fn button_row(&mut self, c: &mut Card, title: &str, desc: &str, label: &str, look: Look, enabled: bool) -> bool {
-        let row = self.next_row(c);
-        let t = self.t;
-        let bw = self.g.measure(label, t.font().b()) + 28.0;
-        self.row_text(row, title, desc, bw + 16.0, true);
-        let id = self.id();
-        button(self.ui, self.g, id, row.r() - 16.0, row.y + (row.h - t.height_button) / 2.0, label, look, enabled, true).0
     }
 
     /// A rounded note box with a leading glyph. Returns its rect.

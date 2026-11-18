@@ -109,7 +109,6 @@ pub struct Env {
     pub install_dir: PathBuf,
     pub exe: PathBuf,
     pub portable: bool,
-    pub dev_run: bool,
     /// Windows is set to dark
     pub system_dark: bool,
     pub version: &'static str,
@@ -168,11 +167,6 @@ impl Settings {
             self.keys.reset_transient();
             self.menu.reset_transient();
         }
-    }
-
-    /// True while a key recorder or a text field of a page wants the keys.
-    pub fn wants_keys(&self) -> bool {
-        self.keys.recording() || self.menu.editing()
     }
 
     pub fn paint(&mut self, ui: &mut Ui, g: &mut dyn Canvas, area: Rect, cx: &mut Cx) {

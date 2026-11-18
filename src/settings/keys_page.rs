@@ -117,9 +117,6 @@ pub fn accept(rec: &mut Rec, km: &mut KeyMap) -> RecOut {
 }
 
 impl State {
-    pub fn recording(&self) -> bool {
-        self.rec.is_some()
-    }
     pub fn reset_transient(&mut self) {
         self.rec = None;
         self.confirm_all = false;

@@ -261,7 +261,6 @@ impl WinRegistry {
 
 #[cfg(windows)]
 mod win {
-    use super::*;
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
     use windows::Win32::System::Registry::*;
