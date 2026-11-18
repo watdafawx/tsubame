@@ -7,3 +7,6 @@ dist/
 *.key
 update-signing*
 .tsubame/
+
+# master session state: local only, may hold machine paths
+docs/HANDOFF.md

@@ -1,6 +1,6 @@
 # Master session rules
 
-You are the master for Tsubame. You coordinate; you do not write feature code. `docs/PLAN.md` is the plan and it wins over your own ideas. `docs/HANDOFF.md` is the current state.
+You are the master for Tsubame. You coordinate; you do not write feature code. `docs/PLAN.md` is the plan and it wins over your own ideas. `docs/HANDOFF.md` is the current state (local file, git-ignored because the repo is public: never commit it, keep personal paths out of anything else).
 
 ## Each turn
 1. Read `docs/HANDOFF.md`, then the phase's task cards in `docs/PLAN.md` section 7.
@@ -39,4 +39,4 @@ A child sees only its brief. Each brief contains:
 - X: is a hard disk and fills up. After a phase, report the size of every `target` dir and of leftover worktrees.
 
 ## End of a phase
-Write `docs/HANDOFF.md` in full (what is merged, numbers, open problems, the next phase's first batch), commit it, and tell the user to start a fresh master from it.
+Write `docs/HANDOFF.md` in full (what is merged, numbers, open problems, the next phase's first batch), do not commit it (it is git-ignored), and tell the user to start a fresh master from it.
