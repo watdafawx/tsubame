@@ -60,6 +60,10 @@ pub struct Bench {
     /// extra report lines (shell stats, set by main before the report)
     pub extra: String,
     pub rows: usize,
+    /// TSUBAME_MEMDIAG blocks (first paint, before the scroll)
+    memdiag: String,
+    /// first frame breakdown (paint start, target creation, EndDraw), set by main
+    pub first_frame: String,
 }
 
 fn filetime_u64(ft: FILETIME) -> u64 {
@@ -126,6 +130,8 @@ impl Bench {
             just_started: false,
             extra: String::new(),
             rows: 0,
+            memdiag: String::new(),
+            first_frame: String::new(),
         }
     }
 
@@ -134,6 +140,7 @@ impl Bench {
         self.first_paint_ms = ms_since_process_start();
         self.first_path = path;
         self.private_first = memory().0;
+        self.memdiag.push_str(&crate::memdiag::sample("first_paint"));
         self.window_px = window_px;
         self.dpi = dpi;
         self.state = State::WaitGpu(Instant::now() + GPU_WAIT);
@@ -167,6 +174,7 @@ impl Bench {
                 // a real folder: also wait for the worker to finish listing
                 if Instant::now() >= deadline && len > 0 && v.load == Load::Done {
                     self.private_before_scroll = memory().0;
+                    self.memdiag.push_str(&crate::memdiag::sample("before_scroll"));
                     self.rows = len;
                     // small real folders start at the top and wrap around
                     self.start_row = if len > 2 * START_ROW { START_ROW } else { 0 };
@@ -223,6 +231,9 @@ impl Bench {
         line(format!("window_px: {}x{} at {:.0} dpi", self.window_px.0, self.window_px.1, self.dpi));
         line(format!("first_paint_path: {}", self.first_path));
         line(format!("first_paint_ms: {:.1}", self.first_paint_ms));
+        if !self.first_frame.is_empty() {
+            line(self.first_frame.clone());
+        }
         if let Some(b) = self.store_build_ms {
             line(format!("first_paint_minus_store_build_ms: {:.1}", self.first_paint_ms - b));
         }
@@ -243,6 +254,8 @@ impl Bench {
         line(format!("peak_commit: {} ({:.1} MB)", peak_commit, peak_commit as f64 / 1048576.0));
         line(format!("exe_size_bytes: {exe_bytes} ({:.2} MB)", exe_bytes as f64 / 1048576.0));
         out.push_str(&self.extra);
+        out.push_str(&self.memdiag);
+        out.push_str(&crate::memdiag::sample_end());
         out
     }
 

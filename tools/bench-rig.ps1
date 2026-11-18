@@ -57,7 +57,14 @@ param(
   [switch] $KeepFixtures,
   [switch] $Quick,
   [switch] $NoLog,
-  [string] $LogPath = 'docs\bench-log.md'
+  [string] $LogPath = 'docs\bench-log.md',
+  # experiments (docs/memory.md): env vars for every app launch ('NAME=value'),
+  # cargo features for the rig build (one comma list, e.g. 'memdiag'), and a
+  # mode that runs only the cold-start + scroll launches (no log entry)
+  [string[]] $AppEnv = @(),
+  [string] $Features = '',
+  [string] $BenchArgs = '',
+  [switch] $ScrollOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -164,6 +171,8 @@ $up = [int]((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime)
 function Start-RigApp([string] $exe, [string] $argLine, [switch] $Wait, [int] $TimeoutSec = 300, [string] $Report = '') {
   if (-not $script:RunDir) { throw 'no run dir yet' }
   $cmd = @('@echo off', "cd /d `"$script:RunDir`"")
+  # `pwsh -File` passes an array as one comma-joined string: split it again
+  foreach ($e in @($AppEnv | ForEach-Object { $_ -split ',' } | Where-Object { $_ })) { if ($e -match '^[A-Za-z_][A-Za-z0-9_]*=') { $cmd += "set `"$e`"" } else { throw "-AppEnv wants NAME=value, got '$e'" } }
   if ($Wait) { $cmd += "`"$script:RunDir\$exe`" $argLine" }
   else { $cmd += "start `"`" `"$script:RunDir\$exe`" $argLine" }
   $cmd += 'echo %ERRORLEVEL%> _exit.txt'
@@ -245,6 +254,7 @@ try {
   if (-not $SkipBuild) {
     $pushArgs = @('-Project', $Project, '-BuildOnRig', '-Exe', 'tsubame', '-Profile', 'release')
     if ($Slot) { $pushArgs += @('-Slot', "$Slot") }
+    if ($Features) { $pushArgs += @('-CargoArgs', "--features=$Features") }
     $log = & pwsh -NoProfile -File $pushToRig @pushArgs 2>&1
     $log | ForEach-Object { Write-Host $_ }
     $line = $log | Where-Object { "$_" -match '^push-to-rig: slot (\d) -> rig:(.+)$' } | Select-Object -Last 1
@@ -291,10 +301,19 @@ try {
   if (-not $LeakGateOnly) {
     for ($i = 1; $i -le $Runs; $i++) {
       $sw = [Diagnostics.Stopwatch]::StartNew()
-      Start-RigApp 'tsubame.exe' "--bench --dir `"$fixture100k`"" -Wait -TimeoutSec 240 -Report 's1-bench.txt'
+      Start-RigApp 'tsubame.exe' "--bench --dir `"$fixture100k`" $BenchArgs" -Wait -TimeoutSec 240 -Report 's1-bench.txt'
       Save-Report 's1-bench.txt' ('cold-start-{0:d2}.txt' -f $i)
       Write-Host ("bench-rig: cold-start run {0}/{1} took {2:N0} s" -f $i, $Runs, $sw.Elapsed.TotalSeconds)
+      $rep = Get-Content -Path ("$script:ReportShare\cold-start-{0:d2}.txt" -f $i) -EA SilentlyContinue
+      $rep | Where-Object { $_ -match '^(first_paint_ms|paint_all|private_bytes_before|private_bytes_end|icon cache|gfx caches)' } | ForEach-Object { Write-Host "  $_" }
     }
+  }
+  if ($ScrollOnly) {
+    Write-Host "bench-rig: -ScrollOnly: reports in $script:ReportDir (\\Rig share: $script:ReportShare)"
+    $NoLog = $true
+    $SkipLeakGate = $true
+  }
+  if (-not $LeakGateOnly -and -not $ScrollOnly) {
 
     # 4. open the 100k folder: first rows and complete+sorted, warm
     Start-RigApp 'tsubame.exe' "--timing --timing-dirs `"$fixture100k`" --reps $Runs" -Wait -TimeoutSec 300 -Report 'u2-timing.txt'
