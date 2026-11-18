@@ -21,8 +21,9 @@
           --timing-dirs "<tiny>;<purge>;<tiny>;<dir>"; the app purges itself
           after startup (working: its own pages too, an artifact), re-warms on the tiny folder and
           then opens <dir>. This is the navigation the budget means.
-    warm: tsubame --timing --timing-dirs "<dir>" --reps <WarmReps>
-          (row "first" is warm metadata + a cold process; repeats are warm)
+    warm: tsubame --timing --timing-dirs "<tiny>;<idle>;<dir>" --reps <WarmReps>
+          (repeats of <dir> are measured; <idle> keeps them out of the
+          startup tail, which otherwise slows the first few)
 
   Builds rotate inside every run (A B C, A B C, ...), so a load change on rig
   hits all of them. Reports land in <Out>\<label>-<run>.txt on FOX and the
@@ -131,7 +132,8 @@ for ($i = 1; $i -le $Runs; $i++) {
       # the storm pass, re-warms itself on the tiny folder, then opens <dir>
       $text = Invoke-Launch $b "--timing --timing-dirs `"$Tiny;<purge>;$Tiny;$Dir`" --reps 1 $ExtraArgs" -Elevated
     } else {
-      $dirs = if ($Ops) { "$Dir;<ops>" } else { $Dir }
+      # tiny + <idle> first: the repeats must not land in the startup tail
+      $dirs = if ($Ops) { "$Tiny;<idle>;$Dir;<ops>" } else { "$Tiny;<idle>;$Dir" }
       $text = Invoke-Launch $b "--timing --timing-dirs `"$dirs`" --reps $WarmReps $ExtraArgs"
     }
     $text | Set-Content -Path (Join-Path $Out ('{0}-{1:d2}.txt' -f $b.Label, $i))
@@ -149,7 +151,7 @@ for ($i = 1; $i -le $Runs; $i++) {
       $kind = $Matches[1]
       if ($kind -eq 'startup') { continue }
       if ($Mode -ne 'warm' -and $kind -ne 'first') { continue }
-      if ($Mode -ne 'warm' -and -not $l.TrimEnd().EndsWith($Dir)) { continue }
+      if (-not $l.TrimEnd().EndsWith($Dir)) { continue }
       $row = [ordered]@{ label = $b.Label; run = $i; kind = ($kind -replace ' \d+', ''); entries = [int]$Matches[2] }
       foreach ($k in $keys) { if ($k -eq 'overhead') { continue }; $row[$k] = if ($l -match "$k\s+([\d.]+)") { [double]$Matches[1] } else { $null } }
       # app time on top of the disk: complete+sorted on screen minus the worker's listing time
