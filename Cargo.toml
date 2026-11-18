@@ -11,6 +11,7 @@ members = [
     "crates/tsubame-plughost",
     "crates/tsubame-bench",
     "crates/tsubame-update",
+    "crates/tsubame-config",
 ]
 default-members = ["."]
 
@@ -26,7 +27,12 @@ tsubame-ui = { path = "crates/tsubame-ui" }
 tsubame-d2d = { path = "crates/tsubame-d2d" }
 tsubame-ext-api = { path = "crates/tsubame-ext-api" }
 tsubame-update = { path = "crates/tsubame-update" }
+tsubame-config = { path = "crates/tsubame-config" }
 windows = "0.61"
+# TOML for the config and session files. Default features are exactly what is
+# needed (std, serde, parse, display); no `preserve_order`/`fast_hash`/`debug`.
+serde = { version = "1", features = ["derive"] }
+toml = { version = "=1.2.1", default-features = false, features = ["std", "serde", "parse", "display"] }
 
 [package]
 name = "tsubame"
@@ -42,6 +48,7 @@ memdiag = []
 embed-resource = "3.0.12"
 
 [dependencies]
+tsubame-config.workspace = true
 tsubame-core.workspace = true
 tsubame-d2d.workspace = true
 tsubame-ui.workspace = true

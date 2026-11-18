@@ -3,9 +3,17 @@
 //! Raw Win32 window with its own title bar, Direct2D drawing, and the
 //! `tsubame-ui` kit on top. See `docs/u2-views.md` for the code structure.
 //!
-//! `tsubame.exe [path] [--dir <path>] [--theme dark|light] [--density compact|comfortable|spacious]`
-//!   path / --dir  folder to open (default: the profile folder)
-//! Measurement and test modes (hidden):
+//! `tsubame.exe [options] [path ...]`, see `docs/config.md` and `src/cli.rs`:
+//!   <path>        a folder, or a file (opens its folder and selects it);
+//!                 several paths open as tabs. `--new-tab`, `--new-window`,
+//!                 `--select <path>`, `--portable`, `--config <file>`,
+//!                 `--help`, `--version`.
+//!   a second launch forwards its paths to the running instance (`src/single.rs`)
+//! Settings and the session live in `%APPDATA%\Tsubame\` (or `.\data\` in
+//! portable mode): `config.toml` and `session.toml` (`crates/tsubame-config`).
+//! `--theme` and `--density` override the config for one run.
+//!
+//! Measurement and test modes (hidden, also `--dir <path>` for the folder):
 //!   --bench       first paint + scroll paint times; writes `s1-bench.txt`
 //!                 (env TSUBAME_BENCH_OUT renames it), exits. Without --dir the
 //!                 list holds 1M synthetic rows. Also: env TSUBAME_BENCH=1
@@ -26,11 +34,14 @@
 //!                 `--gate-settle S` (idle seconds before the end sample, 5)
 //!   --stress m    S4 stress run (menu: 200 context menus; thumbs: 500 thumbnails)
 //!   --workers N   shell STA workers (default 2)
+//! Dev modes never use the single instance and never write the config/session.
 //! Env: TSUBAME_ICON_PER_PATH=1 asks every real file's icon by path (worst
 //! case), TSUBAME_ICON_FACTORY=1 uses IShellItemImageFactory for per-path
-//! icons, TSUBAME_HANG_MS sets the hung-worker threshold (default 3000).
+//! icons, TSUBAME_HANG_MS sets the hung-worker threshold (default 3000),
+//! TSUBAME_DATA_DIR overrides the config/session directory.
 
 mod bench;
+mod cli;
 mod clip;
 mod cols;
 mod data;
@@ -38,8 +49,10 @@ mod leak;
 mod lru;
 mod memdiag;
 mod nav;
+mod session;
 mod shellui;
 mod sidebar;
+mod single;
 mod stress;
 mod tab;
 mod tabs;
@@ -50,12 +63,15 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tsubame_config::{Density as ConfigDensity, LoadStatus};
 use tsubame_d2d::Gfx;
 use tsubame_ui::{Button, Cursor, Density, Event, Key, Mods, Pt, Ui};
 use tsubame_win::places;
 use tsubame_win::shell::{Pool, Request};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::Console::ATTACH_PARENT_PROCESS;
+use windows::Win32::System::Console::AttachConsole;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::HiDpi::*;
@@ -69,10 +85,14 @@ const WM_APP_SHELL: u32 = WM_APP + 1;
 const WM_APP_WAKE: u32 = WM_APP + 2;
 /// The drives / known folders worker finished.
 const WM_APP_PLACES: u32 = WM_APP + 3;
+/// A second launch forwarded paths (see `single`).
+const WM_APP_OPEN: u32 = WM_APP + 4;
 /// Hung-worker watchdog: armed only while the pool has icon/thumbnail work.
 const WATCH_TIMER: usize = 2;
 /// Caret blink: exists only while a text field has focus.
 const CARET_TIMER: usize = 4;
+/// One-shot config/session save while a change is inside the debounce window.
+const SAVE_TIMER: usize = 6;
 const CARET_MS: u32 = 530;
 /// The blink stops (caret solid) after this long without input.
 const CARET_IDLE: Duration = Duration::from_secs(10);
@@ -94,6 +114,8 @@ static PLACES: Mutex<Option<(Vec<places::Drive>, Vec<places::Place>)>> = Mutex::
 struct App {
     view: view::View,
     ui: Ui,
+    /// config + session files and their debounced writers
+    saver: session::Saver,
     /// we hold the mouse capture for a kit drag
     captured: bool,
     /// WM_MOUSELEAVE is armed (TrackMouseEvent)
@@ -162,11 +184,77 @@ fn parse_density(s: &str) -> Option<Density> {
     }
 }
 
+/// `[appearance] density` -> the kit's row height preset.
+fn ui_density(d: ConfigDensity) -> Density {
+    match d {
+        ConfigDensity::Compact => Density::Compact,
+        ConfigDensity::Normal => Density::Comfortable,
+        ConfigDensity::Comfortable => Density::Spacious,
+    }
+}
+
+/// `--help` / `--version`: a GUI-subsystem process has no console handles of
+/// its own, so attach to the console that started it and write there. A
+/// redirected handle (`tsubame --help > out.txt`) is already valid and is used
+/// as is: attaching would point stdout at the console instead.
+fn print_and_exit(text: &str) -> ! {
+    use std::io::Write;
+    use windows::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+    let stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    let have_stdout = stdout.is_ok_and(|h| !h.is_invalid());
+    if !have_stdout {
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+    let mut out = std::io::stdout();
+    let _ = out.write_all(text.as_bytes());
+    let _ = out.flush();
+    std::process::exit(0);
+}
+
+/// The work areas of every monitor, for the saved window geometry.
+fn work_areas() -> Vec<tsubame_config::WorkArea> {
+    unsafe extern "system" fn collect(hmon: HMONITOR, _hdc: HDC, _rc: *mut RECT, data: LPARAM) -> BOOL {
+        let v = unsafe { &mut *(data.0 as *mut Vec<tsubame_config::WorkArea>) };
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if unsafe { GetMonitorInfoW(hmon, &mut mi) }.as_bool() {
+            let r = mi.rcWork;
+            v.push(tsubame_config::WorkArea { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top });
+        }
+        TRUE
+    }
+    let mut v: Vec<tsubame_config::WorkArea> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(collect), LPARAM(&mut v as *mut _ as isize));
+    }
+    v
+}
+
+/// The current window geometry, as the config and session store it.
+fn window_state(hwnd: HWND) -> tsubame_config::WindowState {
+    let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+    if unsafe { GetWindowPlacement(hwnd, &mut wp) }.is_ok() {
+        // rcNormalPosition is the restored (non-maximized) geometry
+        let r = wp.rcNormalPosition;
+        return tsubame_config::WindowState { x: r.left, y: r.top, w: (r.right - r.left).max(1), h: (r.bottom - r.top).max(1), maximized };
+    }
+    let mut r = RECT::default();
+    let _ = unsafe { GetWindowRect(hwnd, &mut r) };
+    tsubame_config::WindowState { x: r.left, y: r.top, w: (r.right - r.left).max(1), h: (r.bottom - r.top).max(1), maximized }
+}
+
 fn main() {
-    // the first frame's software stand-in device, made while the window and
-    // the folder are set up
-    tsubame_d2d::prewarm_software();
     let args: Vec<String> = std::env::args().collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let cli = cli::Cli::parse(&args, &cwd);
+    if cli.help {
+        print_and_exit(cli::HELP);
+    }
+    if cli.version {
+        print_and_exit(&format!("Tsubame {}\n", cli::VERSION));
+    }
     let flag = |n: &str| args.iter().any(|a| a == n);
     let bench_mode = flag("--bench") || std::env::var_os("TSUBAME_BENCH").is_some_and(|v| v != "0");
     let timing_mode = flag("--timing");
@@ -174,18 +262,50 @@ fn main() {
     let stress_mode = arg_value(&args, "--stress").map(|m| if m == "thumbs" { stress::Mode::Thumbs } else { stress::Mode::Menu });
     let workers = arg_value(&args, "--workers").and_then(|v| v.parse().ok()).unwrap_or(2usize);
     let timing_dirs: Vec<String> = arg_value(&args, "--timing-dirs").map(|s| s.split(';').filter(|p| !p.is_empty()).map(str::to_string).collect()).unwrap_or_default();
-    // first bare argument that is not a flag value is the folder to open
-    const VALUE_FLAGS: [&str; 12] = ["--dir", "--theme", "--density", "--stress", "--workers", "--timing-dirs", "--reps", "--gate-fixture", "--gate-navs", "--gate-tabs", "--gate-sample", "--gate-settle"];
-    let positional = args.iter().enumerate().skip(1).find(|(i, a)| !a.starts_with("--") && !VALUE_FLAGS.contains(&args[i - 1].as_str())).map(|(_, a)| a.clone());
-    let explicit_dir = arg_value(&args, "--dir").or(positional);
+    // a measurement run: no single instance, no config writes, default appearance
+    let dev = cli.is_dev_run();
+    let targets = cli::targets(&cli);
+    let explicit_dir = targets.first().map(|t| t.folder.clone()).or_else(|| arg_value(&args, "--dir"));
     let synthetic = bench_mode && explicit_dir.is_none();
-    let start = timing_dirs.first().cloned().or(explicit_dir.clone()).unwrap_or_else(places::home_folder);
+
+    // --- settings and session -------------------------------------------------
+    let loc = tsubame_config::locate_now(cli.portable, cli.config.clone());
+    let loaded = tsubame_config::ConfigFile::load(&loc.config);
+    let cfg = loaded.value.config.clone();
+    let cfg_status = loaded.status.clone();
+    let session_loaded = tsubame_config::Session::load(&loc.session);
+    let mut saved_session = session_loaded.value.clone();
+    // restore only with no path on the command line, and never during a bench
+    let restore_session = !dev && targets.is_empty() && cfg.general.restore_session && session_loaded.status == LoadStatus::Loaded && saved_session.is_usable();
+    if restore_session {
+        // the active tab is the only folder listed at startup; the rest are lazy
+        let active = saved_session.active_tab();
+        if let Some(tab) = saved_session.panes.get_mut(saved_session.active_pane).and_then(|p| p.tabs.get_mut(active)) {
+            // a folder that disappeared falls back to its nearest existing parent
+            tab.path = session::tab_folder(&tab.path);
+        }
+    }
+    // a path replaced the first tab (no --new-tab)
+    let inline_first = !cli.new_tab && !targets.is_empty();
+    let start = if restore_session {
+        saved_session.tabs().get(saved_session.active_tab()).map(|t| t.path.clone()).unwrap_or_default()
+    } else if inline_first {
+        targets[0].folder.clone()
+    } else if dev {
+        timing_dirs.first().cloned().or_else(|| explicit_dir.clone()).unwrap_or_else(places::home_folder)
+    } else {
+        session::start_folder(&cfg, Some(&saved_session), &[])
+    };
+    let start = if start.is_empty() { places::home_folder() } else { start };
+
     let dark = match arg_value(&args, "--theme").as_deref() {
         Some("light") => false,
         Some("dark") => true,
-        _ => system_dark(),
+        // the first ever start follows the system theme; afterwards the file decides
+        _ if dev || cfg_status == LoadStatus::Missing => system_dark(),
+        _ => cfg.appearance.is_dark(),
     };
-    let density = arg_value(&args, "--density").and_then(|d| parse_density(&d)).unwrap_or(Density::Compact);
+    let density = arg_value(&args, "--density").and_then(|d| parse_density(&d)).unwrap_or(if dev { Density::Compact } else { ui_density(cfg.appearance.density) });
 
     if flag("--leak-smoke") {
         let text = leak::run(&start);
@@ -196,6 +316,24 @@ fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
+
+        // --- single instance --------------------------------------------------
+        // Claimed before the window exists, so a forwarded launch that arrives
+        // while this process is still setting up waits in the queue.
+        let mut _instance = None;
+        if !dev {
+            let launch = single::Launch { new_tab: cli.new_tab, paths: targets.clone() };
+            match single::claim(hinst, &launch, cli.new_window) {
+                single::Claim::Forwarded => return,
+                single::Claim::Owner(inst) => _instance = Some(inst),
+                single::Claim::Standalone => {}
+            }
+        }
+
+        // the first frame's software stand-in device, made while the window and
+        // the folder are set up
+        tsubame_d2d::prewarm_software();
+
         let class = w!("TsubameMain");
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -214,6 +352,22 @@ fn main() {
 
         // no WS_CAPTION: the kit draws the title bar (WM_NCCALCSIZE gives it the whole window)
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        single::set_main(hwnd);
+
+        // the saved geometry: the session first (when restoring), else the config
+        let saved_geom = if restore_session && session_loaded.status == LoadStatus::Loaded {
+            Some(saved_session.window)
+        } else if !dev && cfg_status == LoadStatus::Loaded {
+            Some(cfg.window)
+        } else {
+            None
+        };
+        let geom = saved_geom.map(|g| g.sanitized(&work_areas()));
+        if let Some(g) = geom {
+            // a window saved on a monitor that is gone comes back on the primary
+            let _ = SetWindowPos(hwnd, None, g.x, g.y, g.w, g.h, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
         let mut gfx = Gfx::new(hwnd).unwrap();
         let dpi = GetDpiForWindow(hwnd) as f32;
         gfx.set_dpi(dpi);
@@ -235,6 +389,32 @@ fn main() {
         });
 
         let mut view = view::View::new(&start, wake, dark, density);
+        // config appearance and panes
+        view.zebra = flag("--zebra") || (!dev && cfg.appearance.zebra);
+        view.view_mode = if dev { tsubame_config::ViewMode::Details } else { cfg.appearance.view_mode };
+        view.sidebar_width = if dev { tsubame_config::DEFAULT_SIDEBAR_WIDTH } else { cfg.panes.sidebar_width.clamp(120.0, 480.0) };
+        if !dev && cfg.panes.sidebar_collapsed {
+            view.side.collapsed = [true; 3];
+        }
+        if restore_session {
+            // the started tab is the active one; the rest stay lazy
+            session::apply(&mut view, &saved_session);
+        }
+        // command-line paths: the first one is already shown unless --new-tab
+        if inline_first
+            && let Some(sel) = &targets[0].select
+        {
+            view.tab_mut().select_names(std::slice::from_ref(sel));
+        }
+        let extra: &[cli::Target] = if cli.new_tab { &targets[..] } else { &targets[targets.len().min(1)..] };
+        for t in extra {
+            let mut tab = view.pending_tab(&t.folder);
+            tab.restore = t.select.clone().map(|sel| tab::Restore { scroll_first_row: 0, selected: vec![sel] });
+            view.tabs.items.push(tab);
+        }
+        if !extra.is_empty() || inline_first {
+            view.after_restore();
+        }
         let mut bench_state = None;
         if synthetic {
             let t = Instant::now();
@@ -263,11 +443,16 @@ fn main() {
                 std::time::Duration::from_secs(arg_value(&args, "--gate-settle").and_then(|v| v.parse().ok()).unwrap_or(5)),
             )
         });
+        // a measurement run never writes the user's config or session
+        let saver_status = if dev { LoadStatus::Newer { version: u32::MAX } } else { cfg_status.clone() };
+        let saver_session_status = if dev { LoadStatus::Newer { version: u32::MAX } } else { session_loaded.status.clone() };
+        let saver = session::Saver::new(loc.clone(), loaded.value, saved_session.clone(), &saver_status, &saver_session_status);
 
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
                 view,
                 ui,
+                saver,
                 captured: false,
                 tracking: false,
                 hi_surrogate: None,
@@ -289,8 +474,9 @@ fn main() {
             })
         });
 
-        // bench and timing runs measure at full screen (4K on rig)
-        let maximize = (bench_mode || timing_mode || gate_mode) && !flag("--windowed");
+        // bench and timing runs measure at full screen (4K on rig); a restored
+        // maximized window comes back maximized
+        let maximize = ((bench_mode || timing_mode || gate_mode) && !flag("--windowed")) || (geom.is_some_and(|g| g.maximized) && !flag("--windowed"));
         let _ = ShowWindow(hwnd, if maximize { SW_SHOWMAXIMIZED } else { SW_SHOW });
 
         // Idle = blocked here. Timers only while a bench/stress run, the
@@ -393,6 +579,66 @@ fn after_paint(hwnd: HWND, a: &mut App) {
     }
 }
 
+/// A setting the user changed: copy it into the config and wake the debounced
+/// writer (at most one write per 2 s).
+fn settings_changed(hwnd: HWND) {
+    let changed = with(|a| {
+        let App { view, saver, .. } = a;
+        if !std::mem::take(&mut view.config_dirty) {
+            return false;
+        }
+        session::sync_config(view, &mut saver.config.config);
+        saver.config_changed();
+        true
+    })
+    .unwrap_or(false);
+    if changed {
+        with(|a| arm_save(hwnd, a));
+    }
+}
+
+/// One-shot timer for the moment a save is allowed; no timer while clean.
+fn arm_save(hwnd: HWND, a: &mut App) {
+    match (a.saver.pending(), a.saver.wait_ms(Instant::now())) {
+        (true, Some(ms)) => {
+            unsafe { SetTimer(Some(hwnd), SAVE_TIMER, ms.max(1), None) };
+        }
+        _ => {
+            let _ = unsafe { KillTimer(Some(hwnd), SAVE_TIMER) };
+        }
+    }
+}
+
+/// Writes the session and the window geometry in the config. `force` is used on
+/// exit: a change inside the debounce window is still written. Writes nothing
+/// when the content is unchanged.
+fn save_flush(hwnd: HWND, force: bool) {
+    let geom = window_state(hwnd);
+    with(|a| {
+        a.saver.session = session::capture(&a.view, geom);
+        a.saver.session_changed();
+        a.saver.config.config.window = geom;
+        a.saver.config_changed();
+        a.saver.flush(Instant::now(), force);
+        arm_save(hwnd, a);
+    });
+}
+
+/// Paths forwarded by a second launch: focus the tab already showing the
+/// folder, or open a new tab in this instance.
+fn open_launch(hwnd: HWND) {
+    let launches = single::take_pending();
+    if launches.is_empty() {
+        return;
+    }
+    with(|a| {
+        for l in &launches {
+            session::open_targets(&mut a.view, &l.paths, l.new_tab);
+        }
+    });
+    invalidate(hwnd);
+}
+
 unsafe fn on_paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     unsafe { BeginPaint(hwnd, &mut ps) };
@@ -418,6 +664,8 @@ unsafe fn on_paint(hwnd: HWND) {
     if let Some(out) = out {
         after_frame(hwnd, out);
     }
+    // a theme/density/zebra change: write the config, debounced
+    settings_changed(hwnd);
 
     // first completed paint: time from process start
     let first = with(|a| {
@@ -884,6 +1132,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 LRESULT(0)
             }
+            WM_APP_OPEN => {
+                open_launch(hwnd);
+                LRESULT(0)
+            }
             WM_APP_PLACES => {
                 let got = PLACES.lock().ok().and_then(|mut g| g.take());
                 if let Some((drives, places)) = got {
@@ -1046,6 +1298,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 invalidate(hwnd);
                 LRESULT(0)
             }
+            WM_TIMER if wp.0 == SAVE_TIMER => {
+                // the debounce window of a config/session change is over
+                save_flush(hwnd, false);
+                LRESULT(0)
+            }
             WM_TIMER if wp.0 == WATCH_TIMER => {
                 let lost = with(|a| {
                     let lost = a.pool.check_hung();
@@ -1061,7 +1318,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 }
                 LRESULT(0)
             }
+            WM_CLOSE => {
+                // save the session (and the geometry) before the window goes
+                save_flush(hwnd, true);
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
             WM_DESTROY => {
+                // also reached when the app closes itself (last tab, leak gate)
+                save_flush(hwnd, true);
                 PostQuitMessage(0);
                 LRESULT(0)
             }
