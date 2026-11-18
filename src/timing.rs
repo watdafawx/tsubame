@@ -8,13 +8,47 @@
 //! - final_frame: first presented frame after Done (complete + sorted on screen)
 //! - worker:      time inside the enumerator worker (not UI)
 //!
+//! - store_cpu:   UI time moving batches into the store
+//! - final_sort:  UI time of the one full sort at Done (streaming store)
+//! - watch_start: UI time starting the folder watcher
+//! - frames:      frames presented up to the final one
+//!
 //! The very first navigation also includes window creation and the first GPU
 //! frame (cold start); it is labelled `startup`.
+//!
+//! A `<purge>` entry in `--timing-dirs` is no folder: it runs
+//! `tsubame-bench.exe purge --mode working` (next to the exe; the app must
+//! run elevated) before the next navigation, so `tiny;<purge>;tiny;big`
+//! measures a cold folder in a warm app: the second `tiny` re-faults the
+//! app's own pages (paint path, enumerator, store) that the purge dropped,
+//! and `big` is then the only cold thing. Its result is printed as `purge:`.
 
 use crate::tab::Tab;
 use crate::view::View;
 use std::fmt::Write;
 use std::time::Duration;
+
+/// `--timing-dirs` entry that purges the system caches instead of navigating.
+const PURGE: &str = "<purge>";
+/// Wait after a purge (matches `tools/open-probe.ps1`'s disk settle).
+const PURGE_SETTLE: Duration = Duration::from_secs(15);
+
+/// Runs the bench tool's purge next to the exe and waits for it (bench only).
+fn purge() -> String {
+    use std::os::windows::process::CommandExt;
+    let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+        return "failed: no exe dir".into();
+    };
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    match std::process::Command::new(dir.join("tsubame-bench.exe")).args(["purge", "--mode", "working"]).creation_flags(CREATE_NO_WINDOW).output() {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let first = text.lines().next().unwrap_or("").trim().to_string();
+            if o.status.success() && first.contains(" ok") { first } else { format!("failed ({}): {first}", o.status) }
+        }
+        Err(e) => format!("failed: {e}"),
+    }
+}
 
 pub struct Run {
     dirs: Vec<String>,
@@ -43,7 +77,7 @@ impl Run {
         let tm = t.timing;
         let _ = writeln!(
             self.out,
-            "{label:<9} entries {:>7} ({:.1} MB)  first_batch {}  first_frame {}  done {}  final_frame {}  worker {}  store_cpu {}   {}",
+            "{label:<9} entries {:>7} ({:.1} MB)  first_batch {}  first_frame {}  done {}  final_frame {}  worker {}  store_cpu {}  final_sort {}  watch_start {}  frames {:>3}   {}",
             t.store.len(),
             t.memory_bytes() as f64 / 1048576.0,
             ms(tm.first_batch),
@@ -52,6 +86,9 @@ impl Run {
             ms(tm.final_frame),
             ms(tm.worker),
             ms(Some(tm.store_cpu)),
+            ms(Some(tm.final_sort)),
+            ms(Some(tm.watch_start)),
+            tm.frames,
             t.path
         );
     }
@@ -73,7 +110,19 @@ impl Run {
         if self.n >= self.dirs.len() * self.reps {
             return true;
         }
-        let next = self.dirs[self.n / self.reps].clone();
+        let mut next = self.dirs[self.n / self.reps].clone();
+        while next == PURGE {
+            let note = purge();
+            // the purge makes every process re-fault its pages (a paging storm
+            // for seconds): wait it out so the next runs measure the folder
+            std::thread::sleep(PURGE_SETTLE);
+            let _ = writeln!(self.out, "purge: {note}");
+            self.n += self.reps;
+            if self.n >= self.dirs.len() * self.reps {
+                return true;
+            }
+            next = self.dirs[self.n / self.reps].clone();
+        }
         v.go(&next);
         false
     }

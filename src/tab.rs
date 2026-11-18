@@ -92,11 +92,28 @@ pub struct Timing {
     pub worker: Option<Duration>,
     /// UI time converting and inserting batches (including incremental sort).
     pub store_cpu: Duration,
+    /// UI time of the one full sort when the listing completed (`end_stream`)
+    pub final_sort: Duration,
+    /// UI time starting the folder watcher
+    pub watch_start: Duration,
+    /// frames presented until the final frame (included)
+    pub frames: u32,
 }
 
 impl Timing {
     fn new() -> Timing {
-        Timing { t_nav: Instant::now(), first_batch: None, done: None, first_frame: None, final_frame: None, worker: None, store_cpu: Duration::ZERO }
+        Timing {
+            t_nav: Instant::now(),
+            first_batch: None,
+            done: None,
+            first_frame: None,
+            final_frame: None,
+            worker: None,
+            store_cpu: Duration::ZERO,
+            final_sort: Duration::ZERO,
+            watch_start: Duration::ZERO,
+            frames: 0,
+        }
     }
 }
 
@@ -253,6 +270,9 @@ impl Tab {
         self.synthetic = false;
         self.store.clear();
         self.store.sort(self.sort);
+        // batches append; only the first screens stay sorted until Done
+        // sorts everything once (no O(n) merge per batch)
+        self.store.begin_stream();
         self.sel.clear();
         self.filter.clear();
         self.reset_view();
@@ -305,6 +325,7 @@ impl Tab {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    self.store.end_stream();
                     if self.load == Load::Loading {
                         self.load = Load::Failed("The listing stopped unexpectedly.".into());
                         out.changed = true;
@@ -362,9 +383,11 @@ impl Tab {
             return;
         }
         let Some(wake) = self.wake.clone() else { return };
+        let t0 = Instant::now();
         if let Ok(w) = DirWatcher::start(&self.path, WatchOptions::default(), wake) {
             self.watching.w = Some(w);
         }
+        self.timing.watch_start += t0.elapsed();
     }
 
     /// A watcher runs and its notifications can be trusted: changes show up
@@ -515,6 +538,7 @@ impl Tab {
         // current listing ever gets here, so it always matches
         if let Err(e) = self.store.push_batch(self.store.generation(), &inputs) {
             self.load = Load::Failed(format!("Cannot store directory entries: {e:?}"));
+            self.store.end_stream();
             self.enumerator = None;
             self.rx = None;
             return;
@@ -527,6 +551,9 @@ impl Tab {
     }
 
     fn finish(&mut self, d: Done) {
+        let t0 = Instant::now();
+        self.store.end_stream();
+        self.timing.final_sort = t0.elapsed();
         self.timing.done = Some(self.timing.t_nav.elapsed());
         self.timing.worker = Some(d.elapsed);
         self.load = match d.error {
@@ -668,6 +695,9 @@ impl Tab {
     /// Returns true when the final frame of a listing was just recorded.
     pub fn frame_presented(&mut self) -> bool {
         let el = self.timing.t_nav.elapsed();
+        if self.timing.final_frame.is_none() {
+            self.timing.frames += 1;
+        }
         if self.timing.first_frame.is_none() && self.shown() > 0 {
             self.timing.first_frame = Some(el);
         }
@@ -791,6 +821,35 @@ mod tests {
         wait_done(&mut t);
         assert_eq!(t.shown(), 50);
         assert_eq!(t.delivered, 50, "no stale batches reached the store");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_streamed_listing_ends_fully_sorted_and_cancels() {
+        // more than one batch and more than the sorted top window
+        let d = temp_dir("stream");
+        let n = tsubame_core::STREAM_TOP + 1500;
+        for i in 0..n {
+            std::fs::write(d.join(format!("f{}.txt", (i * 7919) % n)), b"").unwrap();
+        }
+        std::fs::create_dir_all(d.join("zdir")).unwrap();
+        let p = d.to_str().unwrap().to_string();
+        let mut t = Tab::new(4, &p, 22.0);
+        t.start(&p, wake());
+        wait_done(&mut t);
+        assert!(!t.store.is_streaming());
+        assert_eq!(t.shown(), n + 1);
+        let got: Vec<String> = names(&t);
+        assert_eq!(got[0], "zdir", "folders first");
+        let want: Vec<String> = std::iter::once("zdir".to_string()).chain((0..n).map(|i| format!("f{i}.txt"))).collect();
+        assert_eq!(got, want, "natural order after Done");
+        // navigating away mid-listing: the old worker stops, nothing of it lands
+        t.start(&p, wake());
+        let sub = d.join("zdir");
+        t.start(sub.to_str().unwrap(), wake());
+        wait_done(&mut t);
+        assert_eq!(t.shown(), 0);
+        assert!(!t.store.is_streaming());
         let _ = std::fs::remove_dir_all(&d);
     }
 
