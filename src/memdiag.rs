@@ -292,11 +292,17 @@ pub fn optimize_heaps() -> isize {
 /// `TSUBAME_MEMDIAG=2`: after the `end` sample, optimize the heaps and sample
 /// again (`end_opt`), to measure what fragmentation holds.
 pub fn sample_end() -> String {
-    let mut s = sample("end");
+    sample_opt("end")
+}
+
+/// `sample(label)`, and with `TSUBAME_MEMDIAG=2` the optimize probe after it
+/// (`<label>_opt`).
+pub fn sample_opt(label: &str) -> String {
+    let mut s = sample(label);
     if std::env::var("TSUBAME_MEMDIAG").is_ok_and(|v| v == "2") {
         let freed = optimize_heaps();
-        s.push_str(&format!("memdiag.optimize_freed_mb={:.2}\n", freed as f64 / 1048576.0));
-        s.push_str(&sample("end_opt"));
+        s.push_str(&format!("memdiag.{label}.optimize_freed_mb={:.2}\n", freed as f64 / 1048576.0));
+        s.push_str(&sample(&format!("{label}_opt")));
     }
     s
 }

@@ -297,6 +297,8 @@ pub struct Gate {
     end: Option<Snap>,
     trim: Option<Snap>,
     trim_note: String,
+    /// TSUBAME_MEMDIAG blocks (start, end, after the trim)
+    memdiag: String,
     notes: Vec<String>,
     run_started: Option<Instant>,
     /// start of the current measured phase (navs, then tabs)
@@ -357,6 +359,7 @@ impl Gate {
             end: None,
             trim: None,
             trim_note: String::new(),
+            memdiag: String::new(),
             notes: Vec::new(),
             run_started: None,
             phase_started: Instant::now(),
@@ -659,6 +662,7 @@ impl Gate {
                     return Step::Wait;
                 }
                 self.start = Some(self.sample(0));
+                self.memdiag.push_str(&crate::memdiag::sample("gate_start"));
                 self.start_folder = v.tab().path.clone();
                 self.start_path = self.paint_path;
                 self.phase = Phase::RunNav;
@@ -676,6 +680,7 @@ impl Gate {
                 }
                 let end = self.sample(self.navs + self.tabs);
                 self.end = Some(end);
+                self.memdiag.push_str(&crate::memdiag::sample("gate_end"));
                 self.phase = Phase::Trim;
                 Step::Wait
             }
@@ -684,6 +689,7 @@ impl Gate {
                 shell.icons = crate::lru::Lru::new(crate::shellui::ICON_CAP_ITEMS, crate::shellui::ICON_CAP_BYTES);
                 self.trim_note = format!("icon cache cleared ({before} entries, cap {} items / {} MB)", crate::shellui::ICON_CAP_ITEMS, crate::shellui::ICON_CAP_BYTES / 1048576);
                 self.trim = Some(Snap::take());
+                self.memdiag.push_str(&crate::memdiag::sample_opt("gate_trim"));
                 let text = self.report_text();
                 let name = std::env::var("TSUBAME_LEAK_OUT").unwrap_or_else(|_| "leak-gate.txt".into());
                 crate::bench::write_text_report(&name, &text);
@@ -860,6 +866,7 @@ impl Gate {
         for n in &self.notes {
             let _ = writeln!(s, "note={n}");
         }
+        s.push_str(&self.memdiag);
         let _ = writeln!(s, "gate={}", if self.pass { "PASS" } else { "FAIL" });
         let _ = writeln!(s, "fail={}", if failed.is_empty() { "-".to_string() } else { failed.join(",") });
         let _ = writeln!(s, "exit={}", (!self.pass) as u8);

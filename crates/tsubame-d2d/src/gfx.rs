@@ -137,7 +137,7 @@ mod warm {
         let work = move || {
             let t0 = std::time::Instant::now();
             let mut dev = None;
-            let r = unsafe { D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut dev), None, None) };
+            let r = unsafe { D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS, None, D3D11_SDK_VERSION, Some(&mut dev), None, None) };
             let ms = t0.elapsed().as_secs_f32() * 1000.0;
             {
                 let Ok(mut s) = SLOT.lock() else { return };
@@ -294,7 +294,7 @@ impl Gfx {
                 None => {
                     let mut dev = None;
                     let kind = if gpu { D3D_DRIVER_TYPE_HARDWARE } else { D3D_DRIVER_TYPE_WARP };
-                    D3D11CreateDevice(None, kind, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut dev), None, None)?;
+                    D3D11CreateDevice(None, kind, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS, None, D3D11_SDK_VERSION, Some(&mut dev), None, None)?;
                     dev.ok_or_else(|| Error::from(E_FAIL))?
                 }
             };
