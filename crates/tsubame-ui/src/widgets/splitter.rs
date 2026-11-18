@@ -31,6 +31,10 @@ pub fn splitter(ui: &mut Ui, c: &mut dyn Canvas, id: Id, area: Rect, split: Spli
     let m = ui.mouse();
     let along = |x: f32, y: f32| if split == Split::LeftRight { x - area.x } else { y - area.y };
     if let Some(p) = it.pressed {
+        if p.double {
+            // double-click puts the bar back in the middle
+            *pos = clamp((len - bw) / 2.0);
+        }
         ui.drag_f64 = (along(p.pos.x, p.pos.y) - *pos) as f64;
     }
     if it.active {

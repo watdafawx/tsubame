@@ -75,9 +75,17 @@ view_mode = "details"        # "details" | "grid-small" | "grid-large"
 
 [panes]
 dual = false
-split = "vertical"           # "vertical" | "horizontal"
+split = "vertical"           # "vertical" = side by side | "horizontal" = stacked
+ratio = 0.5                  # size of the first pane, 0.15-0.85
 sidebar_width = 208.0
-sidebar_collapsed = false
+sidebar_collapsed = false    # true = 48 px icon rail
+
+[sidebar]
+closed = ["network"]         # folded sections: pinned | quick | recent | pc | network
+
+[[sidebar.pinned]]           # bookmarks, in order; drag between rows to pin
+name = "Work"
+path = "D:\work"
 
 [updates]
 auto_check = true
@@ -109,9 +117,12 @@ maximized = false
 | `appearance.font_scale` | `1.0` | read, not wired yet |
 | `appearance.accent` | absent | read (`accent_rgb`), not wired yet |
 | `appearance.view_mode` | `"details"` | `View::view_mode` (grid arrives with W2) |
-| `panes.dual` / `split` | `false` / `"vertical"` | dual-pane task |
-| `panes.sidebar_width` | `208.0` | sidebar width, clamped 120–480 |
-| `panes.sidebar_collapsed` | `false` | folds all sidebar sections at start |
+| `panes.dual` / `split` | `false` / `"vertical"` | two panes, side by side or stacked (Ctrl+\, Ctrl+Shift+\) |
+| `panes.ratio` | `0.5` | first pane's share, clamped 0.15–0.85; the splitter drags it, double-click resets |
+| `panes.sidebar_width` | `208.0` | sidebar width, clamped 120–480; dragging under 120 collapses to the rail |
+| `panes.sidebar_collapsed` | `false` | `true` = the 48 px icon rail (Ctrl+B) |
+| `sidebar.pinned` | empty | `[[sidebar.pinned]]` `name` + `path`, shown in the Pinned section |
+| `sidebar.closed` | empty | sidebar sections folded by the user |
 | `updates.auto_check` / `channel` | `true` / `"stable"` | updater (read, not wired) |
 | `keys.profile` / `keys.overrides` | `"default"` / empty | rebinding task (U4) |
 | `window.*` | `0,0,1120,720,false` | geometry on a plain start |
@@ -162,6 +173,11 @@ sort_column = "size"
 sort_descending = true
 scroll_first_row = 40
 ```
+
+With two panes there are two `[[panes]]` tables (first pane, second pane);
+`active_pane` is the one with focus and `last_folder` is its active tab.
+`recents` (top level, newest first, at most 8 folders) feeds the sidebar's
+Recent section and is written with the rest of the session on exit.
 
 Only the active tab's folder is listed at startup. Every other tab is restored
 lazily: its path and view state are kept, and its enumerator starts the first

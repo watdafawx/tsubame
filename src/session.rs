@@ -68,9 +68,45 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
 
 /// What the app saves on exit.
 pub fn capture(view: &View, window: tsubame_config::WindowState) -> Session {
-    let tabs = view.tabs.items.iter().map(|t| tab_state(t, view.mode.to_config())).collect();
-    let pane = SessionPane { active_tab: view.tabs.active, tabs };
-    Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: 0, window, panes: vec![pane] }
+    let mode = view.mode.to_config();
+    let n = if view.dual() { 2 } else { 1 };
+    let panes: Vec<SessionPane> = (0..n)
+        .filter_map(|slot| view.pane_tabs(slot))
+        .map(|tabs| SessionPane { active_tab: tabs.active, tabs: tabs.items.iter().map(|t| tab_state(t, mode)).collect() })
+        .collect();
+    Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: view.active.min(n - 1), window, panes, recents: view.side.recents.clone() }
+}
+
+/// The shape of the window from the config (one pane or two, how they sit,
+/// the split) and, with two panes, the other pane's saved tabs. Call after
+/// `apply`: the pane the window started with keeps the slot it was saved in.
+pub fn apply_layout(view: &mut View, cfg: &tsubame_config::Config, s: Option<&Session>) {
+    view.ratio = crate::panes::clamp_ratio(cfg.panes.ratio);
+    view.orient = cfg.panes.split;
+    if !cfg.panes.dual {
+        return;
+    }
+    let slot = s.map(|s| s.active_pane.min(1)).unwrap_or(0);
+    view.live = slot;
+    view.active = slot;
+    view.set_layout(true, cfg.panes.split);
+    if let Some(s) = s
+        && s.panes.len() == 2
+    {
+        let other = &s.panes[1 - slot];
+        let tabs: Vec<Tab> = other
+            .tabs
+            .iter()
+            .map(|st| {
+                let mut t = view.pending_tab(&tab_folder(&st.path));
+                attach(&mut t, st);
+                t
+            })
+            .collect();
+        view.restore_other_pane(tabs, other.active_tab);
+    }
+    // starting up is not a change the user made
+    view.config_dirty = false;
 }
 
 /// Restores `s` into a view that was created with the session's active folder.
@@ -79,6 +115,7 @@ pub fn capture(view: &View, window: tsubame_config::WindowState) -> Session {
 /// other tabs are added as pending (no enumerator) in their saved order and
 /// the active tab ends up at `s.active_tab()`.
 pub fn apply(view: &mut View, s: &Session) {
+    view.side.recents = s.recents.iter().take(crate::sidebar::RECENT_CAP).cloned().collect();
     let tabs = s.tabs();
     if tabs.is_empty() {
         return;
@@ -121,8 +158,13 @@ pub fn sync_config(view: &View, cfg: &mut tsubame_config::Config) {
     cfg.appearance.density = config_density(view.density);
     cfg.appearance.zebra = view.zebra;
     cfg.appearance.view_mode = view.mode.to_config();
+    cfg.panes.dual = view.dual();
+    cfg.panes.split = view.orient;
+    cfg.panes.ratio = view.ratio;
     cfg.panes.sidebar_width = view.sidebar_width;
-    cfg.panes.sidebar_collapsed = view.side.collapsed.iter().all(|c| *c);
+    cfg.panes.sidebar_collapsed = view.side.rail;
+    cfg.sidebar.pinned = view.side.pinned.clone();
+    cfg.sidebar.closed = view.side.closed_names();
 }
 
 pub fn config_density(d: tsubame_ui::Density) -> tsubame_config::Density {
@@ -353,6 +395,56 @@ mod tests {
         settle(&mut v2);
         assert_eq!(v2.tab().shown(), 4);
         assert_eq!(v2.tab().path, one);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn two_panes_round_trip() {
+        let d = temp_dir("dual");
+        let one = d.join("one").to_str().unwrap().to_string();
+        let two = d.join("two").to_str().unwrap().to_string();
+        let mut v = view(&one);
+        settle(&mut v);
+        v.set_layout(true, tsubame_config::Split::Horizontal);
+        v.open_in_other_pane(&two);
+        v.ratio = 0.35;
+        settle(&mut v);
+        let s = capture(&v, tsubame_config::WindowState::default());
+        assert_eq!(s.panes.len(), 2);
+        assert_eq!(s.active_pane, 0);
+        assert_eq!(s.panes[0].tabs[0].path, one);
+        assert_eq!(s.panes[1].tabs[0].path, two);
+        let mut cfg = tsubame_config::Config::default();
+        sync_config(&v, &mut cfg);
+        assert!(cfg.panes.dual);
+        assert_eq!(cfg.panes.split, tsubame_config::Split::Horizontal);
+        assert!((cfg.panes.ratio - 0.35).abs() < 1e-6);
+
+        // restore: the window starts on the active pane's folder
+        let mut v2 = view(&one);
+        apply(&mut v2, &s);
+        apply_layout(&mut v2, &cfg, Some(&s));
+        settle(&mut v2);
+        assert!(v2.dual());
+        assert_eq!(v2.orient, tsubame_config::Split::Horizontal);
+        assert!((v2.ratio - 0.35).abs() < 1e-6);
+        assert_eq!(v2.pane_tabs(0).unwrap().items[0].path, one);
+        assert_eq!(v2.pane_tabs(1).unwrap().items[0].path, two);
+        assert!(!v2.config_dirty, "starting up does not dirty the config");
+
+        // the second pane was the active one: it keeps its slot
+        v.set_active_pane(1);
+        let s = capture(&v, tsubame_config::WindowState::default());
+        assert_eq!(s.active_pane, 1);
+        assert_eq!(s.last_folder, two);
+        let mut v3 = view(&two);
+        apply(&mut v3, &s);
+        apply_layout(&mut v3, &cfg, Some(&s));
+        settle(&mut v3);
+        assert_eq!(v3.active, 1);
+        assert_eq!(v3.pane_tabs(0).unwrap().items[0].path, one);
+        assert_eq!(v3.pane_tabs(1).unwrap().items[0].path, two);
+        assert_eq!(v3.tab().path, two);
         let _ = std::fs::remove_dir_all(&d);
     }
 

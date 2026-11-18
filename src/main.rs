@@ -43,18 +43,27 @@
 //! icons, TSUBAME_HANG_MS sets the hung-worker threshold (default 3000),
 //! TSUBAME_DATA_DIR overrides the config/session directory.
 
+mod batchui;
 mod bench;
 mod cli;
 mod clip;
 mod cols;
+mod commands;
 mod data;
+mod dnd;
+mod editing;
 mod leak;
 mod lru;
 mod memdiag;
 mod nav;
 mod ole_glue;
+mod ops;
+mod overlay;
+mod panes;
+mod rename;
 mod session;
 mod shellops;
+mod statusbar;
 mod shellui;
 mod sidebar;
 mod single;
@@ -98,6 +107,9 @@ const WATCH_TIMER: usize = 2;
 const CARET_TIMER: usize = 4;
 /// One-shot config/session save while a change is inside the debounce window.
 const SAVE_TIMER: usize = 6;
+/// File-operation events: polled only while an operation runs.
+const OPS_TIMER: usize = 8;
+const OPS_MS: u32 = 60;
 const CARET_MS: u32 = 530;
 /// The blink stops (caret solid) after this long without input.
 const CARET_IDLE: Duration = Duration::from_secs(10);
@@ -409,11 +421,18 @@ fn main() {
         view.mode = if dev { view::ViewMode::Details } else { view::ViewMode::from_config(cfg.appearance.view_mode) };
         view.sidebar_width = if dev { tsubame_config::DEFAULT_SIDEBAR_WIDTH } else { cfg.panes.sidebar_width.clamp(120.0, 480.0) };
         if !dev && cfg.panes.sidebar_collapsed {
-            view.side.collapsed = [true; 3];
+            view.side.rail = true;
+        }
+        if !dev {
+            view.side.pinned = cfg.sidebar.pinned.clone();
+            view.side.set_closed_names(&cfg.sidebar.closed);
         }
         if restore_session {
             // the started tab is the active one; the rest stay lazy
             session::apply(&mut view, &saved_session);
+        }
+        if !dev {
+            session::apply_layout(&mut view, &cfg, restore_session.then_some(&saved_session));
         }
         // command-line paths: the first one is already shown unless --new-tab
         if inline_first
@@ -445,7 +464,7 @@ fn main() {
         let mut ui = Ui::new(view.base_theme());
         view::bind_shortcuts(&mut ui);
         ui.clipboard = Box::new(clip::WinClipboard(hwnd.0 as isize));
-        ui.set_focus(Some(view::ID_LIST));
+        ui.set_focus(Some(view.list_id()));
         view.dpi = dpi;
         if let Some(m) = arg_value(&args, "--view").and_then(|v| view::ViewMode::parse(&v)) {
             view.set_mode(m);
@@ -548,6 +567,18 @@ fn arm_watch(hwnd: HWND, a: &mut App) {
     }
 }
 
+/// The file-operation poll timer exists only while an operation is running.
+fn arm_ops(hwnd: HWND, a: &mut App) {
+    let busy = a.view.ops_busy();
+    if busy && !a.view.ops_timer {
+        unsafe { SetTimer(Some(hwnd), OPS_TIMER, OPS_MS, None) };
+        a.view.ops_timer = true;
+    } else if !busy && a.view.ops_timer {
+        let _ = unsafe { KillTimer(Some(hwnd), OPS_TIMER) };
+        a.view.ops_timer = false;
+    }
+}
+
 /// The caret rule: one blink timer exists only while a text field has
 /// focus; it stops after `CARET_IDLE` without input (caret stays solid);
 /// with no text field focused there is no timer at all.
@@ -596,6 +627,7 @@ fn spawn_places(hwnd: HWND) {
 fn after_paint(hwnd: HWND, a: &mut App) {
     a.shell.end_frame(&mut a.pool);
     arm_watch(hwnd, a);
+    arm_ops(hwnd, a);
     if a.view.want_drives && !PLACES_BUSY.load(Ordering::Acquire) {
         a.view.want_drives = false;
         spawn_places(hwnd);
@@ -670,6 +702,7 @@ unsafe fn on_paint(hwnd: HWND) {
         let t0 = Instant::now();
         a.last_paint = t0;
         a.shell.begin_frame();
+        a.view.cur_mods = mods();
         let out = a.view.paint(&mut a.ui, &mut a.gfx, &mut a.shell);
         let total = t0.elapsed().as_secs_f32() * 1000.0;
         after_paint(hwnd, a);
@@ -1020,6 +1053,7 @@ fn map_key(vk: u16) -> Key {
         VK_SPACE => Key::Space,
         v if (VK_F1.0..=VK_F24.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
         v if (0x30..=0x39).contains(&v.0) || (0x41..=0x5a).contains(&v.0) => Key::Char(v.0 as u8 as char),
+        v if v.0 == 0xDC => Key::Char('\\'), // VK_OEM_5: the backslash key (Ctrl+\ splits the window)
         v => Key::Other(v.0 as u32),
     }
 }
@@ -1366,6 +1400,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             shellops::WM_APP_SHELLOPS => {
                 shellops::on_app(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == OPS_TIMER => {
+                with(|a| {
+                    a.view.poll_ops();
+                    arm_ops(hwnd, a);
+                });
+                invalidate(hwnd);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == SAVE_TIMER => {
