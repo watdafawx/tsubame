@@ -216,6 +216,29 @@ fn pump() {
     }
 }
 
+const SETTLE_QUIET_MS: u64 = 40;
+const SETTLE_MAX_MS: u64 = 300;
+
+/// Pumps until `sub`'s item count is unchanged for `SETTLE_QUIET_MS`
+/// (capped at `SETTLE_MAX_MS`). Returns the final count.
+fn settle(sub: HMENU) -> i32 {
+    let start = Instant::now();
+    let mut n = unsafe { GetMenuItemCount(Some(sub)) };
+    let mut still = Instant::now();
+    loop {
+        pump();
+        let now = unsafe { GetMenuItemCount(Some(sub)) };
+        if now != n {
+            n = now;
+            still = Instant::now();
+        }
+        if still.elapsed().as_millis() as u64 >= SETTLE_QUIET_MS || start.elapsed().as_millis() as u64 >= SETTLE_MAX_MS {
+            return n;
+        }
+        unsafe { MsgWaitForMultipleObjectsEx(None, 5, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
+    }
+}
+
 struct Built {
     cm: IContextMenu,
     hmenu: HMENU,
@@ -406,8 +429,11 @@ impl Walk<'_> {
         } else if let Ok(cm2) = self.cm.cast::<IContextMenu2>() {
             let _ = unsafe { cm2.HandleMenuMsg(WM_INITMENUPOPUP, wp, lp) };
         }
-        // some handlers fill the popup from posted messages
-        pump();
+        // Some handlers fill the popup later from posted messages or a
+        // helper thread ("Send to" adds its first target at once and the
+        // rest a few ms later). Pump until the count holds still for
+        // SETTLE_QUIET_MS, at most SETTLE_MAX_MS.
+        settle(sub);
         let _ = self.host;
     }
 
