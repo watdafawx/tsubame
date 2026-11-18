@@ -1,0 +1,13 @@
+[package]
+name = "tsubame-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tsubame settings and session: versioned TOML, atomic saves, debounced writes. No Win32."
+
+[lib]
+name = "tsubame_config"
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true

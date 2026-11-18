@@ -21,6 +21,16 @@ pub enum Load {
     Failed(String),
 }
 
+/// Session restore for one tab: applied when its listing completes, because
+/// the scroll row and the selected names need the entries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Restore {
+    /// index of the first visible row
+    pub scroll_first_row: usize,
+    /// entry names to select
+    pub selected: Vec<String>,
+}
+
 /// Times of the last navigation, all measured from the navigation event.
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
@@ -58,6 +68,10 @@ pub struct Tab {
     /// entries the enumerator delivered so far
     pub delivered: usize,
     pub timing: Timing,
+    /// restored from the session: no listing runs until the tab is first shown
+    pub pending: bool,
+    /// restored scroll row and selection, applied when the listing completes
+    pub restore: Option<Restore>,
     title_s: String,
     /// the bench's fake rows: no real files behind them
     pub synthetic: bool,
@@ -116,6 +130,8 @@ impl Tab {
             load: Load::Done,
             delivered: 0,
             timing: Timing::new(),
+            pending: false,
+            restore: None,
             title_s: Self::make_title(path),
             synthetic: false,
             token: CancelToken::new(),
@@ -139,6 +155,8 @@ impl Tab {
     pub fn adopt_store(&mut self, label: &str, store: EntryStore) {
         self.enumerator = None;
         self.rx = None;
+        self.pending = false;
+        self.restore = None;
         self.path = label.to_string();
         self.title_s = Self::make_title(label);
         self.delivered = store.len();
@@ -159,6 +177,9 @@ impl Tab {
     pub fn start(&mut self, path: &str, wake: Wake) {
         self.enumerator = None; // cancels and detaches
         self.rx = None;
+        self.pending = false;
+        // a navigation is not the restored listing any more
+        self.restore = None;
         self.path = path.to_string();
         self.title_s = Self::make_title(path);
         self.synthetic = false;
@@ -250,6 +271,75 @@ impl Tab {
         };
         self.rx = None;
         self.enumerator = None;
+        self.apply_restore();
+    }
+
+    /// Session restore: starts the listing of a tab that was restored at
+    /// startup (the folder is repaired if it disappeared).
+    pub fn resume(&mut self, wake: Wake) {
+        if !self.pending {
+            return;
+        }
+        let p = crate::session::tab_folder(&self.path);
+        let restore = self.restore.take();
+        self.start(&p, wake);
+        self.restore = restore;
+    }
+
+    /// Selection restore for a path given on the command line or forwarded by a
+    /// second launch: applies at once when the listing is there, else with the
+    /// session restore state when the listing completes.
+    pub fn select_names(&mut self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        if self.is_loading() || self.shown() == 0 {
+            let r = self.restore.get_or_insert_default();
+            for n in names {
+                if !r.selected.iter().any(|s| s == n) {
+                    r.selected.push(n.clone());
+                }
+            }
+            return;
+        }
+        self.apply_selection(names);
+    }
+
+    /// Scroll row and selection saved in the session. Runs once, when the
+    /// listing is complete (the entries are what the numbers refer to).
+    fn apply_restore(&mut self) {
+        let Some(r) = self.restore.take() else { return };
+        let n = self.shown();
+        if n > 0 && r.scroll_first_row > 0 {
+            let row = r.scroll_first_row.min(n - 1);
+            self.list.scroll = row as f64 * self.list.row_h as f64;
+            self.list.cursor = row;
+        }
+        self.apply_selection(&r.selected);
+    }
+
+    /// Selects the entries whose names are in `names` (case-insensitive).
+    fn apply_selection(&mut self, names: &[String]) {
+        let n = self.shown();
+        if names.is_empty() || n == 0 {
+            return;
+        }
+        let mut hits = Vec::new();
+        for pos in 0..n {
+            let Some(id) = self.store.at(pos) else { continue };
+            let Some(name) = self.store.name(id) else { continue };
+            let name = String::from_utf16_lossy(name);
+            if names.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+                hits.push(pos);
+            }
+        }
+        for (i, pos) in hits.into_iter().enumerate() {
+            if i == 0 {
+                self.sel.single(&self.store, pos);
+            } else {
+                self.sel.toggle(&self.store, pos);
+            }
+        }
     }
 
     /// Sort by `col`: a second click on the same column flips the direction.

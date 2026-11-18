@@ -20,6 +20,7 @@ use crate::sidebar::Sidebar;
 use crate::tab::{Load, Tab};
 use crate::tabs::Tabs;
 use tsubame_core::{EntryStore, Selection};
+use tsubame_config::{DEFAULT_SIDEBAR_WIDTH, ViewMode};
 use tsubame_ui::{
     Button, Canvas, Cursor, DARK, Density, Event, HeaderCol, Id, Key, LIGHT, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, TabStrip, TextInput, Theme, Ui, column_header, f, list, tab_strip, text_input,
 };
@@ -117,6 +118,12 @@ pub struct View {
     pub density: Density,
     pub dark: bool,
     pub zebra: bool,
+    /// details or one of the grid modes (D1 stores it; the grid view arrives with W2)
+    pub view_mode: ViewMode,
+    /// width of the sidebar in DIPs, from the config
+    pub sidebar_width: f32,
+    /// a setting the user changed: main writes the config (debounced)
+    pub config_dirty: bool,
     pub side: Sidebar,
     wake: Wake,
     rowbuf: Box<RowBuf>,
@@ -164,6 +171,9 @@ impl View {
             density,
             dark,
             zebra: false,
+            view_mode: ViewMode::Details,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            config_dirty: false,
             side: Sidebar::default(),
             wake,
             rowbuf: Box::new(RowBuf::new()),
@@ -185,7 +195,9 @@ impl View {
     }
 
     pub fn base_theme(&self) -> Theme {
-        Theme::with_density(if self.dark { &DARK } else { &LIGHT }, self.density)
+        let mut t = Theme::with_density(if self.dark { &DARK } else { &LIGHT }, self.density);
+        t.layout_sidebar_width = self.sidebar_width;
+        t
     }
 
     /// Pushes theme and density into the kit and every tab's list.
@@ -287,7 +299,32 @@ impl View {
 
     pub fn switch_tab(&mut self, i: usize) {
         self.tabs.activate(i);
+        let wake = self.wake.clone();
+        if self.tab().pending {
+            // a tab restored from the session: its listing starts the first time it is shown
+            self.tab_mut().resume(wake);
+        }
         self.switched();
+    }
+
+    /// A tab restored from the session. Its listing starts on first show
+    /// (`switch_tab`), which keeps the startup cost to one folder.
+    pub fn pending_tab(&mut self, path: &str) -> Tab {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let mut t = Tab::new(id, path, self.density.row_h());
+        t.pending = true;
+        t
+    }
+
+    /// After `session::apply` put the restored tabs in place.
+    pub fn after_restore(&mut self) {
+        self.filter.set_text("");
+        self.editing = false;
+        self.path_error = None;
+        self.focus_list = true;
+        self.strip = TabStrip::default();
+        self.tabs.active = self.tabs.active.min(self.tabs.items.len().saturating_sub(1));
     }
 
     fn switched(&mut self) {
@@ -371,6 +408,7 @@ impl View {
 
     fn set_dark(&mut self, ui: &mut Ui, dark: bool) {
         self.dark = dark;
+        self.config_dirty = true;
         self.apply_theme(ui);
     }
 
@@ -397,9 +435,13 @@ impl View {
             CMD_THEME => self.set_dark(ui, !self.dark),
             CMD_DENSITY => {
                 self.density = self.density.next();
+                self.config_dirty = true;
                 self.apply_theme(ui);
             }
-            CMD_ZEBRA => self.zebra = !self.zebra,
+            CMD_ZEBRA => {
+                self.zebra = !self.zebra;
+                self.config_dirty = true;
+            }
             CMD_REFRESH => self.refresh(),
             CMD_SELECT_ALL => {
                 let t = self.tab_mut();
