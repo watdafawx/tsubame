@@ -1,51 +1,108 @@
-# File operation queue (C3 foundation; incomplete)
+# File operation queue (C3)
 
-`fileops::FileOpQueue::new(backend)` returns queue and event receiver.
-`submit(Vec<Operation>)`, `undo()`, `redo()` return cancellable tickets.
-Submission performs no disk or COM calls. One STA worker executes FIFO commands.
-Poll receiver using `try_recv`; conflict event owns a one-use `ConflictReply`.
-`answer(choice, apply_to_all)` resumes worker. Cancellation interrupts conflict waits.
-Errors are per item; subsequent items continue. Dropping queue closes submission;
-already queued work drains on detached worker.
+Headless logic, no UI. Code: `crates/tsubame-win/src/fileops/`.
 
-`OpBackend::execute` receives operation, cancellation token and byte-delta callback.
-Return inverse operation only after success. `FsBackend` copies in 256 KiB chunks,
-rejects symlinks, uses rename for same-volume moves and copies before removing source
-on Windows ERROR_NOT_SAME_DEVICE. Targets must have existing parents.
-NewFile uses create_new. NewFolder fails if destination exists.
+| File | What |
+|---|---|
+| `mod.rs` | `Operation`, `Event`, `Choice`, `Step`, `OpBackend`, `Cancellation` |
+| `queue.rs` | `FileOpQueue`, the STA worker, conflicts, throttle, journal updates |
+| `fsbackend.rs` | `FsBackend`: std::fs copy/move, Recycle Bin through `recycle` |
+| `recycle.rs` | `IFileOperation` recycle, restore, purge |
+| `totals.rs` | queue-wide totals and the off-thread pre-scan |
+| `journal.rs` | undo/redo journal and its text format |
 
-Events: Started, Progress (current path, cumulative bytes for item), Conflict,
-Error, Finished. Progress limited to 30 Hz within each submitted batch; lifecycle,
-conflict and error events bypass throttle. Queue and event channels are unbounded.
+## API
 
-Journal currently private in-memory forward/inverse pairs, capped at 200 records.
-Copy/new-file/new-folder inverse is permanent deletion in this filesystem fallback;
-move/rename inverse moves back. Permanent delete has no inverse. Successful new work
-clears redo. Undo/redo retain their entry on failure. Each list item is one entry.
+```rust
+let (queue, events) = FileOpQueue::new(FsBackend)?;   // or with_journal(backend, Arc<Mutex<Journal>>)
+let ticket = queue.submit(vec![Operation::Copy { source, target }])?;
+queue.undo()?; queue.redo()?;           // each returns a cancellable Ticket
+queue.journal();                        // Arc<Mutex<Journal>>: save_to_string / load_from_str
+queue.totals();                         // queue-wide Totals, zero when idle
+```
 
-## Outstanding before C3 acceptance
+- Submission performs no disk or COM call. One STA worker thread (`OleInitialize`) runs jobs FIFO and pumps messages while idle (`MsgWaitForMultipleObjectsEx` on a wake event) and while it waits for a conflict answer.
+- Poll `events` with `try_recv`. Events: `Started`, `Progress`, `Conflict`, `Error` (per item; later items continue), `Finished`.
+- A `Conflict` owns a one-use `ConflictReply`: `answer(choice, apply_to_all)`. Choices: `Replace`, `Skip`, `KeepBoth`. Cancelling interrupts the wait.
+- Dropping the queue closes submission; queued work drains on the detached worker.
+- `OpBackend::execute(op, cancel, progress: FnMut(Step))` returns the inverse operation only after success. `Step { bytes, files }`.
 
-- IFileOperation backend, COM message pump, progress sink and recycle restore tokens.
-- Replace with reversible backup; currently reports error and skips (prevents data loss).
-- Recycle deletion; currently Unsupported (never silently permanently deletes).
-- Journal serialization, non-undoable records/reasons, grouped batch undo.
-- Queue-wide totals, item counts, wake callback and error-response choices.
-- Cancellation on queue drop/shutdown and bounded event delivery.
-- Reparse-point-safe cross-volume move source deletion; metadata preservation.
-- TOCTOU hardening against concurrent destination/source mutations.
-- Long-path and throttle tests; shell integration and replace tests.
+## What is undoable
 
-No GUI integration. Do not wire this foundation to destructive UI commands yet.
+| Operation | Undo | Notes |
+|---|---|---|
+| Copy | recycle the created copy | falls back to permanent delete of our own copy only if the volume has no bin |
+| Move, Rename | move back | same-volume rename, or copy then delete the source across volumes |
+| NewFile, NewFolder | recycle it | same fallback as copy |
+| Delete (recycle) | restore from the Recycle Bin | see below |
+| Replace (any of the above onto an existing target) | undoes the operation, then restores the old target | see below |
+| Delete permanent | **not undoable** | the journal entry stays as history with the reason `permanent delete cannot be undone` |
 
-## FOX measurements (2026-11-18)
+Undo takes the newest undoable entry and skips non-undoable ones. A failed undo or redo leaves its entry where it was and reports an `Error`. New work clears redo. The journal holds 200 entries; when full it drops non-undoable history first, then the oldest entry. Each submitted item is one entry (grouped undo of a whole batch is not implemented).
 
-Debug optimized test profile, CCD1, 10,000 files of 128 bytes in system temp.
-Single serial repeat after workspace tests: filesystem copy 5.197 s (1,924 files/s),
-robocopy /E /R:0 /W:0 7.899 s (1,266 files/s). Warm cache, fixed order, one sample;
-not a cold-cache or shell-backend comparison. Includes subprocess startup for robocopy.
-100,000 fake-backend items in one batch: 0.042 microseconds/item, excluding batch
-construction. Does not measure a submit call per item or per-item event delivery.
+## Recycle Bin: how delete and restore work
 
-Validation: cargo check --workspace, cargo test --workspace and clippy -p tsubame-win
---all-targets -- -D warnings passed through cargo-ccd1. Added six tests/benchmarks.
-Existing ignored child-process helper and updater doctest remain ignored.
+Delete: `IFileOperation::DeleteItem` with `FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOFX_NOCOPYHOOKS` and no owner window, so no dialog, progress UI or focus change. A progress sink catches `PostDeleteItem`; the "newly created" item is the entry inside the bin and its `SIGDN_FILESYSPATH` (`C:\$Recycle.Bin\<sid>\$R….ext`) is the restore token. `Operation::Restore(RecycledItem { original, recycled })` is the inverse.
+
+Restore: enumerate the aggregated bin (`SHGetKnownFolderItem(FOLDERID_RecycleBinFolder)` → `IEnumShellItems`), find the entry whose file system path equals the token, and `IFileOperation::MoveItem` it to the original folder under the original name (missing parent folders are recreated). The shell keeps the `$I` metadata consistent. Restore never overwrites: if the original path is occupied it fails with `AlreadyExists` and the entry stays undoable. Matching by original path plus deletion time was not needed: the token from the sink is exact and survives a saved journal as long as the bin entry exists. If the user emptied the bin, restore reports `NotFound`.
+
+Redo of a recycle delete deletes again and replaces the entry's inverse with the new token (tokens change every time an item is recycled).
+
+Safety limits found by testing (`recycle.rs`):
+- A silent recycle of a path of 260 characters or more makes the shell **permanently delete** the item, even in a long-path-aware process. `recycle()` refuses those up front (`Unsupported`, file untouched). Paths up to 259 characters recycle and restore fine. Callers may offer an explicit permanent delete.
+- Volumes without a bin (not `DRIVE_FIXED`, or `SHQueryRecycleBinW` fails) are refused. If the shell reports success but no bin entry, `recycle()` returns an error saying the item was deleted permanently.
+- The shell rejects `\\?\` paths in `SHCreateItemFromParsingName` (error 87), so shell calls use plain absolute paths. std::fs uses verbatim paths itself, so copy and move work beyond 260 characters.
+- Not detected: an item larger than the bin's size limit is deleted for good by the shell. The post-check reports it, but the item is already gone. Check size before offering recycle if that matters.
+
+## Replace
+
+On a `Replace` answer the queue runs `Sequence[Delete{target, recycle}, op]`. If `op` fails, the recycled target is restored (rolled back). If it succeeds, the inverse is `Sequence[inverse of op, Restore(old target)]`, so one undo puts everything back. Redo repeats the sequence. Replace is refused (`Error`, nothing touched) when the source and target are the same or one contains the other.
+
+## Progress and totals
+
+Every `Progress` event carries `totals: Totals { files_done, files_total, bytes_done, bytes_total }` for the whole queue (all submitted batches, not just the current one), and `bytes_done` for the current item. `Finished` carries the last snapshot.
+
+- On submit a scanner thread (never the UI thread) sizes each operation: copies and cross-volume moves recurse into folders (files and bytes); everything else counts as one file and no bytes. If the worker reaches an item before the scanner, the worker adds what it actually did and the late scan result is ignored. Skipped or cancelled items leave the totals. Counters reset when the queue drains.
+- Progress is throttled queue-wide to one event per 34 ms (at most 30 in any second). Lifecycle, conflict and error events are not throttled.
+
+## Journal text format
+
+`Journal::save_to_string()` / `Journal::load_from_str(&str) -> (Journal, LoadReport { loaded, skipped })`. Plain text, no serde, one record per line:
+
+```
+tsubame-journal<TAB>1
+U<TAB>copy<TAB>C:\a<TAB>C:\b<TAB>delete<TAB>C:\b<TAB>0<TAB>
+U<TAB>delete<TAB>C:\x<TAB>1<TAB>-<TAB>permanent delete cannot be undone
+```
+
+`U` undo stack (oldest first), `R` redo stack. Fields: forward operation, inverse (`-` if none), reason. Operations: `copy|move|rename src dst`, `delete path 0|1`, `newfolder path`, `newfile path`, `restore original recycled`, `seq n op…`. In every path and text field `%`, control characters below U+0020 and U+007F become `%XX`; C1 controls and lone UTF-16 surrogates become `%uXXXX`; Unicode and spaces are written as is. Unknown or corrupt lines, a bad escape, trailing junk or an unknown or future header version are skipped and counted; loading never panics (tested with truncation at every character and byte mutations).
+
+## Tests
+
+`cargo test -p tsubame-win --lib fileops` (about 30 s, most of it the progress and 10k-copy tests). The tests use temp directories on the system drive, send real items to the Recycle Bin, and purge what they created. They skip with a message if the temp volume has no bin. `crates/tsubame-win/build.rs` embeds a `longPathAware` manifest into this crate's test and example executables, matching the app manifest.
+
+Coverage: recycle delete and undo/redo of file and folder, restore refuses to overwrite, permanent delete not undoable, Replace (copy and move-over-folder, undo, redo, self refusal, rollback on failure), long paths (copy, move, tree copy; recycle at 255 characters works, at 300 is refused untouched), throttle (unit and through the queue), queue-wide totals, journal round trip with unicode, spaces, `%`, tabs, control characters, a lone surrogate, corrupt and future-version journals, journal survives a new queue.
+
+## Not done
+
+- Grouped undo: a batch of N items is N journal entries and N undos.
+- Wake callback, error-response choices (retry/skip/abort per error), cancellation on queue drop.
+- Reparse points: `FsBackend` refuses to copy symlinks and junctions. Cross-volume move does not check for them before deleting the source.
+- Metadata (timestamps, ACLs, alternate streams) is not preserved by the `std::fs` copy.
+- No TOCTOU hardening against another process changing source or target between the check and the operation.
+- Recycling is one `IFileOperation` per item (each call creates the COM object and performs on its own); batching many deletes into one `IFileOperation` is not done and its cost for large selections is not measured.
+- No GUI integration. Do not wire this to destructive UI commands before grouped undo and the error-response choices exist.
+
+## FOX measurements
+
+Measured 2026-11-18 on FOX (a game was running, so cargo-ccd1 used -j 8; disk noise is real), test profile, CCD1, 10,000 files of 128 bytes in `%TEMP%` (system drive), warm cache, `FsBackend` copy of the whole tree against `robocopy /E /R:0 /W:0` (includes process start), serial, nothing else building:
+
+| Run | fs copy | robocopy |
+|---|---|---|
+| 1 (all benchmarks, 1 thread) | 5.41 s (1,848 files/s) | 8.72 s (1,147 files/s) |
+| 2 | 10.41 s (960 files/s) | 8.33 s (1,200 files/s) |
+| 3 | 5.78 s (1,730 files/s) | 7.96 s (1,257 files/s) |
+| 4 | 4.82 s (2,074 files/s) | 7.28 s (1,373 files/s) |
+| 5 | 5.99 s (1,669 files/s) | 9.88 s (1,012 files/s) |
+
+Median: fs copy 5.78 s, robocopy 8.33 s. Run 2 is an outlier where the copy was slower than robocopy; the spread is large, so treat the gap as roughly 1.4x in favour of the filesystem backend, not a precise figure. Earlier child result (5.2 s vs 7.9 s) is in line. Queue overhead: 100,000 fake-backend items in one batch, submit call 0.4 ms, 0.32 microseconds per item end to end (includes the scanner and totals bookkeeping).

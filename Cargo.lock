@@ -1024,6 +1024,7 @@ name = "tsubame-win"
 version = "0.0.1"
 dependencies = [
  "windows",
+ "windows-core",
 ]
 
 [[package]]
