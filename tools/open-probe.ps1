@@ -10,10 +10,11 @@
     cold: tsubame-bench purge --mode working (the ssh session on rig is
           elevated; gsudo -n as fallback), wait until rig's disks settle (the
           purge starts a paging storm), then
-          tsubame --timing --timing-dirs "<tiny>;<idle>;<tiny>;<dir>" --reps 1
+          tsubame --timing --timing-dirs "<tiny>;<idle>;<warmup>;<tiny>;<dir>" --reps 1
           (the tiny folder takes the process start, <idle> waits 3 s for the
-          startup tail (GPU paint path) to end, the second tiny warms the
-          paint path; the measured row is the navigation into the still cold
+          startup tail (GPU paint path) to end, <warmup> (1k files, a full
+          screen of rows) faults the paint path's pages back in after the
+          purge; the measured row is the navigation into the still cold
           <dir>, timed from the navigation event). -StartupNav measures the
           old way, "<tiny>;<dir>", which overlaps the startup tail.
     navcold: warm app, cold folder: an elevated launch with
@@ -35,6 +36,7 @@ param(
   [Parameter(Mandatory)] [string[]] $Builds,          # label=rigdir
   [string] $Dir = 'G:\rig-bench\tsubame-perf2\100k',
   [string] $Tiny = 'G:\rig-bench\tsubame-perf2\tiny',
+  [string] $Warmup = 'G:\rig-bench\tsubame-perf2\1k',  # cold: a screenful of rows that warms the paint path
   [int]    $Runs = 6,
   [ValidateSet('cold', 'navcold', 'warm')] [string] $Mode = 'cold',
   [int]    $WarmReps = 10,
@@ -122,7 +124,7 @@ for ($i = 1; $i -le $Runs; $i++) {
       # measures the storm. The folder's metadata stays cold meanwhile.
       $d = if ($PurgeMode -ne 'working') { 0 } else { Invoke-Rig "`$t0 = Get-Date; do { `$d = (Get-Counter '\PhysicalDisk(_Total)\% Disk Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue } while (`$d -gt $SettleDiskPct -and ((Get-Date) - `$t0).TotalSeconds -lt $SettleMaxSec); [math]::Round(((Get-Date) - `$t0).TotalSeconds, 1)" 120 }
       Write-Host "  settled after $d s"
-      $dirs = if ($StartupNav) { "$Tiny;$Dir" } else { "$Tiny;<idle>;$Tiny;$Dir" }
+      $dirs = if ($StartupNav) { "$Tiny;$Dir" } else { "$Tiny;<idle>;$Warmup;$Tiny;$Dir" }
       $text = Invoke-Launch $b "--timing --timing-dirs `"$dirs`" --reps 1 $ExtraArgs"
     } elseif ($Mode -eq 'navcold') {
       # warm app, cold folder: the app purges (elevated) after its start, lets
