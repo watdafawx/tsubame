@@ -12,6 +12,7 @@ members = [
     "crates/tsubame-bench",
     "crates/tsubame-update",
     "crates/tsubame-config",
+    "crates/tsubame-handler",
 ]
 default-members = ["."]
 
@@ -28,6 +29,7 @@ tsubame-d2d = { path = "crates/tsubame-d2d" }
 tsubame-ext-api = { path = "crates/tsubame-ext-api" }
 tsubame-update = { path = "crates/tsubame-update" }
 tsubame-config = { path = "crates/tsubame-config" }
+tsubame-handler = { path = "crates/tsubame-handler" }
 windows = "0.61"
 # TOML for the config and session files. Default features are exactly what is
 # needed (std, serde, parse, display); no `preserve_order`/`fast_hash`/`debug`.

@@ -1,0 +1,32 @@
+[package]
+name = "tsubame-handler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fail-safe folder handler shim for Tsubame (docs/default-file-manager.md)"
+build = "build.rs"
+
+[lib]
+name = "tsubame_handler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tsubame-handler"
+path = "src/main.rs"
+
+# No serde/toml, no tsubame-* crates: the shim must stay tiny and must start in milliseconds.
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Environment",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[build-dependencies]
+embed-resource = "3.0.12"

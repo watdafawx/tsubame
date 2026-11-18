@@ -10,7 +10,8 @@
 ; What this installer does:   copies files, Start menu shortcut, optional desktop shortcut,
 ;                             the HKCU Add/Remove Programs entry (written by Inno itself).
 ; What it never does:         register a default folder handler, add a shell verb or context
-;                             menu entry, add a startup/Run entry, create a scheduled task or
+;                             menu entry (the uninstaller only REMOVES one: tsubame-handler.exe
+;                             --remove), add a startup/Run entry, create a scheduled task or
 ;                             service, or touch the user's data (%LOCALAPPDATA%\Tsubame).
 ;                             Those are opt-in features of the app itself.
 
@@ -86,6 +87,9 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "{#SourceDir}\tsubame.exe"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+; The fail-safe folder handler (docs\default-file-manager.md): installed always, used only when the
+; user switches "Default file manager" on in Settings. tools\release.ps1 insists on it for a real release.
+Source: "{#SourceDir}\tsubame-handler.exe"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SourceDir}\tsubame-plughost.exe"; DestDir: "{app}"; Components: plughost; Flags: ignoreversion skipifsourcedoesntexist
 ; Docs are optional files in the release folder.
 Source: "{#SourceDir}\LICENSE"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist
@@ -98,6 +102,12 @@ Name: "{autodesktop}\Tsubame"; Filename: "{app}\tsubame.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\tsubame.exe"; Description: "Start Tsubame"; Flags: nowait postinstall skipifsilent unchecked
+
+[UninstallRun]
+; Put File Explorer back BEFORE any file is deleted (docs\default-file-manager.md, "Uninstall"):
+; removes Tsubame's folder verb from HKCU if the user switched it on, does nothing otherwise.
+; Never run at install time: the installer itself registers nothing.
+Filename: "{app}\tsubame-handler.exe"; Parameters: "--remove"; Flags: runhidden skipifdoesntexist; RunOnceId: "RestoreExplorer"
 
 [InstallDelete]
 ; Leftovers of the in-app updater from before an upgrade-by-installer.
@@ -114,4 +124,7 @@ Type: files; Name: "{app}\tsubame.exe.bad"
 Type: files; Name: "{app}\tsubame-plughost.exe.old"
 Type: files; Name: "{app}\tsubame-plughost.exe.new"
 Type: files; Name: "{app}\tsubame-plughost.exe.bad"
+Type: files; Name: "{app}\tsubame-handler.exe.old"
+Type: files; Name: "{app}\tsubame-handler.exe.new"
+Type: files; Name: "{app}\tsubame-handler.exe.bad"
 ; The folder itself goes only if empty (Inno's default); nothing recursive.

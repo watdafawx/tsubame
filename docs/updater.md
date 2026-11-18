@@ -37,7 +37,7 @@ Release side (building, signing, publishing): `docs\release.md`. Research behind
    (`RELEASE_PUBLIC_KEYS_HEX`). **An empty list means every update is refused** (fail closed).
 2. **Hashes.** The signed manifest holds the zip's size and SHA-256 and the SHA-256 of each exe inside.
    The zip is streamed to `update\staging\<ver>\` hashing as it arrives, with a hard size cap; only a zip
-   that matches is opened. Only names in `UPDATABLE_FILES` (`tsubame.exe`, `tsubame-plughost.exe`) are
+   that matches is opened. Only names in `UPDATABLE_FILES` (`tsubame.exe`, `tsubame-plughost.exe`, `tsubame-handler.exe`) are
    ever extracted, by exact name (no path from the archive is used, so no zip-slip), each checked
    against its own hash, and re-checked right before the swap.
 3. **Authenticode (optional, additive).** When `PINNED_SIGNERS` is non-empty each extracted exe must pass
@@ -78,7 +78,7 @@ A production build also rejects `http://`, including loopback, in `http::get`.
 
 ```
 <install dir>\                       %LOCALAPPDATA%\Programs\Tsubame   (installer) or wherever the zip was unpacked
-    tsubame.exe  tsubame-plughost.exe (optional)
+    tsubame.exe  tsubame-handler.exe  tsubame-plughost.exe (optional)
     tsubame.exe.new    only while swapping; removed at next start
     tsubame.exe.old    the previous version, kept for one-click rollback
     tsubame.exe.bad    the version that was rolled back from; removed at next start
@@ -214,8 +214,10 @@ limit) and the verified cache, a normal day costs 0–1 requests. A 403/429 stop
 - No FileVersion cross-check of the extracted exe and no revocation check (documented above).
 - A small custom semver and zip reader instead of the `semver`/`zip` crates, to keep the dependency list to
   `ed25519-compact`, `miniz_oxide`, `serde`, `serde_json`, `windows`.
-- The installer does not call anything like `RestoreExplorerDefaults()`: the default-folder-handler feature is not built yet. When it is,
-  its uninstall hook belongs in `installer\tsubame.iss` `[Code]` (see the research doc, section 1.2).
+- The installer's uninstall step for the default-folder-handler feature is an `[UninstallRun]` entry that
+  runs `tsubame-handler.exe --remove` before any file is deleted (`docs\default-file-manager.md`). The
+  in-app updater never touches the registration; it swaps the shim file like the other exes (an update
+  swap in progress, `tsubame.exe.new` present, never makes the shim remove the registration).
 
 ## Known limits
 

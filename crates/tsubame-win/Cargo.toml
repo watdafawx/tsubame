@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tsubame-core.workspace = true
+tsubame-handler.workspace = true
 
 [dependencies.windows]
 workspace = true

@@ -33,7 +33,7 @@ pub const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 /// The only files the updater will ever write into the install dir. A signed manifest
 /// that names anything else is refused, so a manifest bug cannot make the updater
 /// drop arbitrary names next to the exe.
-pub const UPDATABLE_FILES: &[&str] = &["tsubame.exe", "tsubame-plughost.exe"];
+pub const UPDATABLE_FILES: &[&str] = &["tsubame.exe", "tsubame-plughost.exe", "tsubame-handler.exe"];
 /// Without this file the update is meaningless.
 pub const MAIN_EXE: &str = "tsubame.exe";
 
