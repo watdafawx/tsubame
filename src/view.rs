@@ -13,10 +13,11 @@
 //! kit's `TestCanvas`.
 
 use crate::cols::{Col, Columns};
+use crate::commands::*;
 use crate::data::{self, RowBuf};
 use crate::nav::{self, Crumb};
 use crate::shellui::ShellUi;
-use crate::sidebar::Sidebar;
+use crate::sidebar::{Act, DragCtx, Sidebar};
 use crate::tab::{Load, Tab};
 use crate::tabs::Tabs;
 use crate::shellui::GridPic;
@@ -106,28 +107,6 @@ const ID_FWD: Id = Id::new("nav-forward");
 const ID_UP: Id = Id::new("nav-up");
 const ID_WIN: Id = Id::new("winctl");
 
-/// App commands (shortcut table values).
-pub const CMD_NEW_TAB: u32 = 1;
-pub const CMD_CLOSE_TAB: u32 = 2;
-pub const CMD_NEXT_TAB: u32 = 3;
-pub const CMD_PREV_TAB: u32 = 4;
-pub const CMD_FOCUS_PATH: u32 = 5;
-pub const CMD_FIND: u32 = 6;
-pub const CMD_BACK: u32 = 7;
-pub const CMD_FORWARD: u32 = 8;
-pub const CMD_UP: u32 = 9;
-pub const CMD_THEME: u32 = 10;
-pub const CMD_DENSITY: u32 = 11;
-pub const CMD_ZEBRA: u32 = 12;
-pub const CMD_REFRESH: u32 = 13;
-pub const CMD_VIEW_DETAILS: u32 = 14;
-pub const CMD_VIEW_GRID_SMALL: u32 = 15;
-pub const CMD_VIEW_GRID_LARGE: u32 = 16;
-/// non-global: only when no widget took the key
-pub const CMD_SELECT_ALL: u32 = 20;
-pub const CMD_ESCAPE: u32 = 21;
-pub const CMD_BACKSPACE_UP: u32 = 22;
-
 /// What main.rs must do with the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WinCmd {
@@ -138,30 +117,7 @@ pub enum WinCmd {
 
 /// Binds the keyboard shortcuts (global ones run even in a text field).
 pub fn bind_shortcuts(ui: &mut Ui) {
-    let s = &mut ui.shortcuts;
-    s.bind(Key::Char('T'), Mods::CTRL, CMD_NEW_TAB, true);
-    s.bind(Key::Char('W'), Mods::CTRL, CMD_CLOSE_TAB, true);
-    s.bind(Key::F(4), Mods::CTRL, CMD_CLOSE_TAB, true);
-    s.bind(Key::Tab, Mods::CTRL, CMD_NEXT_TAB, true);
-    s.bind(Key::Tab, Mods::CTRL_SHIFT, CMD_PREV_TAB, true);
-    s.bind(Key::Char('L'), Mods::CTRL, CMD_FOCUS_PATH, true);
-    s.bind(Key::F(4), Mods::NONE, CMD_FOCUS_PATH, true);
-    s.bind(Key::Char('D'), Mods::ALT, CMD_FOCUS_PATH, true);
-    s.bind(Key::Char('F'), Mods::CTRL, CMD_FIND, true);
-    s.bind(Key::Left, Mods::ALT, CMD_BACK, true);
-    s.bind(Key::Right, Mods::ALT, CMD_FORWARD, true);
-    s.bind(Key::Up, Mods::ALT, CMD_UP, true);
-    s.bind(Key::Char('L'), Mods::CTRL_SHIFT, CMD_THEME, true);
-    s.bind(Key::Char('D'), Mods::CTRL_SHIFT, CMD_DENSITY, true);
-    s.bind(Key::Char('Z'), Mods::CTRL_SHIFT, CMD_ZEBRA, true);
-    s.bind(Key::F(5), Mods::NONE, CMD_REFRESH, true);
-    s.bind(Key::Char('R'), Mods::CTRL, CMD_REFRESH, true);
-    s.bind(Key::Char('1'), Mods::CTRL_SHIFT, CMD_VIEW_DETAILS, true);
-    s.bind(Key::Char('2'), Mods::CTRL_SHIFT, CMD_VIEW_GRID_SMALL, true);
-    s.bind(Key::Char('3'), Mods::CTRL_SHIFT, CMD_VIEW_GRID_LARGE, true);
-    s.bind(Key::Char('A'), Mods::CTRL, CMD_SELECT_ALL, false);
-    s.bind(Key::Escape, Mods::NONE, CMD_ESCAPE, false);
-    s.bind(Key::Backspace, Mods::NONE, CMD_BACKSPACE_UP, false);
+    crate::commands::bind_all(ui);
 }
 
 /// Breadcrumbs of the shown path with their text widths (recomputed only
@@ -275,7 +231,7 @@ impl View {
 
     pub fn base_theme(&self) -> Theme {
         let mut t = Theme::with_density(if self.dark { &DARK } else { &LIGHT }, self.density);
-        t.layout_sidebar_width = self.sidebar_width;
+        t.layout_sidebar_width = if self.side.rail { crate::sidebar::RAIL_W } else { self.sidebar_width };
         t
     }
 
@@ -312,6 +268,8 @@ impl View {
     }
 
     fn after_nav(&mut self) {
+        let p = self.tab().path.clone();
+        self.side.push_recent(&p);
         self.filter.set_text("");
         self.editing = false;
         self.path_error = None;
@@ -491,6 +449,45 @@ impl View {
         self.apply_theme(ui);
     }
 
+    /// What the sidebar asked for.
+    fn side_act(&mut self, ui: &mut Ui, act: Option<Act>) {
+        match act {
+            Some(Act::Go(p)) => self.go(&p),
+            Some(Act::NewTab(p)) => self.open_in_new_tab(&p),
+            Some(Act::OtherPane(p)) => self.open_in_other_pane(&p),
+            Some(Act::DropOn(p)) => self.drop_selection_on(&p),
+            Some(Act::Layout) => {
+                if let Some(w) = self.side.want_width.take() {
+                    self.sidebar_width = w;
+                }
+                self.apply_theme(ui);
+            }
+            None => {}
+        }
+        if self.side.dirty {
+            self.side.dirty = false;
+            self.config_dirty = true;
+        }
+    }
+
+    /// Opens `path` in a new tab of the active pane.
+    pub fn open_in_new_tab(&mut self, path: &str) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let mut t = Tab::new(id, path, self.density.row_h());
+        t.start(path, self.wake.clone());
+        self.tabs.add(t);
+        self.switched();
+    }
+
+    /// With two panes: shows `path` in the other one. With one: a new tab.
+    pub fn open_in_other_pane(&mut self, path: &str) {
+        self.open_in_new_tab(path);
+    }
+
+    /// Files were dropped on a folder row of the sidebar.
+    pub fn drop_selection_on(&mut self, _folder: &str) {}
+
     fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
         match cmd {
             CMD_NEW_TAB => self.new_tab(),
@@ -632,14 +629,15 @@ impl View {
         let main = r;
 
         // body first: the later widgets (toolbar, title bar) win hit tests
-        if let Some(p) = self.side.paint(ui, g, sidebar, &self.tabs.items[self.tabs.active].path) {
-            self.go(&p);
-        }
+        let so = self.side.paint(ui, g, sidebar, &self.tabs.items[self.tabs.active].path, &DragCtx::NONE);
+        self.side_act(ui, so.act);
         self.paint_main(ui, g, shell, main, &t);
         self.paint_status(g, status, &t);
         self.paint_toolbar(ui, g, toolbar, &t);
         self.paint_titlebar(ui, g, titlebar, &t);
         self.paint_path_error(g, toolbar, &t);
+        let oa = self.side.paint_overlay(ui, g, false);
+        self.side_act(ui, oa);
 
         let n_global = ui.commands().len();
         let mut out = ui.end_frame();
@@ -1675,9 +1673,10 @@ mod tests {
         let target = r.dir.join("Docs").to_str().unwrap().to_string();
         r.v.side.places = vec![tsubame_win::places::Place { name: "Desktop", path: target.clone() }];
         r.frame();
-        // the Desktop row is the second quick-access entry, below the title bar and toolbar
+        // the only quick-access row: below the title bar and toolbar, the Pinned section
+        // (header, empty hint, gap) and the Quick access header
         let t = r.ui.theme;
-        let y = t.height_titlebar + t.height_toolbar + t.space_2 + t.height_sidebar_header + t.height_sidebar_item * 1.5;
+        let y = t.height_titlebar + t.height_toolbar + 4.0 + 26.0 + 24.0 + 4.0 + 26.0 + 12.0;
         r.click(60.0, y);
         r.settle();
         assert_eq!(r.v.tab().path, target);

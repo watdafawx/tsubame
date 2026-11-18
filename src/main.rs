@@ -46,12 +46,15 @@ mod bench;
 mod cli;
 mod clip;
 mod cols;
+mod commands;
 mod data;
 mod dnd;
 mod leak;
 mod lru;
 mod memdiag;
 mod nav;
+mod overlay;
+mod panes;
 mod rename;
 mod session;
 mod shellui;
@@ -400,7 +403,11 @@ fn main() {
         view.mode = if dev { view::ViewMode::Details } else { view::ViewMode::from_config(cfg.appearance.view_mode) };
         view.sidebar_width = if dev { tsubame_config::DEFAULT_SIDEBAR_WIDTH } else { cfg.panes.sidebar_width.clamp(120.0, 480.0) };
         if !dev && cfg.panes.sidebar_collapsed {
-            view.side.collapsed = [true; 3];
+            view.side.rail = true;
+        }
+        if !dev {
+            view.side.pinned = cfg.sidebar.pinned.clone();
+            view.side.set_closed_names(&cfg.sidebar.closed);
         }
         if restore_session {
             // the started tab is the active one; the rest stay lazy
@@ -1008,6 +1015,7 @@ fn map_key(vk: u16) -> Key {
         VK_SPACE => Key::Space,
         v if (VK_F1.0..=VK_F24.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
         v if (0x30..=0x39).contains(&v.0) || (0x41..=0x5a).contains(&v.0) => Key::Char(v.0 as u8 as char),
+        v if v.0 == 0xDC => Key::Char('\\'), // VK_OEM_5: the backslash key (Ctrl+\ splits the window)
         v => Key::Other(v.0 as u32),
     }
 }

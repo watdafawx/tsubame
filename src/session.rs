@@ -70,7 +70,7 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
 pub fn capture(view: &View, window: tsubame_config::WindowState) -> Session {
     let tabs = view.tabs.items.iter().map(|t| tab_state(t, view.mode.to_config())).collect();
     let pane = SessionPane { active_tab: view.tabs.active, tabs };
-    Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: 0, window, panes: vec![pane], recents: Vec::new() }
+    Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: 0, window, panes: vec![pane], recents: view.side.recents.clone() }
 }
 
 /// Restores `s` into a view that was created with the session's active folder.
@@ -79,6 +79,7 @@ pub fn capture(view: &View, window: tsubame_config::WindowState) -> Session {
 /// other tabs are added as pending (no enumerator) in their saved order and
 /// the active tab ends up at `s.active_tab()`.
 pub fn apply(view: &mut View, s: &Session) {
+    view.side.recents = s.recents.iter().take(crate::sidebar::RECENT_CAP).cloned().collect();
     let tabs = s.tabs();
     if tabs.is_empty() {
         return;
@@ -122,7 +123,9 @@ pub fn sync_config(view: &View, cfg: &mut tsubame_config::Config) {
     cfg.appearance.zebra = view.zebra;
     cfg.appearance.view_mode = view.mode.to_config();
     cfg.panes.sidebar_width = view.sidebar_width;
-    cfg.panes.sidebar_collapsed = view.side.collapsed.iter().all(|c| *c);
+    cfg.panes.sidebar_collapsed = view.side.rail;
+    cfg.sidebar.pinned = view.side.pinned.clone();
+    cfg.sidebar.closed = view.side.closed_names();
 }
 
 pub fn config_density(d: tsubame_ui::Density) -> tsubame_config::Density {
