@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsubame settings, keys, states</title>
+<!--
+  Tsubame settings mock (task U4-MOCK): settings as a full page in a tab, left nav, pages General, Appearance, Context menu,
+  Keys (+ record state), Updates, Default file manager, Advanced, and a control states sheet.
+  Tokens: tokens.json -> tools/gen-tokens.ps1 -> tokens.css. Layout: mock.css + mock-u4.css. Builders: mock.js, mock-u4.js, mock-u4-settings.js.
+  URL params: ?theme=dark|light &only=<section id>
+  ids: general, appearance, context, context-add, keys, keys-record, updates, updates-available, default, advanced, states
+-->
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mock.css">
+<link rel="stylesheet" href="mock-u4.css">
+</head>
+<body>
+<div class="page">
+  <h1>Settings, keys and control states</h1>
+  <p class="lede">Settings is a <b>page in a tab</b> (Ctrl+, or the gear in the command palette), not a modal. Left: nav list with a &ldquo;Find a setting&rdquo; field. Right: one scrolling page, 880 px max, grouped rows (label and one-line description on the left, control on the right). Everything applies the moment it changes, so there is no Save or Apply button; the few things that need a restart say so in a banner. The mock shows each page unscrolled and at full height (the real page scrolls; the thin scrollbar on the right is drawn). Nine entries in the nav: General, Appearance, Context menu, Keys, Updates, Default file manager and Advanced are drawn; <b>Panes and tabs</b> and <b>Search</b> are nav entries only for now.</p>
+  <div class="ctl">
+    <span><span class="lbl">Theme</span><span class="seg"><button data-theme-btn="dark">Dark</button><button data-theme-btn="light">Light</button></span></span>
+  </div>
+
+  <div class="sec" id="general">
+    <h2>General</h2>
+    <p class="cap">Start folder (with a Browse field that appears for &ldquo;A specific folder&rdquo;), restore session, hidden and protected system files, file extensions, and delete behaviour: Recycle Bin vs permanent, plus the confirm toggle.</p>
+    <div class="win-frame" id="w-general"></div>
+  </div>
+
+  <div class="sec" id="appearance">
+    <h2>Appearance</h2>
+    <p class="cap">All 19 themes as swatch cards: the two Tsubame themes plus the 12 dark and 5 light palettes shared by hopper and spotifast (spotifast loads the same Catppuccin, Nord, Ros&eacute; Pine and Ristretto files, so the two apps need no extra entries). Each card is a miniature of the app in that theme: sidebar and header in <code>panel</code>, rows in <code>text</code>, a selected row in the accent, and the accent dot. Hover previews the theme in the whole window, click keeps it (hopper&rsquo;s behaviour). The current card has a 2 px accent outline and a check. Below: accent colour, row density as a segmented control with three live previews, zebra, font size slider and the icon-style choice.</p>
+    <div class="win-frame" id="w-appearance"></div>
+  </div>
+
+  <div class="sec" id="context">
+    <h2>Context menu: editor</h2>
+    <p class="cap">Left: every entry in order. Grip = drag to reorder (the dragged row is lifted in <code>selected</code> with a focus outline; the accent line with a dot shows the drop position). Eye = show or hide (a hidden row is dimmed and drops out of the preview). A name is renamed in place (the row in the &ldquo;Tools&rdquo; submenu is being edited, caret shown). Submenus fold their children under a guide line. The tag says where an entry comes from: Built-in, Windows (shell), Custom, or From Nilesoft. Right: a live preview using the popup drawing from M1.</p>
+    <div class="win-frame" id="w-context"></div>
+  </div>
+
+  <div class="sec" id="context-add">
+    <h2>Context menu: add a command, import from Nilesoft Shell</h2>
+    <p class="cap">&ldquo;Add custom command&rdquo; opens an inline form: name, program, arguments with <code>{path}</code> and <code>{selection}</code> placeholders explained underneath, where it shows (files, folders, background) and which submenu it goes in. &ldquo;Import from Nilesoft Shell&hellip;&rdquo; reads a <code>.nss</code> file and shows a result summary: here 14 imported, 2 skipped, with the reason and line number for each skipped item. The import can be undone in one click; the original file is never modified.</p>
+    <div class="win-frame" id="w-context-add"></div>
+  </div>
+
+  <div class="sec" id="keys">
+    <h2>Keys</h2>
+    <p class="cap">All commands grouped by category (the same table the command palette uses), with search, current shortcut chips (a command has up to two bindings, the second after &ldquo;or&rdquo;), and a profile switch: Tsubame default, Explorer-like, Total Commander-like. A shortcut that differs from the profile gets an accent bar on its row and a reset icon. The hovered row shows its actions: record, clear, reset. &ldquo;Reset all&rdquo; is a danger button and asks to confirm (see states).</p>
+    <div class="win-frame" id="w-keys"></div>
+  </div>
+
+  <div class="sec" id="keys-record">
+    <h2>Keys: recording a shortcut, with a conflict</h2>
+    <p class="cap">Click a row (or its pencil) and the row expands: a field with a <code>focus</code> border shows the keys as you hold them, in outlined key caps. When the combination is already taken, a danger-bordered box says which command has it and what will happen; the user chooses &ldquo;Assign here, unbind there&rdquo;, picks another, or cancels. Esc cancels, Backspace clears this shortcut. The caret in the field follows the 10 s blink rule.</p>
+    <div class="win-frame" id="w-keys-record"></div>
+  </div>
+
+  <div class="sec" id="updates">
+    <h2>Updates</h2>
+    <p class="cap">Current version, last checked, <b>Check now</b>, channel, check on start, automatic install, roll back to the previous version, and the integrity block with the verified-signature line. Content follows <code>docs/updater.md</code> (Settings &rsaquo; Updates wiring list).</p>
+    <div class="win-frame" id="w-updates"></div>
+  </div>
+
+  <div class="sec" id="updates-available">
+    <h2>Updates: a new version is available</h2>
+    <p class="cap">After a check finds 0.5.0: a banner with the release notes link and <b>Download and restart</b>, a progress bar with Cancel while downloading, and a dot on the &ldquo;Updates&rdquo; nav entry.</p>
+    <div class="win-frame" id="w-updates-available"></div>
+  </div>
+
+  <div class="sec" id="default">
+    <h2>Default file manager</h2>
+    <p class="cap">Opt-in, off by default. The status line always says what is true now (read back from the registry): &ldquo;Tsubame handles folder opens: Off&rdquo;. A plain explanation, three independent switches, an honest list of what still opens File Explorer, a Restore button that is always visible, and the fail-safe note. Wording follows <code>docs/research-default-explorer-defender.md</code> sections 5.3 and 5.4.</p>
+    <div class="win-frame" id="w-default"></div>
+  </div>
+
+  <div class="sec" id="advanced">
+    <h2>Advanced</h2>
+    <p class="cap">Cache sizes with hard caps (every cache in Tsubame has one), live memory numbers, logging level, and Reset all. Shown with a &ldquo;Restart needed&rdquo; banner after the GPU setting was changed.</p>
+    <div class="win-frame" id="w-advanced"></div>
+  </div>
+
+  <div class="sec" id="states">
+    <h2>Control states</h2>
+    <p class="cap">Toggle, segmented control, dropdown (closed and open), slider, text field (empty, focused with caret, error, disabled), the caret blink rule, buttons, the Reset-all confirm (two stages) and the restart banner. No toast for &ldquo;Settings saved&rdquo;: settings apply live.</p>
+    <div class="win-frame" id="w-states"></div>
+  </div>
+</div>
+<script src="mock.js"></script>
+<script src="mock-u4.js"></script>
+<script src="mock-u4-settings.js"></script>
+<script>
+  var st = { theme: Tsu.qs('theme', 'dark') };
+  var only = Tsu.qs('only', '');
+  if (only) { document.body.classList.add('only'); document.getElementById(only).classList.add('show'); }
+  var IDS = ['general', 'appearance', 'context', 'context-add', 'keys', 'keys-record', 'updates', 'updates-available', 'default', 'advanced', 'states'];
+  function draw() {
+    Tsu.setTheme(st.theme);
+    IDS.forEach(function (id) {
+      if (only && only !== id) return;
+      document.getElementById('w-' + id).innerHTML = Tsu4S.page(id);
+    });
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-theme-btn]'); if (!b) return;
+    st.theme = b.dataset.themeBtn; draw();
+  });
+  draw();
+</script>
+</body>
+</html>

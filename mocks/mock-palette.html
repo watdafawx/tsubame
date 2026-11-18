@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsubame command palette</title>
+<!--
+  Tsubame command palette mock (task U4-MOCK). Ctrl+Shift+P opens a centred overlay on the main window.
+  Tokens: tokens.json -> tools/gen-tokens.ps1 -> tokens.css. Layout: mock.css + mock-u4.css. Builders: mock.js + mock-u4.js.
+  URL params: ?theme=dark|light &only=<section id>   ids: default, fuzzy, path, filter, tabs, fresh, none
+-->
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mock.css">
+<link rel="stylesheet" href="mock-u4.css">
+</head>
+<body>
+<div class="page">
+  <h1>Command palette</h1>
+  <p class="lede">Ctrl+Shift+P opens a 640 px panel, centred, 56 px from the top of the window. No dimming scrim (the kit has no alpha-free way to dim cheaply and File Pilot does not either): the panel is a filled rounded rect with a 1 px <code>popup_border</code> stroke, like every popup. The text field has focus; the caret blinks only while it is focused and stops after about 10 s. A prefix typed in the field switches the mode, and the mode strip under it shows all four so nobody has to remember them. Selected row = <code>selected</code> fill plus the 2 px accent bar used in the sidebar.</p>
+  <div class="ctl">
+    <span><span class="lbl">Theme</span><span class="seg"><button data-theme-btn="dark">Dark</button><button data-theme-btn="light">Light</button></span></span>
+    <span><span class="lbl">Try it (live, commands mode)</span><input id="live" placeholder="type: rn, tab, hid, th&hellip;" style="background:var(--c-field);border:1px solid var(--c-border);border-radius:5px;color:var(--c-text);padding:5px 8px;font:12px var(--font-ui);width:200px"></span>
+  </div>
+
+  <div class="sec" id="default">
+    <h2>1. Opening state: recent commands first</h2>
+    <p class="cap">Empty field, commands mode. The five most recently run commands come first under &ldquo;Recent&rdquo;, then everything else in a fixed order (category, then name). Each row: icon, name, category, current shortcut chips (or a dashed <code>unbound</code> chip). The shortcut shown is always the user's current binding, so it follows rebinding and profile changes. Custom commands carry a small accent <code>Custom</code> tag. A thin scrollbar appears when the list is longer than the panel (the panel is capped at about 10 rows).</p>
+    <div class="win-frame" id="w-default"></div>
+  </div>
+
+  <div class="sec" id="fuzzy">
+    <h2>2. Fuzzy match with highlighted letters</h2>
+    <p class="cap">Typing <code>rn</code>: every command whose name contains those letters in order matches. The matched letters get the same solid <code>highlight</code> rect as the folder filter. Ranking: word starts and consecutive letters score higher, shorter names win ties, and commands run recently get a bonus, so &ldquo;Rename&rdquo; is first. Matching is on the name only; the category and shortcut are shown but not searched (searching <code>ctrl+t</code> also matches the shortcut chip: see open question 2 in the report).</p>
+    <div class="win-frame" id="w-fuzzy"></div>
+  </div>
+
+  <div class="sec" id="path">
+    <h2>3. Mode <code>/</code>: go to path, with completion</h2>
+    <p class="cap">Typed <code>/C:\Users\Alex\D</code>. Folders that continue the typed path are listed with the typed part dimmed and the rest bold (Tab completes to the highlighted one, Backspace on a path separator goes up one level). Below: recent folders. UNC and drive-less paths work the same. If the typed path does not exist the first row says so instead of failing silently (not drawn here). This replaces nothing in the path bar: Ctrl+L still edits the breadcrumb in place; this is the same completion reachable from the palette.</p>
+    <div class="win-frame" id="w-path"></div>
+  </div>
+
+  <div class="sec" id="filter">
+    <h2>4. Mode <code>#</code>: filter this folder</h2>
+    <p class="cap">Same engine as Ctrl+F: case-insensitive substring, folders first. The list behind the palette is filtered live as you type; this panel previews up to six matches with the matched text highlighted and the status-style count in the first row. Enter keeps the filter in the folder and closes the palette; Esc clears it.</p>
+    <div class="win-frame" id="w-filter"></div>
+  </div>
+
+  <div class="sec" id="tabs">
+    <h2>5. Mode <code>@</code>: jump to an open tab</h2>
+    <p class="cap">All open tabs of all panes. The current tab carries an accent <code>Current</code> tag, others show which pane they sit in, and Alt+1 &hellip; Alt+9 are the direct shortcuts. Typing after <code>@</code> fuzzy-matches the tab title and the path.</p>
+    <div class="win-frame" id="w-tabs"></div>
+  </div>
+
+  <div class="sec" id="fresh">
+    <h2>6. Empty state (first use, no recent commands)</h2>
+    <p class="cap">Nothing typed and no history yet: instead of an empty list, a short prefix cheat sheet. After the first command is run the opening state of section 1 replaces it.</p>
+    <div class="win-frame" id="w-fresh"></div>
+  </div>
+
+  <div class="sec" id="none">
+    <h2>7. No results</h2>
+    <p class="cap">One line saying what was searched, one hint line, and an escape hatch: create a custom command with that name (opens Settings &rsaquo; Context menu with the form prefilled). Backspace edits the search; Esc closes.</p>
+    <div class="win-frame" id="w-none"></div>
+  </div>
+</div>
+<script src="mock.js"></script>
+<script src="mock-u4.js"></script>
+<script>
+  var st = { theme: Tsu.qs('theme', 'dark'), live: Tsu.qs('q', '') };
+  var only = Tsu.qs('only', '');
+  if (only) { document.body.classList.add('only'); document.getElementById(only).classList.add('show'); }
+  var $ = function (id) { return document.getElementById(id); };
+  function draw() {
+    Tsu.setTheme(st.theme);
+    $('w-default').innerHTML = Tsu4.palette({ mode: 'cmd', q: '', hot: 0 }, 1280, 600);
+    $('w-fuzzy').innerHTML = Tsu4.palette({ mode: 'cmd', q: st.live || 'rn', hot: 0 }, 1280, 560);
+    $('w-path').innerHTML = Tsu4.palette({ mode: 'path', q: 'C:\\Users\\Alex\\D', hot: 2 }, 1280, 560);
+    $('w-filter').innerHTML = Tsu4.palette({ mode: 'filter', q: 'inv' }, 1280, 560);
+    $('w-tabs').innerHTML = Tsu4.palette({ mode: 'tabs', q: '', hot: 1 }, 1280, 520);
+    $('w-fresh').innerHTML = Tsu4.palette({ mode: 'fresh' }, 1280, 480);
+    $('w-none').innerHTML = Tsu4.palette({ mode: 'none', q: 'zzq' }, 1280, 440);
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-theme-btn]'); if (!b) return;
+    st.theme = b.dataset.themeBtn; draw();
+  });
+  $('live').addEventListener('input', function () { st.live = this.value; draw(); });
+  draw();
+</script>
+</body>
+</html>
