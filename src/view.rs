@@ -509,7 +509,14 @@ impl View {
             } else if was_grid {
                 t.list.cursor = t.grid.cursor.min(len.saturating_sub(1));
                 let c = t.list.cursor;
-                t.list.ensure_visible(c, len);
+                if t.list.view_h > 0.0 {
+                    t.list.ensure_visible(c, len);
+                } else {
+                    // the list was never drawn (started in a grid): no height
+                    // to fit yet, so put the cursor row at the top
+                    let top = t.list.row_top(c);
+                    t.list.set_scroll(top, len);
+                }
             }
         }
         self.focus_list = true;

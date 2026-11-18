@@ -30,10 +30,11 @@ pub fn rgba(c: u32, a: f32) -> D2D1_COLOR_F {
 }
 
 /// Device-side image cache cap. Every device copy is also what the GPU (or
-/// WARP) holds in memory, so this is a share of the process budget: the app's
-/// CPU-side caches (icons 6 MB + thumbnails 24 MB) hold the pixels, this holds
-/// what the last few screens drew. See docs/icons-thumbnails.md.
-pub const BITMAP_CAP_BYTES: usize = 32 << 20;
+/// WARP) holds in memory, so this is a share of the process budget. Thumbnails
+/// live only here once drawn (the app drops its CPU pixels after the upload),
+/// so keep it above the app's thumbnail cap (12 MB) plus the icons in use.
+/// See docs/icons-thumbnails.md.
+pub const BITMAP_CAP_BYTES: usize = 16 << 20;
 
 struct CachedBitmap {
     bmp: ID2D1Bitmap,

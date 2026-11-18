@@ -15,7 +15,7 @@
 
 use crate::data::RowBuf;
 use crate::lru::Lru;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
@@ -29,10 +29,11 @@ use tsubame_win::shell::{IconSource, MenuResult, Payload, Pool, Reply, Request, 
 /// 36 to 144 KB: the byte cap is what binds.
 pub const ICON_CAP_ITEMS: usize = 2048;
 pub const ICON_CAP_BYTES: usize = 6 << 20;
-/// Thumbnail cache caps (CPU pixels; the device copies are capped separately
-/// in `tsubame_d2d::BITMAP_CAP_BYTES`).
+/// Thumbnail cache caps. An entry is charged w*h*4: the CPU pixels until the
+/// first draw uploads them, then the device copy (the CPU pixels are dropped).
+/// `tsubame_d2d::BITMAP_CAP_BYTES` must stay above this plus the icons.
 pub const THUMB_CAP_ITEMS: usize = 4096;
-pub const THUMB_CAP_BYTES: usize = 24 << 20;
+pub const THUMB_CAP_BYTES: usize = 12 << 20;
 /// Shell STA workers: icons and menus, and the thumbnail lane.
 pub const ICON_WORKERS: usize = 2;
 pub const THUMB_WORKERS: usize = 2;
@@ -71,9 +72,20 @@ impl Image {
 }
 
 pub struct Thumb {
+    /// `img.px` is dropped once the device bitmap exists (the device cache is
+    /// then the only copy); `img.w > 0` tells a real thumbnail from a failure
     img: Image,
+    px: RefCell<Vec<u32>>,
     /// when it was first drawn (starts the fade)
     born: Cell<Option<Instant>>,
+}
+
+impl Thumb {
+    fn new(img: Image) -> Thumb {
+        let mut img = img;
+        let px = RefCell::new(std::mem::take(&mut img.px));
+        Thumb { img, px, born: Cell::new(None) }
+    }
 }
 
 struct Pending {
@@ -401,17 +413,22 @@ impl ShellUi {
     pub fn paint_pic(&mut self, g: &mut dyn Canvas, t: &Theme, row: &RowBuf, root: Option<&str>, boxr: Rect) {
         let mut alpha = 0.0f32;
         let mut thumb_key: Option<Arc<str>> = None;
+        let mut lost: Option<Arc<str>> = None;
         if let Some(r) = root
             && !row.is_dir()
             && is_thumb_ext(row.ext())
         {
             let key = self.thumb_want(row, r, 0.0);
             if let Some(th) = self.thumbs.get(&*key)
-                && !th.img.px.is_empty()
+                && th.img.w > 0
             {
                 // a new device bitmap costs an upload: spread them over frames
                 let have = g.has_image(&key);
-                if have || self.uploads_left > 0 {
+                if !have && th.px.borrow().is_empty() {
+                    // the device cache dropped it and the CPU copy is gone:
+                    // forget the entry so the next frame asks again
+                    lost = Some(key);
+                } else if have || self.uploads_left > 0 {
                     if !have {
                         self.uploads_left -= 1;
                     }
@@ -438,10 +455,18 @@ impl ShellUi {
             let s = (boxr.w / w).min(boxr.h / h);
             let (dw, dh) = (w * s, h * s);
             let r = Rect::new(boxr.x + (boxr.w - dw) / 2.0, boxr.y + (boxr.h - dh) / 2.0, dw, dh);
-            g.image_a(&th.img.key, th.img.w, th.img.h, &th.img.px, r, alpha);
+            g.image_a(&th.img.key, th.img.w, th.img.h, &th.px.borrow(), r, alpha);
+            if g.has_image(&th.img.key) {
+                // uploaded: the device cache is the only copy from now on
+                *th.px.borrow_mut() = Vec::new();
+            }
             if alpha < 1.0 {
                 self.animating = true;
             }
+        }
+        if let Some(key) = lost {
+            self.thumbs.remove(&*key);
+            self.animating = true;
         }
     }
 
@@ -571,7 +596,7 @@ impl ShellUi {
                 }
                 let img = Image::from(key.clone(), bmp);
                 let b = img.bytes();
-                self.thumbs.insert(key, Thumb { img, born: Cell::new(None) }, b);
+                self.thumbs.insert(key, Thumb::new(img), b);
                 true
             }
             Payload::Menu(m) => {
@@ -710,7 +735,7 @@ mod tests {
     #[test]
     fn thumbnail_size_fits_the_cache_for_a_full_screen() {
         let mut s = ShellUi::new(16);
-        // 4K, small cells: 150 cells of 128 px fit 24 MB x 0.85, so the box size stands
+        // 4K, small cells: 150 cells of 128 px fit 12 MB x 0.85, so the box size stands
         s.set_grid(GridPic { box_dip: 64.0, icon_dip: 48.0, dpi: 192.0 }, 150);
         assert_eq!(s.thumb_px(), 128);
         assert!(s.thumb_budget_cells() >= 150, "{}", s.thumb_budget_cells());
@@ -772,7 +797,7 @@ mod tests {
         s.want_cell(&row("a.png", false), Some("C:\\x"), 0.0);
         s.end_frame(&mut p);
         let id = *s.by_id.keys().next().unwrap();
-        s.thumbs.insert(Arc::from("t:old@64"), Thumb { img: Image { key: Arc::from("t:old@64"), w: 1, h: 1, px: vec![0] }, born: Cell::new(None) }, 100);
+        s.thumbs.insert(Arc::from("t:old@64"), Thumb::new(Image { key: Arc::from("t:old@64"), w: 1, h: 1, px: vec![0] }), 100);
         s.sync_generation(1);
         assert_eq!(s.load(), (0, 0));
         assert_eq!(s.thumbs.len(), 0);
@@ -793,7 +818,7 @@ mod tests {
             let k: Arc<str> = Arc::from(format!("t:{i}@64"));
             let img = Image { key: k.clone(), w: 128, h: 128, px: vec![0; 128 * 128] };
             let b = img.bytes();
-            s.thumbs.insert(k, Thumb { img, born: Cell::new(None) }, b);
+            s.thumbs.insert(k, Thumb::new(img), b);
         }
         assert!(s.thumbs.bytes() <= THUMB_CAP_BYTES, "{}", s.thumbs.bytes());
         assert!(s.thumbs.evictions > 0);

@@ -128,6 +128,20 @@ impl<K: Hash + Eq + Clone, V> Lru<K, V> {
         }
     }
 
+    /// Drops an entry (not counted as an eviction).
+    pub fn remove<Q>(&mut self, k: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some(i) = self.map.remove(k) {
+            self.unlink(i);
+            let s = self.slots[i].take().unwrap();
+            self.bytes -= s.bytes;
+            self.free.push(i);
+        }
+    }
+
     fn evict_one(&mut self) {
         let i = self.tail;
         if i == NIL {
@@ -173,6 +187,19 @@ mod tests {
         l.insert(9, (), 11);
         assert!(!l.contains(&9), "bigger than the whole cap");
         assert!(l.bytes() <= 10);
+    }
+
+    #[test]
+    fn remove_frees_bytes_and_slot() {
+        let mut l: Lru<u32, u32> = Lru::new(8, 100);
+        l.insert(1, 1, 30);
+        l.insert(2, 2, 30);
+        l.remove(&1);
+        l.remove(&1);
+        assert_eq!((l.len(), l.bytes(), l.evictions), (1, 30, 0));
+        l.insert(3, 3, 30);
+        assert_eq!(l.slots.len(), 2, "freed slot reused");
+        assert_eq!(l.get(&2), Some(&2));
     }
 
     #[test]
