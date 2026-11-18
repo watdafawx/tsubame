@@ -41,6 +41,9 @@ pub struct PressInfo {
     pub pos: Pt,
     /// a slow second click on the only selected row: renames on release
     pub slow: bool,
+    /// a plain press on a multi-selection: collapses to this row on release
+    /// unless it turned into a drag
+    pub collapse: Option<usize>,
 }
 
 impl View {
@@ -55,6 +58,7 @@ impl View {
         if pressed_now {
             self.ops.message = None;
             self.press = None;
+            let keep = super::KEEP_MULTI.with(|k| k.take());
             if ui.active() == Some(list_id) && self.rename.is_none() && !self.mode.is_grid() {
                 let pos = ui.mouse();
                 let ms = now_ms();
@@ -64,7 +68,7 @@ impl View {
                         let plain = !self.cur_mods.ctrl && !self.cur_mods.shift;
                         let slow = plain && rename::is_slow_click(prev, self.sole_hist[0] == Some(row), ms);
                         self.last_click = Some((row, ms));
-                        Some(PressInfo { pos, slow })
+                        Some(PressInfo { pos, slow, collapse: keep.filter(|k| *k == row) })
                     }
                     None => {
                         self.last_click = None;
@@ -85,10 +89,16 @@ impl View {
         }
         if released {
             if let Some(p) = self.press.take()
-                && p.slow
                 && self.drag.is_none()
             {
-                self.begin_rename(ui);
+                if let Some(row) = p.collapse {
+                    let t = self.tab_mut();
+                    t.sel.single(&t.store, row);
+                    ui.request_repaint();
+                }
+                if p.slow {
+                    self.begin_rename(ui);
+                }
             }
         }
         released

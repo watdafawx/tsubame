@@ -1038,6 +1038,11 @@ impl View {
             self.tab_mut().set_filter(&text);
             again = true;
         }
+        // the pointer went up in this frame: one more frame sees the release
+        // (drop, slow-click rename) even when nothing else asks for it
+        if (self.drag.is_some() || self.press.is_some()) && self.ptr_was_active && ui.active().is_none() {
+            again = true;
+        }
         if again {
             out.repaint = true;
         }
@@ -1199,7 +1204,7 @@ impl View {
         // filter box on the right, path bar takes the rest
         let filter_id = pid(self.live, ID_FILTER);
         let icon_only = compact && self.filter.text.is_empty() && !ui.has_focus(filter_id);
-        let fw = if icon_only { bs } else if compact { 140.0 } else { t.layout_filter_width.min((r.w - x) / 2.0).max(60.0) };
+        let fw = if icon_only { bs } else if compact { 140.0 } else { t.layout_filter_width.min((r.r() - x) / 2.0).max(60.0) };
         let fr = Rect::new(r.r() - t.space_4 - fw, r.y + (r.h - t.height_path_bar) / 2.0, fw, t.height_path_bar);
         // view mode toggle between the path bar and the filter box
         let vb = Rect::new(fr.x - t.space_4 - bs, by, bs, bs);
@@ -1678,8 +1683,18 @@ struct Rows<'a> {
 }
 
 /// Click / key / space selection rules, shared by the list and the grid.
+thread_local! {
+    /// A plain press on a row of a multi-selection leaves the selection alone
+    /// (it may be the start of a drag); the row waits here for the release.
+    pub(crate) static KEEP_MULTI: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 fn select_entry(store: &EntryStore, sel: &mut Selection, i: usize, mods: Mods, by: SelectBy) {
     let Some(id) = store.at(i) else { return };
+    if by == SelectBy::Click && !mods.ctrl && !mods.shift && sel.count() > 1 && sel.contains(id) {
+        KEEP_MULTI.with(|k| k.set(Some(i)));
+        return;
+    }
     match by {
         SelectBy::Click | SelectBy::Key if mods.shift => sel.extend(store, i),
         SelectBy::Click if mods.ctrl => sel.toggle(store, i),
