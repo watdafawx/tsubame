@@ -165,8 +165,12 @@ disabled with the tooltip "shim not built yet".
 
 ## Budgets
 
-See the numbers in the U4 report (`docs/HANDOFF.md` is not touched by this task). Short form: palette
-and settings state are built lazily and freed on close; the leak gate cycles both with every tab cycle.
+Rig, release, `tools/bench-rig.ps1` (`docs/bench-log.md`, "U4" section): idle 0 wake-ups (46 ms CPU / 10 s,
+as before), private bytes 64.5 MB idle / 83.8 MB after the 4K scroll run (budgets 90 / 110), leak gate with
+palette + Settings churn in every tab cycle PASS (worst +4.12%, limit 5%), exe 1714 KB (limit 6 MB).
+Scroll paint p95 read 6.7 ms on a loaded rig; the INT1 baseline binary reads 4.7 to 7.5 ms on the same rig
+at different times, so the figure needs a quiet rig. Palette and Settings are `None` while closed, so
+nothing of U4 runs per frame in a list.
 
 ## Not done / known gaps
 
@@ -179,3 +183,6 @@ and settings state are built lazily and freed on close; the leak gate cycles bot
 - `updates.channel` is read; the updater is pinned to stable.
 - The memory readout on Advanced refreshes on repaint (about once a second while the page is visible),
   not on a timer.
+- The Updates "can’t reach the server" state is covered by unit tests (`status_line`, `phase_from_error`) but
+  has no rig screenshot: the rig does reach GitHub and a 404 (no release yet) reads as "up to date".
+- `docs/shots/u4-impl-*.png` were driven by keyboard only (mouse injection does not register on rig).
