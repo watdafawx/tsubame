@@ -32,7 +32,11 @@ pub fn rgba(c: u32, a: f32) -> D2D1_COLOR_F {
 pub struct Gfx {
     factory: ID2D1Factory,
     dw: IDWriteFactory,
-    rt: Option<ID2D1HwndRenderTarget>,
+    rt: Option<ID2D1RenderTarget>,
+    /// the target as a D2D device context on our own flip-model swap chain, or
+    flip: Option<Flip>,
+    /// as an HWND target (`TSUBAME_FLIP=0`, or the flip chain failed)
+    hwnd_rt: Option<ID2D1HwndRenderTarget>,
     brush: Option<ID2D1SolidColorBrush>,
     formats: HashMap<Font, IDWriteTextFormat>,
     /// shaped text by (string, font, box size): `text` reuses a layout while
@@ -90,8 +94,9 @@ struct Layout {
 /// 190-250 ms on an RTX 3080), and the hide → release → show cycle pays it on
 /// every open. So it is made on a worker: the app paints the open with a
 /// software target (~15 ms), starts the worker once that frame is shown, and
-/// when the warm device exists makes its GPU target (the driver is loaded by
-/// then: ~40 ms instead of ~200) and drops the warm device.
+/// when the warm device exists makes its GPU target on it (the flip-model
+/// path) or next to it (an HWND target: the driver is loaded by then, ~40 ms
+/// instead of ~200, and the warm device is dropped).
 mod warm {
     use std::sync::Mutex;
     use windows::Win32::Foundation::{E_FAIL, HMODULE, HWND};
@@ -106,8 +111,9 @@ mod warm {
         Ready(f32),
         Failed(windows::core::HRESULT),
     }
-    struct Dev(#[allow(dead_code)] ID3D11Device);
-    // SAFETY: D3D11 devices are free-threaded; this one is only held and dropped.
+    struct Dev(ID3D11Device);
+    // SAFETY: D3D11 devices are free-threaded; this one is made on the worker,
+    // then dropped or handed to the UI thread (`take`), which alone uses it.
     unsafe impl Send for Dev {}
     /// (generation, state, the device): `reset` bumps the generation so a
     /// worker that finishes after it drops its device instead of keeping it
@@ -154,6 +160,11 @@ mod warm {
             }
     }
 
+    /// The warm device, if it is made (the slot keeps the Ready state).
+    pub fn take() -> Option<ID3D11Device> {
+        SLOT.lock().ok().and_then(|mut s| s.2.take()).map(|d| d.0)
+    }
+
     /// Forget the warm device, and any being made.
     pub fn reset() {
         if let Ok(mut s) = SLOT.lock() {
@@ -178,6 +189,23 @@ fn want_gpu(env_allows: bool, failed: Option<std::time::Instant>, now: std::time
     env_allows && failed.is_none_or(|t| now.duration_since(t) >= GPU_RETRY)
 }
 
+/// A flip-model swap chain on our own D3D11 device, drawn with a D2D device
+/// context. An HWND render target makes a GDI-compatible blt-model swap chain
+/// instead: the driver keeps a system-memory copy of the window (~32 MB
+/// private at 4K), and its WARP stand-in left one more (~30 MB) behind after
+/// the GPU swap (docs/memory.md).
+struct Flip {
+    d3d: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    swap: windows::Win32::Graphics::Dxgi::IDXGISwapChain1,
+    ctx: ID2D1DeviceContext,
+}
+
+/// `TSUBAME_FLIP=0` uses an HWND render target instead (A/B measurements).
+fn flip_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("TSUBAME_FLIP").is_none_or(|v| v != "0"))
+}
+
 impl Gfx {
     pub fn new(hwnd: HWND) -> Result<Self> {
         unsafe {
@@ -187,6 +215,8 @@ impl Gfx {
                 factory,
                 dw,
                 rt: None,
+                flip: None,
+                hwnd_rt: None,
                 brush: None,
                 formats: HashMap::new(),
                 layouts: HashMap::new(),
@@ -203,6 +233,11 @@ impl Gfx {
         }
     }
 
+    /// Cache sizes for reports: (text layouts, text formats, bitmaps).
+    pub fn cache_counts(&self) -> (usize, usize, usize) {
+        (self.layouts.len(), self.formats.len(), self.bitmaps.len())
+    }
+
     /// Which render path the current target uses, for log lines.
     pub fn path(&self) -> &'static str {
         if self.warming {
@@ -216,7 +251,13 @@ impl Gfx {
         }
     }
 
-    fn create_target(&self, gpu: bool) -> Result<ID2D1HwndRenderTarget> {
+    fn create_target(&mut self, gpu: bool) -> Result<ID2D1RenderTarget> {
+        if flip_enabled() {
+            match self.create_flip(gpu) {
+                Ok(rt) => return Ok(rt),
+                Err(e) => crate::log(&format!("render: flip-model swap chain failed {:?}, using an HWND target", e.code())),
+            }
+        }
         unsafe {
             let mut rc = RECT::default();
             windows::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd, &mut rc)?;
@@ -234,8 +275,71 @@ impl Gfx {
                 pixelSize: D2D_SIZE_U { width: rc.right.max(1) as u32, height: rc.bottom.max(1) as u32 },
                 presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
             };
-            self.factory.CreateHwndRenderTarget(&props, &hprops)
+            let h = self.factory.CreateHwndRenderTarget(&props, &hprops)?;
+            let rt: ID2D1RenderTarget = h.cast()?;
+            self.hwnd_rt = Some(h);
+            Ok(rt)
         }
+    }
+
+    /// A D3D11 device (the warm one when it is made; WARP for software), a
+    /// flip-model swap chain on the window and a D2D device context on it.
+    fn create_flip(&mut self, gpu: bool) -> Result<ID2D1RenderTarget> {
+        use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+        use windows::Win32::Graphics::Direct3D11::*;
+        use windows::Win32::Graphics::Dxgi::*;
+        unsafe {
+            let d3d = match if gpu { warm::take() } else { None } {
+                Some(d) => d,
+                None => {
+                    let mut dev = None;
+                    let kind = if gpu { D3D_DRIVER_TYPE_HARDWARE } else { D3D_DRIVER_TYPE_WARP };
+                    D3D11CreateDevice(None, kind, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut dev), None, None)?;
+                    dev.ok_or_else(|| Error::from(E_FAIL))?
+                }
+            };
+            let dxgi: IDXGIDevice = d3d.cast()?;
+            let f1: ID2D1Factory1 = self.factory.cast()?;
+            let ctx = f1.CreateDevice(&dxgi)?.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            let dxf: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
+            let mut rc = RECT::default();
+            windows::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd, &mut rc)?;
+            let desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: rc.right.max(1) as u32,
+                Height: rc.bottom.max(1) as u32,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 2,
+                Scaling: DXGI_SCALING_NONE,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                ..Default::default()
+            };
+            let swap = dxf.CreateSwapChainForHwnd(&d3d, self.hwnd, &desc, None, None)?;
+            let _ = dxf.MakeWindowAssociation(self.hwnd, DXGI_MWA_NO_ALT_ENTER);
+            self.flip_target(&ctx, &swap)?;
+            let rt: ID2D1RenderTarget = ctx.cast()?;
+            self.flip = Some(Flip { d3d, swap, ctx });
+            Ok(rt)
+        }
+    }
+
+    /// Points the device context at the swap chain's back buffer.
+    fn flip_target(&self, ctx: &ID2D1DeviceContext, swap: &windows::Win32::Graphics::Dxgi::IDXGISwapChain1) -> Result<()> {
+        unsafe {
+            let surf: windows::Win32::Graphics::Dxgi::IDXGISurface = swap.GetBuffer(0)?;
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+                dpiX: self.dpi,
+                dpiY: self.dpi,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                colorContext: std::mem::ManuallyDrop::new(None),
+            };
+            let bmp = ctx.CreateBitmapFromDxgiSurface(&surf, Some(&props))?;
+            ctx.SetTarget(&bmp);
+        }
+        Ok(())
     }
 
     /// GPU by default. Software (WARP) when `TSUBAME_GPURENDER=0`, when the GPU
@@ -251,8 +355,8 @@ impl Gfx {
                 return Ok(());
             }
             self.drop_target();
-            // the factory caches the stand-in's WARP device (~40 MB private
-            // with its buffers): a fresh one lets it go
+            // an HWND target's factory caches its WARP device (~40 MB
+            // private with its buffers): a fresh one lets it go
             self.fresh_factory();
         }
         let t0 = std::time::Instant::now();
@@ -288,7 +392,7 @@ impl Gfx {
         self.on_gpu = gpu;
         if gpu {
             self.gpu_failed = None;
-            // the target has its own device now, which keeps the driver loaded
+            // the target holds a device now, which keeps the driver loaded
             warm::reset();
         }
         unsafe {
@@ -310,7 +414,8 @@ impl Gfx {
                 *last = path;
                 // the software target rasterises with WARP (d3d10warp.dll) and its worker threads
                 let warp = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(w!("d3d10warp.dll")).is_ok() };
-                crate::log(&format!("render: {path} Direct2D target, WARP loaded={warp}, created in {:.1} ms", self.create_ms));
+                let model = if self.flip.is_some() { "flip-model swap chain" } else { "HWND target" };
+                crate::log(&format!("render: {path} Direct2D target ({model}), WARP loaded={warp}, created in {:.1} ms", self.create_ms));
             }
         Ok(())
     }
@@ -337,11 +442,35 @@ impl Gfx {
         self.bitmaps.clear();
         self.brush = None;
         self.rt = None;
+        self.hwnd_rt = None;
+        if let Some(f) = self.flip.take() {
+            // the swap chain must be gone before the next one is made on the
+            // window: release the back buffer and flush deferred destruction
+            unsafe { f.ctx.SetTarget(None) };
+            let Flip { d3d, swap, ctx } = f;
+            drop((ctx, swap));
+            if let Ok(c) = unsafe { d3d.GetImmediateContext() } {
+                unsafe {
+                    c.ClearState();
+                    c.Flush();
+                }
+            }
+        }
         self.on_gpu = false;
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
-        if let Some(rt) = &self.rt {
+        if let Some(f) = &self.flip {
+            use windows::Win32::Graphics::Dxgi::DXGI_SWAP_CHAIN_FLAG;
+            unsafe { f.ctx.SetTarget(None) };
+            let ok = unsafe { f.swap.ResizeBuffers(0, w.max(1), h.max(1), DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)) }.is_ok() && self.flip_target(&f.ctx, &f.swap).is_ok();
+            if !ok {
+                // remade on the next paint
+                self.drop_target();
+            }
+            return;
+        }
+        if let Some(rt) = &self.hwnd_rt {
             unsafe {
                 let _ = rt.Resize(&D2D_SIZE_U { width: w.max(1), height: h.max(1) });
             }
@@ -360,7 +489,7 @@ impl Gfx {
         unsafe { b.SetColor(&c) };
         b
     }
-    fn rt(&self) -> &ID2D1HwndRenderTarget {
+    fn rt(&self) -> &ID2D1RenderTarget {
         self.rt.as_ref().unwrap()
     }
 
@@ -460,7 +589,16 @@ impl Canvas for Gfx {
     fn end(&mut self) {
         let Some(rt) = &self.rt else { return };
         let t0 = std::time::Instant::now();
-        let r = unsafe { rt.EndDraw(None, None) };
+        let mut r = unsafe { rt.EndDraw(None, None) };
+        if let (Ok(()), Some(f)) = (&r, &self.flip) {
+            use windows::Win32::Graphics::Dxgi::*;
+            let hr = unsafe { f.swap.Present(0, DXGI_PRESENT(0)) };
+            if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
+                r = Err(Error::from(D2DERR_RECREATE_TARGET));
+            } else {
+                r = hr.ok();
+            }
+        }
         self.end_ms = t0.elapsed().as_secs_f32() * 1000.0;
         // debug builds: TSUBAME_TEST_DEVICELOST=<n> reports frame n as a lost device
         #[cfg(debug_assertions)]

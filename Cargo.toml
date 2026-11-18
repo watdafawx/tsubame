@@ -34,6 +34,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# counting global allocator for the TSUBAME_MEMDIAG report (src/memdiag.rs)
+memdiag = []
+
 [build-dependencies]
 embed-resource = "3.0.12"
 
