@@ -372,13 +372,26 @@ impl View {
         }
     }
 
-    /// Open the palette for the leak gate and the tests: opens it, paints nothing.
-    #[allow(dead_code)]
+    /// The leak gate's churn: builds and drops the palette and the Settings tab once
+    /// (both are created lazily and must free everything when they close).
+    pub fn churn_u4(&mut self) {
+        let data = self.palette_data();
+        drop(Palette::open(Mode::Commands, data, Box::new(crate::commands::first_key_label)));
+        self.open_settings(None);
+        if let Some(i) = self.tabs.items.iter().position(|t| t.settings) {
+            self.close_tab(i);
+        }
+        if let Some(o) = self.other.as_deref() {
+            debug_assert!(!o.tabs.items.iter().any(|t| t.settings));
+        }
+    }
+
+    #[cfg(test)]
     pub fn palette_open(&self) -> bool {
         self.palette.is_some()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn settings_open(&self) -> bool {
         self.settings.is_some()
     }

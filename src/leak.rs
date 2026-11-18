@@ -123,6 +123,7 @@ fn round(v: &mut View, folders: &[String], navs: usize, tabs: usize) {
         v.new_tab();
         settle(v);
         v.close_tab(v.tabs.active);
+        v.churn_u4();
     }
 }
 
@@ -481,6 +482,8 @@ impl Gate {
             Kind::Tab => {
                 // a new tab opens the current folder, then navigates: the
                 // dropped listing must cancel cleanly (that is a leak path)
+                // the palette and the Settings tab open and close with every tab cycle
+                v.churn_u4();
                 v.new_tab();
                 let p = self.folders[self.nav_index(self.op.wrapping_mul(53).wrapping_add(7))].clone();
                 v.go(&p);

@@ -2667,5 +2667,12 @@ mod tests {
         assert!(!r.v.settings_open());
         assert_eq!(settings_tabs(&mut r.v), 0);
         assert_eq!(r.v.tabs.items.len(), 1);
+        for _ in 0..1000 {
+            r.v.churn_u4();
+        }
+        assert!(!r.v.palette_open());
+        assert!(!r.v.settings_open());
+        assert_eq!(settings_tabs(&mut r.v), 0);
+        assert_eq!(r.v.tabs.items.len(), 1);
     }
 }
