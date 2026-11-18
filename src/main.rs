@@ -57,6 +57,7 @@ mod overlay;
 mod panes;
 mod rename;
 mod session;
+mod statusbar;
 mod shellui;
 mod sidebar;
 mod single;
@@ -443,7 +444,7 @@ fn main() {
         let mut ui = Ui::new(view.base_theme());
         view::bind_shortcuts(&mut ui);
         ui.clipboard = Box::new(clip::WinClipboard(hwnd.0 as isize));
-        ui.set_focus(Some(view::ID_LIST));
+        ui.set_focus(Some(view.list_id()));
         view.dpi = dpi;
         if let Some(m) = arg_value(&args, "--view").and_then(|v| view::ViewMode::parse(&v)) {
             view.set_mode(m);

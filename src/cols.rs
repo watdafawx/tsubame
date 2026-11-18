@@ -74,6 +74,26 @@ impl Columns {
         [(0.0, name_w), (mx, w[0]), (tx, w[1]), (sx, w[2])]
     }
 
+    /// Like `spans`, for a pane too narrow for the Type column (`hide_type`):
+    /// Type gets no width and Name takes it. The spans keep their four slots.
+    pub fn spans_pane(&self, total: f32, hide_type: bool) -> Spans {
+        if !hide_type {
+            return self.spans(total);
+        }
+        let mut w = [self.w[0], self.w[2]];
+        let room = (total - MIN_NAME_W).max(0.0);
+        let fixed = w[0] + w[1];
+        if fixed > room {
+            let k = if fixed > 0.0 { room / fixed } else { 1.0 };
+            for v in &mut w {
+                *v = (*v * k).max(MIN_W);
+            }
+        }
+        let name_w = (total - w[0] - w[1]).max(0.0);
+        let sx = name_w + w[0];
+        [(0.0, name_w), (name_w, w[0]), (sx, 0.0), (sx, w[1])]
+    }
+
     /// Drags the left edge of `col` to `edge_x` (header-relative): that
     /// column's width changes, the others stay. Keeps every column at least
     /// `MIN_W` and the name at least `MIN_NAME_W`. Returns true when changed.
@@ -115,6 +135,20 @@ mod tests {
         assert_eq!(s[3], (910.0, 90.0));
         let last = s[3];
         assert_eq!(last.0 + last.1, 1000.0);
+    }
+
+    #[test]
+    fn hidden_type_column_gives_its_width_to_the_name() {
+        let c = Columns::default();
+        let s = c.spans_pane(600.0, true);
+        assert_eq!(s[2].1, 0.0);
+        assert_eq!(s[0], (0.0, 360.0));
+        assert_eq!(s[1], (360.0, 150.0));
+        assert_eq!(s[3], (510.0, 90.0));
+        assert_eq!(s[3].0 + s[3].1, 600.0);
+        assert_eq!(c.spans_pane(1000.0, false), c.spans(1000.0));
+        let tiny = c.spans_pane(200.0, true);
+        assert!(tiny.iter().all(|&(x, w)| x >= 0.0 && w >= 0.0));
     }
 
     #[test]

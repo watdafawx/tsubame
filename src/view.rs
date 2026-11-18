@@ -16,7 +16,9 @@ use crate::cols::{Col, Columns};
 use crate::commands::*;
 use crate::data::{self, RowBuf};
 use crate::nav::{self, Crumb};
+use crate::panes;
 use crate::shellui::ShellUi;
+use crate::statusbar::{self, StatusInfo};
 use crate::sidebar::{Act, DragCtx, Sidebar};
 use crate::tab::{Load, Tab};
 use crate::tabs::Tabs;
@@ -24,7 +26,7 @@ use crate::shellui::GridPic;
 use tsubame_config::DEFAULT_SIDEBAR_WIDTH;
 use tsubame_core::{EntryId, EntryStore, Selection};
 use tsubame_ui::{
-    BandCells, Button, Canvas, Cursor, DARK, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, LIGHT, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, TabStrip, TextInput, Theme, Ui, column_header, f, grid, list, tab_strip, text_input,
+    BandCells, Button, Canvas, Cursor, DARK, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, LIGHT, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header, f, grid, list, splitter, tab_strip, text_input,
 };
 use tsubame_win::enumerate::Wake;
 
@@ -106,6 +108,55 @@ const ID_BACK: Id = Id::new("nav-back");
 const ID_FWD: Id = Id::new("nav-forward");
 const ID_UP: Id = Id::new("nav-up");
 const ID_WIN: Id = Id::new("winctl");
+const ID_SPLIT: Id = Id::new("pane-split");
+const ID_LAYOUT: Id = Id::new("pane-layout");
+const ID_SEARCH: Id = Id::new("pane-search");
+/// Height of a pane's own tab strip (two panes).
+const PANE_STRIP_H: f32 = 30.0;
+
+/// Widget id of pane `slot` (0 = left / top, 1 = right / bottom): the second
+/// pane gets its own copy of every id.
+pub fn pid(slot: usize, base: Id) -> Id {
+    if slot == 0 { base } else { base.with(0x70_616e_65) }
+}
+
+/// The per-pane state that is swapped in and out of the view: the pane that
+/// is not active keeps it here.
+pub struct PaneState {
+    tabs: Tabs<Tab>,
+    strip: TabStrip,
+    filter: TextInput,
+    path_text: TextInput,
+    editing: bool,
+    edit_frames: u32,
+    path_error: Option<String>,
+    edit_nav: Option<(u64, String, String)>,
+    crumbs: CrumbCache,
+    focus_list: bool,
+    focus_path: bool,
+    list_top: f32,
+    last_range: (usize, usize),
+}
+
+impl PaneState {
+    fn new(tab: Tab) -> PaneState {
+        PaneState {
+            tabs: Tabs::new(tab),
+            strip: TabStrip::default(),
+            filter: TextInput::default(),
+            path_text: TextInput::default(),
+            editing: false,
+            edit_frames: 0,
+            path_error: None,
+            edit_nav: None,
+            crumbs: CrumbCache::default(),
+            focus_list: false,
+            focus_path: false,
+            list_top: 0.0,
+            last_range: (0, 0),
+        }
+    }
+}
 
 /// What main.rs must do with the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +235,20 @@ pub struct View {
     pub win_cmd: Option<WinCmd>,
     /// last tab closed: the window should close
     pub quit: bool,
+    /// the other pane while two are shown (its state is swapped in to draw it)
+    other: Option<Box<PaneState>>,
+    /// slot (0 = left / top, 1 = right / bottom) the live fields belong to
+    pub live: usize,
+    /// slot of the pane that has the focus
+    pub active: usize,
+    /// how the two panes sit: Vertical = side by side, Horizontal = stacked
+    pub orient: tsubame_config::Split,
+    /// share of the area the first pane takes
+    pub ratio: f32,
+    /// a widget was held last frame (a press that starts on another pane makes it active)
+    ptr_was_active: bool,
+    /// where the two panes were drawn last frame (a press there activates the pane)
+    pane_rects: [Rect; 2],
 }
 
 impl View {
@@ -226,6 +291,13 @@ impl View {
             open_paths: Vec::new(),
             win_cmd: None,
             quit: false,
+            other: None,
+            live: 0,
+            active: 0,
+            orient: tsubame_config::Split::Vertical,
+            ratio: 0.5,
+            ptr_was_active: false,
+            pane_rects: [Rect::new(0.0, 0.0, 0.0, 0.0); 2],
         }
     }
 
@@ -248,12 +320,133 @@ impl View {
         ui.request_repaint();
     }
 
+    /// Generation key of the shared icon / thumbnail work: changes when either
+    /// pane shows another folder (both panes share the shell caches).
+    fn shell_key(&self) -> u64 {
+        let a = self.tab().nav_key();
+        match self.other.as_deref() {
+            Some(o) => a ^ o.tabs.items[o.tabs.active].nav_key().rotate_left(23),
+            None => a,
+        }
+    }
+
     pub fn tab(&self) -> &Tab {
         &self.tabs.items[self.tabs.active]
     }
     pub fn tab_mut(&mut self) -> &mut Tab {
         let i = self.tabs.active;
         &mut self.tabs.items[i]
+    }
+
+    // ---- two panes ---------------------------------------------------------
+
+    /// Two panes are shown.
+    pub fn dual(&self) -> bool {
+        self.other.is_some()
+    }
+
+    /// Widget id of the active pane's list (the window focuses it at start).
+    pub fn list_id(&self) -> Id {
+        pid(self.live, ID_LIST)
+    }
+
+    /// Swaps the live per-pane fields with the other pane's: afterwards
+    /// `self.tabs`, `self.filter`, ... belong to the other pane.
+    fn swap_live(&mut self) {
+        let Some(o) = self.other.as_deref_mut() else { return };
+        std::mem::swap(&mut self.tabs, &mut o.tabs);
+        std::mem::swap(&mut self.strip, &mut o.strip);
+        std::mem::swap(&mut self.filter, &mut o.filter);
+        std::mem::swap(&mut self.path_text, &mut o.path_text);
+        std::mem::swap(&mut self.editing, &mut o.editing);
+        std::mem::swap(&mut self.edit_frames, &mut o.edit_frames);
+        std::mem::swap(&mut self.path_error, &mut o.path_error);
+        std::mem::swap(&mut self.edit_nav, &mut o.edit_nav);
+        std::mem::swap(&mut self.crumbs, &mut o.crumbs);
+        std::mem::swap(&mut self.focus_list, &mut o.focus_list);
+        std::mem::swap(&mut self.focus_path, &mut o.focus_path);
+        std::mem::swap(&mut self.list_top, &mut o.list_top);
+        std::mem::swap(&mut self.last_range, &mut o.last_range);
+        self.live = 1 - self.live;
+    }
+
+    /// Runs `f` with the pane in `slot` live (no-op swap when it already is).
+    pub fn with_pane<R>(&mut self, slot: usize, f: impl FnOnce(&mut View) -> R) -> R {
+        let swap = self.other.is_some() && slot != self.live;
+        if swap {
+            self.swap_live();
+        }
+        let r = f(self);
+        if swap {
+            self.swap_live();
+        }
+        r
+    }
+
+    /// Gives the focus to pane `slot` (a click in it, Tab).
+    pub fn set_active_pane(&mut self, slot: usize) {
+        if self.other.is_none() || slot == self.active || slot > 1 {
+            return;
+        }
+        if self.live != slot {
+            self.swap_live();
+        }
+        self.active = slot;
+        self.focus_list = true;
+    }
+
+    /// The tabs of pane `slot`, whichever is live.
+    pub fn pane_tabs(&self, slot: usize) -> Option<&Tabs<Tab>> {
+        if slot == self.live {
+            Some(&self.tabs)
+        } else {
+            self.other.as_deref().map(|o| &o.tabs)
+        }
+    }
+
+    /// One pane or two, and how they sit (the title-bar switch and the
+    /// "pane.split" commands). Two panes start with the same folder in both;
+    /// back to one, the other pane's tabs join the remaining pane.
+    pub fn set_layout(&mut self, dual: bool, orient: tsubame_config::Split) {
+        let changed = self.orient != orient || dual != self.dual();
+        self.orient = orient;
+        if dual && self.other.is_none() {
+            let path = self.tab().path.clone();
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            let mut t = Tab::new(id, &path, self.density.row_h());
+            t.start(&path, self.wake.clone());
+            let mut o = PaneState::new(t);
+            o.focus_list = false;
+            self.other = Some(Box::new(o));
+            // the live pane keeps its slot; the new one takes the other
+            self.active = self.live;
+        } else if !dual && let Some(o) = self.other.take() {
+            let mut o = *o;
+            self.tabs.items.append(&mut o.tabs.items);
+            self.live = 0;
+            self.active = 0;
+            self.focus_list = true;
+        }
+        if changed {
+            self.config_dirty = true;
+        }
+    }
+
+    /// Ctrl+\
+    pub fn toggle_split(&mut self) {
+        let o = self.orient;
+        self.set_layout(!self.dual(), o);
+    }
+
+    /// Ctrl+Shift+\ : side by side <-> stacked (opens the second pane if needed).
+    pub fn flip_split(&mut self) {
+        let o = crate::panes::flip(self.orient);
+        if self.dual() {
+            self.set_layout(true, o);
+        } else {
+            self.set_layout(true, o);
+        }
     }
 
     // ---- navigation ------------------------------------------------------
@@ -383,8 +576,18 @@ impl View {
     /// Moves everything the enumerators delivered into the stores. UI thread,
     /// no disk. True when something visible changed.
     pub fn pump(&mut self) -> bool {
-        let mut changed = false;
         self.pump_more = false;
+        let mut changed = self.pump_pane();
+        if self.other.is_some() {
+            self.swap_live();
+            changed |= self.pump_pane();
+            self.swap_live();
+        }
+        changed
+    }
+
+    fn pump_pane(&mut self) -> bool {
+        let mut changed = false;
         for t in &mut self.tabs.items {
             let p = t.pump();
             changed |= p.changed;
@@ -426,7 +629,7 @@ impl View {
         self.editing = true;
         self.edit_frames = 0;
         self.path_error = None;
-        ui.set_focus(Some(ID_PATH_EDIT));
+        ui.set_focus(Some(pid(self.live, ID_PATH_EDIT)));
         ui.request_repaint();
     }
 
@@ -502,7 +705,7 @@ impl View {
             }
             CMD_FOCUS_PATH => self.begin_edit(ui),
             CMD_FIND => {
-                ui.set_focus(Some(ID_FILTER));
+                ui.set_focus(Some(pid(self.live, ID_FILTER)));
                 self.filter.select_all();
             }
             CMD_BACK => self.back(),
@@ -615,28 +818,42 @@ impl View {
             g.end();
             return Some(out);
         }
+        self.sync_tab_binding(ui);
+        // a press that starts in the other pane makes it the active one
+        let held = ui.active().is_some();
+        if held && !self.ptr_was_active && self.other.is_some() {
+            let m = ui.mouse();
+            if let Some(slot) = self.pane_rects.iter().position(|r| r.contains_pt(m)) {
+                self.set_active_pane(slot);
+            }
+        }
+        self.ptr_was_active = held;
         if std::mem::take(&mut self.focus_path) {
-            ui.set_focus(Some(ID_PATH_EDIT));
+            ui.set_focus(Some(pid(self.live, ID_PATH_EDIT)));
         } else if std::mem::take(&mut self.focus_list) {
-            ui.set_focus(Some(ID_LIST));
+            ui.set_focus(Some(pid(self.live, ID_LIST)));
         }
         let t = ui.theme;
-        let mut r = tsubame_ui::Rect::new(0.0, 0.0, w, h);
-        let titlebar = r.cut_top(t.height_titlebar);
-        let toolbar = r.cut_top(t.height_toolbar);
-        let status = r.cut_bottom(t.height_status_bar);
-        let sidebar = r.cut_left(t.layout_sidebar_width);
-        let main = r;
+        if self.other.is_some() {
+            self.paint_dual(ui, g, shell, (w, h), &t);
+        } else {
+            let mut r = tsubame_ui::Rect::new(0.0, 0.0, w, h);
+            let titlebar = r.cut_top(t.height_titlebar);
+            let toolbar = r.cut_top(t.height_toolbar);
+            let status = r.cut_bottom(t.height_status_bar);
+            let sidebar = r.cut_left(t.layout_sidebar_width);
+            let main = r;
 
-        // body first: the later widgets (toolbar, title bar) win hit tests
-        let so = self.side.paint(ui, g, sidebar, &self.tabs.items[self.tabs.active].path, &DragCtx::NONE);
-        self.side_act(ui, so.act);
-        self.paint_main(ui, g, shell, main, &t);
-        self.paint_status(g, status, &t);
-        self.paint_toolbar(ui, g, toolbar, &t);
-        self.paint_titlebar(ui, g, titlebar, &t);
-        self.paint_path_error(g, toolbar, &t);
-        let oa = self.side.paint_overlay(ui, g, false);
+            // body first: the later widgets (toolbar, title bar) win hit tests
+            let so = self.side.paint(ui, g, sidebar, &self.tabs.items[self.tabs.active].path, &DragCtx::NONE);
+            self.side_act(ui, so.act);
+            self.paint_main(ui, g, shell, main, &t);
+            self.paint_status(g, status, &t, false);
+            self.paint_toolbar(ui, g, toolbar, &t, false, false);
+            self.paint_titlebar(ui, g, titlebar, &t, true);
+            self.paint_path_error(g, toolbar, &t);
+        }
+        let oa = self.side.paint_overlay(ui, g, self.other.is_some());
         self.side_act(ui, oa);
 
         let n_global = ui.commands().len();
@@ -654,8 +871,8 @@ impl View {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
             }
-            if !ui.has_focus(ID_FILTER) {
-                ui.set_focus(Some(ID_FILTER));
+            if !ui.has_focus(pid(self.live, ID_FILTER)) {
+                ui.set_focus(Some(pid(self.live, ID_FILTER)));
                 self.filter.set_text("");
             }
             let mut b = [0u8; 4];
@@ -671,7 +888,81 @@ impl View {
         Some(out)
     }
 
-    fn paint_titlebar(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme) {
+    /// Two panes: the title bar on top, the sidebar down the left, the panes
+    /// (each with its own tab strip, toolbar and status bar) split by a bar.
+    fn paint_dual(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, size: (f32, f32), t: &Theme) {
+        let mut r = Rect::new(0.0, 0.0, size.0, size.1);
+        let titlebar = r.cut_top(t.height_titlebar);
+        let sidebar = r.cut_left(t.layout_sidebar_width);
+        let area = r;
+        let len = panes::len_of(area, self.orient);
+        let mut pos = panes::pos_for(self.ratio, len);
+        let sp = match self.orient {
+            tsubame_config::Split::Vertical => Split::LeftRight,
+            tsubame_config::Split::Horizontal => Split::TopBottom,
+        };
+        let (a, b, moved) = splitter(ui, g, ID_SPLIT, area, sp, &mut pos, panes::MIN_PANE, panes::MIN_PANE);
+        if moved {
+            self.ratio = panes::ratio_for(pos, len);
+            self.config_dirty = true;
+        }
+        self.pane_rects = [a, b];
+        let cur = self.tab().path.clone();
+        let so = self.side.paint(ui, g, sidebar, &cur, &DragCtx::NONE);
+        self.side_act(ui, so.act);
+        for slot in 0..2 {
+            let rect = self.pane_rects[slot];
+            let active = slot == self.active;
+            self.with_pane(slot, |v| v.paint_pane(ui, g, shell, rect, t, active));
+        }
+        self.paint_titlebar(ui, g, titlebar, t, false);
+    }
+
+    /// One pane of two: tab strip, toolbar (accent line when active), list,
+    /// status bar.
+    fn paint_pane(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, rect: Rect, t: &Theme, active: bool) {
+        let mut r = rect;
+        let strip_r = r.cut_top(PANE_STRIP_H);
+        let toolbar = r.cut_top(t.height_toolbar);
+        let status = r.cut_bottom(t.height_status_bar);
+        g.fill(strip_r, t.bg);
+        self.paint_main(ui, g, shell, r, t);
+        self.paint_status(g, status, t, active);
+        self.paint_toolbar(ui, g, toolbar, t, panes::compact_toolbar(rect.w), active);
+        self.paint_tabs(ui, g, strip_r);
+        self.paint_path_error(g, toolbar, t);
+    }
+
+    /// The tab strip of the live pane in `r`.
+    fn paint_tabs(&mut self, ui: &mut Ui, g: &mut dyn Canvas, strip_r: Rect) {
+        let titles: Vec<&str> = self.tabs.items.iter().map(|t| t.title()).collect();
+        let resp = tab_strip(ui, g, pid(self.live, ID_TABS), strip_r, &mut self.strip, &titles, self.tabs.active);
+        if let Some(i) = resp.select {
+            self.switch_tab(i);
+        }
+        if let Some((from, to)) = resp.moved {
+            self.tabs.move_tab(from, to);
+        }
+        if let Some(i) = resp.close {
+            self.close_tab(i);
+        }
+        if resp.add {
+            self.new_tab();
+        }
+    }
+
+    /// Tab binds to "switch pane" (even in a text field: the command decides)
+    /// while two panes or a rename are open; otherwise Tab keeps moving the
+    /// keyboard focus along the widgets.
+    fn sync_tab_binding(&mut self, ui: &mut Ui) {
+        let want = self.other.is_some();
+        let bound = ui.shortcuts.lookup(Key::Tab, Mods::NONE, true).is_some();
+        if want != bound {
+            ui.shortcuts.bind(Key::Tab, Mods::NONE, CMD_SWITCH_PANE, want);
+        }
+    }
+
+    fn paint_titlebar(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme, with_tabs: bool) {
         g.fill(r, t.bg);
         // app mark
         let mark = Rect::new(r.x + 12.0, r.y + (r.h - 18.0) / 2.0, 18.0, 18.0);
@@ -695,25 +986,22 @@ impl View {
                 self.win_cmd = Some(cmds[i]);
             }
         }
-        // tabs
-        let strip_r = Rect::new(r.x + 40.0, r.y, (ctl.x - r.x - 40.0 - 8.0).max(0.0), r.h);
-        let titles: Vec<&str> = self.tabs.items.iter().map(|t| t.title()).collect();
-        let resp = tab_strip(ui, g, ID_TABS, strip_r, &mut self.strip, &titles, self.tabs.active);
-        if let Some(i) = resp.select {
-            self.switch_tab(i);
+        // pane layout switch: one pane / side by side / stacked
+        let sw = Rect::new(ctl.x - 8.0 - 3.0 * LAYOUT_BTN_W, r.y + (r.h - 24.0) / 2.0, 3.0 * LAYOUT_BTN_W, 24.0);
+        if let Some((dual, orient)) = layout_switch(ui, g, t, sw, self.dual(), self.orient) {
+            self.set_layout(dual, orient);
+            ui.request_repaint();
         }
-        if let Some((from, to)) = resp.moved {
-            self.tabs.move_tab(from, to);
-        }
-        if let Some(i) = resp.close {
-            self.close_tab(i);
-        }
-        if resp.add {
-            self.new_tab();
+        // tabs (with two panes every pane has its own strip)
+        if with_tabs {
+            let strip_r = Rect::new(r.x + 40.0, r.y, (sw.x - r.x - 40.0 - 8.0).max(0.0), r.h);
+            self.paint_tabs(ui, g, strip_r);
         }
     }
 
-    fn paint_toolbar(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme) {
+    /// `compact`: a narrow pane swaps the filter box for a search button.
+    /// `underline`: the active pane of two gets an accent line under its toolbar.
+    fn paint_toolbar(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme, compact: bool, underline: bool) {
         g.fill(r, t.panel);
         let by = r.y + (r.h - t.height_button) / 2.0;
         let bs = t.height_button;
@@ -722,21 +1010,23 @@ impl View {
             (tab.history.can_back(), tab.history.can_forward(), nav::parent(&tab.path).is_some())
         };
         let mut x = r.x + t.space_4;
-        if icon_button(ui, g, t, ID_BACK, Rect::new(x, by, bs, bs), "\u{E72B}", can_back) {
+        if icon_button(ui, g, t, pid(self.live, ID_BACK), Rect::new(x, by, bs, bs), "\u{E72B}", can_back) {
             self.back();
         }
         x += bs + 2.0;
-        if icon_button(ui, g, t, ID_FWD, Rect::new(x, by, bs, bs), "\u{E72A}", can_fwd) {
+        if icon_button(ui, g, t, pid(self.live, ID_FWD), Rect::new(x, by, bs, bs), "\u{E72A}", can_fwd) {
             self.forward();
         }
         x += bs + 2.0;
-        if icon_button(ui, g, t, ID_UP, Rect::new(x, by, bs, bs), "\u{E74A}", can_up) {
+        if icon_button(ui, g, t, pid(self.live, ID_UP), Rect::new(x, by, bs, bs), "\u{E74A}", can_up) {
             self.up();
         }
         x += bs + t.space_4;
 
         // filter box on the right, path bar takes the rest
-        let fw = t.layout_filter_width.min((r.w - x) / 2.0).max(60.0);
+        let filter_id = pid(self.live, ID_FILTER);
+        let icon_only = compact && self.filter.text.is_empty() && !ui.has_focus(filter_id);
+        let fw = if icon_only { bs } else if compact { 140.0 } else { t.layout_filter_width.min((r.w - x) / 2.0).max(60.0) };
         let fr = Rect::new(r.r() - t.space_4 - fw, r.y + (r.h - t.height_path_bar) / 2.0, fw, t.height_path_bar);
         // view mode toggle between the path bar and the filter box
         let vb = Rect::new(fr.x - t.space_4 - bs, by, bs, bs);
@@ -745,13 +1035,24 @@ impl View {
             ViewMode::GridSmall => "\u{F0E2}",
             ViewMode::GridLarge => "\u{E8A9}",
         };
-        if icon_button(ui, g, t, ID_VIEW, vb, glyph, true) {
+        if icon_button(ui, g, t, pid(self.live, ID_VIEW), vb, glyph, true) {
             let m = self.mode.next();
             self.set_mode(m);
         }
         let bar = Rect::new(x, fr.y, (vb.x - t.space_4 - x).max(40.0), t.height_path_bar);
         self.paint_path_bar(ui, g, bar, t);
-        self.paint_filter(ui, g, fr, t);
+        if icon_only {
+            let sb = Rect::new(fr.x, by, bs, bs);
+            if icon_button(ui, g, t, pid(self.live, ID_SEARCH), sb, "\u{E721}", true) {
+                ui.set_focus(Some(filter_id));
+                ui.request_repaint();
+            }
+        } else {
+            self.paint_filter(ui, g, fr, t, compact);
+        }
+        if underline {
+            g.fill(Rect::new(r.x, r.b() - 2.0, r.w, 2.0), t.accent);
+        }
 
         // loading line under the toolbar: grows with the entries delivered
         let tab = self.tab();
@@ -762,11 +1063,11 @@ impl View {
         }
     }
 
-    fn paint_filter(&mut self, ui: &mut Ui, g: &mut dyn Canvas, fr: Rect, t: &Theme) {
+    fn paint_filter(&mut self, ui: &mut Ui, g: &mut dyn Canvas, fr: Rect, t: &Theme, compact: bool) {
         self.filter.pad_left = 20.0;
-        let resp = text_input(ui, g, ID_FILTER, fr, &mut self.filter, "Filter");
+        let resp = text_input(ui, g, pid(self.live, ID_FILTER), fr, &mut self.filter, "Filter");
         g.text("\u{E721}", Rect::new(fr.x + 8.0, fr.y, 14.0, fr.h), f(12.0).icon().c(), t.text_dim);
-        if self.filter.text.is_empty() && !resp.focused {
+        if self.filter.text.is_empty() && !resp.focused && !compact {
             let badge = Rect::new(fr.r() - 54.0, fr.y + 4.0, 48.0, fr.h - 8.0);
             g.round_stroke(badge, t.radius_sm, t.border, 1.0);
             g.text("Ctrl+F", badge, t.font_mono().c(), t.text_dim);
@@ -777,7 +1078,7 @@ impl View {
         }
         if resp.cancelled {
             if self.filter.text.is_empty() {
-                ui.set_focus(Some(ID_LIST));
+                ui.set_focus(Some(pid(self.live, ID_LIST)));
             } else {
                 self.filter.set_text("");
                 self.tab_mut().set_filter("");
@@ -785,7 +1086,7 @@ impl View {
             ui.request_repaint();
         }
         if resp.submitted {
-            ui.set_focus(Some(ID_LIST));
+            ui.set_focus(Some(pid(self.live, ID_LIST)));
             ui.request_repaint();
         }
     }
@@ -794,7 +1095,7 @@ impl View {
         if self.editing {
             self.edit_frames += 1;
             self.path_text.pad_left = 22.0;
-            let resp = text_input(ui, g, ID_PATH_EDIT, bar, &mut self.path_text, "Type a path");
+            let resp = text_input(ui, g, pid(self.live, ID_PATH_EDIT), bar, &mut self.path_text, "Type a path");
             g.text("\u{E8B7}", Rect::new(bar.x + 8.0, bar.y, 16.0, bar.h), f(13.0).icon().c(), t.folder);
             if self.path_error.is_some() {
                 g.round_stroke(bar, t.radius_md, t.danger, 1.0);
@@ -808,7 +1109,7 @@ impl View {
             } else if resp.cancelled {
                 self.editing = false;
                 self.path_error = None;
-                ui.set_focus(Some(ID_LIST));
+                ui.set_focus(Some(pid(self.live, ID_LIST)));
                 ui.request_repaint();
             } else if !resp.focused && self.edit_frames > 2 {
                 // clicked elsewhere
@@ -821,7 +1122,7 @@ impl View {
         // breadcrumb mode
         g.round(bar, t.radius_md, t.field);
         g.round_stroke(bar, t.radius_md, t.border, 1.0);
-        let it = ui.interact(ID_PATH, bar, Sense::click().cursor(Cursor::IBeam));
+        let it = ui.interact(pid(self.live, ID_PATH), bar, Sense::click().cursor(Cursor::IBeam));
         if it.clicked == Some(Button::Left) {
             self.begin_edit(ui);
             return;
@@ -853,7 +1154,7 @@ impl View {
         let mut x = first_x;
         if first > 0 && n > 0 {
             let r = Rect::new(x, bar.y + 3.0, ELLIPSIS_W, bar.h - 6.0);
-            let hit = ui.interact(ID_PATH.child("more"), r, Sense::click().cursor(Cursor::Hand));
+            let hit = ui.interact(pid(self.live, ID_PATH).child("more"), r, Sense::click().cursor(Cursor::Hand));
             if hit.hovered {
                 g.round(r, t.radius_sm, t.hover);
             }
@@ -873,7 +1174,7 @@ impl View {
             let last = i + 1 == n;
             let wd = self.crumbs.widths[i] + 2.0 * CRUMB_PAD;
             let r = Rect::new(x, bar.y + 3.0, wd, bar.h - 6.0);
-            let hit = ui.interact(ID_PATH.child("crumb").with(i as u64), r, Sense::click().cursor(Cursor::Hand));
+            let hit = ui.interact(pid(self.live, ID_PATH).child("crumb").with(i as u64), r, Sense::click().cursor(Cursor::Hand));
             if hit.hovered {
                 g.round(r, t.radius_sm, t.hover);
             }
@@ -909,7 +1210,7 @@ impl View {
 
     fn paint_main(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, main: Rect, t: &Theme) {
         // a new folder / another tab: pending shell work and thumbnails go
-        shell.sync_generation(self.tabs.items[self.tabs.active].nav_key());
+        shell.sync_generation(self.shell_key());
         if self.mode.is_grid() {
             self.paint_grid_main(ui, g, shell, main, t);
             return;
@@ -919,23 +1220,28 @@ impl View {
         let list_r = area;
         self.list_top = list_r.y;
         let total = main.w - t.layout_scrollbar_width;
-        let spans = self.cols.spans(total);
+        // a narrow pane of two drops the Type column
+        let hide_type = self.other.is_some() && panes::hide_type_column(main.w);
+        let spans = self.cols.spans_pane(total, hide_type);
 
         // header: sort and resize
-        let hc = Col::ALL.map(|c| tsubame_ui::HeaderCol { label: c.label(), right: c.right_aligned() });
-        let hc: [HeaderCol; 4] = hc;
+        let all = Col::ALL.map(|c| tsubame_ui::HeaderCol { label: c.label(), right: c.right_aligned() });
+        let shown: Vec<usize> = (0..all.len()).filter(|&i| !(hide_type && Col::ALL[i] == Col::Type)).collect();
+        let hc: Vec<HeaderCol> = shown.iter().map(|&i| all[i]).collect();
+        let hspans: Vec<(f32, f32)> = shown.iter().map(|&i| spans[i]).collect();
         let tab = &mut self.tabs.items[self.tabs.active];
-        let sorted = Col::ALL.iter().position(|c| c.sort_column() == tab.sort.column).map(|i| (i, tab.sort.descending));
-        let hr = column_header(ui, g, ID_HEADER, header_r, &hc, &spans, sorted);
+        let sorted = shown.iter().position(|&i| Col::ALL[i].sort_column() == tab.sort.column).map(|i| (i, tab.sort.descending));
+        let hr = column_header(ui, g, pid(self.live, ID_HEADER), header_r, &hc, &hspans, sorted);
         if let Some(i) = hr.sort {
-            tab.sort_by(Col::ALL[i].sort_column());
+            tab.sort_by(Col::ALL[shown[i]].sort_column());
         }
-        if let Some((i, x)) = hr.resize
+        if !hide_type
+            && let Some((i, x)) = hr.resize
             && let Some(&col) = Col::ALL.get(i)
         {
             self.cols.drag_left_edge(col, x, total);
         }
-        let spans = self.cols.spans(total);
+        let spans = self.cols.spans_pane(total, hide_type);
 
         // the list
         g.fill(list_r, t.row);
@@ -945,7 +1251,7 @@ impl View {
             let Tab { store, sel, list: lstate, path, synthetic, .. } = &mut *tab;
             let root = if *synthetic { None } else { Some(path.as_str()) };
             let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root };
-            let lr = list(ui, g, ID_LIST, list_r, lstate, &mut rows);
+            let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
             (lr, lr.activated)
@@ -1003,7 +1309,7 @@ impl View {
             let Tab { store, sel, grid: gstate, band_base, path, synthetic, .. } = &mut *tab;
             let root = if *synthetic { None } else { Some(path.as_str()) };
             let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, labels: &mut self.labels, box_dip, font: label_font };
-            let gr = grid(ui, g, ID_LIST, grid_r, gstate, &mut tiles);
+            let gr = grid(ui, g, pid(self.live, ID_LIST), grid_r, gstate, &mut tiles);
             tiles.prefetch(gstate);
             (gr, gr.activated)
         };
@@ -1041,7 +1347,7 @@ impl View {
             let is_sorted = col.sort_column() == sorted_col;
             let w = g.measure(col.label(), font) + 16.0 + if is_sorted { 14.0 } else { 0.0 };
             let cell = Rect::new(x, r.y + 3.0, w, r.h - 7.0);
-            let it = ui.interact(ID_HEADER.with(i as u64), cell, Sense::click());
+            let it = ui.interact(pid(self.live, ID_HEADER).with(i as u64), cell, Sense::click());
             if it.hovered {
                 g.round(cell, t.radius_sm, t.hover);
             }
@@ -1062,51 +1368,26 @@ impl View {
         }
     }
 
-    fn paint_status(&mut self, g: &mut dyn Canvas, r: Rect, t: &Theme) {
-        g.fill(r, t.panel);
-        g.fill(Rect::new(r.x, r.y, r.w, 1.0), t.border);
+    /// The status bar of the live pane. `hints`: this is the active pane of
+    /// two, so the bar shows the copy / move keys for the other pane.
+    fn paint_status(&mut self, g: &mut dyn Canvas, r: Rect, t: &Theme, hints: bool) {
         let tab = &self.tabs.items[self.tabs.active];
-        let f = t.font_small();
+        let loading = matches!(tab.load, Load::Loading).then_some(tab.delivered);
+        let side = panes::side_name(self.orient, self.live);
+        let info = StatusInfo {
+            loading,
+            failed: matches!(tab.load, Load::Failed(_)),
+            shown: tab.shown(),
+            total: tab.store.len(),
+            selected: tab.sel.count(),
+            selected_bytes: tab.sel.total_size().min(u64::MAX as u128) as u64,
+            free: self.side.volume_of(&tab.path),
+            other_side: hints.then_some(side),
+            batch: false,
+            message: None,
+        };
         let mut s = std::mem::take(&mut self.text);
-        s.clear();
-        {
-            use std::fmt::Write;
-            let shown = tab.shown();
-            match &tab.load {
-                Load::Loading => {
-                    let _ = write!(s, "Reading folder... {} items", count(tab.delivered));
-                }
-                Load::Failed(_) => s.push_str("Can't open this folder"),
-                Load::Done if shown != tab.store.len() => {
-                    let _ = write!(s, "{} of {} items", count(shown), count(tab.store.len()));
-                }
-                Load::Done => {
-                    let _ = write!(s, "{} {}", count(shown), if shown == 1 { "item" } else { "items" });
-                }
-            }
-        }
-        let left = Rect::new(r.x + 12.0, r.y + 1.0, 360.0, r.h - 1.0);
-        g.text(&s, left, f, if matches!(tab.load, Load::Failed(_)) { t.danger } else { t.text_dim });
-        let mut x = r.x + 12.0 + g.measure(&s, f) + 24.0;
-        if tab.sel.count() > 0 {
-            s.clear();
-            let mut sz = String::new();
-            data::fmt_size(tab.sel.total_size().min(u64::MAX as u128) as u64, &mut sz);
-            use std::fmt::Write;
-            let _ = write!(s, "{} selected  {}", count(tab.sel.count()), sz);
-            g.text(&s, Rect::new(x, r.y + 1.0, 300.0, r.h - 1.0), f, t.text);
-            x += 300.0;
-        }
-        let _ = x;
-        if let Some((free, total)) = self.side.volume_of(&tab.path) {
-            s.clear();
-            let (mut a, mut b) = (String::new(), String::new());
-            data::fmt_volume(free, &mut a);
-            data::fmt_volume(total, &mut b);
-            use std::fmt::Write;
-            let _ = write!(s, "{a} free of {b}");
-            g.text(&s, Rect::new(r.r() - 12.0 - 260.0, r.y + 1.0, 260.0, r.h - 1.0), f.r(), t.text_dim);
-        }
+        statusbar::paint(g, t, r, &info, &mut s);
         self.text = s;
     }
 }
@@ -1141,15 +1422,51 @@ pub fn first_visible_crumb(widths: &[f32], avail: f32) -> usize {
     first
 }
 
-/// 12480 -> "12,480"
-fn count(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
+const LAYOUT_BTN_W: f32 = 28.0;
+
+/// The title bar's pane layout switch: one pane, side by side, stacked.
+/// Returns the layout the user clicked.
+fn layout_switch(ui: &mut Ui, g: &mut dyn Canvas, t: &Theme, r: Rect, dual: bool, orient: tsubame_config::Split) -> Option<(bool, tsubame_config::Split)> {
+    use tsubame_config::Split as O;
+    g.round_stroke(r, t.radius_md, t.border, 1.0);
+    let mut out = None;
+    let mut tip = None;
+    let labels = ["Single pane", "Side by side", "Stacked"];
+    for i in 0..3 {
+        let b = Rect::new(r.x + i as f32 * LAYOUT_BTN_W, r.y, LAYOUT_BTN_W, r.h);
+        let on = match i {
+            0 => !dual,
+            1 => dual && orient == O::Vertical,
+            _ => dual && orient == O::Horizontal,
+        };
+        let it = ui.interact(ID_LAYOUT.with(i as u64), b, Sense::click());
+        if on {
+            g.round(b.pad(1.0), t.radius_sm, t.selected_inactive);
+        } else if it.hovered {
+            g.round(b.pad(1.0), t.radius_sm, t.hover);
         }
-        out.push(ch);
+        let col = if on { t.accent } else { t.text_dim };
+        // tiny icon: a frame with 0, 1 vertical or 1 horizontal divider
+        let ic = Rect::new(b.x + (b.w - 14.0) / 2.0, b.y + (b.h - 11.0) / 2.0, 14.0, 11.0);
+        g.round_stroke(ic, 2.0, col, 1.2);
+        match i {
+            1 => g.fill(Rect::new(ic.x + 7.0, ic.y + 1.0, 1.0, ic.h - 2.0), col),
+            2 => g.fill(Rect::new(ic.x + 1.0, ic.y + 5.0, ic.w - 2.0, 1.0), col),
+            _ => {}
+        }
+        if it.hovered && ui.active().is_none() {
+            tip = Some((i, b));
+        }
+        if it.clicked == Some(Button::Left) && !on {
+            out = Some(match i {
+                0 => (false, orient),
+                1 => (true, O::Vertical),
+                _ => (true, O::Horizontal),
+            });
+        }
+    }
+    if let Some((i, b)) = tip {
+        crate::overlay::tooltip(g, t, ui.size(), Pt { x: b.x, y: b.b() + 6.0 }, labels[i], &[]);
     }
     out
 }
@@ -1387,14 +1704,6 @@ mod tests {
         // even a tiny bar keeps the last crumb
         assert_eq!(first_visible_crumb(&w, 10.0), 3);
         assert_eq!(first_visible_crumb(&[], 100.0), 0);
-    }
-
-    #[test]
-    fn counts_get_separators() {
-        assert_eq!(count(0), "0");
-        assert_eq!(count(999), "999");
-        assert_eq!(count(12_480), "12,480");
-        assert_eq!(count(1_000_000), "1,000,000");
     }
 
     // ---- whole-frame tests on the kit's recording canvas -----------------
