@@ -17,6 +17,7 @@
 //!   --hold S          keep the process (and its dialogs) alive S seconds at the end
 //!   --cycles N        leak loop: N menus through the model path, counters at 10/100/N
 //!   --native          with --cycles: the native TrackPopupMenu path instead (auto-closed)
+//!   --skip-model      no model build (so --handlers / --packaged times are cold)
 //! ```
 
 use std::time::{Duration, Instant};
@@ -37,10 +38,11 @@ struct Args {
     hold: u64,
     cycles: usize,
     native: bool,
+    skip_model: bool,
 }
 
 fn args() -> Args {
-    let mut a = Args { paths: vec![], bg: false, ext: false, top: false, repeat: 1, handlers: false, packaged: false, invoke: None, no_ui: false, hold: 0, cycles: 0, native: false };
+    let mut a = Args { paths: vec![], bg: false, ext: false, top: false, repeat: 1, handlers: false, packaged: false, invoke: None, no_ui: false, hold: 0, cycles: 0, native: false, skip_model: false };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -55,6 +57,7 @@ fn args() -> Args {
             "--hold" => a.hold = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--cycles" => a.cycles = it.next().and_then(|v| v.parse().ok()).unwrap_or(200),
             "--native" => a.native = true,
+            "--skip-model" => a.skip_model = true,
             _ => a.paths.push(s),
         }
     }
@@ -215,7 +218,7 @@ fn main() {
         leak_loop(&mut pool, &a);
         return;
     }
-    for i in 0..a.repeat.max(1) {
+    for i in 0..if a.skip_model { 0 } else { a.repeat.max(1) } {
         let Some((first, full, t, _)) = model_run(&mut pool, &a, i == 0) else { break };
         println!(
             "run {i} ({}): submit->top level {} ms, ->full tree {} ms | worker bind {} ms, QueryContextMenu {} ms, walk {} ms",
@@ -487,8 +490,12 @@ mod packaged {
         let repo = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\Repository\\Packages";
         let mut out = Vec::new();
         for full in reg::subkeys(HKEY_CLASSES_ROOT, "PackagedCom\\Package") {
-            let Some(root) = reg::string(HKEY_CURRENT_USER, &format!("{repo}\\{full}"), "PackageRootFolder") else { continue };
-            let Ok(x) = std::fs::read_to_string(format!("{root}\\AppxManifest.xml")) else { continue };
+            // the package folder, or (sparse packages such as VS Code) the
+            // install folder under WindowsApps that holds the manifest
+            let root = reg::string(HKEY_CURRENT_USER, &format!("{repo}\\{full}"), "PackageRootFolder").unwrap_or_default();
+            let pf = std::env::var("ProgramW6432").unwrap_or_else(|_| "C:\\Program Files".into());
+            let found = [format!("{root}\\AppxManifest.xml"), format!("{pf}\\WindowsApps\\{full}\\AppxManifest.xml")].iter().find_map(|p| std::fs::read_to_string(p).ok().filter(|x| x.contains("windows.fileExplorerContextMenus")));
+            let Some(x) = found else { continue };
             let Some(i) = x.find("windows.fileExplorerContextMenus") else { continue };
             let end = x[i..].find("</desktop4:Extension>").or_else(|| x[i..].find("Extension>")).map(|e| i + e).unwrap_or(x.len());
             let block = &x[i..end];
