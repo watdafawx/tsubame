@@ -78,7 +78,7 @@ mod updates;
 mod view;
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tsubame_config::{Density as ConfigDensity, LoadStatus};
@@ -105,6 +105,10 @@ const WM_APP_WAKE: u32 = WM_APP + 2;
 const WM_APP_PLACES: u32 = WM_APP + 3;
 /// A second launch forwarded paths (see `single`).
 const WM_APP_OPEN: u32 = WM_APP + 4;
+/// The updater changed state (check result, download progress): repaint Settings > Updates.
+const WM_APP_UPDATE: u32 = WM_APP + 5;
+/// The main window, for the updater's wake function (0 until it exists).
+static UPDATE_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Hung-worker watchdog: armed only while the pool has icon/thumbnail work.
 const WATCH_TIMER: usize = 2;
 /// Caret blink: exists only while a text field has focus.
@@ -344,6 +348,24 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
 
+        // --- updater ----------------------------------------------------------
+        // before the single-instance claim: a copy the updater just started waits for the
+        // old process, and a crashed update rolls back here. No network and no disk in a
+        // dev run.
+        if let Some(pid) = cli.after_update {
+            updates::wait_for_exit(pid, Duration::from_secs(10));
+        }
+        let upd_env = updates::Env { dev_run: dev, portable: cli.portable || loc.portable, bench: bench_mode };
+        let wake = || {
+            let h = UPDATE_HWND.load(Ordering::Acquire);
+            if h != 0 {
+                let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(0)) };
+            }
+        };
+        if updates::init(upd_env, cfg.updates.auto_install, wake) == updates::StartAction::Exit {
+            return;
+        }
+
         // --- single instance --------------------------------------------------
         // Claimed before the window exists, so a forwarded launch that arrives
         // while this process is still setting up waits in the queue.
@@ -380,6 +402,7 @@ fn main() {
         // no WS_CAPTION: the kit draws the title bar (WM_NCCALCSIZE gives it the whole window)
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         single::set_main(hwnd);
+        UPDATE_HWND.store(hwnd.0 as isize, Ordering::Release);
         // OLE STA + drop target, before anything else uses COM on this thread
         let drop_target = shellops::init(hwnd);
 
@@ -757,6 +780,11 @@ unsafe fn on_paint(hwnd: HWND) {
     })
     .flatten();
     if first.is_some() {
+        // the update (if any) took: end its trial; then the once-a-day background check
+        // (a worker; a no-op in a dev run, a portable copy, or with the setting off)
+        updates::on_ready();
+        let auto = with(|a| a.saver.config.config.updates.auto_check).unwrap_or(false);
+        updates::auto_check(auto);
         if with(|a| a.bench.is_some()).unwrap_or(false) {
             unsafe { SetTimer(Some(hwnd), bench::TIMER_ID, bench::TICK_MS, None) };
         }
@@ -1389,6 +1417,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         a.ui.caret_on = !a.ui.caret_on;
                     }
                 });
+                invalidate(hwnd);
+                LRESULT(0)
+            }
+            WM_APP_UPDATE => {
+                // only Settings > Updates shows update state: repaint when it is visible
                 invalidate(hwnd);
                 LRESULT(0)
             }

@@ -67,6 +67,9 @@ pub struct Cli {
     pub version: bool,
     /// A measurement/diagnostics run (`--bench`, `--leak-gate`, ...).
     pub dev: bool,
+    /// `--after-update <pid>`: the updater started this copy; wait for that process to exit
+    /// before claiming the single-instance lock.
+    pub after_update: Option<u32>,
     /// Flags this parser does not own, with their values, in order. The app's
     /// existing measurement flags are read from here (and from the raw args).
     pub passthrough: Vec<String>,
@@ -82,6 +85,12 @@ impl Cli {
                 "--new-tab" => c.new_tab = true,
                 "--new-window" => c.new_window = true,
                 "--portable" => c.portable = true,
+                "--after-update" => {
+                    if let Some(v) = args.get(i + 1) {
+                        c.after_update = v.parse().ok();
+                        i += 1;
+                    }
+                }
                 "--help" | "-h" | "-?" | "/?" => c.help = true,
                 "--version" | "-V" => c.version = true,
                 "--config" => {

@@ -483,3 +483,16 @@ mod tests {
         assert_eq!(ago(1000, 1000 + 5 * 86_400), "5 days ago");
     }
 }
+
+/// `--after-update <pid>`: wait (at most `max`) until the old process is gone, so the
+/// single-instance lock and the files it held are free.
+pub fn wait_for_exit(pid: u32, max: Duration) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            WaitForSingleObject(h, max.as_millis().min(u32::MAX as u128 - 1) as u32);
+            let _ = CloseHandle(h);
+        }
+    }
+}
