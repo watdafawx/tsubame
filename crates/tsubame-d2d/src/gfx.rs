@@ -69,6 +69,20 @@ pub struct Gfx {
     /// times, ms (for `stall: paint` lines)
     pub end_ms: f32,
     pub create_ms: f32,
+    /// per-frame costs for the bench report: Present alone (part of `end_ms`),
+    /// text layouts made this frame (layout cache misses) and the time spent
+    /// making them
+    pub present_ms: f32,
+    pub layouts_made: u32,
+    pub layout_ms: f32,
+    /// this frame: `text` calls and their time (layout lookup + DrawTextLayout),
+    /// `image` time and the bitmaps it had to create (uploads)
+    pub text_calls: u32,
+    /// `text` calls that had to clip (ink outside the box)
+    pub text_clipped: u32,
+    pub text_ms: f32,
+    pub image_ms: f32,
+    pub bitmaps_made: u32,
     /// the current target is a hardware (GPU) one
     on_gpu: bool,
     /// when the GPU path last failed (creation error or device lost): software
@@ -84,6 +98,12 @@ pub struct Gfx {
 const LAYOUT_CAP: usize = 1024;
 /// Frames a layout survives without being drawn.
 const LAYOUT_AGE: u32 = 4;
+
+/// `TSUBAME_TEXT_CLIP=all` clips every string as before PERF3 (A/B measurements).
+fn clip_all_text() -> bool {
+    static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *C.get_or_init(|| std::env::var_os("TSUBAME_TEXT_CLIP").is_some_and(|v| v == "all"))
+}
 
 fn layout_age() -> u32 {
     static C: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -103,7 +123,21 @@ struct Layout {
     w4: u32,
     h4: u32,
     l: IDWriteTextLayout,
+    /// the ink leaves the box: draw with a clip (see `overhangs`)
+    clip: bool,
     used: u32,
+}
+
+/// How far (DIPs) a glyph's ink may reach past its text box before `text`
+/// clips it. A clip per draw (`D2D1_DRAW_TEXT_OPTIONS_CLIP`) splits Direct2D's
+/// batch at every string: at 4K the details list's ~270 strings cost 2.4 ms of
+/// CPU and a GPU flush per string (PERF3, docs/bench.md). Cells keep 8 DIPs
+/// of padding, so half a DIP of antialiased ink is not visible as a spill.
+const INK_SLACK: f32 = 0.5;
+
+/// True when a layout's ink leaves its box by more than `INK_SLACK` on any side.
+fn overhangs(o: &DWRITE_OVERHANG_METRICS) -> bool {
+    o.left > INK_SLACK || o.top > INK_SLACK || o.right > INK_SLACK || o.bottom > INK_SLACK
 }
 
 /// The first GPU device in a process takes ~200 ms (driver load and init;
@@ -291,6 +325,14 @@ impl Gfx {
                 dpi: 96.0,
                 end_ms: 0.0,
                 create_ms: 0.0,
+                present_ms: 0.0,
+                layouts_made: 0,
+                layout_ms: 0.0,
+                text_calls: 0,
+                text_clipped: 0,
+                text_ms: 0.0,
+                image_ms: 0.0,
+                bitmaps_made: 0,
                 on_gpu: false,
                 gpu_failed: None,
                 warming: false,
@@ -630,6 +672,12 @@ impl Gfx {
 
     /// Shaped layout of `s` (cached like `text`, box `w` x `h`).
     fn layout(&mut self, s: &str, font: Font, w: f32, h: f32) -> Option<IDWriteTextLayout> {
+        self.layout_clip(s, font, w, h).map(|(l, _)| l)
+    }
+
+    /// `layout`, plus whether the text's ink leaves its box (so `text` must
+    /// clip it). Measured once, when the layout is made.
+    fn layout_clip(&mut self, s: &str, font: Font, w: f32, h: f32) -> Option<(IDWriteTextLayout, bool)> {
         use std::hash::{Hash, Hasher};
         // box size in quarter DIPs: the layout's max width / height
         let (w4, h4) = ((w * 4.0).round() as u32, (h * 4.0).round() as u32);
@@ -639,15 +687,21 @@ impl Gfx {
         let frame = self.frame;
         if let Some(l) = self.layouts.get_mut(&key).filter(|l| &*l.s == s && l.font == font && l.w4 == w4 && l.h4 == h4) {
             l.used = frame;
-            return Some(l.l.clone());
+            return Some((l.l.clone(), l.clip));
         }
+        let t0 = std::time::Instant::now();
         let fmt = self.format(font);
         let wide: Vec<u16> = s.encode_utf16().collect();
         let l = unsafe { self.dw.CreateTextLayout(&wide, &fmt, w4 as f32 / 4.0, h4 as f32 / 4.0) }.ok()?;
+        // ink outside the box: a box narrower than the ellipsis, or shorter
+        // than the line; a missing answer clips, as every draw used to
+        let clip = unsafe { l.GetOverhangMetrics() }.map_or(true, |o| overhangs(&o));
+        self.layouts_made += 1;
+        self.layout_ms += t0.elapsed().as_secs_f32() * 1000.0;
         if layout_cap() > 0 {
-            self.layouts.insert(key, Layout { s: s.into(), font, w4, h4, l: l.clone(), used: frame });
+            self.layouts.insert(key, Layout { s: s.into(), font, w4, h4, l: l.clone(), clip, used: frame });
         }
-        Some(l)
+        Some((l, clip))
     }
 }
 
@@ -663,6 +717,13 @@ impl Canvas for Gfx {
     }
 
     fn begin(&mut self, bg: u32) -> bool {
+        self.layouts_made = 0;
+        self.layout_ms = 0.0;
+        self.text_calls = 0;
+        self.text_clipped = 0;
+        self.text_ms = 0.0;
+        self.image_ms = 0.0;
+        self.bitmaps_made = 0;
         if self.ensure_target().is_err() {
             return false;
         }
@@ -687,9 +748,12 @@ impl Canvas for Gfx {
         let Some(rt) = &self.rt else { return };
         let t0 = std::time::Instant::now();
         let mut r = unsafe { rt.EndDraw(None, None) };
+        self.present_ms = 0.0;
         if let (Ok(()), Some(f)) = (&r, &self.flip) {
             use windows::Win32::Graphics::Dxgi::*;
+            let t1 = std::time::Instant::now();
             let hr = unsafe { f.swap.Present(0, DXGI_PRESENT(0)) };
+            self.present_ms = t1.elapsed().as_secs_f32() * 1000.0;
             if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
                 r = Err(Error::from(D2DERR_RECREATE_TARGET));
             } else {
@@ -773,8 +837,15 @@ impl Canvas for Gfx {
         if s.is_empty() || r.w <= 1.0 {
             return;
         }
-        let Some(layout) = self.layout(s, font, r.w, r.h) else { return };
-        unsafe { self.rt().DrawTextLayout(D2D_POINT_2F { X: r.x, Y: r.y }, &layout, self.br(rgb(c)), D2D1_DRAW_TEXT_OPTIONS_CLIP) }
+        let t0 = std::time::Instant::now();
+        let Some((layout, clip)) = self.layout_clip(s, font, r.w, r.h) else { return };
+        // clip only text whose ink leaves the box: a clip per string splits the batch
+        let clip = clip || clip_all_text();
+        let opt = if clip { D2D1_DRAW_TEXT_OPTIONS_CLIP } else { D2D1_DRAW_TEXT_OPTIONS_NONE };
+        unsafe { self.rt().DrawTextLayout(D2D_POINT_2F { X: r.x, Y: r.y }, &layout, self.br(rgb(c)), opt) }
+        self.text_calls += 1;
+        self.text_clipped += clip as u32;
+        self.text_ms += t0.elapsed().as_secs_f32() * 1000.0;
     }
 
     /// Width of `s` in DIPs.
@@ -874,28 +945,9 @@ impl Canvas for Gfx {
     }
 
     fn image_a(&mut self, key: &str, w: u32, h: u32, px: &[u32], r: Rect, a: f32) {
-        if !self.bitmaps.contains_key(key) {
-            if w == 0 || h == 0 || px.len() < (w as usize) * (h as usize) {
-                return;
-            }
-            let bytes = w as usize * h as usize * 4;
-            self.evict_bitmaps(bytes);
-            let props = D2D1_BITMAP_PROPERTIES {
-                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-                dpiX: 96.0,
-                dpiY: 96.0,
-            };
-            let Ok(bmp) = (unsafe { self.rt().CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(px.as_ptr() as *const _), w * 4, &props) }) else { return };
-            self.bitmap_bytes += bytes;
-            self.bitmaps.insert(Arc::from(key), CachedBitmap { bmp, bytes, used: self.frame });
-        }
-        let frame = self.frame;
-        if let Some(b) = self.bitmaps.get_mut(key) {
-            b.used = frame;
-        }
-        if let Some(b) = self.bitmaps.get(key) {
-            unsafe { self.rt().DrawBitmap(&b.bmp, Some(&d2(r)), a.clamp(0.0, 1.0), D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
-        }
+        let t0 = std::time::Instant::now();
+        self.draw_image(key, w, h, px, r, a);
+        self.image_ms += t0.elapsed().as_secs_f32() * 1000.0;
     }
 
     fn has_image(&self, key: &str) -> bool {
@@ -910,10 +962,51 @@ impl Canvas for Gfx {
     }
 }
 
+impl Gfx {
+    fn draw_image(&mut self, key: &str, w: u32, h: u32, px: &[u32], r: Rect, a: f32) {
+        if !self.bitmaps.contains_key(key) {
+            if w == 0 || h == 0 || px.len() < (w as usize) * (h as usize) {
+                return;
+            }
+            let bytes = w as usize * h as usize * 4;
+            self.evict_bitmaps(bytes);
+            let props = D2D1_BITMAP_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+            };
+            let Ok(bmp) = (unsafe { self.rt().CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(px.as_ptr() as *const _), w * 4, &props) }) else { return };
+            self.bitmap_bytes += bytes;
+            self.bitmaps_made += 1;
+            self.bitmaps.insert(Arc::from(key), CachedBitmap { bmp, bytes, used: self.frame });
+        }
+        let frame = self.frame;
+        if let Some(b) = self.bitmaps.get_mut(key) {
+            b.used = frame;
+        }
+        if let Some(b) = self.bitmaps.get(key) {
+            unsafe { self.rt().DrawBitmap(&b.bmp, Some(&d2(r)), a.clamp(0.0, 1.0), D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn only_ink_past_the_slack_needs_a_clip() {
+        let o = |left, top, right, bottom| DWRITE_OVERHANG_METRICS { left, top, right, bottom };
+        // a fitting string: ink inside the box on every side (negative overhangs)
+        assert!(!overhangs(&o(-8.0, -3.0, -40.0, -3.0)));
+        // a glyph's antialiased edge a little past the box: no clip
+        assert!(!overhangs(&o(0.4, -3.0, 0.5, -3.0)));
+        // a box narrower than the ellipsis, or shorter than the line: clip
+        assert!(overhangs(&o(-1.0, -3.0, 6.0, -3.0)));
+        assert!(overhangs(&o(-1.0, 2.0, -9.0, 2.0)));
+        assert!(overhangs(&o(1.0, -3.0, -9.0, -3.0)));
+    }
 
     #[test]
     fn gpu_unless_forced_off_or_recently_failed() {
