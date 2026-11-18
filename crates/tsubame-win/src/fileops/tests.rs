@@ -796,6 +796,7 @@ fn sample_journal() -> Journal {
                 permanent: i % 2 == 0,
             }),
             reason: None,
+            group: 0,
         });
         j.record(Entry {
             forward: Operation::Delete {
@@ -807,6 +808,7 @@ fn sample_journal() -> Journal {
                 recycled: PathBuf::from(r"C:\$Recycle.Bin\S-1-5-21-1\$R1ABC.txt"),
             })),
             reason: None,
+            group: 0,
         });
         j.record(Entry {
             forward: Operation::Sequence(vec![
@@ -821,6 +823,7 @@ fn sample_journal() -> Journal {
             ]),
             inverse: None,
             reason: Some("weird\treason with 100% and\nnewline é".into()),
+            group: 0,
         });
     }
     j.record(Entry {
@@ -830,11 +833,13 @@ fn sample_journal() -> Journal {
             target: PathBuf::from("b"),
         }),
         reason: None,
+        group: 0,
     });
     j.record(Entry {
         forward: Operation::NewFile(PathBuf::from(r"C:\f")),
         inverse: None,
         reason: Some("x".into()),
+        group: 0,
     });
     j
 }
@@ -949,6 +954,7 @@ fn journal_cap_evicts_history_before_undoable_entries() {
             permanent: false,
         }),
         reason: None,
+        group: 0,
     };
     let permanent = Entry {
         forward: Operation::Delete {
@@ -957,6 +963,7 @@ fn journal_cap_evicts_history_before_undoable_entries() {
         },
         inverse: None,
         reason: Some("permanent delete cannot be undone".into()),
+        group: 0,
     };
     j.record(undoable("a"));
     j.record(permanent);
@@ -1074,4 +1081,117 @@ mod benchmarks {
         );
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// The app's Ctrl+Z / Ctrl+Y: one submission (a paste of several items, a batch
+/// rename, a delete of a selection) undoes and redoes as one step, newest first,
+/// whatever kind of operation it was.
+#[test]
+fn group_undo_redo_of_mixed_operations() {
+    let t = Temp::new();
+    if !bin_or_skip(&t.0) {
+        return;
+    }
+    let d = &t.0;
+    for n in ["a.txt", "b.txt", "x.txt", "gone.txt"] {
+        fs::write(d.join(n), n.as_bytes()).unwrap();
+    }
+    fs::create_dir(d.join("dst")).unwrap();
+    let r = Rig::new();
+    // 1: a paste of two items + a new folder in one submission
+    r.q.submit(vec![
+        Operation::Copy { source: d.join("a.txt"), target: d.join("dst").join("a.txt") },
+        Operation::Move { source: d.join("b.txt"), target: d.join("dst").join("b.txt") },
+        Operation::NewFolder(d.join("dst").join("new")),
+    ])
+    .unwrap();
+    finish(&r.rx);
+    // 2: a batch rename
+    r.q.submit(vec![
+        Operation::Rename { source: d.join("x.txt"), target: d.join("x1.txt") },
+        Operation::Rename { source: d.join("dst").join("a.txt"), target: d.join("dst").join("a1.txt") },
+    ])
+    .unwrap();
+    finish(&r.rx);
+    // 3: a delete to the Recycle Bin
+    r.q.submit(vec![Operation::Delete { path: d.join("gone.txt"), permanent: false }]).unwrap();
+    finish(&r.rx);
+    assert!(!d.join("gone.txt").exists() && d.join("x1.txt").exists() && d.join("dst").join("new").is_dir());
+
+    // undo 3: the delete comes back
+    r.q.undo_group().unwrap();
+    finish(&r.rx);
+    assert_eq!(fs::read(d.join("gone.txt")).unwrap(), b"gone.txt");
+    assert!(d.join("x1.txt").exists(), "only the newest group");
+    // undo 2: both renames revert in one step
+    r.q.undo_group().unwrap();
+    finish(&r.rx);
+    assert!(d.join("x.txt").exists() && !d.join("x1.txt").exists());
+    assert!(d.join("dst").join("a.txt").exists() && !d.join("dst").join("a1.txt").exists());
+    // undo 1: copy, move and new folder revert together
+    r.q.undo_group().unwrap();
+    finish(&r.rx);
+    assert!(!d.join("dst").join("a.txt").exists() && !d.join("dst").join("new").exists());
+    assert!(d.join("b.txt").exists() && !d.join("dst").join("b.txt").exists());
+    assert!(d.join("a.txt").exists(), "a copy's source stays");
+    {
+        let j = r.q.journal();
+        let j = j.lock().unwrap();
+        assert!(j.undo_entries().is_empty());
+        assert_eq!(j.redo_entries().len(), 6);
+    }
+    // redo 1 then 2: original order inside each group (the rename of dst\a.txt
+    // needs the copy that group 1 redoes first)
+    r.q.redo_group().unwrap();
+    finish(&r.rx);
+    assert!(d.join("dst").join("a.txt").exists() && d.join("dst").join("b.txt").exists() && d.join("dst").join("new").is_dir());
+    assert!(d.join("x.txt").exists(), "group 2 not redone yet");
+    r.q.redo_group().unwrap();
+    finish(&r.rx);
+    assert!(d.join("x1.txt").exists() && d.join("dst").join("a1.txt").exists());
+    // and the redone groups undo as groups again
+    r.q.undo_group().unwrap();
+    finish(&r.rx);
+    assert!(d.join("x.txt").exists() && d.join("dst").join("a.txt").exists());
+    {
+        let j = r.q.journal();
+        let j = j.lock().unwrap();
+        assert_eq!(j.undo_entries().len(), 3);
+        assert_eq!(j.redo_entries().len(), 3, "group 2 waits for redo, group 3 too");
+    }
+    // nothing to undo or redo is a finished job with no errors
+    let empty = Rig::new();
+    empty.q.undo_group().unwrap();
+    finish(&empty.rx);
+    empty.q.redo_group().unwrap();
+    finish(&empty.rx);
+}
+
+#[test]
+fn group_lookup_skips_history_and_keeps_groups_apart() {
+    let e = |n: &str, g: u64, undoable: bool| Entry {
+        forward: Operation::NewFile(PathBuf::from(n)),
+        inverse: undoable.then(|| Operation::Delete { path: PathBuf::from(n), permanent: false }),
+        reason: (!undoable).then(|| "x".to_string()),
+        group: g,
+    };
+    let mut j = Journal::default();
+    j.record(e("a", 1, true));
+    j.record(e("b", 2, true));
+    j.record(e("c", 2, false));
+    j.record(e("d", 2, true));
+    j.record(e("p", 3, false));
+    // group 3 has nothing undoable: group 2 is next, newest first, without "c"
+    let g: Vec<usize> = j.undo_group().into_iter().map(|(i, _)| i).collect();
+    assert_eq!(g, vec![3, 1]);
+    for (i, _) in j.undo_group() {
+        j.mark_undone(i);
+    }
+    assert_eq!(j.redo_entries().len(), 2);
+    let r: Vec<usize> = j.redo_group().into_iter().map(|(i, _)| i).collect();
+    assert_eq!(r, vec![1, 0], "oldest first: b, then d");
+    // a loaded journal: every entry its own group
+    let (loaded, _) = Journal::load_from_str(&j.save_to_string());
+    assert_eq!(loaded.undo_group().len(), 1);
+    assert_eq!(loaded.redo_group().len(), 1);
 }

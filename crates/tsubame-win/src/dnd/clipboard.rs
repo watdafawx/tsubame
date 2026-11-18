@@ -38,7 +38,8 @@ pub enum ClipReply {
     /// know when our cut was replaced)
     Set(Result<u32, String>),
     Read(Result<ClipRead, String>),
-    Links(Result<usize, String>),
+    /// the file names of the shortcuts made, in order
+    Links(Result<Vec<String>, String>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -243,9 +244,10 @@ fn copy_stream(s: &IStream, f: &mut std::fs::File, limit: u64) -> Option<u64> {
 }
 
 /// Creates `<name> - Shortcut.lnk` in `folder` for each target (a free name).
-pub fn make_links(targets: &[PathBuf], folder: &Path) -> Result<usize, String> {
+/// Returns the names made.
+pub fn make_links(targets: &[PathBuf], folder: &Path) -> Result<Vec<String>, String> {
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
-    let mut made = 0;
+    let mut made = Vec::new();
     for t in targets {
         let name = t.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| t.to_string_lossy().trim_end_matches(['\\', ':']).to_string());
         let mut dest = folder.join(format!("{name} - Shortcut.lnk"));
@@ -262,7 +264,7 @@ pub fn make_links(targets: &[PathBuf], folder: &Path) -> Result<usize, String> {
             let dw = crate::wide(&dest.to_string_lossy());
             pf.Save(PCWSTR(dw.as_ptr()), true).map_err(|e| format!("Save {:?}", e.code()))?;
         }
-        made += 1;
+        made.push(dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
     }
     Ok(made)
 }

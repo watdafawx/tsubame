@@ -56,6 +56,8 @@ enum Command {
     Run(Arc<Vec<Operation>>),
     Undo,
     Redo,
+    UndoGroup,
+    RedoGroup,
 }
 struct Job {
     id: u64,
@@ -238,6 +240,15 @@ impl FileOpQueue {
     pub fn redo(&self) -> io::Result<Ticket> {
         self.send(Command::Redo)
     }
+    /// Undo the newest submission as a whole (every undoable entry of its group,
+    /// newest first). One ticket, one `Finished`.
+    pub fn undo_group(&self) -> io::Result<Ticket> {
+        self.send(Command::UndoGroup)
+    }
+    /// Redo the submission undone last, as a whole, in its original order.
+    pub fn redo_group(&self) -> io::Result<Ticket> {
+        self.send(Command::RedoGroup)
+    }
     /// The journal shared with the worker. Lock briefly; the worker takes it between items.
     pub fn journal(&self) -> Arc<Mutex<Journal>> {
         self.journal.clone()
@@ -256,10 +267,12 @@ impl Drop for FileOpQueue {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Mode {
     Run,
     Undo(usize),
     Redo,
+    RedoAt(usize),
 }
 
 struct Worker {
@@ -406,19 +419,15 @@ impl Worker {
     fn run_job(&mut self, job: Job, _wake: &Wake) {
         let id = job.id;
         self.send(Event::Started(id));
-        let (ops, mode): (Vec<Operation>, Mode) = match &job.command {
-            Command::Run(ops) => (ops.to_vec(), Mode::Run),
-            Command::Undo => match lock(&self.journal).next_undo() {
-                Some((i, inv)) => (vec![inv], Mode::Undo(i)),
-                None => (vec![], Mode::Run),
-            },
-            Command::Redo => match lock(&self.journal).next_redo() {
-                Some(fwd) => (vec![fwd], Mode::Redo),
-                None => (vec![], Mode::Run),
-            },
+        let ops: Vec<(Operation, Mode)> = match &job.command {
+            Command::Run(ops) => ops.iter().map(|o| (o.clone(), Mode::Run)).collect(),
+            Command::Undo => lock(&self.journal).next_undo().map(|(i, inv)| (inv, Mode::Undo(i))).into_iter().collect(),
+            Command::Redo => lock(&self.journal).next_redo().map(|fwd| (fwd, Mode::Redo)).into_iter().collect(),
+            Command::UndoGroup => lock(&self.journal).undo_group().into_iter().map(|(i, inv)| (inv, Mode::Undo(i))).collect(),
+            Command::RedoGroup => lock(&self.journal).redo_group().into_iter().map(|(i, fwd)| (fwd, Mode::RedoAt(i))).collect(),
         };
         let mut apply_all: Option<Choice> = None;
-        for (index, mut op) in ops.into_iter().enumerate() {
+        for (index, (mut op, mode)) in ops.into_iter().enumerate() {
             if job.cancel.is_cancelled() {
                 break;
             }
@@ -518,9 +527,11 @@ impl Worker {
                             forward: executed,
                             inverse,
                             reason,
+                            group: id,
                         }),
                         Mode::Undo(i) => journal.mark_undone(i),
                         Mode::Redo => journal.mark_redone(inverse, reason),
+                        Mode::RedoAt(i) => journal.mark_redone_at(i, inverse, reason),
                     }
                 }
                 Err(e) => self.send(Event::Error {

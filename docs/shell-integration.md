@@ -16,8 +16,8 @@ goes through the file-op queue, so it shows progress and can be undone.
 | `crates/tsubame-win/src/dnd/clipboard.rs` | Clipboard jobs (set files / text, read with virtual-file staging, create shortcuts). Run on shell workers. |
 | `crates/tsubame-win/src/fileops/deletecheck.rs` | Which items the Recycle Bin can take. |
 | `src/ole_glue.rs` | Pure drop rules: which DROPEFFECT, which file operations. Unit tested. |
-| `src/shellops.rs` | App glue: keys, menus, clipboard flow, drag start, drop target, delete flow, file-op queue driving. |
-| `src/view.rs`, `src/main.rs`, `src/shellui.rs` | Hook lines only (`ViewHooks`, message routing). |
+| `src/shellops.rs` | App glue: file keys (`key_act`), menus, clipboard flow, `drag_out`, drop target, delete flow, queue event handling (`on_ops_timer`). The queue itself is `View::ops` (`src/ops.rs`), shared with rename and F5/F6 since INT1. |
+| `src/view.rs`, `src/view_edit.rs`, `src/main.rs` | Per-pane state the glue reads and sets (`drag_out`, `drop_dest`, `drag_keys`, `menu_pane`, `bg_menu`, `rename_request`), message routing. |
 
 ## Threading
 
@@ -47,17 +47,20 @@ The UI thread makes no blocking shell COM call.
   `RegisterDragDrop` on the main window, `DoDragDrop` called outside the app
   borrow (`crate::with`), because it runs a modal loop that dispatches our own
   window messages.
-- **The file-op queue** has its own worker. The UI polls it with a 100 ms
+- **The file-op queue** has its own worker. The UI polls it with a 60 ms
   timer (`OPS_TIMER`) only while a job is in flight; idle means no timer.
 - **Opening a terminal** (`wt.exe -d`, else `cmd.exe`) is started on a thread.
 
 ## Drag out
 
-A press on a selected row without modifiers is held back. Moving past
-`SM_CXDRAG`/`SM_CYDRAG` starts `DoDragDrop` with our data object
-(`CF_HDROP`), allowing COPY | MOVE | LINK. If the button comes up first, the
-held press is sent to the UI kit before the release, so clicks behave as
-before. After the drop the active tab is refreshed.
+Since INT1 the view decides when a drag starts (`View::track_pointer`): a
+press on a row of a multi-selection keeps the selection, and 5 DIPs of travel
+hands the whole selection to main (`drag_out`). After the frame,
+`shellops::drag_out` pushes a MouseUp to the kit, releases mouse capture and
+runs `DoDragDrop` with our data object (`CF_HDROP`), allowing COPY | MOVE |
+LINK. Drags between our own panes, tabs and sidebar are the same OLE drag:
+they arrive through our `IDropTarget`. Folders that changed follow through
+their tab watchers; no refresh.
 
 Explorer does an optimized move on the same volume (it moves the files itself
 and reports DROPEFFECT_MOVE via `Performed DropEffect` + `Paste Succeeded`).
@@ -65,8 +68,11 @@ Tsubame never deletes the source after a drag; it only refreshes.
 
 ## Drag in and the DROPEFFECT rules
 
-Target, in this order: a tab in the tab strip (that tab's folder), a folder row
-under the cursor, else the current folder. The hovered row is highlighted.
+Target, in this order: a pinned-row gap (pins a dropped folder) or a sidebar
+folder, a tab in either pane's tab strip (that tab's folder), a folder row
+under the cursor in either pane, else that pane's folder. The view's paint
+decides it (`View::drop_dest`) while `DragOver` waits on a synchronous paint,
+so the cursor effect and the hint chip agree. The hovered row is highlighted.
 
 `ole_glue::choose(sources, target, keys, allowed)`:
 
@@ -82,14 +88,16 @@ under the cursor, else the current folder. The hovered row is highlighted.
 insensitive.
 
 Always NONE (no drop):
-- every item is already in the target folder (dropping onto its own folder is a no-op);
+- every item is already in the target folder (dropping onto its own folder is
+  a no-op; when only some are, the drop goes on without them);
 - the target is one of the items or inside one (a folder into itself);
 - an item is a drive root;
 - no valid paths.
 
 `ole_glue::ops` turns the drop into queue operations: COPY → `Copy`, MOVE →
 `Move` (items already in the target are skipped), LINK → no queue op; a shell
-worker creates `<name> - Shortcut.lnk` files (`ClipJob::Links`).
+worker creates `<name> - Shortcut.lnk` files (`ClipJob::Links`) and returns
+their names, which the pane then selects.
 
 ## Clipboard
 
@@ -158,8 +166,9 @@ New folder, New text file, Copy path, Open terminal here. The shell leaves
 Paste out of a background menu that has no folder view behind it, so ours
 stands in.
 
-Intercepted verbs: delete, cut, copy, paste, rename. Rename from the menu
-shows a status message for now (inline rename belongs to another task).
+Our item menu also has "Rename\tF2" on top. Intercepted verbs: delete, cut,
+copy, paste, rename. Delete takes the delete flow and the queue; rename (ours
+or the shell's verb) starts the inline rename in the pane the menu belongs to.
 
 ## Measured on rig
 
@@ -206,8 +215,10 @@ By hand on rig (push-to-rig, fixtures in `G:\rig-test\w1-fixtures`, deleted afte
 - same-folder paste → `file1 (2).txt` without asking
 - Delete → Recycle Bin; 263-character path → hazard dialog, Yes deletes permanently
 
-Not tested by hand: drag to a second Tsubame window, drop on a tab, Alt-drop
-shortcuts in the GUI (shortcut creation itself is covered by the headless test).
+Not tested by hand at W1: drag to a second Tsubame window, drop on a tab,
+Alt-drop shortcuts in the GUI. INT1 tested Alt-drag, pinned-gap and
+sidebar drops by hand and drop on a tab in `view.rs` tests
+(`docs/integration.md`).
 
 ## Not done
 
@@ -215,8 +226,7 @@ shortcuts in the GUI (shortcut creation itself is covered by the headless test).
 - A drag image (the cursor shows the effect only).
 - Virtual files from a drop (paste only).
 - Right-button drag with the Move/Copy/Link menu.
-- Rename from the context menu.
-- Inactive tabs showing the dropped folder are not refreshed until visited.
+- Inactive tabs have no watcher: they relist when shown if the folder changed.
 - After an optimized move by the target, the source never deletes anything
   (correct for Explorer; a target that reports MOVE without moving would leave
   the files in place, which is the safe side).

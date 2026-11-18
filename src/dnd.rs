@@ -1,12 +1,13 @@
-//! Drag and drop inside the app: what is dragged, where it may land and what
-//! the drop does. Pure functions, no UI and no disk, so the rules are unit
-//! tested and the OLE task (W1) can call the same functions for drops that come
-//! from or go to other programs: build a [`DragPayload`] from the data object,
-//! call [`resolve`] / [`plan`], feed the result to the file-op queue.
+//! Drag and drop rules, for every drop: from our own rows and from other
+//! programs alike (OLE, `src/shellops.rs` → `src/ole_glue.rs` call these).
+//! Pure functions, no UI and no disk, so the rules are unit tested.
 //!
 //! Rules (the mock, "Plain Windows rules"): the same drive moves, another drive
-//! copies, Ctrl copies, Shift moves, Alt makes a shortcut. Dropping a folder
-//! between two pinned rows pins it there instead (`pin_slot`).
+//! copies, Ctrl copies, Shift moves, Alt or Ctrl+Shift makes a shortcut.
+//! Dropping a folder between two pinned rows pins it there instead
+//! (`pin_slot`). A drop is refused when the target is one of the items or
+//! inside one, when an item has no name (a drive root), or when every item
+//! already sits in the target.
 
 use crate::nav;
 use tsubame_ui::Mods;
@@ -69,10 +70,10 @@ pub fn same_volume(a: &str, b: &str) -> bool {
     }
 }
 
-/// Alt makes a shortcut, Shift moves, Ctrl copies; with no key the same drive
-/// moves and another drive copies.
+/// Alt (or Ctrl+Shift, like Explorer) makes a shortcut, Shift moves, Ctrl
+/// copies; with no key the same drive moves and another drive copies.
 pub fn resolve(source: &str, dest_folder: &str, mods: Mods) -> DropAction {
-    if mods.alt {
+    if mods.alt || (mods.ctrl && mods.shift) {
         DropAction::Link
     } else if mods.shift {
         DropAction::Move
@@ -91,16 +92,19 @@ pub fn refusal(payload: &DragPayload, dest_folder: &str) -> Option<&'static str>
         return Some("Nothing to drop");
     }
     let dest = dest_folder.trim_end_matches('\\').to_ascii_lowercase();
+    if dest.is_empty() {
+        return Some("Nothing to drop on");
+    }
+    let mut all_here = true;
     for p in &payload.paths {
         let src = p.trim_end_matches('\\').to_ascii_lowercase();
+        let Some(parent) = nav::parent(p) else { return Some("Can't move a drive") };
         if src == dest || dest.starts_with(&format!("{src}\\")) {
             return Some("Can't drop a folder into itself");
         }
-        if nav::parent(p).is_some_and(|par| par.trim_end_matches('\\').eq_ignore_ascii_case(&dest)) {
-            return Some("Already in this folder");
-        }
+        all_here &= parent.trim_end_matches('\\').eq_ignore_ascii_case(&dest);
     }
-    None
+    all_here.then_some("Already in this folder")
 }
 
 /// One step of a drop, ready for the file-op queue.
@@ -199,7 +203,7 @@ mod tests {
         assert_eq!(resolve("C:\\a\\f", "C:\\b", alt), DropAction::Link);
         // Alt wins over Ctrl and Shift (Windows: Ctrl+Shift is a shortcut too)
         assert_eq!(resolve("C:\\a\\f", "C:\\b", Mods { ctrl: true, shift: true, alt: true }), DropAction::Link);
-        assert_eq!(resolve("C:\\a\\f", "X:\\b", Mods { ctrl: true, shift: true, alt: false }), DropAction::Move);
+        assert_eq!(resolve("C:\\a\\f", "X:\\b", Mods { ctrl: true, shift: true, alt: false }), DropAction::Link);
     }
 
     #[test]
@@ -221,6 +225,9 @@ mod tests {
         assert!(refusal(&p, "C:\\a\\Docs2").is_none(), "a sibling with the same prefix is fine");
         assert!(refusal(&p, "C:\\b").is_none());
         assert!(refusal(&DragPayload::default(), "C:\\b").is_some());
+        // some items elsewhere: the drop goes on (the ones already there are skipped)
+        assert!(refusal(&payload(&["C:\\a\\x", "C:\\b\\y"]), "C:\\a").is_none());
+        assert!(refusal(&payload(&["C:\\"]), "D:\\b").is_some(), "a drive root");
     }
 
     #[test]

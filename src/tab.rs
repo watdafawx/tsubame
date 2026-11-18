@@ -5,13 +5,58 @@
 //! (its worker sees the flag, closes the directory handle and exits).
 //! Nothing here touches the disk; the enumerator worker does, and the UI
 //! thread only moves finished batches into the store (`pump`).
+//!
+//! A visible tab (the active tab of each pane, `set_visible`) watches its
+//! folder (`tsubame_win::watch`): changes arrive as coalesced batches and go
+//! into the store incrementally (`EntryStore` IDs stay, so selection, cursor
+//! and scroll stay on the same entries). Small batches are applied on the UI
+//! thread, big ones are resolved on a short-lived thread first. Batches that
+//! arrive while the listing runs wait for it. Only an overflow (records
+//! lost) or a folder that came back relists. A hidden tab drops its watcher
+//! and, when shown again, relists if the folder changed meanwhile. An idle
+//! watcher costs no wake-ups.
 
 use crate::nav::{self, History};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use tsubame_core::{EntryInput, EntryStore, FOLDER, FilterMode, HIDDEN, READONLY, REPARSE, SYSTEM, Selection, Sort};
 use tsubame_ui::{GridState, ListState};
+use std::collections::VecDeque;
+use std::sync::mpsc::{Sender, channel};
 use tsubame_win::enumerate::{Batch, CancelToken, Done, Enumerator, Message, Wake};
+use tsubame_win::watch::{self, DirWatcher, Gone, Options as WatchOptions, Unreliable};
+
+/// Watch batches up to this many names are applied on the UI thread (each
+/// name is one stat); bigger ones are resolved on a worker first.
+pub const APPLY_INLINE: usize = 30;
+/// Names to select after a file operation wait this long for the watcher.
+const WANT_FOR: Duration = Duration::from_secs(3);
+
+/// What a visible tab's watcher said that the view has to act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchNote {
+    /// records were lost (or the folder came back): relist keeping the place
+    Relist,
+    /// the folder was deleted or renamed: go up
+    Gone,
+}
+
+/// The directory watcher of a visible tab and what is waiting to be applied.
+#[derive(Default)]
+struct Watching {
+    w: Option<(DirWatcher, Receiver<watch::Message>)>,
+    /// batches waiting: the listing runs, or an earlier batch is resolving
+    queued: VecDeque<watch::Batch>,
+    /// a big batch resolving on a worker
+    resolving: Option<Receiver<(watch::Batch, watch::Resolved)>>,
+    /// notifications here may miss changes (network, removable): ops reload
+    unreliable: bool,
+    /// the folder's last-write time when the watcher stopped (hidden tab)
+    mtime_at_stop: Option<std::time::SystemTime>,
+    /// the tab was hidden with no watcher: relist when shown again
+    stale: bool,
+    note: Option<WatchNote>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Load {
@@ -83,6 +128,12 @@ pub struct Tab {
     enum_gen: u64,
     enumerator: Option<Enumerator>,
     rx: Option<Receiver<Message>>,
+    /// the tab is shown in its pane (it watches its folder)
+    visible: bool,
+    watching: Watching,
+    wake: Option<Wake>,
+    /// names to select once they show up (after a copy / move / rename)
+    want: Option<(Vec<String>, Instant)>,
 }
 
 /// What `pump` found.
@@ -144,6 +195,10 @@ impl Tab {
             enum_gen: 0,
             enumerator: None,
             rx: None,
+            visible: false,
+            watching: Watching::default(),
+            wake: None,
+            want: None,
         }
     }
 
@@ -161,6 +216,7 @@ impl Tab {
     pub fn adopt_store(&mut self, label: &str, store: EntryStore) {
         self.enumerator = None;
         self.rx = None;
+        self.watching = Watching::default();
         self.pending = false;
         self.restore = None;
         self.path = label.to_string();
@@ -183,6 +239,10 @@ impl Tab {
     pub fn start(&mut self, path: &str, wake: Wake) {
         self.enumerator = None; // cancels and detaches
         self.rx = None;
+        // a new listing: the old folder's watcher and its pending batches go
+        self.watching = Watching::default();
+        self.want = None;
+        self.wake = Some(wake.clone());
         self.pending = false;
         // a navigation is not the restored listing any more
         self.restore = None;
@@ -201,6 +261,12 @@ impl Tab {
         let (e, rx) = Enumerator::start_channel(path, self.enum_gen, self.token.clone(), wake);
         self.enumerator = Some(e);
         self.rx = Some(rx);
+        // a local folder is watched from the start, so changes made while it
+        // lists are not lost (they wait in `queued`); a network folder once
+        // it listed (opening it can block)
+        if self.visible && !path.starts_with("\\\\") {
+            self.watch_start();
+        }
     }
 
     /// Moves everything the worker has delivered into the store. UI thread.
@@ -247,7 +313,196 @@ impl Tab {
                 }
             }
         }
+        out.changed |= self.pump_watch();
         out
+    }
+
+    // ---- watching ------------------------------------------------------------
+
+    /// The view says whether this tab is the one shown in its pane. Shown:
+    /// it watches its folder (and relists if it changed while hidden).
+    /// Hidden: the watcher goes (a hidden tab costs no handle, no buffer).
+    pub fn set_visible(&mut self, visible: bool) {
+        if visible == self.visible {
+            return;
+        }
+        self.visible = visible;
+        if self.synthetic || self.pending {
+            return;
+        }
+        if !visible {
+            if self.watching.w.take().is_some() {
+                self.watching.mtime_at_stop = dir_mtime(&self.path);
+                self.watching.stale = true;
+            }
+            self.watching.queued.clear();
+            self.watching.resolving = None;
+            return;
+        }
+        if self.load == Load::Loading {
+            if !self.path.starts_with("\\\\") {
+                self.watch_start();
+            }
+            return;
+        }
+        let was_stale = std::mem::take(&mut self.watching.stale);
+        let before = self.watching.mtime_at_stop.take();
+        self.watch_start();
+        // a folder's last-write time moves when entries come, go or are
+        // renamed; unknown (network) counts as changed
+        if was_stale && (before.is_none() || dir_mtime(&self.path) != before) {
+            self.watching.note = Some(WatchNote::Relist);
+        }
+    }
+
+    fn watch_start(&mut self) {
+        if self.watching.w.is_some() || self.synthetic || self.path.is_empty() {
+            return;
+        }
+        let Some(wake) = self.wake.clone() else { return };
+        if let Ok(w) = DirWatcher::start(&self.path, WatchOptions::default(), wake) {
+            self.watching.w = Some(w);
+        }
+    }
+
+    /// A watcher runs and its notifications can be trusted: changes show up
+    /// by themselves, no relist needed after a file operation.
+    pub fn watched(&self) -> bool {
+        self.watching.w.is_some() && !self.watching.unreliable
+    }
+
+    /// What the watcher asks of the view (relist, go up), once.
+    pub fn take_note(&mut self) -> Option<WatchNote> {
+        self.watching.note.take()
+    }
+
+    /// Selects `names` once they are in the listing (they may arrive with the
+    /// watcher's next batch), for a few seconds at most.
+    pub fn want_select(&mut self, names: Vec<String>) {
+        self.want = Some((names, Instant::now()));
+        self.try_want();
+    }
+
+    fn try_want(&mut self) {
+        let Some((names, t0)) = &self.want else { return };
+        if t0.elapsed() > WANT_FOR || self.is_loading() {
+            if t0.elapsed() > WANT_FOR {
+                self.want = None;
+            }
+            return;
+        }
+        let all = names.iter().all(|n| {
+            let w: Vec<u16> = n.encode_utf16().collect();
+            self.store.find(&w).is_some()
+        });
+        if all {
+            let names = self.want.take().map(|w| w.0).unwrap_or_default();
+            self.apply_selection(&names);
+            if let Some(pos) = self.store.view().iter().position(|id| self.sel.contains(*id)) {
+                self.list.cursor = pos;
+                self.grid.cursor = pos;
+                let len = self.shown();
+                self.list.ensure_visible(pos, len);
+            }
+        }
+    }
+
+    /// Drains the watcher: batches into the store, notes for the view.
+    fn pump_watch(&mut self) -> bool {
+        let mut changed = false;
+        // a big batch resolved on its worker
+        if let Some(rx) = &self.watching.resolving {
+            match rx.try_recv() {
+                Ok((b, r)) => {
+                    self.watching.resolving = None;
+                    changed |= self.keep_place(|t| watch::apply_resolved(&mut t.store, Some(&mut t.sel), &b, &r).map(|s| s.changed()).unwrap_or(false));
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.watching.resolving = None,
+            }
+        }
+        if let Some((_, rx)) = &self.watching.w {
+            let mut end = false;
+            while let Ok(m) = rx.try_recv() {
+                match m {
+                    watch::Message::Batch(b) => self.watching.queued.push_back(b),
+                    watch::Message::Overflow => {
+                        self.watching.queued.clear();
+                        self.watching.note = Some(WatchNote::Relist);
+                    }
+                    watch::Message::Unreliable(Unreliable::NotSupported) => {
+                        self.watching.unreliable = true;
+                        end = true;
+                    }
+                    watch::Message::Unreliable(_) => self.watching.unreliable = true,
+                    watch::Message::Gone(Gone::Unavailable) | watch::Message::Failed(_) => end = true,
+                    watch::Message::Gone(Gone::Deleted | Gone::Renamed) => {
+                        end = true;
+                        self.watching.note = Some(WatchNote::Gone);
+                    }
+                }
+            }
+            if end {
+                self.watching.w = None;
+                self.watching.queued.clear();
+            }
+        }
+        // in order, one at a time; nothing while the listing runs
+        while self.load == Load::Done && self.watching.resolving.is_none() {
+            let Some(b) = self.watching.queued.pop_front() else { break };
+            if b.len() <= APPLY_INLINE {
+                let dir = std::path::PathBuf::from(&self.path);
+                changed |= self.keep_place(|t| watch::apply_batch(&mut t.store, Some(&mut t.sel), &dir, &b).map(|s| s.changed()).unwrap_or(false));
+            } else {
+                self.resolve_on_worker(b);
+            }
+        }
+        if changed && self.want.is_some() {
+            self.try_want();
+        }
+        changed
+    }
+
+    fn resolve_on_worker(&mut self, b: watch::Batch) {
+        let (tx, rx): (Sender<(watch::Batch, watch::Resolved)>, _) = channel();
+        let dir = std::path::PathBuf::from(&self.path);
+        let hint = self.store.len();
+        let wake = self.wake.clone();
+        let spawned = std::thread::Builder::new().name("tsubame-watch-resolve".into()).spawn(move || {
+            let r = watch::resolve(&dir, &b, hint);
+            let _ = tx.send((b, r));
+            if let Some(w) = wake {
+                w();
+            }
+        });
+        if spawned.is_ok() {
+            self.watching.resolving = Some(rx);
+        } else {
+            self.watching.note = Some(WatchNote::Relist);
+        }
+    }
+
+    /// Runs a store change keeping the cursor on the same entry and the first
+    /// visible entry where it was (positions shift, IDs do not).
+    fn keep_place(&mut self, f: impl FnOnce(&mut Tab) -> bool) -> bool {
+        let row_h = self.list.row_h.max(1.0) as f64;
+        let top_pos = (self.list.scroll / row_h) as usize;
+        let top = self.store.at(top_pos);
+        let cur = self.store.at(self.list.cursor);
+        let gcur = self.store.at(self.grid.cursor);
+        if !f(self) {
+            return false;
+        }
+        let pos_of = |t: &Tab, id: Option<tsubame_core::EntryId>| id.and_then(|id| t.store.view().iter().position(|v| *v == id));
+        let n = self.shown();
+        if let Some(p) = pos_of(self, top) {
+            let frac = self.list.scroll - top_pos as f64 * row_h;
+            self.list.scroll = p as f64 * row_h + frac;
+        }
+        let clamp = |p: usize| p.min(n.saturating_sub(1));
+        self.list.cursor = pos_of(self, cur).unwrap_or_else(|| clamp(self.list.cursor));
+        self.grid.cursor = pos_of(self, gcur).unwrap_or_else(|| clamp(self.grid.cursor));
+        true
     }
 
     fn push(&mut self, b: &Batch) {
@@ -277,6 +532,9 @@ impl Tab {
         self.rx = None;
         self.enumerator = None;
         self.apply_restore();
+        if self.visible && self.load == Load::Done {
+            self.watch_start();
+        }
     }
 
     /// Session restore: starts the listing of a tab that was restored at
@@ -425,6 +683,15 @@ impl Tab {
     }
 }
 
+/// A folder's last-write time (moves when entries are added, removed or
+/// renamed). `None` for a network path (no cheap, reliable answer).
+fn dir_mtime(path: &str) -> Option<std::time::SystemTime> {
+    if path.starts_with("\\\\") {
+        return None;
+    }
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,5 +788,96 @@ mod tests {
         assert_eq!(t.shown(), 50);
         assert_eq!(t.delivered, 50, "no stale batches reached the store");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Pumps until `ok` holds (the watcher's window is 60 ms).
+    fn pump_until(t: &mut Tab, what: &str, ok: impl Fn(&Tab) -> bool) {
+        let t0 = Instant::now();
+        while !ok(t) {
+            t.pump();
+            assert!(t0.elapsed() < Duration::from_secs(5), "{what}: not seen in time");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn names(t: &Tab) -> Vec<String> {
+        (0..t.shown()).filter_map(|p| t.entry_at(p)).map(|(p, _)| crate::dnd::name_of(&p).to_string()).collect()
+    }
+
+    #[test]
+    fn a_visible_tab_follows_changes_without_relisting() {
+        let dir = temp_dir("watch");
+        for n in ["b.txt", "d.txt", "f.txt"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let mut t = Tab::new(1, dir.to_str().unwrap(), 20.0);
+        t.set_visible(true);
+        t.start(dir.to_str().unwrap(), wake());
+        wait_done(&mut t);
+        assert!(t.watched(), "a shown local folder is watched");
+        assert_eq!(names(&t), ["b.txt", "d.txt", "f.txt"]);
+        // the cursor and the selection sit on d.txt
+        t.sel.single(&t.store, 1);
+        t.list.cursor = 1;
+        let listing = t.enum_gen;
+        // created before it: the cursor follows d.txt to its new position
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        pump_until(&mut t, "create", |t| t.shown() == 4);
+        assert_eq!(names(&t), ["a.txt", "b.txt", "d.txt", "f.txt"]);
+        assert_eq!(t.list.cursor, 2, "cursor stays on d.txt");
+        assert_eq!(t.selected_paths(4).len(), 1);
+        assert!(t.selected_paths(1)[0].ends_with("d.txt"));
+        // renamed in place, deleted
+        std::fs::rename(dir.join("f.txt"), dir.join("g.txt")).unwrap();
+        std::fs::remove_file(dir.join("b.txt")).unwrap();
+        pump_until(&mut t, "rename + delete", |t| names(t) == ["a.txt", "d.txt", "g.txt"]);
+        assert!(t.selected_paths(1)[0].ends_with("d.txt"));
+        assert_eq!(t.enum_gen, listing, "no relist: the changes were applied to the store");
+        assert_eq!(t.take_note(), None);
+        // names wanted after a copy show up selected
+        t.want_select(vec!["h.txt".into()]);
+        std::fs::write(dir.join("h.txt"), b"x").unwrap();
+        pump_until(&mut t, "wanted name", |t| t.selected_paths(4).len() == 1 && t.selected_paths(1)[0].ends_with("h.txt"));
+        // hidden: no watcher; a change meanwhile relists when shown again
+        t.set_visible(false);
+        assert!(!t.watched());
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(dir.join("i.txt"), b"x").unwrap();
+        t.set_visible(true);
+        assert!(t.watched());
+        assert_eq!(t.take_note(), Some(WatchNote::Relist));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn big_bursts_resolve_off_the_ui_thread_and_land_in_order() {
+        let dir = temp_dir("burst");
+        let mut t = Tab::new(1, dir.to_str().unwrap(), 20.0);
+        t.set_visible(true);
+        t.start(dir.to_str().unwrap(), wake());
+        wait_done(&mut t);
+        for i in 0..200 {
+            std::fs::write(dir.join(format!("n{i:03}.txt")), b"x").unwrap();
+        }
+        pump_until(&mut t, "burst", |t| t.shown() == 200);
+        for i in 0..50 {
+            std::fs::remove_file(dir.join(format!("n{i:03}.txt"))).unwrap();
+        }
+        pump_until(&mut t, "removals", |t| t.shown() == 150);
+        assert_eq!(names(&t)[0], "n050.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn synthetic_and_hidden_tabs_do_not_watch() {
+        let dir = temp_dir("nowatch");
+        let mut t = Tab::new(1, dir.to_str().unwrap(), 20.0);
+        t.start(dir.to_str().unwrap(), wake());
+        wait_done(&mut t);
+        assert!(!t.watched(), "not shown");
+        t.adopt_store("bench", EntryStore::new());
+        t.set_visible(true);
+        assert!(!t.watched(), "no real folder");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -9,11 +9,11 @@ What shipped, where it lives, what is left out. Config keys: `docs/config.md`.
 | `src/commands.rs` | ONE `commands` table: id, name, label, shortcuts. Palette, menus and key dispatch all read it. |
 | `src/sidebar.rs` | Pinned, Quick access, Recent, This PC (free-space bars), Network. 24 px rows, drives 32. 48 px rail. Drag rows to pin. |
 | `src/panes.rs` | Split math (ratio clamp, 640 px narrow rule, rail snap). Pure, unit tested. |
-| `src/dnd.rs` | Drag action resolution (same drive moves, other drive copies, Ctrl copy, Shift move, Alt shortcut). Internal only; the OLE seam is here. |
+| `src/dnd.rs` | Drag action resolution (same drive moves, other drive copies, Ctrl copy, Shift move, Alt or Ctrl+Shift shortcut) and refusals. The one copy of the rules; `ole_glue` delegates here. |
 | `src/rename.rs` | Name validation, slow-click rule, batch pattern engine (`{name}`, `{n:3}`, `{date}`). Pure. |
 | `src/editing.rs` | Inline rename widget state and paint. |
 | `src/batchui.rs` | Batch rename bar and preview popup. |
-| `src/ops.rs` | Bridge to the `fileops` queue: copy/move/rename/replace, progress message, reload after finish. |
+| `src/ops.rs` | The app's only `fileops` queue (INT1): every file operation, group undo/redo, the one status message, what to select after a job. See `docs/integration.md`. |
 | `src/statusbar.rs` | Selection count/size, free space, folder item count. |
 | `src/overlay.rs` | Keycaps, drag ghost, small popups. |
 | `src/view.rs`, `src/view_edit.rs` | Live pane fields + one stashed `other` pane; paint, input, command run. |
@@ -37,13 +37,25 @@ What shipped, where it lives, what is left out. Config keys: `docs/config.md`.
 | Ctrl+\ | split on/off |
 | Ctrl+Shift+\ | side by side / stacked |
 | F5 / F6 (two panes) | copy / move selection to the other pane |
+| Ctrl+Z / Ctrl+Y | undo / redo the last job of any kind, as one step |
+| Ctrl+C / Ctrl+X / Ctrl+V, Delete, Shift+Ctrl+C | clipboard and delete in the active pane (`docs/shell-integration.md`) |
 | Ctrl+Shift+Enter | open the selected folder in the other pane |
 
 Deviation from the mock: F6 moves to the other pane; Tab is the focus switch.
 
+## Since INT1
+
+- Drags are OLE drags (W1), inside the app too; Alt or Ctrl+Shift makes
+  shortcuts. A press on a multi-selection keeps it and drags all of it.
+- Context menus, drop targets, list focus and rename are per pane.
+- Each pane's visible tab follows its folder through a watcher: no F5 after
+  outside changes, selection and scroll kept.
+- Rename, batch rename and replace share the queue and journal with
+  copy/move/delete: one Ctrl+Z each.
+
+Details: `docs/integration.md`.
+
 ## Not done
 
-- No OLE drag-drop and no shell context menu (W1). `dnd.rs` is the seam.
-- Alt = shortcut is shown in the drag hint, not implemented.
 - Sync-scroll chip and dragging a tab across panes.
 - Recents are saved on exit (and with the debounced config flush), not on every navigation.
