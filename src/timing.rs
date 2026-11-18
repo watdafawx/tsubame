@@ -22,16 +22,25 @@
 //! measures a cold folder in a warm app: the second `tiny` re-faults the
 //! app's own pages (paint path, enumerator, store) that the purge dropped,
 //! and `big` is then the only cold thing. Its result is printed as `purge:`.
+//!
+//! An `<ops>` entry is no folder either: on the folder listed last it times
+//! the UI work of a sort switch per column (Size, Modified, Type, Name, Name
+//! descending, Name) and of filter-as-you-type (the first characters of a
+//! name from the middle of the list typed one at a time, then erased one at
+//! a time). Printed as `ops:` lines; paint is not included (the scroll
+//! paint gate bounds one frame).
 
 use crate::tab::Tab;
 use crate::view::View;
 use std::fmt::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `--timing-dirs` entry that purges the system caches instead of navigating.
 const PURGE: &str = "<purge>";
 /// Wait after a purge (matches `tools/open-probe.ps1`'s disk settle).
 const PURGE_SETTLE: Duration = Duration::from_secs(15);
+/// `--timing-dirs` entry that times sort switches and filter keystrokes.
+const OPS: &str = "<ops>";
 
 /// Runs the bench tool's purge next to the exe and waits for it (bench only).
 fn purge() -> String {
@@ -57,6 +66,35 @@ pub struct Run {
     out: String,
     pub first_paint_ms: f64,
     private_first: usize,
+}
+
+/// Times sort switches and filter keystrokes on the loaded tab (UI work).
+fn ops(out: &mut String, t: &mut Tab) {
+    use tsubame_core::Column::*;
+    let time = |f: &mut dyn FnMut()| {
+        let t0 = Instant::now();
+        f();
+        t0.elapsed().as_secs_f64() * 1000.0
+    };
+    let mut line = format!("ops: entries {:>7}  sort", t.store.len());
+    for (label, col) in [("size", Size), ("modified", Modified), ("type", Type), ("name", Name), ("name_desc", Name), ("name_asc", Name)] {
+        let _ = write!(line, "  {label} {:.2}", time(&mut || t.sort_by(col)));
+    }
+    let _ = writeln!(out, "{line}");
+    let mid = t.store.at(t.shown() / 2);
+    let word: Vec<char> = mid.and_then(|id| t.store.name(id)).map(|n| String::from_utf16_lossy(n).chars().take(5).collect()).unwrap_or_default();
+    let mut line = format!("ops: filter {:?}", word.iter().collect::<String>());
+    let mut typed = String::new();
+    for c in &word {
+        typed.push(*c);
+        let ms = time(&mut || t.set_filter(&typed));
+        let _ = write!(line, "  +{} {:.2} ({})", typed.chars().count(), ms, t.shown());
+    }
+    while typed.pop().is_some() {
+        let ms = time(&mut || t.set_filter(&typed));
+        let _ = write!(line, "  -{} {:.2} ({})", typed.chars().count(), ms, t.shown());
+    }
+    let _ = writeln!(out, "{line}");
 }
 
 fn ms(d: Option<Duration>) -> String {
@@ -111,12 +149,18 @@ impl Run {
             return true;
         }
         let mut next = self.dirs[self.n / self.reps].clone();
-        while next == PURGE {
-            let note = purge();
-            // the purge makes every process re-fault its pages (a paging storm
-            // for seconds): wait it out so the next runs measure the folder
-            std::thread::sleep(PURGE_SETTLE);
-            let _ = writeln!(self.out, "purge: {note}");
+        while next == PURGE || next == OPS {
+            if next == OPS {
+                for _ in 0..self.reps {
+                    ops(&mut self.out, v.tab_mut());
+                }
+            } else {
+                let note = purge();
+                // the purge makes every process re-fault its pages (a paging storm
+                // for seconds): wait it out so the next runs measure the folder
+                std::thread::sleep(PURGE_SETTLE);
+                let _ = writeln!(self.out, "purge: {note}");
+            }
             self.n += self.reps;
             if self.n >= self.dirs.len() * self.reps {
                 return true;
