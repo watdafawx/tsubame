@@ -266,6 +266,43 @@ pub fn parse_timing(text: &str) -> Result<Timing, String> {
     Ok(r)
 }
 
+/// One cold-folder run (`--timing-dirs "tiny;<idle>;warmup;tiny;<dir>"` after
+/// a purge from outside, docs/bench.md): the app's warm-up navigations are not
+/// the measurement, only the last navigation is (the still cold `<dir>`).
+pub fn parse_cold_nav(text: &str) -> Result<Timing, String> {
+    let all = parse_timing(text)?;
+    let (row, line) = text
+        .lines()
+        .filter_map(|l| parse_timing_row(l).map(|r| (r, l)))
+        .filter(|(r, _)| r.label != "startup")
+        .last()
+        .ok_or("no navigation after the warm-up in the cold --timing report")?;
+    let entries = line.split_whitespace().skip_while(|t| *t != "entries").nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+    Ok(Timing {
+        entries,
+        first_rows: row.first_frame.into_iter().collect(),
+        sorted: row.final_frame.into_iter().collect(),
+        done: row.done.into_iter().collect(),
+        first_batch: row.first_batch.into_iter().collect(),
+        startup_first_rows: None,
+        startup_sorted: None,
+        ..all
+    })
+}
+
+/// Several cold-folder runs as one series (one process per run).
+pub fn merge_cold(runs: Vec<Timing>) -> Option<Timing> {
+    let mut it = runs.into_iter();
+    let mut m = it.next()?;
+    for t in it {
+        m.first_rows.extend(t.first_rows);
+        m.sorted.extend(t.sorted);
+        m.done.extend(t.done);
+        m.first_batch.extend(t.first_batch);
+    }
+    Some(m)
+}
+
 // ---- app --leak-gate (leak-gate.txt) -------------------------------------
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -583,6 +620,9 @@ pub struct Run {
     pub raw_gate: String,
     pub raw_idle: String,
     pub raw_cold_timing: String,
+    /// `cold-timing-NN.txt` runs (folder-only method); 0: a legacy
+    /// `cold-timing.txt` whose purge also emptied the app's pages
+    pub cold_runs: usize,
 }
 
 impl Run {
@@ -635,7 +675,13 @@ pub fn section(run: &Run, commit: &str) -> String {
     let _ = writeln!(out, "- Fixtures: `{}` (100,000 entries), `{}` ({} folders, mixed sizes)", run.meta("fixture_100k"), run.meta("gate_fixture"), gate.folders);
     let _ = writeln!(out, "- Cache: {}; rig load: {}", run.meta("cache"), run.meta("rig_load"));
     let _ = writeln!(out, "- Cold-cache 100k open: {}", run.meta("cold"));
-    if let Some(t) = &run.cold_timing {
+    if run.cold_timing.is_some() && run.cold_runs > 0 {
+        let _ = writeln!(
+            out,
+            "  {} runs, one process each: purge, then the app warms up on small folders (and idles 3 s) before it opens the still cold 100k folder; the row times only that last navigation.",
+            run.cold_runs
+        );
+    } else if let Some(t) = &run.cold_timing {
         let _ = writeln!(
             out,
             "  The purge also emptied the app's own pages: that process painted its first frame {:.0} ms after start (warm: {:.0} ms), so the cold row includes loading the app itself, not only the folder's metadata.",
@@ -760,7 +806,7 @@ pub fn section(run: &Run, commit: &str) -> String {
     raw(&mut out, "Raw: s1-bench.txt (one --bench run per line)", &s1.join("\n"));
     raw(&mut out, "Raw: u2-timing.txt", &run.raw_timing);
     if !run.raw_cold_timing.is_empty() {
-        raw(&mut out, "Raw: cold-cache u2-timing.txt", &run.raw_cold_timing);
+        raw(&mut out, "Raw: cold-cache --timing reports", &run.raw_cold_timing);
     }
     raw(&mut out, "Raw: idle.txt", &run.raw_idle);
     raw(&mut out, "Raw: leak-gate.txt", &run.raw_gate);
@@ -790,6 +836,37 @@ fn read_gates(dir: &Path, gates: &mut Vec<GateReport>) -> Result<String, String>
     Ok(raw)
 }
 
+/// The cold-cache 100k reports: `cold-timing-01.txt`, ... (one process each,
+/// only the last navigation counts), else a legacy `cold-timing.txt`.
+/// Returns the merged series, the raw text and the number of NN runs.
+fn read_cold(dir: &Path) -> (Option<Timing>, String, usize) {
+    let mut raw = String::new();
+    let mut runs = Vec::new();
+    for i in 1..=9 {
+        let name = format!("cold-timing-{i:02}.txt");
+        let Ok(text) = std::fs::read_to_string(dir.join(&name)) else { break };
+        match parse_cold_nav(&text) {
+            Ok(t) => runs.push(t),
+            Err(e) => eprintln!("tsubame-bench app: {name} ignored: {e}"),
+        }
+        raw.push_str(&format!("# --- {name} ---\n{text}\n"));
+    }
+    if !runs.is_empty() {
+        let n = runs.len();
+        return (merge_cold(runs), raw, n);
+    }
+    match std::fs::read_to_string(dir.join("cold-timing.txt")) {
+        Ok(text) => match parse_timing(&text) {
+            Ok(t) => (Some(t), text, 0),
+            Err(e) => {
+                eprintln!("tsubame-bench app: cold-timing.txt ignored: {e}");
+                (None, String::new(), 0)
+            }
+        },
+        Err(_) => (None, raw, 0),
+    }
+}
+
 /// Reads `meta.txt`, `idle.txt`, `cold-start-*.txt`, `timing.txt` and
 /// `leak-gate*.txt` from `dir` and renders the section.
 pub fn run(dir: &Path, commit: &str, append: Option<&Path>) -> Result<String, String> {
@@ -801,16 +878,7 @@ pub fn run(dir: &Path, commit: &str, append: Option<&Path>) -> Result<String, St
     let idle = parse_kv(&raw_idle);
     let raw_timing = read("timing.txt")?;
     let timing = parse_timing(&raw_timing)?;
-    let (cold_timing, raw_cold_timing) = match std::fs::read_to_string(dir.join("cold-timing.txt")) {
-        Ok(text) => match parse_timing(&text) {
-            Ok(t) => (Some(t), text),
-            Err(e) => {
-                eprintln!("tsubame-bench app: cold-timing.txt ignored: {e}");
-                (None, String::new())
-            }
-        },
-        Err(_) => (None, String::new()),
-    };
+    let (cold_timing, raw_cold_timing, cold_runs) = read_cold(dir);
     let mut gates = Vec::new();
     let raw_gate = read_gates(dir, &mut gates)?;
     let mut cold = Vec::new();
@@ -824,7 +892,7 @@ pub fn run(dir: &Path, commit: &str, append: Option<&Path>) -> Result<String, St
     if cold.is_empty() {
         return Err(format!("{}: no cold-start-NN.txt reports", dir.display()));
     }
-    let run = Run { meta, idle, cold, timing, cold_timing, gates, raw_timing, raw_gate, raw_idle, raw_cold_timing };
+    let run = Run { meta, idle, cold, timing, cold_timing, gates, raw_timing, raw_gate, raw_idle, raw_cold_timing, cold_runs };
     let commit = if commit.is_empty() { kv(&run.meta, "commit").unwrap_or("unknown") } else { commit }.to_string();
     let text = section(&run, &commit);
     if let Some(path) = append {
@@ -910,6 +978,35 @@ private_bytes_end: 149.6 MB
         assert_eq!(t.first_batch.len(), 3);
         assert!((t.private_end_mb - 149.6).abs() < 0.01);
         assert_eq!(t.first_rows.iter().copied().fold(0.0, f64::max), 2.34);
+    }
+
+    // a cold-folder run: warm-up on tiny/small folders, then the cold 100k
+    const COLD: &str = "\
+tsubame U2 timing (release)
+window_px: 3840x2064 at 192 dpi, paint path hardware
+first_paint_ms (process start to first completed paint): 80.1
+all times in ms from the navigation event
+startup   entries      20 (0.0 MB)  first_batch     0.40  first_frame    30.00  done     0.50  final_frame    30.00  worker     0.40   G:\\rig-bench\\x\\gate\\tiny\\0001
+first     entries    1000 (0.1 MB)  first_batch     0.80  first_frame     1.50  done     2.00  final_frame     2.10  worker     1.90   G:\\rig-bench\\x\\gate\\small\\0001
+repeat 1  entries      20 (0.0 MB)  first_batch     0.30  first_frame     0.90  done     0.40  final_frame     0.90  worker     0.30   G:\\rig-bench\\x\\gate\\tiny\\0001
+repeat 2  entries  100000 (11.4 MB)  first_batch     9.00  first_frame    21.50  done   140.00  final_frame   150.25  worker   130.00   G:\\rig-bench\\x\\100k
+private_bytes_end: 120.0 MB
+";
+
+    #[test]
+    fn a_cold_run_counts_only_its_last_navigation() {
+        let t = parse_cold_nav(COLD).expect("parse");
+        assert_eq!(t.entries, 100_000);
+        assert_eq!(t.first_rows, vec![21.50]);
+        assert_eq!(t.sorted, vec![150.25]);
+        assert_eq!(t.first_batch, vec![9.00]);
+        assert_eq!(t.startup_first_rows, None);
+        let m = merge_cold(vec![t.clone(), t.clone(), t]).unwrap();
+        assert_eq!(m.first_rows.len(), 3);
+        assert_eq!(m.sorted, vec![150.25; 3]);
+        // a report with only the startup navigation has no cold row
+        let only_startup: String = COLD.lines().filter(|l| !l.starts_with("first") && !l.starts_with("repeat")).collect::<Vec<_>>().join("\n");
+        assert!(parse_cold_nav(&only_startup).is_err());
     }
 
     const GATE: &str = "\
@@ -1083,6 +1180,7 @@ exit=0
             raw_gate: GATE.to_string(),
             raw_idle: "idle.seconds=10\nidle.cpu_ms=0\n".to_string(),
             raw_cold_timing: String::new(),
+            cold_runs: 0,
         };
         let s = section(&run, "abc1234");
         assert!(s.starts_with("## 2026-11-18 14:22 — rig, commit `abc1234`"), "{s}");

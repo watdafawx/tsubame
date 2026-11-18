@@ -20,8 +20,11 @@
     * idle CPU over 10 s (a plain launch, process CPU time sampled twice)
     * the full leak gate in one process (`--leak-gate`: 10,000 navigations and
       1,000 tab open/close with real icons, counters every 1,000 ops)
-    * optionally a cold-cache open: `gsudo -n <bench> purge` then one timed
-      navigation; if the purge is not permitted the log says "not measured"
+    * optionally a cold-cache open (-ColdRuns, default 3), the open-probe.ps1
+      cold method: `<bench> purge` from the elevated ssh session (gsudo -n as
+      fallback), wait for the disks to settle, then one process that warms up
+      on small folders and times only its navigation into the still cold 100k
+      folder; if the purge is not permitted the log says "not measured"
 
   Fixtures live under G:\rig-bench\tsubame-b1 (100k folder + the gate's
   200-folder tree; well under the 10 GB cap) and are deleted at the end unless
@@ -49,6 +52,7 @@ param(
   [int]    $GateTabs = 1000,
   [int]    $GateRuns = 3,
   [ValidateSet('none', 'standby', 'working')] [string] $ColdMode = 'working',
+  [int]    $ColdRuns = 3,
   [int]    $Slot = 0,
   [switch] $SkipBuild,
   [switch] $SkipGen,
@@ -354,19 +358,37 @@ Start-Sleep -Seconds 10
     $cpuLine = $idle | Where-Object { $_ -like 'idle.cpu_ms=*' }
     Write-Host "bench-rig: idle $cpuLine over 10 s (second window)"
 
-    # 6. optional cold-cache open: purge (elevated), then one timed navigation
+    # 6. optional cold-cache open, the open-probe.ps1 "cold" method: purge from
+    #    outside the app, let rig's disks settle, then one process per run that
+    #    warms itself up on small folders before it opens the still cold 100k
+    #    folder; only that last navigation is the measurement (a purge also
+    #    empties the app's own pages, so a cold *process* would time the app)
     if ($ColdMode -ne 'none') {
-      $purgeOut = Invoke-Rig "gsudo -n -w $(Q $benchExe) purge --mode $ColdMode --out $(Q "$RunDir\_purge.txt") 2>&1; 'gsudo-exit=' + `$LASTEXITCODE" 300
-      $purgeOut | ForEach-Object { Write-Host "  $_" }
-      $purgeText = try { Invoke-Rig "if (Test-Path $(Q "$RunDir\_purge.txt")) { Get-Content $(Q "$RunDir\_purge.txt") }" } catch { @() }
-      $purgeText | ForEach-Object { Write-Host "  $_" }
-      $purged = (($purgeOut -join "`n") -match 'gsudo-exit=0') -and (($purgeText -join "`n") -match 'purge: \w+ ok')
-      if ($purged) {
-        $coldText = "measured (purge $ColdMode ok)"
-        Start-RigApp 'tsubame.exe' "--timing --timing-dirs `"$gateFixture\tiny\0001;$fixture100k`" --reps 1" -Wait -TimeoutSec 300 -Report 'u2-timing.txt'
-        Save-Report 'u2-timing.txt' 'cold-timing.txt'
+      $tiny = "$gateFixture\tiny\0001"
+      $warmup = "$gateFixture\small\0001"
+      $done = 0
+      for ($c = 1; $c -le $ColdRuns; $c++) {
+        # the ssh session on rig is elevated already; gsudo -n only when it is
+        # not (its credential cache fails now and then): retry a few times
+        $purged = $false
+        for ($try = 1; $try -le 4 -and -not $purged; $try++) {
+          $p = Invoke-Rig "`$o = & $(Q $benchExe) purge --mode $ColdMode 2>&1; if (-not ((`$o -join ' ') -match 'purge: \w+ ok')) { `$o = gsudo -n -w $(Q $benchExe) purge --mode $ColdMode 2>&1 }; `$o" 300
+          $purged = ($p -join "`n") -match 'purge: \w+ ok'
+          if (-not $purged) { $p | ForEach-Object { Write-Host "  $_" } }
+        }
+        if (-not $purged) { break }
+        # a working-set purge makes every process on rig re-fault its pages
+        $s = Invoke-Rig "`$t0 = Get-Date; do { `$d = (Get-Counter '\PhysicalDisk(_Total)\% Disk Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue } while (`$d -gt 15 -and ((Get-Date) - `$t0).TotalSeconds -lt 20); [math]::Round(((Get-Date) - `$t0).TotalSeconds, 1)" 120
+        Start-RigApp 'tsubame.exe' "--timing --timing-dirs `"$tiny;<idle>;$warmup;$tiny;$fixture100k`" --reps 1" -Wait -TimeoutSec 300 -Report 'u2-timing.txt'
+        Save-Report 'u2-timing.txt' ('cold-timing-{0:d2}.txt' -f $c)
+        $last = Get-Content -Path ("$script:ReportShare\cold-timing-{0:d2}.txt" -f $c) -EA SilentlyContinue | Where-Object { $_ -match 'first_frame' } | Select-Object -Last 1
+        Write-Host ("bench-rig: cold run {0}/{1} (disks settled after {2} s): {3}" -f $c, $ColdRuns, ($s -join ''), $last)
+        $done++
+      }
+      $coldText = if ($done -gt 0) {
+        "measured ($done runs: purge $ColdMode from outside, app warmed up on small folders, only the cold 100k navigation timed)"
       } else {
-        $coldText = "not measured (purge $ColdMode needs elevation on rig: gsudo -n refused)"
+        "not measured (purge $ColdMode needs elevation on rig: the ssh session and gsudo -n were refused)"
       }
       Write-Host "bench-rig: cold cache: $coldText"
     }
