@@ -33,13 +33,23 @@ pub const VERSION: u32 = 1;
 const MAX_DEPTH: usize = 4;
 pub const DEFAULT_CAP: usize = 200;
 
-/// One recorded operation.
-#[derive(Clone, Debug, PartialEq)]
+/// One recorded operation. Equality ignores `group` (it is not saved).
+#[derive(Clone, Debug)]
 pub struct Entry {
     pub forward: Operation,
     /// What undo runs. `None`: not undoable, `reason` says why.
     pub inverse: Option<Operation>,
     pub reason: Option<String>,
+    /// The submission the entry came from (the queue's job id). `undo_group` and
+    /// `redo_group` treat every entry of one group as one step. Not saved: a loaded
+    /// entry is a group of its own.
+    pub group: u64,
+}
+
+impl PartialEq for Entry {
+    fn eq(&self, o: &Self) -> bool {
+        self.forward == o.forward && self.inverse == o.inverse && self.reason == o.reason
+    }
 }
 
 impl Entry {
@@ -104,6 +114,48 @@ impl Journal {
     }
     pub fn next_redo(&self) -> Option<Operation> {
         self.redo.last().map(|e| e.forward.clone())
+    }
+    /// The newest group that has something to undo: (index, inverse) of each of its
+    /// undoable entries, newest first. Undoing them in this order reverts the whole
+    /// submission. Indices stay valid while the entries are marked undone in this order.
+    pub fn undo_group(&self) -> Vec<(usize, Operation)> {
+        let Some(start) = self.undo.iter().rposition(Entry::is_undoable) else {
+            return Vec::new();
+        };
+        let g = self.undo[start].group;
+        self.undo[..=start]
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, e)| e.group == g)
+            .filter_map(|(i, e)| e.inverse.clone().map(|inv| (i, inv)))
+            .collect()
+    }
+    /// The group on top of the redo stack: (index, forward) of each entry, oldest first
+    /// (the order they first ran in).
+    pub fn redo_group(&self) -> Vec<(usize, Operation)> {
+        let Some(g) = self.redo.last().map(|e| e.group) else {
+            return Vec::new();
+        };
+        self.redo
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, e)| e.group == g)
+            .map(|(i, e)| (i, e.forward.clone()))
+            .collect()
+    }
+    /// Redo of the entry at `index` of the redo stack succeeded (see `mark_redone`).
+    pub fn mark_redone_at(&mut self, index: usize, inverse: Option<Operation>, reason: Option<String>) {
+        if index < self.redo.len() {
+            let mut entry = self.redo.remove(index);
+            entry.inverse = inverse;
+            entry.reason = reason;
+            self.undo.push(entry);
+            if self.undo.len() > self.cap {
+                self.undo.remove(0);
+            }
+        }
     }
     /// Undo at `index` succeeded: the entry moves to the redo stack.
     pub fn mark_undone(&mut self, index: usize) {
@@ -173,6 +225,12 @@ impl Journal {
                 }
                 None => report.skipped += 1,
             }
+        }
+        // every loaded entry is its own group (groups are not saved)
+        let mut g = u64::MAX;
+        for e in journal.undo.iter_mut().chain(journal.redo.iter_mut()) {
+            e.group = g;
+            g -= 1;
         }
         for list in [&mut journal.undo, &mut journal.redo] {
             if list.len() > journal.cap {
@@ -347,6 +405,7 @@ fn parse_line(line: &str) -> Option<(char, Entry)> {
             forward,
             inverse,
             reason,
+            group: 0,
         },
     ))
 }
