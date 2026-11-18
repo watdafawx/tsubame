@@ -421,7 +421,7 @@ mod tests {
             if is_dir_index(i) {
                 dirs += 1;
             }
-            if name_for(7, i).chars().any(|c| !c.is_ascii()) {
+            if !name_for(7, i).is_ascii() {
                 unicode += 1;
             }
         }
