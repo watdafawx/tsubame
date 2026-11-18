@@ -5727,3 +5727,23 @@ the second (the table's figure). Private bytes 66.2 MB idle (budget 90 MB
 windowed), 84.2 MB after the 4K scroll run (budget 110 MB). Leak gate PASS
 (+3.7% worst run). Exe 1664 KB. The two cold-cache rows (n=1, disk-bound
 after a working-set purge) miss their budgets; INT1 did not touch listing.
+
+## U4 (2026-11-18, commit `da7b850`, rig release build, `tools/bench-rig.ps1` full run)
+
+Rig was loaded (8 Minecraft java, 25 containers, CPU 47% busy), so latency rows are noisy.
+
+| Metric | Budget | Measured | |
+|---|---|---|---|
+| Idle CPU, second 10 s window | 0 wake-ups | 47 ms (first window 16 ms) | as INT1 (31-47 ms) |
+| Private bytes, one tab, small folder, 4K | < 110 MB | 64.5 MB | PASS |
+| Private bytes after the 5 s scroll run (100k) | < 110 MB | 83.8 MB median (89.5 max) | PASS |
+| Main exe | < 6 MB | 1714 KB (INT1: 1664 KB; the updater crate and U4 add 50 KB) | PASS |
+| Leak gate (10,000 navs + 1,000 tabs, palette + settings churn in every tab cycle) | within 5% | worst run +4.12% (runs: +2.85, +3.54, +4.12) | PASS |
+| Scroll paint p95, 4K | < 5.0 ms | 6.67 ms median of 10 (8.82 max) | see below |
+| Cold start to first frame | < 100 ms | 115 ms median | see below |
+
+Scroll p95 under load: the same run of the INT1 baseline `e230e30` gave a 4.73 ms median when the rig was
+quieter (21:34) and a 7.5 ms median when run again from the same binary at 21:55 (5 Minecraft, 22% busy).
+U4 builds gave 6.0 to 6.7 ms in between (`815a440`, `e1de2ee`, `da7b850`). Nothing U4 added runs per
+row or per frame in the list (palette and Settings are `None` while closed), so the spread is rig load, not a
+measured regression; rerun on a quiet rig before relying on the figure.
