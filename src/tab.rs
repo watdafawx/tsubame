@@ -789,4 +789,95 @@ mod tests {
         assert_eq!(t.delivered, 50, "no stale batches reached the store");
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    /// Pumps until `ok` holds (the watcher's window is 60 ms).
+    fn pump_until(t: &mut Tab, what: &str, ok: impl Fn(&Tab) -> bool) {
+        let t0 = Instant::now();
+        while !ok(t) {
+            t.pump();
+            assert!(t0.elapsed() < Duration::from_secs(5), "{what}: not seen in time");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn names(t: &Tab) -> Vec<String> {
+        (0..t.shown()).filter_map(|p| t.entry_at(p)).map(|(p, _)| crate::dnd::name_of(&p).to_string()).collect()
+    }
+
+    #[test]
+    fn a_visible_tab_follows_changes_without_relisting() {
+        let dir = temp_dir("watch");
+        for n in ["b.txt", "d.txt", "f.txt"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let mut t = Tab::new(1, dir.to_str().unwrap(), 20.0);
+        t.set_visible(true);
+        t.start(dir.to_str().unwrap(), wake());
+        wait_done(&mut t);
+        assert!(t.watched(), "a shown local folder is watched");
+        assert_eq!(names(&t), ["b.txt", "d.txt", "f.txt"]);
+        // the cursor and the selection sit on d.txt
+        t.sel.single(&t.store, 1);
+        t.list.cursor = 1;
+        let listing = t.enum_gen;
+        // created before it: the cursor follows d.txt to its new position
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        pump_until(&mut t, "create", |t| t.shown() == 4);
+        assert_eq!(names(&t), ["a.txt", "b.txt", "d.txt", "f.txt"]);
+        assert_eq!(t.list.cursor, 2, "cursor stays on d.txt");
+        assert_eq!(t.selected_paths(4).len(), 1);
+        assert!(t.selected_paths(1)[0].ends_with("d.txt"));
+        // renamed in place, deleted
+        std::fs::rename(dir.join("f.txt"), dir.join("g.txt")).unwrap();
+        std::fs::remove_file(dir.join("b.txt")).unwrap();
+        pump_until(&mut t, "rename + delete", |t| names(t) == ["a.txt", "d.txt", "g.txt"]);
+        assert!(t.selected_paths(1)[0].ends_with("d.txt"));
+        assert_eq!(t.enum_gen, listing, "no relist: the changes were applied to the store");
+        assert_eq!(t.take_note(), None);
+        // names wanted after a copy show up selected
+        t.want_select(vec!["h.txt".into()]);
+        std::fs::write(dir.join("h.txt"), b"x").unwrap();
+        pump_until(&mut t, "wanted name", |t| t.selected_paths(4).len() == 1 && t.selected_paths(1)[0].ends_with("h.txt"));
+        // hidden: no watcher; a change meanwhile relists when shown again
+        t.set_visible(false);
+        assert!(!t.watched());
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(dir.join("i.txt"), b"x").unwrap();
+        t.set_visible(true);
+        assert!(t.watched());
+        assert_eq!(t.take_note(), Some(WatchNote::Relist));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn big_bursts_resolve_off_the_ui_thread_and_land_in_order() {
+        let dir = temp_dir("burst");
+        let mut t = Tab::new(1, dir.to_str().unwrap(), 20.0);
+        t.set_visible(true);
+        t.start(dir.to_str().unwrap(), wake());
+        wait_done(&mut t);
+        for i in 0..200 {
+            std::fs::write(dir.join(format!("n{i:03}.txt")), b"x").unwrap();
+        }
+        pump_until(&mut t, "burst", |t| t.shown() == 200);
+        for i in 0..50 {
+            std::fs::remove_file(dir.join(format!("n{i:03}.txt"))).unwrap();
+        }
+        pump_until(&mut t, "removals", |t| t.shown() == 150);
+        assert_eq!(names(&t)[0], "n050.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn synthetic_and_hidden_tabs_do_not_watch() {
+        let dir = temp_dir("nowatch");
+        let mut t = Tab::new(1, dir.to_str().unwrap(), 20.0);
+        t.start(dir.to_str().unwrap(), wake());
+        wait_done(&mut t);
+        assert!(!t.watched(), "not shown");
+        t.adopt_store("bench", EntryStore::new());
+        t.set_visible(true);
+        assert!(!t.watched(), "no real folder");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

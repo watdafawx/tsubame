@@ -2012,7 +2012,8 @@ mod tests {
         }
         fn settle(&mut self) {
             let t0 = Instant::now();
-            while self.v.tabs.items.iter().any(|t| t.is_loading()) {
+            let loading = |v: &mut View| (0..2).any(|s| v.with_pane(s, |v| v.tabs.items.iter().any(|t| t.is_loading())));
+            while loading(&mut self.v) {
                 self.v.pump();
                 assert!(t0.elapsed() < Duration::from_secs(10), "listing did not finish");
                 std::thread::sleep(Duration::from_millis(1));
@@ -2249,6 +2250,168 @@ mod tests {
         }
         assert_eq!(ViewMode::parse("nope"), None);
         assert_eq!(ViewMode::Details.next().next().next(), ViewMode::Details);
+    }
+
+    // ---- INT1: two panes act as one app ---------------------------------------
+
+    impl Rig {
+        fn dual(tag: &str) -> Rig {
+            let mut r = Rig::new(tag);
+            r.v.set_layout(true, tsubame_config::Split::Vertical);
+            r.settle();
+            r
+        }
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.ui.push(Event::MouseMove { pos: Pt::new(x, y) });
+            self.frame();
+        }
+        fn right_click(&mut self, x: f32, y: f32) {
+            let pos = Pt::new(x, y);
+            self.move_to(x, y);
+            self.ui.push(Event::MouseDown { pos, button: Button::Right, mods: Mods::NONE, double: false });
+            self.ui.push(Event::MouseUp { pos, button: Button::Right, mods: Mods::NONE });
+            self.frame();
+        }
+        /// (list rect, row height) of pane `slot`
+        fn list_of(&mut self, slot: usize) -> (Rect, f32) {
+            self.v.with_pane(slot, |v| (v.list_r, v.tab().list.row_h))
+        }
+    }
+
+    #[test]
+    fn clicks_and_keys_go_to_the_pane_they_are_in() {
+        let mut r = Rig::dual("keys");
+        assert_eq!(r.v.active, 0);
+        let (l1, rh) = r.list_of(1);
+        // a click on pane 1's second row: pane 1 is active and its list has the keys
+        r.click(l1.x + 40.0, l1.y + rh * 1.5);
+        assert_eq!(r.v.active, 1);
+        assert_eq!(r.v.live, 1, "live == active outside a paint");
+        assert!(r.v.list_focused(&r.ui), "the active pane's list has the focus");
+        assert!(r.ui.has_focus(pid(1, ID_LIST)) && !r.ui.has_focus(pid(0, ID_LIST)));
+        assert_eq!(r.v.tab().sel.count(), 1);
+        // F2 renames in pane 1, not pane 0
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.rename.is_some());
+        assert_eq!(r.v.rename_slot, 1);
+        assert!(!r.v.list_focused(&r.ui), "file keys stay off while renaming");
+        r.key(Key::Escape, Mods::NONE);
+        assert!(r.v.rename.is_none());
+        // back to pane 0
+        let (l0, rh) = r.list_of(0);
+        r.click(l0.x + 40.0, l0.y + rh * 0.5);
+        assert_eq!(r.v.active, 0);
+        assert!(r.ui.has_focus(pid(0, ID_LIST)));
+    }
+
+    #[test]
+    fn context_menus_belong_to_the_pane_clicked() {
+        let mut r = Rig::dual("menus");
+        let (l1, rh) = r.list_of(1);
+        // empty space of pane 1: the folder menu, pane 1 made active first
+        r.right_click(l1.x + 40.0, l1.b() - 10.0);
+        assert_eq!(r.v.active, 1);
+        assert!(r.v.bg_menu.take().is_some());
+        assert!(r.v.menu_request.is_none());
+        // a row of pane 0: the item menu for that row, pane 0 active again
+        let (l0, _) = r.list_of(0);
+        r.right_click(l0.x + 40.0, l0.y + rh * 1.5);
+        assert_eq!(r.v.active, 0);
+        assert_eq!(r.v.menu_request.take().map(|m| m.0), Some(1));
+        // the shell menu's Rename: inline rename of that row on the next frame
+        r.v.rename_request = true;
+        r.frame();
+        assert!(r.v.rename.is_some() && r.v.rename_slot == 0);
+    }
+
+    #[test]
+    fn drop_targets_follow_the_pointer_across_panes_and_tabs() {
+        let mut r = Rig::dual("drops");
+        let docs = r.dir.join("Docs").to_str().unwrap().to_string();
+        let alpha = r.dir.join("alpha.txt").to_str().unwrap().to_string();
+        let wake = r.v.wake.clone();
+        r.v.with_pane(1, |v| {
+            v.tab_mut().history.push(&docs);
+            v.tab_mut().start(&docs, wake);
+        });
+        r.settle();
+        r.v.drag_enter(vec![alpha.clone()]);
+        // over pane 1 (showing Docs): into Docs
+        let (l1, _) = r.list_of(1);
+        r.move_to(l1.x + 40.0, l1.b() - 10.0);
+        assert_eq!(r.v.drop_dest, Some(DropDest::Folder(docs.clone())));
+        assert!(r.c.has_text("Move to Docs"), "{:?}", r.c.texts());
+        // over pane 0's empty space: its own folder is refused
+        let (l0, rh) = r.list_of(0);
+        r.move_to(l0.x + 40.0, l0.b() - 10.0);
+        assert_eq!(r.v.drop_dest, None);
+        assert!(r.c.has_text("Already in this folder"));
+        // over the Docs row (first: folders first) of pane 0
+        r.move_to(l0.x + 40.0, l0.y + rh * 0.5);
+        assert_eq!(r.v.drop_dest, Some(DropDest::Folder(docs.clone())));
+        // over pane 1's tab
+        let (strip, _) = r.v.strips[1];
+        r.move_to(strip.x + 30.0, strip.b() - 8.0);
+        assert_eq!(r.v.drop_dest, Some(DropDest::Folder(docs.clone())));
+        // Ctrl+Shift (the OLE keys): a shortcut
+        r.v.drag_keys = Some(Mods { ctrl: true, shift: true, alt: false });
+        r.move_to(l1.x + 40.0, l1.b() - 12.0);
+        assert!(r.c.has_text("Shortcut in Docs"), "{:?}", r.c.texts());
+        r.v.drag_leave();
+        r.frame();
+        assert_eq!(r.v.drop_dest, None);
+        assert!(r.v.drag.is_none());
+    }
+
+    #[test]
+    fn a_press_on_a_multi_selection_drags_all_of_it() {
+        let mut r = Rig::new("multi");
+        let (l, rh) = r.list_of(0);
+        {
+            let t = r.v.tab_mut();
+            t.sel.select_all(&t.store);
+        }
+        r.frame();
+        let n = r.v.tab().sel.count();
+        assert_eq!(n, 3);
+        let p = Pt::new(l.x + 40.0, l.y + rh * 1.5);
+        r.move_to(p.x, p.y);
+        r.ui.push(Event::MouseDown { pos: p, button: Button::Left, mods: Mods::NONE, double: false });
+        r.frame();
+        assert_eq!(r.v.tab().sel.count(), 3, "the press keeps the selection");
+        // under the threshold: nothing yet
+        r.move_to(p.x + 2.0, p.y);
+        assert!(r.v.drag_out.is_none());
+        r.move_to(p.x + 12.0, p.y + 4.0);
+        assert_eq!(r.v.drag_out.as_ref().map(|v| v.len()), Some(3), "the whole selection is dragged");
+        r.ui.push(Event::MouseUp { pos: p, button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert_eq!(r.v.tab().sel.count(), 3, "a drag does not collapse the selection");
+        // a plain click (no drag) collapses it to the row
+        r.v.drag_out = None;
+        r.click(p.x, p.y);
+        assert_eq!(r.v.tab().sel.count(), 1);
+    }
+
+    #[test]
+    fn finished_jobs_select_new_items_in_every_pane_showing_the_folder() {
+        let mut r = Rig::dual("after");
+        let dir = r.dir.to_str().unwrap().to_string();
+        std::fs::write(r.dir.join("new.txt"), b"n").unwrap();
+        r.v.ops.changed(&dir, vec!["new.txt".into()]);
+        r.v.after_ops();
+        // watched panes get it from their watcher, unwatched ones relist
+        let t0 = Instant::now();
+        loop {
+            r.v.pump();
+            r.frame();
+            let ok = (0..2).all(|s| r.v.with_pane(s, |v| v.tab().sel.count() == 1 && v.tab().selected_paths(1)[0].ends_with("new.txt")));
+            if ok {
+                break;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "new.txt not selected in both panes");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

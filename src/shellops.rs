@@ -398,51 +398,85 @@ fn paste_read(a: &mut App, folder: String, r: ClipRead) {
 
 // ---- keys --------------------------------------------------------------------
 
-/// WM_KEYDOWN before the kit: the list's file shortcuts. True = handled.
-pub fn on_key(hwnd: HWND, vk: u16, m: Mods) -> bool {
+/// A file shortcut of the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAct {
+    Copy,
+    Cut,
+    Paste,
+    CopyPath,
+    Delete { permanent: bool },
+    Undo,
+    Redo,
+    NewFolder,
+}
+
+/// The file shortcut `vk` with `m` stands for (Explorer's keys).
+pub fn key_act(vk: u16, m: Mods) -> Option<KeyAct> {
     let k = VIRTUAL_KEY(vk);
     let ch = |c: u8| vk == c as u16;
-    let r = with(|a| {
-        // the ACTIVE pane's list (live == active outside a paint)
-        if a.view.tabs.is_empty() || !a.view.list_focused(&a.ui) {
-            return None;
-        }
-        let sel = || a.view.tab().selected_paths(MAX_ITEMS);
-        let (c, s, al) = (m.ctrl, m.shift, m.alt);
-        if al {
-            return None;
-        }
-        if c && !s && (ch(b'C') || k == VK_INSERT) {
-            let p = sel();
-            copy_files(a, p, false);
-        } else if c && !s && ch(b'X') {
-            let p = sel();
-            copy_files(a, p, true);
-        } else if (c && !s && ch(b'V')) || (!c && s && k == VK_INSERT) {
-            let Some(f) = active_folder(a) else { return Some(false) };
-            paste(a, f);
-        } else if c && s && ch(b'C') {
-            let t = path_text(&sel());
-            copy_text(a, t, "path");
-        } else if !c && k == VK_DELETE {
-            let p = sel();
-            start_delete(a, p, s);
-        } else if c && !s && ch(b'Z') {
-            a.view.ops.undo();
-        } else if c && !s && ch(b'Y') {
-            a.view.ops.redo();
-        } else if c && s && ch(b'N') {
-            new_item(a, false);
-        } else {
-            return None;
-        }
-        Some(true)
+    let (c, s) = (m.ctrl, m.shift);
+    if m.alt {
+        return None;
+    }
+    Some(if c && !s && (ch(b'C') || k == VK_INSERT) {
+        KeyAct::Copy
+    } else if c && !s && ch(b'X') {
+        KeyAct::Cut
+    } else if (c && !s && ch(b'V')) || (!c && s && k == VK_INSERT) {
+        KeyAct::Paste
+    } else if c && s && ch(b'C') {
+        KeyAct::CopyPath
+    } else if !c && k == VK_DELETE {
+        KeyAct::Delete { permanent: s }
+    } else if c && !s && ch(b'Z') {
+        KeyAct::Undo
+    } else if c && !s && ch(b'Y') {
+        KeyAct::Redo
+    } else if c && s && ch(b'N') {
+        KeyAct::NewFolder
+    } else {
+        return None;
     })
-    .flatten();
-    if r.is_some() {
+}
+
+/// WM_KEYDOWN before the kit: the file shortcuts of the ACTIVE pane's list
+/// (live == active outside a paint, so `a.view.tab()` is that pane's tab).
+/// True = handled.
+pub fn on_key(hwnd: HWND, vk: u16, m: Mods) -> bool {
+    let Some(act) = key_act(vk, m) else { return false };
+    let r = with(|a| {
+        if a.view.tabs.is_empty() || !a.view.list_focused(&a.ui) {
+            return false;
+        }
+        let sel = |a: &App| a.view.tab().selected_paths(MAX_ITEMS);
+        match act {
+            KeyAct::Copy => copy_files(a, sel(a), false),
+            KeyAct::Cut => copy_files(a, sel(a), true),
+            KeyAct::Paste => match active_folder(a) {
+                Some(f) => paste(a, f),
+                None => return false,
+            },
+            KeyAct::CopyPath => {
+                let t = path_text(&sel(a));
+                copy_text(a, t, "path");
+            }
+            KeyAct::Delete { permanent } => start_delete(a, sel(a), permanent),
+            KeyAct::Undo => {
+                a.view.ops.undo();
+            }
+            KeyAct::Redo => {
+                a.view.ops.redo();
+            }
+            KeyAct::NewFolder => new_item(a, false),
+        }
+        true
+    })
+    .unwrap_or(false);
+    if r {
         invalidate(hwnd);
     }
-    r.is_some()
+    r
 }
 
 fn new_item(a: &mut App, file: bool) {
@@ -572,8 +606,12 @@ pub fn on_reply(a: &mut App, r: Reply) -> Option<Reply> {
 /// panes, the sidebar, a tab, Explorer or the desktop.
 pub fn drag_out(hwnd: HWND) {
     let Some((paths, pos)) = with(|a| a.view.drag_out.take().map(|p| (p, a.ui.mouse()))).flatten() else { return };
-    // the kit's press ends here: OLE has the mouse until the drop
+    // the kit's press ends here: OLE has the mouse until the drop. Our capture
+    // goes now, so no frame painted during the drag releases OLE's.
     push(hwnd, Event::MouseUp { pos, button: Button::Left, mods: Mods::NONE });
+    if with(|a| std::mem::take(&mut a.captured)).unwrap_or(false) {
+        let _ = unsafe { ReleaseCapture() };
+    }
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
     // modal: OLE runs its own loop (paints, timers and our IDropTarget still run)
     let r = dnd::drag_files(&paths, EFFECT_COPY | EFFECT_MOVE | EFFECT_LINK, MK_LBUTTON);
@@ -687,6 +725,25 @@ fn drop_into(a: &mut App, paths: &[PathBuf], folder: String, e: u32, rejected: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_shortcuts() {
+        let m = |ctrl, shift| Mods { ctrl, shift, alt: false };
+        let k = |c: u8| c as u16;
+        assert_eq!(key_act(k(b'C'), m(true, false)), Some(KeyAct::Copy));
+        assert_eq!(key_act(VK_INSERT.0, m(true, false)), Some(KeyAct::Copy));
+        assert_eq!(key_act(k(b'X'), m(true, false)), Some(KeyAct::Cut));
+        assert_eq!(key_act(k(b'V'), m(true, false)), Some(KeyAct::Paste));
+        assert_eq!(key_act(VK_INSERT.0, m(false, true)), Some(KeyAct::Paste));
+        assert_eq!(key_act(k(b'C'), m(true, true)), Some(KeyAct::CopyPath));
+        assert_eq!(key_act(VK_DELETE.0, m(false, false)), Some(KeyAct::Delete { permanent: false }));
+        assert_eq!(key_act(VK_DELETE.0, m(false, true)), Some(KeyAct::Delete { permanent: true }));
+        assert_eq!(key_act(k(b'Z'), m(true, false)), Some(KeyAct::Undo));
+        assert_eq!(key_act(k(b'Y'), m(true, false)), Some(KeyAct::Redo));
+        assert_eq!(key_act(k(b'N'), m(true, true)), Some(KeyAct::NewFolder));
+        assert_eq!(key_act(k(b'C'), Mods { ctrl: true, shift: false, alt: true }), None);
+        assert_eq!(key_act(k(b'C'), m(false, false)), None, "typing goes to the filter");
+    }
 
     #[test]
     fn copy_as_path_quotes_each_line() {
