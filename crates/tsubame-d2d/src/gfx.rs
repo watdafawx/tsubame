@@ -137,6 +137,8 @@ mod warm {
         let work = move || {
             let t0 = std::time::Instant::now();
             let mut dev = None;
+            // no driver worker threads (as D2D makes its own devices): with
+            // them the NVIDIA driver started ~70 threads and idle CPU rose
             let r = unsafe { D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS, None, D3D11_SDK_VERSION, Some(&mut dev), None, None) };
             let ms = t0.elapsed().as_secs_f32() * 1000.0;
             {
@@ -170,6 +172,52 @@ mod warm {
         if let Ok(mut s) = SLOT.lock() {
             (s.0, s.1, s.2) = (s.0 + 1, State::Idle, None);
         }
+    }
+}
+
+/// The first stand-in's WARP device, made on a worker from process start so
+/// its creation overlaps window and folder setup (`prewarm_software`).
+mod soft {
+    use std::sync::Mutex;
+    use std::thread::JoinHandle;
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+    use windows::Win32::Graphics::Direct3D11::*;
+
+    struct Dev(ID3D11Device);
+    // SAFETY: D3D11 devices are free-threaded; made on the worker, then only
+    // the UI thread uses it.
+    unsafe impl Send for Dev {}
+    static JOB: Mutex<Option<JoinHandle<Option<Dev>>>> = Mutex::new(None);
+
+    pub fn start() {
+        let Ok(mut job) = JOB.lock() else { return };
+        if job.is_some() {
+            return;
+        }
+        *job = std::thread::Builder::new()
+            .name("warp warm-up".into())
+            .spawn(|| {
+                let mut dev = None;
+                unsafe { D3D11CreateDevice(None, D3D_DRIVER_TYPE_WARP, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut dev), None, None) }.ok()?;
+                dev.map(Dev)
+            })
+            .ok();
+    }
+
+    /// The device, waiting for the worker if it is still making it; None
+    /// when none was started (or it failed).
+    pub fn take() -> Option<ID3D11Device> {
+        let job = JOB.lock().ok()?.take()?;
+        job.join().ok().flatten().map(|d| d.0)
+    }
+}
+
+/// Start making the software stand-in's device now (call once, early in
+/// `main`): the first frame then only adds its swap chain (~5-10 ms saved).
+pub fn prewarm_software() {
+    if flip_enabled() {
+        soft::start();
     }
 }
 
@@ -289,12 +337,16 @@ impl Gfx {
         use windows::Win32::Graphics::Direct3D11::*;
         use windows::Win32::Graphics::Dxgi::*;
         unsafe {
-            let d3d = match if gpu { warm::take() } else { None } {
+            let d3d = match if gpu { warm::take() } else { soft::take() } {
                 Some(d) => d,
                 None => {
                     let mut dev = None;
                     let kind = if gpu { D3D_DRIVER_TYPE_HARDWARE } else { D3D_DRIVER_TYPE_WARP };
-                    D3D11CreateDevice(None, kind, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS, None, D3D11_SDK_VERSION, Some(&mut dev), None, None)?;
+                    // WARP rasterises on its worker threads (the stand-in's
+                    // first frame: ~16 ms of drawing instead of ~24); a GPU
+                    // driver's threads only cost idle wake-ups and memory
+                    let flags = if gpu { D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS } else { D3D11_CREATE_DEVICE_BGRA_SUPPORT };
+                    D3D11CreateDevice(None, kind, HMODULE::default(), flags, None, D3D11_SDK_VERSION, Some(&mut dev), None, None)?;
                     dev.ok_or_else(|| Error::from(E_FAIL))?
                 }
             };

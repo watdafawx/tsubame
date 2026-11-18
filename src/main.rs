@@ -163,6 +163,9 @@ fn parse_density(s: &str) -> Option<Density> {
 }
 
 fn main() {
+    // the first frame's software stand-in device, made while the window and
+    // the folder are set up
+    tsubame_d2d::prewarm_software();
     let args: Vec<String> = std::env::args().collect();
     let flag = |n: &str| args.iter().any(|a| a == n);
     let bench_mode = flag("--bench") || std::env::var_os("TSUBAME_BENCH").is_some_and(|v| v != "0");
