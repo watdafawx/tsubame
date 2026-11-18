@@ -39,3 +39,12 @@ Screenshots: `mocks/shots/ctx-<id>-light|dark.png` (ids: look, full, kinds, quic
 4. Typing in an open menu filters it? **On**, accelerators move to Alt + letter; alternatives: off, or filter only after `/`.
 
 Out of scope: Win11 `IExplorerCommand` items ("Show more options") may be missing from `QueryContextMenu`; a later spike. Accessibility (UI Automation tree, High Contrast) is plain recolouring of the tokens.
+
+## Approved answers (user, 2026-11-19)
+
+All four defaults accepted, with one change to question 3:
+
+1. Quick-action row: off by default (plain list), Settings toggle later.
+2. Submenu delay: 150 ms open, 250 ms close, safe triangle.
+3. Menu taller than the screen: first try the Windows 11 trick. When the menu does not fit, fold the common actions (Cut, Copy, Paste, Rename, Delete, Share) from their text rows into one icon-only row at the top (variant A in state 4), which frees about 5 rows. Only if it still does not fit, scroll with chevron strips. Rows never shrink.
+4. Typing filters the open menu; accelerators become Alt + letter.
