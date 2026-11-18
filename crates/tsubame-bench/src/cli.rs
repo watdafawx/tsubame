@@ -1,11 +1,13 @@
-//! Command line: `gen`, `enum`, `verify`, `coldtest`.
+//! Command line: `gen`, `gate-fixture`, `enum`, `verify`, `coldtest`, `purge`, `app`.
 
 use std::collections::{HashMap, HashSet};
 
+use crate::appbench;
 use crate::bench::{self, Method, RunOptions};
-use crate::cold;
+use crate::cold::{self, ColdStatus};
 use crate::disk;
 use crate::fixture::{self, GenSpec};
+use crate::gatefixture::{self, GateSpec};
 use crate::load;
 use crate::store::compare;
 use crate::util::{normalize_dir, unextended};
@@ -73,14 +75,17 @@ pub fn run() -> i32 {
     let rest = &argv[1..];
     let result = match cmd.as_str() {
         "gen" => cmd_gen(rest),
+        "gate-fixture" => cmd_gate_fixture(rest),
         "enum" => cmd_enum(rest),
         "verify" => cmd_verify(rest),
         "coldtest" => cmd_coldtest(),
+        "purge" => cmd_purge(rest),
+        "app" => cmd_app(rest),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
         }
-        other => Err(format!("unknown command {other:?} (try: gen, enum, verify, coldtest)")),
+        other => Err(format!("unknown command {other:?} (try: gen, gate-fixture, enum, verify, coldtest, purge, app)")),
     };
     match result {
         Ok(()) => 0,
@@ -94,12 +99,19 @@ pub fn run() -> i32 {
 fn print_help() {
     println!(
         "\
-tsubame-bench: fixture generator and directory-enumeration benchmark
+tsubame-bench: fixture generators, directory-enumeration benchmark, bench log
 
   tsubame-bench gen --root DIR [--sizes 1k,100k,1m] [--seed N] [--threads N]
                     [--tiny BYTES] [--force] [--no-verify]
       Create DIR\\<size> folders of mixed-name files. Deterministic seed,
       resumable (an existing complete folder is skipped).
+
+  tsubame-bench gate-fixture --root DIR [--tiny 190] [--small 9] [--big 1]
+                    [--tiny-files 20] [--small-files 1000] [--big-files 10000]
+                    [--seed N] [--threads N] [--force]
+      Create DIR\\gate: the leak gate's tree of at least 200 folders of mixed
+      sizes (tiny, 1000-file and 10000-file folders, plus .exe/.lnk files so
+      the per-path icon cache is exercised). Resumable, marker-verified.
 
   tsubame-bench enum --dir DIR [--method find|nt64k|nt1m|gfhie|all] [--runs N]
                      [--cold] [--purge-mode standby|filecache|working]
@@ -121,6 +133,18 @@ tsubame-bench: fixture generator and directory-enumeration benchmark
 
   tsubame-bench coldtest
       Report whether the cold-cache purge is available on this token.
+
+  tsubame-bench purge [--mode working|standby|filecache]
+      Flush the system caches once (needs elevation) and say what happened.
+      Exit 0 only when the purge really ran: tools/bench-rig.ps1 uses this to
+      decide whether a cold-cache app run is possible.
+
+  tsubame-bench app --reports DIR [--commit SHA] [--append FILE]
+      Read one rig run's raw app reports (meta.txt, idle.txt,
+      cold-start-NN.txt, timing.txt, leak-gate.txt) and render the
+      docs/bench-log.md section: the budget table with pass/fail, the leak
+      gate evidence and the raw output. --append writes it (creating the file
+      with its header); without it the markdown goes to stdout.
 
 Methods:
   find   FindFirstFileExW, FindExInfoBasic + FIND_FIRST_EX_LARGE_FETCH
@@ -404,6 +428,76 @@ fn cmd_verify(argv: &[String]) -> Result<(), String> {
         return Err("methods disagree".to_string());
     }
     println!("verify: all methods agree");
+    Ok(())
+}
+
+fn cmd_gate_fixture(argv: &[String]) -> Result<(), String> {
+    let args = Args::parse(argv)?;
+    let root = normalize_dir(args.req("root")?);
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8)
+        .min(12);
+    let spec = GateSpec {
+        root: root.clone(),
+        tiny: args.num("tiny", 190usize)?,
+        small: args.num("small", 9usize)?,
+        big: args.num("big", 1usize)?,
+        tiny_files: args.num("tiny-files", 20usize)?,
+        small_files: args.num("small-files", 1000usize)?,
+        big_files: args.num("big-files", 10_000usize)?,
+        seed: args.num("seed", DEFAULT_SEED)?,
+        threads: args.num("threads", cpus)?.max(1),
+        force: args.flag("force"),
+    };
+    if spec.folders() < 200 {
+        return Err(format!(
+            "the gate needs 200 folders or more, this spec has {} (see docs/bench.md)",
+            spec.folders()
+        ));
+    }
+    gatefixture::generate(&spec)?;
+    println!("gate-fixture: {} folders under {root}\\gate", spec.folders());
+    Ok(())
+}
+
+fn cmd_purge(argv: &[String]) -> Result<(), String> {
+    let args = Args::parse(argv)?;
+    let mode = cold::PurgeMode::parse(args.get("mode").unwrap_or("working"))
+        .ok_or_else(|| "--mode: unknown value (working, standby, filecache)".to_string())?;
+    let status = cold::purge(mode);
+    let mut text = String::new();
+    match &status {
+        ColdStatus::Purged => text.push_str(&format!("purge: {} ok\n", mode.name())),
+        other => text.push_str(&format!("purge: {} {} ({})\n", mode.name(), other.label(), other.detail().unwrap_or(""))),
+    }
+    text.push_str(&format!("elevation: {}\n", cold::elevation_note()));
+    print!("{text}");
+    // an elevated run's stdout does not reach the ssh session: the harness
+    // reads the file instead (`gsudo -n <exe> purge --out FILE`)
+    if let Some(path) = args.get("out") {
+        std::fs::write(path, &text).map_err(|e| format!("{path}: {e}"))?;
+    }
+    if status != ColdStatus::Purged {
+        return Err(format!(
+            "purge {} did not run: {}",
+            mode.name(),
+            status.detail().unwrap_or("not permitted on this token")
+        ));
+    }
+    Ok(())
+}
+
+fn cmd_app(argv: &[String]) -> Result<(), String> {
+    let args = Args::parse(argv)?;
+    let dir = args.req("reports")?;
+    let commit = args.get("commit").unwrap_or("");
+    let append = args.get("append").map(std::path::PathBuf::from);
+    let text = appbench::run(std::path::Path::new(dir), commit, append.as_deref())?;
+    println!("{text}");
+    if let Some(p) = append {
+        println!("app: appended the section to {}", p.display());
+    }
     Ok(())
 }
 

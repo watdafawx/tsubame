@@ -16,6 +16,14 @@
 //!                 (the first one is also the start folder), `--reps N` per folder
 //!   --leak-smoke  no window: 200 navigations + 50 tab open/close, writes
 //!                 `u2-leak.txt` (private bytes before/after)
+//!   --leak-gate   the full gate in this window: 10,000 navigations + 1,000
+//!                 tab open/close over a fixture tree, counters sampled every
+//!                 1,000 ops and after a 5 s settle; writes `leak-gate.txt`
+//!                 (env TSUBAME_LEAK_OUT renames it) and exits 0 on pass, 1 on
+//!                 fail. `--gate-fixture DIR` the folder tree (default: the
+//!                 start folder), `--gate-navs N`, `--gate-tabs N`,
+//!                 `--gate-sample N` (ops per counter sample, 1,000),
+//!                 `--gate-settle S` (idle seconds before the end sample, 5)
 //!   --stress m    S4 stress run (menu: 200 context menus; thumbs: 500 thumbnails)
 //!   --workers N   shell STA workers (default 2)
 //! Env: TSUBAME_ICON_PER_PATH=1 asks every real file's icon by path (worst
@@ -91,6 +99,8 @@ struct App {
     gfx: Gfx,
     bench: Option<bench::Bench>,
     timing: Option<timing::Run>,
+    /// `--leak-gate`: the full in-window leak gate
+    gate: Option<leak::Gate>,
     first_done: bool,
     pool: Pool,
     shell: shellui::ShellUi,
@@ -152,11 +162,12 @@ fn main() {
     let flag = |n: &str| args.iter().any(|a| a == n);
     let bench_mode = flag("--bench") || std::env::var_os("TSUBAME_BENCH").is_some_and(|v| v != "0");
     let timing_mode = flag("--timing");
+    let gate_mode = flag("--leak-gate");
     let stress_mode = arg_value(&args, "--stress").map(|m| if m == "thumbs" { stress::Mode::Thumbs } else { stress::Mode::Menu });
     let workers = arg_value(&args, "--workers").and_then(|v| v.parse().ok()).unwrap_or(2usize);
     let timing_dirs: Vec<String> = arg_value(&args, "--timing-dirs").map(|s| s.split(';').filter(|p| !p.is_empty()).map(str::to_string).collect()).unwrap_or_default();
     // first bare argument that is not a flag value is the folder to open
-    const VALUE_FLAGS: [&str; 7] = ["--dir", "--theme", "--density", "--stress", "--workers", "--timing-dirs", "--reps"];
+    const VALUE_FLAGS: [&str; 12] = ["--dir", "--theme", "--density", "--stress", "--workers", "--timing-dirs", "--reps", "--gate-fixture", "--gate-navs", "--gate-tabs", "--gate-sample", "--gate-settle"];
     let positional = args.iter().enumerate().skip(1).find(|(i, a)| !a.starts_with("--") && !VALUE_FLAGS.contains(&args[i - 1].as_str())).map(|(_, a)| a.clone());
     let explicit_dir = arg_value(&args, "--dir").or(positional);
     let synthetic = bench_mode && explicit_dir.is_none();
@@ -235,6 +246,15 @@ fn main() {
         view.zebra = flag("--zebra");
 
         let timing = timing_mode.then(|| timing::Run::new(if timing_dirs.is_empty() { vec![start.clone()] } else { timing_dirs.clone() }, arg_value(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(3)));
+        let gate = gate_mode.then(|| {
+            leak::Gate::new(
+                arg_value(&args, "--gate-fixture").as_deref().unwrap_or(&start),
+                arg_value(&args, "--gate-navs").and_then(|v| v.parse().ok()).unwrap_or(10_000),
+                arg_value(&args, "--gate-tabs").and_then(|v| v.parse().ok()).unwrap_or(1_000),
+                arg_value(&args, "--gate-sample").and_then(|v| v.parse().ok()).unwrap_or(1_000),
+                std::time::Duration::from_secs(arg_value(&args, "--gate-settle").and_then(|v| v.parse().ok()).unwrap_or(5)),
+            )
+        });
 
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
@@ -247,6 +267,7 @@ fn main() {
                 gfx,
                 bench: bench_state,
                 timing,
+                gate,
                 first_done: false,
                 pool,
                 shell,
@@ -261,7 +282,7 @@ fn main() {
         });
 
         // bench and timing runs measure at full screen (4K on rig)
-        let maximize = (bench_mode || timing_mode) && !flag("--windowed");
+        let maximize = (bench_mode || timing_mode || gate_mode) && !flag("--windowed");
         let _ = ShowWindow(hwnd, if maximize { SW_SHOWMAXIMIZED } else { SW_SHOW });
 
         // Idle = blocked here. Timers only while a bench/stress run, the
@@ -275,6 +296,10 @@ fn main() {
         // thread-local destructor run inside ExitProcess crashes in D3D teardown)
         let taken = APP.with(|a| a.try_borrow_mut().ok().and_then(|mut a| a.take()));
         drop(taken);
+        // the leak gate's verdict is the process exit code: 0 pass, 1 fail
+        if leak::GATE_FAILED.load(Ordering::Acquire) {
+            std::process::exit(1);
+        }
     }
 }
 
@@ -370,6 +395,9 @@ unsafe fn on_paint(hwnd: HWND) {
         let out = a.view.paint(&mut a.ui, &mut a.gfx, &mut a.shell);
         let total = t0.elapsed().as_secs_f32() * 1000.0;
         after_paint(hwnd, a);
+        if let Some(g) = a.gate.as_mut() {
+            g.painted(a.gfx.path());
+        }
         if let Some(s) = a.stress.as_mut() {
             s.painted(total);
         }
@@ -398,6 +426,9 @@ unsafe fn on_paint(hwnd: HWND) {
         if let Some(t) = a.timing.as_mut() {
             t.first_paint(ms, bench::memory().0);
         }
+        if let Some(g) = a.gate.as_mut() {
+            g.env((rc.right, rc.bottom), a.gfx.dpi, a.gfx.path());
+        }
         Some(ms)
     })
     .flatten();
@@ -408,6 +439,11 @@ unsafe fn on_paint(hwnd: HWND) {
         if with(|a| a.stress.is_some()).unwrap_or(false) {
             unsafe { SetTimer(Some(hwnd), stress::TIMER_ID, stress::TICK_MS, None) };
         }
+        // the gate is driven by paints and shell/enumerator messages; the
+        // timer only keeps a lost wake from stalling it
+        if with(|a| a.gate.is_some()).unwrap_or(false) {
+            unsafe { SetTimer(Some(hwnd), leak::TIMER_ID, leak::TICK_MS, None) };
+        }
     } else {
         with(|a| {
             if let Some(b) = a.bench.as_mut() {
@@ -417,6 +453,10 @@ unsafe fn on_paint(hwnd: HWND) {
     }
     if final_frame {
         timing_step(hwnd);
+    }
+    // the leak gate advances on every completed paint
+    if with(|a| a.gate.is_some()).unwrap_or(false) {
+        on_gate(hwnd);
     }
 }
 
@@ -442,6 +482,25 @@ fn timing_step(hwnd: HWND) {
         }
         Some(false) => invalidate(hwnd),
         None => {}
+    }
+}
+
+/// One `--leak-gate` step. Never blocks and never dispatches messages: the
+/// gate moves on paints, enumerator wakes, shell replies and its timer.
+fn on_gate(hwnd: HWND) {
+    let r = with(|a| {
+        let App { gate, view, shell, pool, .. } = a;
+        gate.as_mut().map(|g| g.step(view, shell, pool))
+    })
+    .flatten();
+    match r {
+        Some(leak::Step::Repaint) => invalidate(hwnd),
+        Some(leak::Step::Done) => unsafe {
+            let _ = KillTimer(Some(hwnd), leak::TIMER_ID);
+            // WM_CLOSE, not DestroyWindow: this can run inside a paint
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        },
+        _ => {}
     }
 }
 
@@ -954,6 +1013,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_TIMER if wp.0 == stress::TIMER_ID => {
                 on_stress_tick(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == leak::TIMER_ID => {
+                on_gate(hwnd);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == CARET_TIMER => {
