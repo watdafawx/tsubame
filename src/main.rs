@@ -48,10 +48,13 @@ mod bench;
 mod cli;
 mod clip;
 mod cols;
+mod custom_cmd;
 mod commands;
 mod data;
 mod dnd;
 mod editing;
+mod fuzzy;
+mod keymap;
 mod leak;
 mod lru;
 mod memdiag;
@@ -59,9 +62,11 @@ mod nav;
 mod ole_glue;
 mod ops;
 mod overlay;
+mod palette;
 mod panes;
 mod rename;
 mod session;
+mod settings;
 mod shellops;
 mod statusbar;
 mod shellui;
@@ -71,10 +76,11 @@ mod stress;
 mod tab;
 mod tabs;
 mod timing;
+mod updates;
 mod view;
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tsubame_config::{Density as ConfigDensity, LoadStatus};
@@ -101,6 +107,10 @@ const WM_APP_WAKE: u32 = WM_APP + 2;
 const WM_APP_PLACES: u32 = WM_APP + 3;
 /// A second launch forwarded paths (see `single`).
 const WM_APP_OPEN: u32 = WM_APP + 4;
+/// The updater changed state (check result, download progress): repaint Settings > Updates.
+const WM_APP_UPDATE: u32 = WM_APP + 5;
+/// The main window, for the updater's wake function (0 until it exists).
+static UPDATE_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Hung-worker watchdog: armed only while the pool has icon/thumbnail work.
 const WATCH_TIMER: usize = 2;
 /// Caret blink: exists only while a text field has focus.
@@ -340,6 +350,24 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
 
+        // --- updater ----------------------------------------------------------
+        // before the single-instance claim: a copy the updater just started waits for the
+        // old process, and a crashed update rolls back here. No network and no disk in a
+        // dev run.
+        if let Some(pid) = cli.after_update {
+            updates::wait_for_exit(pid, Duration::from_secs(10));
+        }
+        let upd_env = updates::Env { dev_run: dev, portable: cli.portable || loc.portable, bench: bench_mode };
+        let wake = || {
+            let h = UPDATE_HWND.load(Ordering::Acquire);
+            if h != 0 {
+                let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(0));
+            }
+        };
+        if updates::init(upd_env, cfg.updates.auto_install, wake) == updates::StartAction::Exit {
+            return;
+        }
+
         // --- single instance --------------------------------------------------
         // Claimed before the window exists, so a forwarded launch that arrives
         // while this process is still setting up waits in the queue.
@@ -376,6 +404,7 @@ fn main() {
         // no WS_CAPTION: the kit draws the title bar (WM_NCCALCSIZE gives it the whole window)
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         single::set_main(hwnd);
+        UPDATE_HWND.store(hwnd.0 as isize, Ordering::Release);
         // OLE STA + drop target, before anything else uses COM on this thread
         let drop_target = shellops::init(hwnd);
 
@@ -415,8 +444,23 @@ fn main() {
         });
 
         let mut view = view::View::new(&start, wake, dark, density);
+        // where this copy lives (Settings shows it) and the settings as the user has them
+        view.env = settings::Env {
+            config_path: loc.config.clone(),
+            data_dir: loc.data_dir.clone(),
+            install_dir: std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default(),
+            exe: std::env::current_exe().unwrap_or_default(),
+            portable: cli.portable || loc.portable,
+            system_dark: system_dark(),
+            version: env!("CARGO_PKG_VERSION"),
+        };
+        let theme_from_cfg = !dev && cfg_status != LoadStatus::Missing && arg_value(&args, "--theme").is_none();
+        // a measurement run uses the defaults and shows every file
+        view.set_prefs(&if dev { tsubame_config::Config::default() } else { cfg.clone() }, !dev, theme_from_cfg);
+        view.publish_menu();
         // config appearance and panes
         view.zebra = flag("--zebra") || (!dev && cfg.appearance.zebra);
+        view.pull_appearance();
         // set the field directly: no tab has been listed yet, and starting up must not dirty the config
         view.mode = if dev { view::ViewMode::Details } else { view::ViewMode::from_config(cfg.appearance.view_mode) };
         view.sidebar_width = if dev { tsubame_config::DEFAULT_SIDEBAR_WIDTH } else { cfg.panes.sidebar_width.clamp(120.0, 480.0) };
@@ -462,7 +506,7 @@ fn main() {
         }
 
         let mut ui = Ui::new(view.base_theme());
-        view::bind_shortcuts(&mut ui);
+        view.keymap.bind_all(&mut ui);
         ui.clipboard = Box::new(clip::WinClipboard(hwnd.0 as isize));
         ui.set_focus(Some(view.list_id()));
         view.dpi = dpi;
@@ -532,6 +576,16 @@ fn main() {
         // thread-local destructor run inside ExitProcess crashes in D3D teardown)
         let taken = APP.with(|a| a.try_borrow_mut().ok().and_then(|mut a| a.take()));
         drop(taken);
+        // "Download and restart" / "Roll back": the window is gone and the session saved
+        match AFTER_EXIT.load(Ordering::Acquire) {
+            1 => {
+                updates::restart();
+            }
+            2 => {
+                updates::rollback_and_relaunch();
+            }
+            _ => {}
+        }
         // the leak gate's verdict is the process exit code: 0 pass, 1 fail
         if leak::GATE_FAILED.load(Ordering::Acquire) {
             std::process::exit(1);
@@ -631,6 +685,36 @@ fn after_paint(hwnd: HWND, a: &mut App) {
     if a.view.want_drives && !PLACES_BUSY.load(Ordering::Acquire) {
         a.view.want_drives = false;
         spawn_places(hwnd);
+    }
+}
+
+/// What to do after the process exits: 1 start the updated version, 2 roll back.
+static AFTER_EXIT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Requests the Settings pages made that main must carry out: restart into the updated
+/// version, roll back, reset every setting.
+fn settings_requests(hwnd: HWND) {
+    let (restart, rollback, reset) = with(|a| (std::mem::take(&mut a.view.want_restart), std::mem::take(&mut a.view.want_rollback), std::mem::take(&mut a.view.want_reset_all))).unwrap_or_default();
+    if reset {
+        with(|a| {
+            let old = a.saver.config.config.clone();
+            // the old file stays as config.toml.bak
+            let _ = std::fs::copy(&a.saver.loc.config, a.saver.loc.config.with_file_name("config.toml.bak"));
+            let mut def = tsubame_config::Config::default();
+            def.window = old.window;
+            def.panes = old.panes;
+            def.sidebar = old.sidebar;
+            let App { view, ui, .. } = a;
+            view.reset_prefs(ui, &def);
+            view.ops.message = Some("All settings are back to the defaults. The old file is config.toml.bak.".to_string());
+        });
+        invalidate(hwnd);
+    }
+    if restart || rollback {
+        AFTER_EXIT.store(if restart { 1 } else { 2 }, Ordering::Release);
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
     }
 }
 
@@ -753,6 +837,11 @@ unsafe fn on_paint(hwnd: HWND) {
     })
     .flatten();
     if first.is_some() {
+        // the update (if any) took: end its trial; then the once-a-day background check
+        // (a worker; a no-op in a dev run, a portable copy, or with the setting off)
+        updates::on_ready();
+        let auto = with(|a| a.saver.config.config.updates.auto_check).unwrap_or(false);
+        updates::auto_check(auto);
         if with(|a| a.bench.is_some()).unwrap_or(false) {
             unsafe { SetTimer(Some(hwnd), bench::TIMER_ID, bench::TICK_MS, None) };
         }
@@ -1001,6 +1090,7 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
         let _ = unsafe { DestroyWindow(hwnd) };
         return;
     }
+    settings_requests(hwnd);
     if out.repaint {
         invalidate(hwnd);
     }
@@ -1056,6 +1146,8 @@ fn map_key(vk: u16) -> Key {
         v if (VK_F1.0..=VK_F24.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
         v if (0x30..=0x39).contains(&v.0) || (0x41..=0x5a).contains(&v.0) => Key::Char(v.0 as u8 as char),
         v if v.0 == 0xDC => Key::Char('\\'), // VK_OEM_5: the backslash key (Ctrl+\ splits the window)
+        // the other punctuation keys, so they can be bound (Ctrl+, opens Settings)
+        v if crate::keymap::oem_char(v.0).is_some() => Key::Char(crate::keymap::oem_char(v.0).unwrap_or(' ')),
         v => Key::Other(v.0 as u32),
     }
 }
@@ -1383,6 +1475,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         a.ui.caret_on = !a.ui.caret_on;
                     }
                 });
+                invalidate(hwnd);
+                LRESULT(0)
+            }
+            WM_APP_UPDATE => {
+                // only Settings > Updates shows update state: repaint when it is visible
                 invalidate(hwnd);
                 LRESULT(0)
             }

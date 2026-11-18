@@ -26,12 +26,14 @@ use crate::shellui::GridPic;
 use tsubame_config::DEFAULT_SIDEBAR_WIDTH;
 use tsubame_core::{EntryId, EntryStore, Selection};
 use tsubame_ui::{
-    BandCells, Button, Canvas, Cursor, DARK, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, LIGHT, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header, f, grid, list, splitter, tab_strip, text_input,
+    BandCells, Button, Canvas, Cursor, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header, f, grid, list, splitter, tab_strip, text_input,
 };
 use tsubame_win::enumerate::Wake;
 
 #[path = "view_edit.rs"]
 mod edit;
+#[path = "view_u4.rs"]
+mod u4;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
 use crate::ops::Ops;
@@ -182,11 +184,6 @@ pub enum WinCmd {
     Close,
 }
 
-/// Binds the keyboard shortcuts (global ones run even in a text field).
-pub fn bind_shortcuts(ui: &mut Ui) {
-    crate::commands::bind_all(ui);
-}
-
 /// Breadcrumbs of the shown path with their text widths (recomputed only
 /// when the path or the text size changes).
 #[derive(Default)]
@@ -302,6 +299,27 @@ pub struct View {
     pub ops_timer: bool,
     /// where the sidebar says a drag would land
     side_target: Option<crate::sidebar::DropTarget>,
+    /// the settings as the user has them (U4): Settings edits this, `config_dirty` saves it
+    pub prefs: tsubame_config::Config,
+    /// id of the colour theme (`themes::find`)
+    pub theme_id: String,
+    /// the key map (defaults + `[keys.overrides]`)
+    pub keymap: crate::keymap::KeyMap,
+    /// the command palette, built when it opens and dropped when it closes
+    palette: Option<Box<crate::palette::Palette>>,
+    /// command ids run from the palette, most recent first
+    recents: Vec<u32>,
+    /// the Settings tab's pages, built when the tab opens and dropped when it closes
+    settings: Option<Box<crate::settings::Settings>>,
+    /// where this copy lives (main fills it in)
+    pub env: crate::settings::Env,
+    /// main must restart into the updated version / roll back / reset the config
+    pub want_restart: bool,
+    pub want_rollback: bool,
+    pub want_reset_all: bool,
+    /// private bytes of the process, sampled at most once a second while Settings is shown
+    pub private_bytes: usize,
+    private_at: Option<std::time::Instant>,
 }
 
 impl View {
@@ -372,11 +390,23 @@ impl View {
             cur_mods: Mods::default(),
             ops_timer: false,
             side_target: None,
+            prefs: tsubame_config::Config::default(),
+            theme_id: tsubame_ui::themes::tsubame(dark).id.to_string(),
+            keymap: crate::keymap::KeyMap::defaults(),
+            palette: None,
+            recents: Vec::new(),
+            settings: None,
+            env: crate::settings::Env::default(),
+            want_restart: false,
+            want_rollback: false,
+            want_reset_all: false,
+            private_bytes: 0,
+            private_at: None,
         }
     }
 
     pub fn base_theme(&self) -> Theme {
-        let mut t = Theme::with_density(if self.dark { &DARK } else { &LIGHT }, self.density);
+        let mut t = self.themed();
         t.layout_sidebar_width = if self.side.rail { crate::sidebar::RAIL_W } else { self.sidebar_width };
         t
     }
@@ -501,7 +531,7 @@ impl View {
         let changed = self.orient != orient || dual != self.dual();
         self.orient = orient;
         if dual && self.other.is_none() {
-            let path = self.tab().path.clone();
+            let path = self.folder_path();
             let id = self.next_tab_id;
             self.next_tab_id += 1;
             let mut t = Tab::new(id, &path, self.density.row_h());
@@ -543,6 +573,9 @@ impl View {
 
     /// Opens `path` in the current tab and records it in the history.
     pub fn go(&mut self, path: &str) {
+        if self.tab().settings {
+            return self.open_in_new_tab(path);
+        }
         let wake = self.wake.clone();
         let t = self.tab_mut();
         t.history.push(path);
@@ -567,6 +600,9 @@ impl View {
     }
 
     pub fn back(&mut self) {
+        if self.tab().settings {
+            return;
+        }
         let wake = self.wake.clone();
         let t = self.tab_mut();
         if let Some(p) = t.history.back().map(str::to_string) {
@@ -575,6 +611,9 @@ impl View {
         }
     }
     pub fn forward(&mut self) {
+        if self.tab().settings {
+            return;
+        }
         let wake = self.wake.clone();
         let t = self.tab_mut();
         if let Some(p) = t.history.forward().map(str::to_string) {
@@ -588,6 +627,9 @@ impl View {
         }
     }
     pub fn refresh(&mut self) {
+        if self.tab().settings {
+            return;
+        }
         let wake = self.wake.clone();
         let t = self.tab_mut();
         let p = t.path.clone();
@@ -597,7 +639,7 @@ impl View {
     }
 
     pub fn new_tab(&mut self) {
-        let path = self.tab().path.clone();
+        let path = self.folder_path();
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let mut t = Tab::new(id, &path, self.density.row_h());
@@ -611,7 +653,11 @@ impl View {
     /// Closes tab `i`: its store is freed and its enumeration cancelled
     /// (the tab drops). The last tab closing ends the window.
     pub fn close_tab(&mut self, i: usize) {
+        let was_settings = self.tabs.items.get(i).is_some_and(|t| t.settings);
         drop(self.tabs.close(i));
+        if was_settings {
+            self.settings = None;
+        }
         if self.tabs.is_empty() {
             self.quit = true;
         } else {
@@ -781,6 +827,8 @@ impl View {
 
     fn set_dark(&mut self, ui: &mut Ui, dark: bool) {
         self.dark = dark;
+        self.theme_id = tsubame_ui::themes::tsubame(dark).id.to_string();
+        self.pull_appearance();
         self.config_dirty = true;
         self.apply_theme(ui);
     }
@@ -826,6 +874,13 @@ impl View {
     }
 
     fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
+        if self.tab().settings && !u4::settings_tab_allows(cmd) {
+            return;
+        }
+        if self.run_u4(ui, cmd) {
+            ui.request_repaint();
+            return;
+        }
         match cmd {
             CMD_NEW_TAB => self.new_tab(),
             CMD_CLOSE_TAB => self.close_tab(self.tabs.active),
@@ -848,11 +903,13 @@ impl View {
             CMD_THEME => self.set_dark(ui, !self.dark),
             CMD_DENSITY => {
                 self.density = self.density.next();
+                self.pull_appearance();
                 self.config_dirty = true;
                 self.apply_theme(ui);
             }
             CMD_ZEBRA => {
                 self.zebra = !self.zebra;
+                self.pull_appearance();
                 self.config_dirty = true;
             }
             CMD_REFRESH => self.refresh(),
@@ -904,7 +961,7 @@ impl View {
             CMD_UNDO => self.undo_op(),
             CMD_REDO => self.redo_op(),
             CMD_PIN_FOLDER => {
-                let p = self.selected_folder().unwrap_or_else(|| self.tab().path.clone());
+                let p = self.selected_folder().unwrap_or_else(|| self.folder_path());
                 let n = self.side.pinned.len();
                 if self.side.pin_at(&p, n) {
                     self.ops.message = Some(format!("Pinned {}", crate::dnd::name_of(&p)));
@@ -924,7 +981,7 @@ impl View {
             CMD_TAB_TO_OTHER => self.move_tab_to_other(),
             CMD_SYNC_OTHER => {
                 if self.other.is_some() {
-                    let p = self.tab().path.clone();
+                    let p = self.folder_path();
                     let slot = panes::other(self.active);
                     self.with_pane(slot, |v| v.go(&p));
                 }
@@ -1034,6 +1091,8 @@ impl View {
             return Some(out);
         }
         self.sync_tab_binding(ui);
+        // the palette and the key recorder set this again while they are painted
+        ui.capture_keys = false;
         // a press that starts in the other pane makes it the active one
         let held = ui.active().is_some();
         if held && !self.ptr_was_active && self.other.is_some() {
@@ -1055,6 +1114,11 @@ impl View {
         let t = ui.theme;
         if self.other.is_some() {
             self.paint_dual(ui, g, shell, (w, h), &t);
+        } else if self.tab().settings {
+            let mut r = tsubame_ui::Rect::new(0.0, 0.0, w, h);
+            let titlebar = r.cut_top(t.height_titlebar);
+            self.paint_settings(ui, g, r);
+            self.paint_titlebar(ui, g, titlebar, &t, true);
         } else {
             let mut r = tsubame_ui::Rect::new(0.0, 0.0, w, h);
             let titlebar = r.cut_top(t.height_titlebar);
@@ -1083,6 +1147,7 @@ impl View {
         let oa = self.side.paint_overlay(ui, g, self.other.is_some());
         self.side_act(ui, oa);
         self.paint_batch_preview(g, &t, (w, h));
+        self.paint_palette(ui, g, (w, h));
         let target = self.side_target.take();
         self.finish_drag(ui, g, &t, target.as_ref());
         self.sole_hist = [self.sole_hist[1], self.sole_row()];
@@ -1098,7 +1163,7 @@ impl View {
             again = true;
         }
         // typing in the list starts the filter
-        let typed: Vec<char> = ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect();
+        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
         for c in typed {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
@@ -1173,6 +1238,12 @@ impl View {
     fn paint_pane(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, rect: Rect, t: &Theme, active: bool) {
         let mut r = rect;
         let strip_r = r.cut_top(PANE_STRIP_H);
+        if self.tab().settings {
+            g.fill(strip_r, t.bg);
+            self.paint_settings(ui, g, r);
+            self.paint_tabs(ui, g, strip_r);
+            return;
+        }
         let toolbar = r.cut_top(t.height_toolbar);
         let status = r.cut_bottom(t.height_status_bar);
         let batch_bar = r.cut_top(self.batch_h());
@@ -1985,7 +2056,7 @@ mod tests {
 
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use tsubame_ui::TestCanvas;
+    use tsubame_ui::{LIGHT, TestCanvas};
 
     struct Rig {
         v: View,
@@ -2005,7 +2076,7 @@ mod tests {
             let wake: Wake = Arc::new(|| {});
             let v = View::new(dir.to_str().unwrap(), wake, true, Density::Compact);
             let mut ui = Ui::new(v.base_theme());
-            bind_shortcuts(&mut ui);
+            v.keymap.bind_all(&mut ui);
             let mut r = Rig { v, ui, c: TestCanvas::new(1120.0, 720.0), shell: ShellUi::new(16), dir };
             r.settle();
             r
@@ -2427,5 +2498,198 @@ mod tests {
         r.click(60.0, y);
         r.settle();
         assert_eq!(r.v.tab().path, target);
+    }
+
+    // ---- U4: palette, Settings tab, live preferences ---------------------
+
+    use crate::settings::{C_APPEARANCE, C_HIDE, C_KEYS, Page};
+
+    fn settings_tabs(v: &mut View) -> usize {
+        (0..2).filter_map(|s| v.pane_tabs(s).map(|t| t.items.iter().filter(|t| t.settings).count())).sum()
+    }
+
+    #[test]
+    fn palette_opens_with_both_chords_and_closes_with_escape() {
+        let mut r = Rig::new("u4-pal");
+        assert!(!r.v.palette_open());
+        r.key(Key::Char('P'), Mods::CTRL_SHIFT);
+        assert!(r.v.palette_open());
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.palette_open());
+        r.key(Key::Char('K'), Mods::CTRL);
+        assert!(r.v.palette_open());
+        // the same chord toggles it shut again
+        r.key(Key::Char('P'), Mods::CTRL_SHIFT);
+        assert!(!r.v.palette_open());
+        assert!(!r.ui.capture_keys);
+    }
+
+    #[test]
+    fn a_prefix_typed_over_a_selection_still_switches_the_mode() {
+        let mut r = Rig::new("u4-prefix");
+        r.key(Key::Char('K'), Mods::CTRL);
+        for c in "rn".chars() {
+            r.ui.push(Event::Char(c));
+            r.frame();
+        }
+        assert_eq!(r.v.palette.as_ref().unwrap().mode, crate::palette::Mode::Commands);
+        r.key(Key::Char('A'), Mods::CTRL);
+        r.ui.push(Event::Char('/'));
+        r.frame();
+        let p = r.v.palette.as_ref().unwrap();
+        assert_eq!(p.mode, crate::palette::Mode::Path);
+        assert!(p.input.text.is_empty());
+    }
+
+    #[test]
+    fn running_a_palette_command_puts_it_first_in_the_recents() {
+        let mut r = Rig::new("u4-recent");
+        let zebra = r.v.zebra;
+        r.v.run_palette_action(&mut r.ui, crate::palette::Action::Run { id: CMD_ZEBRA, keep: false });
+        r.v.run_palette_action(&mut r.ui, crate::palette::Action::Run { id: CMD_SIDEBAR, keep: false });
+        r.v.run_palette_action(&mut r.ui, crate::palette::Action::Run { id: CMD_ZEBRA, keep: false });
+        assert_eq!(r.v.recents, vec![CMD_ZEBRA, CMD_SIDEBAR]);
+        // the command really ran (twice: zebra is back where it was)
+        assert_eq!(r.v.zebra, zebra);
+    }
+
+    #[test]
+    fn settings_is_one_tab_across_both_panes_and_is_not_saved() {
+        let mut r = Rig::new("u4-single");
+        r.key(Key::Char(','), Mods::CTRL);
+        r.key(Key::Char(','), Mods::CTRL);
+        assert_eq!(settings_tabs(&mut r.v), 1);
+        assert!(r.v.settings_open());
+        assert!(r.v.tab().settings);
+        // a second pane does not get a second copy
+        r.v.set_layout(true, tsubame_config::Split::Vertical);
+        r.v.set_active_pane(1);
+        r.v.open_settings(None);
+        assert_eq!(settings_tabs(&mut r.v), 1);
+        // session capture skips it
+        let s = crate::session::capture(&r.v, tsubame_config::WindowState::default());
+        assert!(s.panes.iter().all(|p| !p.tabs.is_empty() && p.tabs.iter().all(|t| !t.path.is_empty())));
+        // closing it frees the page state
+        let slot = (0..2).find(|&s| r.v.pane_tabs(s).is_some_and(|t| t.items.iter().any(|t| t.settings))).unwrap();
+        r.v.set_active_pane(slot);
+        let i = r.v.tabs.items.iter().position(|t| t.settings).unwrap();
+        r.v.close_tab(i);
+        assert!(!r.v.settings_open());
+        assert_eq!(settings_tabs(&mut r.v), 0);
+    }
+
+    #[test]
+    fn every_settings_page_paints_in_both_themes_and_three_densities() {
+        use tsubame_config::Density as D;
+        let mut r = Rig::new("u4-pages");
+        r.v.open_settings(None);
+        for theme in ["tsubame-dark", "tsubame-light"] {
+            for d in [D::Compact, D::Normal, D::Comfortable] {
+                r.v.prefs.appearance.theme = theme.to_string();
+                r.v.prefs.appearance.density = d;
+                r.v.apply_prefs(&mut r.ui, C_APPEARANCE);
+                for p in Page::ALL {
+                    r.v.open_settings(Some(p));
+                    r.frame();
+                    assert!(r.c.ops.len() > 20, "{theme} {d:?} {p:?} drew almost nothing");
+                }
+            }
+        }
+        r.v.prefs.appearance.density = D::Compact;
+        r.v.apply_prefs(&mut r.ui, C_APPEARANCE);
+    }
+
+    #[test]
+    fn appearance_changes_apply_live() {
+        let mut r = Rig::new("u4-live");
+        let rows = r.ui.theme.height_list_row;
+        r.v.prefs.appearance.density = tsubame_config::Density::Comfortable;
+        r.v.apply_prefs(&mut r.ui, C_APPEARANCE);
+        assert!(r.ui.theme.height_list_row > rows);
+        assert!(r.v.config_dirty);
+        r.v.prefs.appearance.theme = "tsubame-light".into();
+        r.v.apply_prefs(&mut r.ui, C_APPEARANCE);
+        assert!(!r.v.dark);
+        assert_eq!(r.v.theme_id, "tsubame-light");
+        r.v.prefs.appearance.accent = Some("#ff8800".into());
+        r.v.prefs.appearance.font_scale = 1.25;
+        r.v.apply_prefs(&mut r.ui, C_APPEARANCE);
+        assert_eq!(r.ui.theme.accent & 0xffffff, 0xff8800);
+        r.frame();
+    }
+
+    #[test]
+    fn show_hidden_toggle_changes_the_listing_live() {
+        use std::os::windows::process::CommandExt;
+        let mut r = Rig::new("u4-hide");
+        let hidden = r.dir.join("secret.txt");
+        std::fs::write(&hidden, b"x").unwrap();
+        let ok = std::process::Command::new("attrib").arg("+h").arg(&hidden).creation_flags(0x0800_0000).status().map(|s| s.success()).unwrap_or(false);
+        assert!(ok, "attrib failed");
+        r.v.go(r.dir.to_str().unwrap());
+        r.settle();
+        // the default rule hides hidden and system files
+        r.v.prefs.general.show_hidden = false;
+        r.v.prefs.general.show_system = false;
+        r.v.apply_prefs(&mut r.ui, C_HIDE);
+        r.settle();
+        let before = r.v.tab().shown();
+        assert_eq!(before, 3, "alpha, beta, Docs");
+        r.v.prefs.general.show_hidden = true;
+        r.v.apply_prefs(&mut r.ui, C_HIDE);
+        r.settle();
+        assert_eq!(r.v.tab().shown(), before + 1);
+        // the dev-run default (everything shown) is back for the tests that follow
+        r.v.prefs.general.show_system = true;
+        r.v.apply_prefs(&mut r.ui, C_HIDE);
+    }
+
+    #[test]
+    fn rebinding_a_key_applies_live_and_survives_a_round_trip() {
+        use crate::keymap::{Chord, KeyMap};
+        let mut r = Rig::new("u4-rebind");
+        let chord = Chord::new(Key::Char('J'), Mods::CTRL);
+        assert_eq!(r.v.keymap.assign(CMD_ZEBRA, 0, chord), Ok(None));
+        r.v.apply_prefs(&mut r.ui, C_KEYS);
+        // saved as an override ...
+        assert!(!r.v.prefs.keys.overrides.is_empty());
+        let (back, unknown) = KeyMap::from_overrides(&r.v.prefs.keys.overrides);
+        assert!(unknown.is_empty());
+        assert_eq!(back.label(CMD_ZEBRA), "Ctrl+J");
+        // ... and the new chord runs the command
+        let zebra = r.v.zebra;
+        r.key(Key::Char('J'), Mods::CTRL);
+        assert_ne!(r.v.zebra, zebra);
+        // reset all brings the defaults back, live
+        r.v.run_command(&mut r.ui, CMD_RESET_KEYS);
+        assert!(r.v.prefs.keys.overrides.is_empty());
+        assert_eq!(r.v.keymap.changed(), 0);
+        let zebra = r.v.zebra;
+        r.key(Key::Char('J'), Mods::CTRL);
+        assert_eq!(r.v.zebra, zebra);
+    }
+
+    #[test]
+    fn palette_and_settings_open_close_leaves_nothing_behind() {
+        let mut r = Rig::new("u4-churn");
+        for _ in 0..200 {
+            r.key(Key::Char('P'), Mods::CTRL_SHIFT);
+            r.key(Key::Escape, Mods::NONE);
+            r.v.open_settings(None);
+            r.frame();
+            let i = r.v.tabs.items.iter().position(|t| t.settings).unwrap();
+            r.v.close_tab(i);
+        }
+        assert!(!r.v.palette_open());
+        assert!(!r.v.settings_open());
+        assert_eq!(settings_tabs(&mut r.v), 0);
+        assert_eq!(r.v.tabs.items.len(), 1);
+        for _ in 0..1000 {
+            r.v.churn_u4();
+        }
+        assert!(!r.v.palette_open());
+        assert!(!r.v.settings_open());
+        assert_eq!(settings_tabs(&mut r.v), 0);
+        assert_eq!(r.v.tabs.items.len(), 1);
     }
 }

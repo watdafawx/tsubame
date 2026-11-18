@@ -1,0 +1,339 @@
+//! The editable right-click menu: the data model the Settings > Context menu
+//! page edits, `[[context_menu.entries]]` in `config.toml`.
+//!
+//! The list is flat and ordered; a submenu's children point at it with
+//! `parent`. Built-in entries (Open, Copy, ...) are part of the list so they
+//! can be hidden, renamed and reordered, but never deleted. Custom entries run
+//! a program (`command` + `args` with `{path}` / `{selection}` / `{dir}`
+//! tokens); the argv is built by the app, never through a shell string.
+//!
+//! Pure data and rules, no Win32.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    Submenu,
+    Separator,
+    #[default]
+    #[serde(other)]
+    Item,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// ships with Tsubame; can be hidden and renamed, not deleted
+    Builtin,
+    /// the Windows shell's own menu (Open with, Show more options)
+    Windows,
+    /// imported from a Nilesoft Shell `shell.nss`
+    Nilesoft,
+    /// added by the user (also what an unknown value reads as)
+    #[default]
+    #[serde(other)]
+    Custom,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Builtin => "Built-in",
+            Source::Windows => "Windows",
+            Source::Custom => "Custom",
+            Source::Nilesoft => "From Nilesoft",
+        }
+    }
+    /// Entries of these sources run a program and are appended to the shell menu.
+    pub fn runs_program(self) -> bool {
+        matches!(self, Source::Custom | Source::Nilesoft)
+    }
+}
+
+/// What the entry shows for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShowFor {
+    pub files: bool,
+    pub folders: bool,
+    /// right click on the folder background
+    pub background: bool,
+}
+
+impl Default for ShowFor {
+    fn default() -> Self {
+        ShowFor { files: true, folders: true, background: false }
+    }
+}
+
+/// What was right-clicked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    File,
+    Folder,
+    Background,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MenuEntry {
+    /// stable id: `builtin.copy`, `custom.3`, `nss.7`
+    pub id: String,
+    pub kind: EntryKind,
+    pub source: Source,
+    /// the label ("rename" edits it)
+    pub name: String,
+    /// custom entries: the program. Built-ins: the command name it runs.
+    pub command: String,
+    /// custom entries: arguments, split like a command line; `{path}`,
+    /// `{selection}`, `{dir}` are replaced (see the app's `custom_cmd`)
+    pub args: String,
+    /// lower-case extensions without the dot (`["txt", "md"]`); empty = any.
+    /// Applies to files only.
+    pub extensions: Vec<String>,
+    pub show_for: ShowFor,
+    pub hidden: bool,
+    /// id of the submenu this entry sits in; empty = top level
+    pub parent: String,
+}
+
+impl MenuEntry {
+    pub fn separator(id: &str) -> MenuEntry {
+        MenuEntry { id: id.to_string(), kind: EntryKind::Separator, source: Source::Builtin, ..Default::default() }
+    }
+    pub fn builtin(id: &str, name: &str, command: &str) -> MenuEntry {
+        MenuEntry { id: id.to_string(), source: Source::Builtin, name: name.to_string(), command: command.to_string(), show_for: ShowFor { files: true, folders: true, background: false }, ..Default::default() }
+    }
+    pub fn custom(id: &str, name: &str, command: &str, args: &str) -> MenuEntry {
+        MenuEntry { id: id.to_string(), source: Source::Custom, name: name.to_string(), command: command.to_string(), args: args.to_string(), ..Default::default() }
+    }
+    pub fn is_separator(&self) -> bool {
+        self.kind == EntryKind::Separator
+    }
+    pub fn is_submenu(&self) -> bool {
+        self.kind == EntryKind::Submenu
+    }
+    /// Does this program entry apply to `target` (with `ext` the lower-case
+    /// extension of a file)?
+    pub fn matches(&self, target: Target, ext: &str) -> bool {
+        match target {
+            Target::File => {
+                self.show_for.files && (self.extensions.is_empty() || self.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+            }
+            Target::Folder => self.show_for.folders,
+            Target::Background => self.show_for.background,
+        }
+    }
+}
+
+/// The built-in default menu (the mock's list). Ids are stable: they are how a
+/// saved list is matched against newer builds.
+pub fn default_entries() -> Vec<MenuEntry> {
+    let b = MenuEntry::builtin;
+    let mut v = vec![
+        b("builtin.open", "Open", "file.open"),
+        b("builtin.open-tab", "Open in new tab", "tab.open-selected"),
+        MenuEntry { source: Source::Windows, ..b("windows.open-with", "Open with", "") },
+        MenuEntry::separator("sep.1"),
+        b("builtin.cut", "Cut", "file.cut"),
+        b("builtin.copy", "Copy", "file.copy"),
+        b("builtin.paste", "Paste", "file.paste"),
+        b("builtin.copy-path", "Copy as path", "file.copy-path"),
+        MenuEntry::separator("sep.2"),
+        b("builtin.rename", "Rename", "file.rename"),
+        b("builtin.delete", "Delete", "file.delete"),
+        MenuEntry::separator("sep.3"),
+        MenuEntry { source: Source::Windows, ..b("windows.more", "Show more options", "") },
+        b("builtin.properties", "Properties", "file.properties"),
+    ];
+    for e in &mut v {
+        if e.id == "windows.open-with" || e.id == "windows.more" {
+            e.show_for.background = false;
+        }
+    }
+    v
+}
+
+/// The entries to show: the saved list, or the defaults when nothing was
+/// saved. Built-ins missing from a saved list (a newer build added one) are
+/// appended so they never disappear.
+pub fn effective(saved: &[MenuEntry]) -> Vec<MenuEntry> {
+    if saved.is_empty() {
+        return default_entries();
+    }
+    let mut v = saved.to_vec();
+    for d in default_entries() {
+        if !d.is_separator() && !v.iter().any(|e| e.id == d.id) {
+            v.push(d);
+        }
+    }
+    v
+}
+
+/// A fresh id `<prefix>.<n>` that no entry uses.
+pub fn next_id(entries: &[MenuEntry], prefix: &str) -> String {
+    let mut n = entries.len() + 1;
+    loop {
+        let id = format!("{prefix}.{n}");
+        if !entries.iter().any(|e| e.id == id) {
+            return id;
+        }
+        n += 1;
+    }
+}
+
+/// Moves entry `from` so it sits before the entry that is at `to` now (`to ==
+/// len` = the end). A submenu moves with its children. Returns the new index
+/// of the moved entry, or `None` when nothing changed.
+pub fn move_entry(entries: &mut Vec<MenuEntry>, from: usize, to: usize) -> Option<usize> {
+    if from >= entries.len() || to > entries.len() {
+        return None;
+    }
+    // the block that moves: the entry and, for a submenu, everything under it
+    let mut end = from + 1;
+    if entries[from].is_submenu() {
+        let id = entries[from].id.clone();
+        while end < entries.len() && entries[end].parent == id {
+            end += 1;
+        }
+    }
+    if to > from && to <= end || to == from {
+        return None;
+    }
+    let block: Vec<MenuEntry> = entries.drain(from..end).collect();
+    let len = block.len();
+    let at = if to > from { to - len } else { to };
+    for (i, e) in block.into_iter().enumerate() {
+        entries.insert(at + i, e);
+    }
+    Some(at)
+}
+
+/// Removes entry `i`: custom and imported ones go (a submenu takes its
+/// children along); built-ins cannot be deleted. Returns whether it went.
+pub fn delete_entry(entries: &mut Vec<MenuEntry>, i: usize) -> bool {
+    let Some(e) = entries.get(i) else { return false };
+    if e.source == Source::Builtin || e.source == Source::Windows {
+        return e.is_separator() && {
+            entries.remove(i);
+            true
+        };
+    }
+    let id = e.id.clone();
+    let sub = e.is_submenu();
+    entries.remove(i);
+    if sub {
+        entries.retain(|c| c.parent != id);
+    }
+    true
+}
+
+/// The enabled program entries that apply to `target`, in menu order, with
+/// the submenu path flattened into the name ("Tools > Git Bash here"). These
+/// are what the shell menu gets appended.
+pub fn program_entries(entries: &[MenuEntry], target: Target, ext: &str) -> Vec<(MenuEntry, String)> {
+    let mut out = Vec::new();
+    for e in entries {
+        if !e.source.runs_program() || e.kind != EntryKind::Item || e.hidden || e.command.trim().is_empty() || !e.matches(target, ext) {
+            continue;
+        }
+        let mut label = e.name.clone();
+        let mut parent = e.parent.as_str();
+        let mut depth = 0;
+        let mut hidden_parent = false;
+        while !parent.is_empty() && depth < 4 {
+            match entries.iter().find(|p| p.id == parent) {
+                Some(p) => {
+                    hidden_parent |= p.hidden;
+                    label = format!("{} > {}", p.name, label);
+                    parent = p.parent.as_str();
+                }
+                None => break,
+            }
+            depth += 1;
+        }
+        if !hidden_parent {
+            out.push((e.clone(), label));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_have_unique_ids_and_the_mock_order() {
+        let d = default_entries();
+        let names: Vec<&str> = d.iter().filter(|e| !e.is_separator()).map(|e| e.name.as_str()).collect();
+        assert_eq!(names[..3], ["Open", "Open in new tab", "Open with"]);
+        for (i, a) in d.iter().enumerate() {
+            assert!(!a.id.is_empty());
+            assert!(d[i + 1..].iter().all(|b| b.id != a.id), "{}", a.id);
+        }
+    }
+
+    #[test]
+    fn empty_saved_list_is_the_default_and_missing_builtins_come_back() {
+        assert_eq!(effective(&[]), default_entries());
+        let saved: Vec<MenuEntry> = default_entries().into_iter().filter(|e| e.id != "builtin.cut").collect();
+        let eff = effective(&saved);
+        assert!(eff.iter().any(|e| e.id == "builtin.cut"));
+        assert_eq!(eff.len(), saved.len() + 1);
+    }
+
+    #[test]
+    fn moving_and_deleting() {
+        let mut v = vec![
+            MenuEntry::custom("a", "A", "a.exe", ""),
+            MenuEntry { id: "s".into(), kind: EntryKind::Submenu, name: "S".into(), ..Default::default() },
+            MenuEntry { parent: "s".into(), ..MenuEntry::custom("c", "C", "c.exe", "") },
+            MenuEntry { parent: "s".into(), ..MenuEntry::custom("d", "D", "d.exe", "") },
+            MenuEntry::custom("e", "E", "e.exe", ""),
+        ];
+        // submenu with children goes before A
+        assert_eq!(move_entry(&mut v, 1, 0), Some(0));
+        let ids: Vec<&str> = v.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["s", "c", "d", "a", "e"]);
+        // A to the end
+        assert_eq!(move_entry(&mut v, 3, 5), Some(4));
+        let ids: Vec<&str> = v.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["s", "c", "d", "e", "a"]);
+        // no-ops
+        assert_eq!(move_entry(&mut v, 1, 1), None);
+        assert_eq!(move_entry(&mut v, 1, 2), None);
+        assert_eq!(move_entry(&mut v, 9, 0), None);
+        // deleting a submenu takes its children
+        assert!(delete_entry(&mut v, 0));
+        let ids: Vec<&str> = v.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["e", "a"]);
+        // built-ins stay
+        let mut d = default_entries();
+        let n = d.len();
+        assert!(!delete_entry(&mut d, 0));
+        assert_eq!(d.len(), n);
+        assert!(delete_entry(&mut d, 3), "a separator can go");
+        assert_eq!(d.len(), n - 1);
+    }
+
+    #[test]
+    fn program_entries_filter_by_target_extension_and_hidden() {
+        let mut sub = MenuEntry { id: "tools".into(), kind: EntryKind::Submenu, name: "Tools".into(), source: Source::Custom, ..Default::default() };
+        let a = MenuEntry { parent: "tools".into(), extensions: vec!["txt".into(), "MD".into()], ..MenuEntry::custom("a", "Edit", "ed.exe", "{path}") };
+        let b = MenuEntry { show_for: ShowFor { files: false, folders: false, background: true }, ..MenuEntry::custom("b", "Terminal here", "wt.exe", "-d {path}") };
+        let c = MenuEntry { hidden: true, ..MenuEntry::custom("c", "Hidden", "h.exe", "") };
+        let mut v = vec![sub.clone(), a, b, c, MenuEntry::builtin("builtin.copy", "Copy", "file.copy")];
+        let files = program_entries(&v, Target::File, "md");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].1, "Tools > Edit");
+        assert!(program_entries(&v, Target::File, "png").is_empty());
+        let bg = program_entries(&v, Target::Background, "");
+        assert_eq!(bg.len(), 1);
+        assert_eq!(bg[0].1, "Terminal here");
+        sub.hidden = true;
+        v[0] = sub;
+        assert!(program_entries(&v, Target::File, "md").is_empty(), "a hidden submenu hides its items");
+    }
+}

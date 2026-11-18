@@ -1,4 +1,5 @@
 pub mod button;
+pub mod controls;
 pub mod colheader;
 pub mod grid;
 pub mod list;

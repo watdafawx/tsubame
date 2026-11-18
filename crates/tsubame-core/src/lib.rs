@@ -68,6 +68,9 @@ pub struct EntryStore {
     sort: Sort,
     query: Vec<u16>,
     mode: FilterMode,
+    /// Attribute flags (`HIDDEN`, `SYSTEM`) that keep an entry out of the index: the
+    /// "show hidden / system files" settings. Survives `clear` like the sort does.
+    hide: u16,
     /// IDs of tombstoned records, reused by `apply` inserts.
     free: Vec<u32>,
     /// Name units no live record points at (compacted by `compact_names`).
@@ -443,7 +446,27 @@ impl EntryStore {
         self.index = ids;
     }
     fn matches(&self, id: u32) -> bool {
+        if self.records[id as usize].flags & self.hide != 0 {
+            return false;
+        }
         matches_name(self.name(id).unwrap(), &self.query, self.mode)
+    }
+    /// Which attributes hide an entry (`0` shows everything, `HIDDEN`, `SYSTEM`, or both).
+    pub fn hide(&self) -> u16 {
+        self.hide
+    }
+    /// Change the hidden/system rule and rebuild the index (O(n), only when it changed).
+    pub fn set_hide(&mut self, mask: u16) {
+        let mask = mask & (HIDDEN | SYSTEM);
+        if mask == self.hide {
+            return;
+        }
+        self.hide = mask;
+        let mut ids = (0..self.records.len() as u32)
+            .filter(|&i| self.is_live(i) && self.matches(i))
+            .collect::<Vec<_>>();
+        self.sort_ids(&mut ids);
+        self.index = ids;
     }
     pub fn filter(&mut self, query: &str, mode: FilterMode) {
         let next: Vec<u16> = query.encode_utf16().map(fold).collect();
@@ -806,6 +829,54 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn hide_rule_filters_hidden_and_system_entries() {
+        let mut s = EntryStore::new();
+        let g = s.generation();
+        let names: Vec<Vec<u16>> = ["a.txt", "b.sys", "c.hid", "d.both"].iter().map(|n| n.encode_utf16().collect()).collect();
+        let flags = [0u16, SYSTEM, HIDDEN, HIDDEN | SYSTEM];
+        let batch: Vec<EntryInput> = names.iter().zip(flags).map(|(n, f)| EntryInput { name: n, size: 1, modified: 0, flags: f }).collect();
+        s.push_batch(g, &batch).unwrap();
+        assert_eq!(s.view().len(), 4, "default shows everything");
+        s.set_hide(HIDDEN);
+        assert_eq!(s.view().len(), 2, "hidden and hidden+system out");
+        s.set_hide(HIDDEN | SYSTEM);
+        assert_eq!(s.view().len(), 1);
+        s.set_hide(SYSTEM);
+        assert_eq!(s.view().len(), 2);
+        s.set_hide(0);
+        assert_eq!(s.view().len(), 4);
+        // unknown bits are ignored
+        s.set_hide(0xFF00);
+        assert_eq!(s.hide(), 0);
+    }
+
+    #[test]
+    fn hide_rule_applies_to_later_appends_applies_and_filters() {
+        let mut s = EntryStore::new();
+        s.set_hide(HIDDEN);
+        let g = s.generation();
+        let n1: Vec<u16> = "keep".encode_utf16().collect();
+        let n2: Vec<u16> = "secret".encode_utf16().collect();
+        s.push_batch(g, &[EntryInput { name: &n1, size: 1, modified: 0, flags: 0 }, EntryInput { name: &n2, size: 1, modified: 0, flags: HIDDEN }]).unwrap();
+        assert_eq!(s.view().len(), 1);
+        // an upsert that makes a visible file hidden removes it from the index
+        let id = s.find(&n1).unwrap();
+        s.apply(&[], &[Upsert { id: Some(id), input: EntryInput { name: &n1, size: 2, modified: 0, flags: HIDDEN } }]).unwrap();
+        assert_eq!(s.view().len(), 0);
+        // a name filter does not resurrect hidden entries
+        s.filter("s", FilterMode::Substring);
+        assert_eq!(s.view().len(), 0);
+        s.filter("", FilterMode::Substring);
+        assert_eq!(s.view().len(), 0);
+        s.set_hide(0);
+        assert_eq!(s.view().len(), 2);
+        // the rule survives clear
+        s.set_hide(HIDDEN);
+        s.clear();
+        assert_eq!(s.hide(), HIDDEN);
+    }
+
     #[test]
     fn filtering() {
         let mut s = store(&["Alpha.txt", "alphabet", "Äpfel", "beta", ""]);

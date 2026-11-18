@@ -970,6 +970,7 @@ dependencies = [
  "tsubame-core",
  "tsubame-d2d",
  "tsubame-ui",
+ "tsubame-update",
  "tsubame-win",
  "windows",
 ]

@@ -126,6 +126,9 @@ pub struct Tab {
     title_s: String,
     /// the bench's fake rows: no real files behind them
     pub synthetic: bool,
+    /// the Settings tab: no folder, no listing (always `synthetic` too, so nothing
+    /// lists, watches or touches files for it)
+    pub settings: bool,
     token: CancelToken,
     enum_gen: u64,
     enumerator: Option<Enumerator>,
@@ -173,13 +176,35 @@ fn flags_of(attrs: u32, is_dir: bool, reparse: bool) -> u16 {
     f
 }
 
+/// Which attributes hide an entry in tabs made from now on (`Settings > General`; 0 = show all).
+pub static HIDE: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// The hide mask for the two "Show hidden / system files" settings.
+pub fn hide_mask(show_hidden: bool, show_system: bool) -> u16 {
+    (if show_hidden { 0 } else { tsubame_core::HIDDEN }) | (if show_system { 0 } else { tsubame_core::SYSTEM })
+}
+
 impl Tab {
+    /// Applies a new hide rule to this tab's store (rebuilds the shown index).
+    pub fn set_hide(&mut self, mask: u16) {
+        if self.store.hide() == (mask & (tsubame_core::HIDDEN | tsubame_core::SYSTEM)) {
+            return;
+        }
+        self.store.set_hide(mask);
+        self.sel.clear();
+        self.reset_view();
+    }
+
     pub fn new(id: u64, path: &str, row_h: f32) -> Tab {
         Tab {
             id,
             path: path.to_string(),
             history: History::new(path),
-            store: EntryStore::new(),
+            store: {
+                let mut s = EntryStore::new();
+                s.set_hide(HIDE.load(std::sync::atomic::Ordering::Relaxed));
+                s
+            },
             sel: Selection::new(),
             sort: Sort { column: tsubame_core::Column::Name, descending: false, folders_first: true },
             filter: String::new(),
@@ -193,6 +218,7 @@ impl Tab {
             restore: None,
             title_s: Self::make_title(path),
             synthetic: false,
+            settings: false,
             token: CancelToken::new(),
             enum_gen: 0,
             enumerator: None,
@@ -202,6 +228,15 @@ impl Tab {
             wake: None,
             want: None,
         }
+    }
+
+    /// The single "Settings" tab.
+    pub fn new_settings(id: u64, row_h: f32) -> Tab {
+        let mut t = Tab::new(id, "", row_h);
+        t.settings = true;
+        t.synthetic = true;
+        t.title_s = "Settings".to_string();
+        t
     }
 
     /// Short title for the tab strip: the folder's own name (cached).

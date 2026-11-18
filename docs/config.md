@@ -69,7 +69,7 @@ delete_to_recycle = true
 theme = "tsubame-dark"       # "tsubame-dark" | "tsubame-light" ("dark"/"light" too)
 density = "compact"          # "compact" (22 px) | "normal" (26 px) | "comfortable" (30 px)
 zebra = true
-font_scale = 1.0             # reserved for the text-size scaling task
+font_scale = 1.0             # list and menu text size, 10-18 px at 12 px = 1.0 (Settings > Appearance)
 accent = "#e0492c"           # optional; absent = the theme's accent
 view_mode = "details"        # "details" | "grid-small" | "grid-large"
 
@@ -88,14 +88,27 @@ name = "Work"
 path = "D:\work"
 
 [updates]
-auto_check = true
-channel = "stable"
+auto_check = true            # background check at most once per 24 h
+auto_install = false         # download in the background; it still installs only at restart
+channel = "stable"           # read; the updater is pinned to stable
 
 [keys]
-profile = "default"
+profile = "default"          # read, not used (no profiles yet)
 
-[keys.overrides]
+[keys.overrides]             # command id -> up to 2 chords; [] = unbound
 "view.refresh" = ["F5", "Ctrl+R"]
+
+[[context_menu.entries]]     # see docs/u4-settings.md; empty list = default menu
+id = "custom.1"
+name = "Open in VS Code"
+command = "C:\\Program Files\\Microsoft VS Code\\Code.exe"
+args = "\"{path}\""
+extensions = []
+hidden = false
+source = "custom"
+
+[advanced]
+diagnostics = false          # persists; the log writer is not wired yet
 
 [window]
 x = 100
@@ -109,13 +122,13 @@ maximized = false
 |---|---|---|
 | `general.start_folder` | `"last"` | startup folder when no path and no session |
 | `general.restore_session` | `true` | restore tabs when the command line names no path |
-| `general.show_hidden` / `show_system` | `false` | filter task (read, not wired) |
-| `general.confirm_delete` / `delete_to_recycle` | `true` | file-op task (read, not wired) |
-| `appearance.theme` | `"tsubame-dark"` | `View::dark`, Ctrl+Shift+L |
-| `appearance.density` | `"compact"` | row height, Ctrl+Shift+D |
-| `appearance.zebra` | `true` | alternating rows, Ctrl+Shift+Z |
-| `appearance.font_scale` | `1.0` | read, not wired yet |
-| `appearance.accent` | absent | read (`accent_rgb`), not wired yet |
+| `general.show_hidden` / `show_system` | `false` | hide rule of every tab; Settings > General, Ctrl+H (live) |
+| `general.confirm_delete` / `delete_to_recycle` | `true` | Delete key: ask first / Recycle Bin vs permanent (Shift+Delete does the other one) |
+| `appearance.theme` | `"tsubame-dark"` | `View::dark`, Ctrl+Shift+L; Settings > Appearance picks any of the 19 themes (live) |
+| `appearance.density` | `"compact"` | row height, Ctrl+Shift+D, Settings > Appearance (live) |
+| `appearance.zebra` | `true` | alternating rows, Ctrl+Shift+Z, Settings > Appearance (live) |
+| `appearance.font_scale` | `1.0` | text size slider on Settings > Appearance (live) |
+| `appearance.accent` | absent | accent swatches on Settings > Appearance (live); absent = the theme's own |
 | `appearance.view_mode` | `"details"` | `View::view_mode` (grid arrives with W2) |
 | `panes.dual` / `split` | `false` / `"vertical"` | two panes, side by side or stacked (Ctrl+\, Ctrl+Shift+\) |
 | `panes.ratio` | `0.5` | first pane's share, clamped 0.15–0.85; the splitter drags it, double-click resets |
@@ -123,8 +136,13 @@ maximized = false
 | `panes.sidebar_collapsed` | `false` | `true` = the 48 px icon rail (Ctrl+B) |
 | `sidebar.pinned` | empty | `[[sidebar.pinned]]` `name` + `path`, shown in the Pinned section |
 | `sidebar.closed` | empty | sidebar sections folded by the user |
-| `updates.auto_check` / `channel` | `true` / `"stable"` | updater (read, not wired) |
-| `keys.profile` / `keys.overrides` | `"default"` / empty | rebinding task (U4) |
+| `updates.auto_check` | `true` | background check at start (<= 1 per 24 h). `false` = no network from the automatic path |
+| `updates.auto_install` | `false` | download without a click; installing is still only at restart |
+| `updates.channel` | `"stable"` | read, not wired (updater pinned to stable) |
+| `keys.overrides` | empty | rebound shortcuts, applied live; Settings > Keys, format in `docs/u4-settings.md` |
+| `keys.profile` | `"default"` | read, not wired |
+| `context_menu.entries` | empty | what Tsubame adds to the native context menu (`docs/u4-settings.md`) |
+| `advanced.diagnostics` | `false` | persists; no log writer behind it yet |
 | `window.*` | `0,0,1120,720,false` | geometry on a plain start |
 
 Density naming: the UI kit's `Density` has three presets (22/26/30 px), the

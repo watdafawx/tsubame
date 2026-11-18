@@ -290,6 +290,10 @@ pub struct Ui {
     /// The caret is in its visible phase. The app flips it from the blink
     /// timer (which runs only while `Output::text_focus`); solid by default.
     pub caret_on: bool,
+    /// A key recorder is listening: key presses skip the global shortcuts,
+    /// Esc-closes-popup and Tab focus stepping, and go to the focused widget
+    /// (the settings Keys page records the next chord; Esc cancels there).
+    pub capture_keys: bool,
 
     popups: Vec<Popup>,
     /// `popup_begin` nesting (clip depth to undo)
@@ -345,6 +349,7 @@ impl Ui {
             drag_f64: 0.0,
             drag_pt: Pt::default(),
             caret_on: true,
+            capture_keys: false,
             popups: Vec::new(),
             popup_depth: 0,
             composition: String::new(),
@@ -515,6 +520,7 @@ impl Ui {
                     self.queue[i].target = self.active.or_else(|| self.top_hit(pos).map(|h| h.id));
                 }
                 Event::Wheel { pos, .. } => self.queue[i].target = self.wheel_target(pos),
+                Event::KeyDown { .. } if self.capture_keys => {}
                 Event::KeyDown { key, mods, .. } => {
                     if key == Key::Escape && mods.none() && !self.popups.is_empty() {
                         let top = self.popups.last().unwrap().id;
@@ -548,6 +554,7 @@ impl Ui {
                 continue;
             }
             match q.ev {
+                Event::KeyDown { .. } if self.capture_keys => self.leftover.push(q.ev),
                 Event::KeyDown { key, mods, .. } => match self.shortcuts.lookup(key, mods, false) {
                     Some(cmd) => self.commands.push(cmd),
                     None => self.leftover.push(q.ev),

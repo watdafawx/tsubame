@@ -43,6 +43,19 @@ pub const CMD_OPEN_OTHER: u32 = 40;
 pub const CMD_OPEN_NEW_TAB: u32 = 41;
 pub const CMD_TAB_TO_OTHER: u32 = 42;
 pub const CMD_SYNC_OTHER: u32 = 43;
+// U4: palette, settings, hidden files, updates
+pub const CMD_PALETTE: u32 = 44;
+pub const CMD_SETTINGS: u32 = 45;
+pub const CMD_HIDDEN: u32 = 46;
+pub const CMD_SYSTEM: u32 = 47;
+pub const CMD_CHECK_UPDATES: u32 = 48;
+pub const CMD_OPEN_CONFIG: u32 = 49;
+pub const CMD_SETTINGS_KEYS: u32 = 50;
+pub const CMD_SETTINGS_APPEARANCE: u32 = 51;
+pub const CMD_SETTINGS_MENU: u32 = 52;
+pub const CMD_SETTINGS_UPDATES: u32 = 53;
+pub const CMD_SETTINGS_DEFAULT_FM: u32 = 54;
+pub const CMD_RESET_KEYS: u32 = 55;
 
 pub struct Command {
     pub id: u32,
@@ -98,9 +111,23 @@ pub static COMMANDS: &[Command] = &[
     c(CMD_OPEN_NEW_TAB, "tab.open-selected", "Open the selected folder in a new tab", &[(Key::Enter, CT)], false),
     c(CMD_TAB_TO_OTHER, "pane.move-tab", "Move this tab to the other pane", &[], false),
     c(CMD_SYNC_OTHER, "pane.sync-folders", "Show this folder in the other pane", &[], false),
+    c(CMD_PALETTE, "palette.open", "Command palette", &[(Key::Char('P'), CS), (Key::Char('K'), CT)], true),
+    c(CMD_SETTINGS, "settings.open", "Open settings", &[(Key::Char(','), CT)], true),
+    c(CMD_HIDDEN, "view.hidden", "Show hidden files", &[(Key::Char('H'), CT)], true),
+    c(CMD_SYSTEM, "view.system", "Show protected system files", &[], true),
+    c(CMD_CHECK_UPDATES, "app.check-updates", "Check for updates", &[], true),
+    c(CMD_OPEN_CONFIG, "app.open-config-folder", "Open the settings folder", &[], true),
+    c(CMD_SETTINGS_KEYS, "settings.keys", "Settings: keyboard shortcuts", &[], true),
+    c(CMD_SETTINGS_APPEARANCE, "settings.appearance", "Settings: themes and appearance", &[], true),
+    c(CMD_SETTINGS_MENU, "settings.context-menu", "Settings: context menu editor", &[], true),
+    c(CMD_SETTINGS_UPDATES, "settings.updates", "Settings: updates", &[], true),
+    c(CMD_SETTINGS_DEFAULT_FM, "settings.default-file-manager", "Settings: default file manager", &[], true),
+    c(CMD_RESET_KEYS, "settings.reset-keys", "Reset all keyboard shortcuts", &[], true),
 ];
 
-/// Binds every default key. The one call that fills the kit's shortcut table.
+/// Binds every default key (tests and the bench; the app binds its key map,
+/// `KeyMap::bind_all`, which starts from the same defaults).
+#[allow(dead_code)]
 pub fn bind_all(ui: &mut Ui) {
     for cmd in COMMANDS {
         for (key, mods) in cmd.keys {
@@ -147,8 +174,12 @@ pub fn key_label(key: Key, mods: Mods) -> String {
     s
 }
 
-/// The first default key of a command as text ("" when it has none).
+/// The first key of a command as text ("" when it has none): the user's
+/// binding once the key map is loaded (`keymap::set_current`), else the default.
 pub fn first_key_label(id: u32) -> String {
+    if let Some(l) = crate::keymap::current_label(id) {
+        return l;
+    }
     by_id(id).and_then(|c| c.keys.first()).map(|(k, m)| key_label(*k, *m)).unwrap_or_default()
 }
 
