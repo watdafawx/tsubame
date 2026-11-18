@@ -104,7 +104,7 @@ if (Test-Path `$rep) { 'ok'; Get-Content `$rep } else { 'noreport' }
   $r | Select-Object -Skip ($at + 1)
 }
 
-$keys = 'first_batch', 'first_frame', 'done', 'final_frame', 'worker', 'store_cpu', 'final_sort', 'watch_start'
+$keys = 'first_batch', 'first_frame', 'done', 'final_frame', 'worker', 'overhead', 'store_cpu', 'final_sort', 'watch_start'
 $rows = [Collections.Generic.List[object]]::new()
 $opRows = [Collections.Generic.List[object]]::new()
 for ($i = 1; $i -le $Runs; $i++) {
@@ -151,7 +151,9 @@ for ($i = 1; $i -le $Runs; $i++) {
       if ($Mode -ne 'warm' -and $kind -ne 'first') { continue }
       if ($Mode -ne 'warm' -and -not $l.TrimEnd().EndsWith($Dir)) { continue }
       $row = [ordered]@{ label = $b.Label; run = $i; kind = ($kind -replace ' \d+', ''); entries = [int]$Matches[2] }
-      foreach ($k in $keys) { $row[$k] = if ($l -match "$k\s+([\d.]+)") { [double]$Matches[1] } else { $null } }
+      foreach ($k in $keys) { if ($k -eq 'overhead') { continue }; $row[$k] = if ($l -match "$k\s+([\d.]+)") { [double]$Matches[1] } else { $null } }
+      # app time on top of the disk: complete+sorted on screen minus the worker's listing time
+      $row['overhead'] = if ($null -ne $row['final_frame'] -and $null -ne $row['worker']) { $row['final_frame'] - $row['worker'] } else { $null }
       $rows.Add([pscustomobject]$row)
     }
     $last = $rows | Where-Object { $_.label -eq $b.Label -and $_.run -eq $i } | Select-Object -Last 1
