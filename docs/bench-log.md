@@ -6543,3 +6543,703 @@ fail=-
 exit=0
 ```
 </details>
+
+## 2026-11-19 00:29 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `cb13120`
+
+- Mode: full (10 cold-start runs, 10 scroll runs)
+- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/fix-details-scroll-paint-p95`, commit `cb13120`
+- Window: 3840x2076 at 168 dpi, paint path `hardware`
+- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); rig load: 5 Minecraft java process(es), 25 docker container(s), CPU 12% busy, servers loaded; rig up 1 h
+- Cold-cache 100k open: measured (3 runs: purge working from outside, app warmed up on small folders, only the cold 100k navigation timed)
+  3 runs, one process each: purge, then the app warms up on small folders (and idles 3 s) before it opens the still cold 100k folder; the row times only that last navigation.
+- Idle: 0 ms of CPU over the first idle window, 31 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
+- Memory context: 28.1 MB private at the first painted frame, 99.8 MB at the end of the warm navigation run (a 100k store plus the DirectWrite layout cache is live then; the budget row below uses the gate's steady state).
+
+| Metric | Budget | Measured | |
+|---|---|---|---|
+| Cold start to first painted frame | < 100 ms | 66.60 ms median, 72.80 ms p95 (n=10) | PASS |
+| 100,000-entry folder: first rows | < 30 ms | 5.52 ms median, 29.32 ms p95 (n=9) | PASS |
+| 100,000-entry folder: complete and sorted | < 200 ms | 53.62 ms median, 93.74 ms p95 (n=9) | PASS |
+| 100,000-entry folder, cold cache: first rows | < 30 ms | 13.73 ms median, 14.73 ms p95 (n=3) | PASS |
+| 100,000-entry folder, cold cache: complete and sorted | < 200 ms | 168.98 ms median, 221.55 ms p95 (n=3) | PASS |
+| Scroll paint p95, 4K, details view | < 5.0 ms | 2.65 ms median, 2.81 ms p95 (n=10) | PASS |
+| Idle CPU over the idle window | 0 wake-ups (0 ms CPU) | 31 ms | PASS |
+| Private bytes, one tab, small folder, 4K | < 110 MB | 63.3 MB (idle sample before the gate's warm-up) | PASS |
+| Private bytes after the 5 s scroll run (100k folder) | < 110 MB | 82.4 MB median (83.1 MB max) | PASS |
+| Main exe | < 6 MB | 2681 KB | PASS |
+| Leak gate: 10,000 navigations + 1,000 tabs | private bytes within 5% of the start | 80.6 -> 82.9 MB (+2.27 MB, 2.8%; allowance 4.0 MB) | PASS |
+
+All measured budgets and the leak gate pass.
+
+Informational: startup navigation first rows 49.40 ms and complete+sorted 81.74 ms from tab creation (window creation and the first GPU frame included; the budgets above exclude startup).
+
+### Leak gate evidence
+
+The gate ran 3 times in fresh processes; the worst run decides (no run may exceed the allowance).
+
+| Run | Private MB start -> end | Delta MB | Delta % | Allowance MB | Wall s | |
+|---|---|---|---|---|---|---|
+| 1 | 83.1 -> 84.7 | +1.55 | +1.87 | 4.16 | 37 | PASS |
+| 2 | 80.6 -> 82.9 | +2.27 | +2.82 | 4.03 | 41 | PASS |
+| 3 | 82.5 -> 84.2 | +1.73 | +2.10 | 4.12 | 37 | PASS |
+
+10000 navigations over 204 folders and 1000 tab open/close (with a scroll) in one process, 12 samples every 1000 operations, 5 s settle. Gate: **PASS**
+The start sample is the steady state: 408 warm-up navigations and 200 warm-up tabs run first, then the window shows the fixture's first folder for 5 s. From the idle one-tab sample (63.3 MB private, before the warm-up) to the end the process grew 19.6 MB; the gate judges the warm-to-warm delta, because the bounded icon and text-layout caches fill on first use.
+
+Worst run (the one above):
+
+| Operation | Private MB | Working set MB | Handles | GDI | USER | Threads |
+|---|---|---|---|---|---|---|
+| start | 80.6 | 75.0 | 626 | 45 | 21 | 59 |
+| 0 ops | 80.6 | 75.0 | 626 | 45 | 21 | 59 |
+| 1000 ops | 84.8 | 78.1 | 626 | 45 | 21 | 59 |
+| 2000 ops | 81.8 | 76.1 | 626 | 45 | 21 | 59 |
+| 3000 ops | 85.3 | 78.6 | 626 | 45 | 21 | 59 |
+| 4000 ops | 85.2 | 78.7 | 622 | 45 | 21 | 59 |
+| 5000 ops | 85.7 | 78.9 | 625 | 45 | 21 | 58 |
+| 6000 ops | 83.6 | 77.1 | 625 | 45 | 21 | 58 |
+| 7000 ops | 86.4 | 79.6 | 625 | 45 | 21 | 58 |
+| 8000 ops | 85.5 | 79.5 | 623 | 45 | 21 | 58 |
+| 9000 ops | 83.5 | 76.9 | 625 | 45 | 21 | 58 |
+| 10000 ops | 83.9 | 77.1 | 625 | 45 | 21 | 58 |
+| 11000 ops | 82.9 | 77.1 | 623 | 45 | 21 | 56 |
+| after settle | 82.9 | 77.1 | 623 | 45 | 21 | 56 |
+| after icon-cache trim | 82.9 | | | | | |
+
+Private bytes +2.27 MB (+2.82%, allowance 4.03 MB), handles -3, GDI +0, USER +0, threads -3. Peak private bytes 86.4 MB.
+Forced collection: icon cache cleared (1121 entries, cap 2048 items / 6 MB); private bytes after it 82.9 MB.
+Gate wall time 41 s.
+
+<details><summary>Raw: meta.txt</summary>
+
+```
+stamp=2026-11-19T00:29:16
+commit=cb13120
+branch=t3/fix-details-scroll-paint-p95
+dirty=0
+machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+build=release (lto, codegen-units=1, strip, panic=abort)
+mode=full
+runs=10
+cache=warm filesystem cache (no purge before these runs)
+cold=measured (3 runs: purge working from outside, app warmed up on small folders, only the cold 100k navigation timed)
+dpi=192
+rig_load=5 Minecraft java process(es), 25 docker container(s), CPU 12% busy, servers loaded; rig up 1 h
+fixture_100k=G:\rig-bench\tsubame-b1\100k
+gate_fixture=G:\rig-bench\tsubame-b1\gate
+gate_navs=10000
+gate_tabs=1000
+gate_runs=3
+slot=3
+reports=G:\rig-test\tsubame-s3\bench-2026-11-19T00-29-16
+notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+```
+</details>
+
+<details><summary>Raw: s1-bench.txt (one --bench run per line)</summary>
+
+```
+run 1: first_paint_ms 66.50 paint_p50_ms 1.57 paint_p95_ms 2.69 private_before_scroll_mb 90.2 private_end_mb 82.1 peak_commit_mb 90.5 rows 100000 exe_bytes 2745344
+run 2: first_paint_ms 67.30 paint_p50_ms 1.51 paint_p95_ms 2.64 private_before_scroll_mb 86.9 private_end_mb 83.1 peak_commit_mb 90.3 rows 100000 exe_bytes 2745344
+run 3: first_paint_ms 66.60 paint_p50_ms 1.56 paint_p95_ms 2.61 private_before_scroll_mb 86.2 private_end_mb 82.2 peak_commit_mb 86.9 rows 100000 exe_bytes 2745344
+run 4: first_paint_ms 70.30 paint_p50_ms 1.51 paint_p95_ms 2.71 private_before_scroll_mb 94.5 private_end_mb 82.9 peak_commit_mb 96.5 rows 100000 exe_bytes 2745344
+run 5: first_paint_ms 64.90 paint_p50_ms 1.52 paint_p95_ms 2.55 private_before_scroll_mb 90.2 private_end_mb 82.5 peak_commit_mb 96.2 rows 100000 exe_bytes 2745344
+run 6: first_paint_ms 61.30 paint_p50_ms 1.50 paint_p95_ms 2.65 private_before_scroll_mb 84.2 private_end_mb 80.5 peak_commit_mb 84.9 rows 100000 exe_bytes 2745344
+run 7: first_paint_ms 71.20 paint_p50_ms 1.53 paint_p95_ms 2.73 private_before_scroll_mb 90.3 private_end_mb 82.8 peak_commit_mb 91.0 rows 100000 exe_bytes 2745344
+run 8: first_paint_ms 72.80 paint_p50_ms 1.50 paint_p95_ms 2.65 private_before_scroll_mb 92.9 private_end_mb 83.1 peak_commit_mb 95.5 rows 100000 exe_bytes 2745344
+run 9: first_paint_ms 64.70 paint_p50_ms 1.55 paint_p95_ms 2.78 private_before_scroll_mb 94.6 private_end_mb 82.4 peak_commit_mb 95.7 rows 100000 exe_bytes 2745344
+run 10: first_paint_ms 71.80 paint_p50_ms 1.56 paint_p95_ms 2.81 private_before_scroll_mb 90.5 private_end_mb 81.7 peak_commit_mb 97.4 rows 100000 exe_bytes 2745344
+```
+</details>
+
+<details><summary>Raw: u2-timing.txt</summary>
+
+```
+tsubame U2 timing (release)
+window_px: 3840x2076 at 168 dpi, paint path hardware
+first_paint_ms (process start to first completed paint): 77.7
+private_bytes_first_paint: 28.1 MB
+all times in ms from the navigation event
+startup   entries  100000 (9.8 MB)  first_batch    21.14  first_frame    49.40  done    79.42  final_frame    81.74  worker    52.50  store_cpu    11.86  final_sort     7.51  watch_start     0.11  frames   3   G:\rig-bench\tsubame-b1\100k
+repeat 1  entries  100000 (9.8 MB)  first_batch     1.03  first_frame     5.52  done    51.22  final_frame    53.62  worker    42.57  store_cpu     6.28  final_sort     6.87  watch_start     0.01  frames   6   G:\rig-bench\tsubame-b1\100k
+repeat 2  entries  100000 (9.8 MB)  first_batch     4.56  first_frame    12.56  done    61.17  final_frame    64.77  worker    53.66  store_cpu     5.64  final_sort     6.54  watch_start     0.01  frames   9   G:\rig-bench\tsubame-b1\100k
+repeat 3  entries  100000 (9.8 MB)  first_batch     4.11  first_frame    11.06  done    59.03  final_frame    62.34  worker    48.60  store_cpu     7.13  final_sort     9.81  watch_start     0.01  frames   8   G:\rig-bench\tsubame-b1\100k
+repeat 4  entries  100000 (9.8 MB)  first_batch     1.43  first_frame    29.32  done    90.82  final_frame    93.74  worker    58.46  store_cpu     7.07  final_sort     8.15  watch_start     0.01  frames   9   G:\rig-bench\tsubame-b1\100k
+repeat 5  entries  100000 (9.8 MB)  first_batch     2.16  first_frame     7.03  done    45.86  final_frame    48.04  worker    38.77  store_cpu     6.63  final_sort     6.25  watch_start     0.01  frames  18   G:\rig-bench\tsubame-b1\100k
+repeat 6  entries  100000 (9.8 MB)  first_batch     2.72  first_frame     5.41  done    44.25  final_frame    45.85  worker    37.25  store_cpu     5.72  final_sort     6.23  watch_start     0.01  frames  21   G:\rig-bench\tsubame-b1\100k
+repeat 7  entries  100000 (9.8 MB)  first_batch     0.84  first_frame     3.40  done    42.50  final_frame    43.99  worker    34.77  store_cpu     5.15  final_sort     6.68  watch_start     0.01  frames  24   G:\rig-bench\tsubame-b1\100k
+repeat 8  entries  100000 (9.8 MB)  first_batch     1.08  first_frame     3.52  done    39.85  final_frame    41.58  worker    33.68  store_cpu     5.37  final_sort     5.86  watch_start     0.01  frames  22   G:\rig-bench\tsubame-b1\100k
+repeat 9  entries  100000 (9.8 MB)  first_batch     0.94  first_frame     3.30  done    53.39  final_frame    54.85  worker    46.46  store_cpu     5.73  final_sort     5.19  watch_start     0.01  frames  26   G:\rig-bench\tsubame-b1\100k
+private_bytes_end: 99.8 MB
+```
+</details>
+
+<details><summary>Raw: cold-cache --timing reports</summary>
+
+```
+# --- cold-timing-01.txt ---
+tsubame U2 timing (release)
+window_px: 3840x2076 at 168 dpi, paint path hardware
+first_paint_ms (process start to first completed paint): 496.7
+private_bytes_first_paint: 17.4 MB
+all times in ms from the navigation event
+startup   entries      24 (0.0 MB)  first_batch   258.75  first_frame   422.04  done   422.37  final_frame   423.80  worker     2.21  store_cpu     0.02  final_sort     0.00  watch_start     0.08  frames   2   G:\rig-bench\tsubame-b1\gate\tiny\0001
+first     entries    1004 (0.1 MB)  first_batch   167.02  first_frame   232.13  done   232.43  final_frame   233.83  worker    14.70  store_cpu     0.43  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\small\0001
+first     entries      24 (0.1 MB)  first_batch    14.63  first_frame    16.23  done    16.36  final_frame    18.02  worker     0.26  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\tiny\0001
+first     entries  100000 (8.1 MB)  first_batch    10.67  first_frame    13.58  done   152.74  final_frame   154.46  worker   142.69  store_cpu     7.78  final_sort     6.92  watch_start     0.01  frames  40   G:\rig-bench\tsubame-b1\100k
+private_bytes_end: 85.4 MB
+
+# --- cold-timing-02.txt ---
+tsubame U2 timing (release)
+window_px: 3840x2076 at 168 dpi, paint path hardware
+first_paint_ms (process start to first completed paint): 304.2
+private_bytes_first_paint: 17.2 MB
+all times in ms from the navigation event
+startup   entries      24 (0.0 MB)  first_batch    98.12  first_frame   237.68  done   237.99  final_frame   239.39  worker     2.66  store_cpu     0.02  final_sort     0.00  watch_start     0.11  frames   2   G:\rig-bench\tsubame-b1\gate\tiny\0001
+first     entries    1004 (0.1 MB)  first_batch    29.75  first_frame    36.25  done    37.00  final_frame    39.91  worker     3.79  store_cpu     0.61  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\small\0001
+first     entries      24 (0.1 MB)  first_batch     2.05  first_frame     4.44  done     4.51  final_frame     6.02  worker     0.31  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\tiny\0001
+first     entries  100000 (8.1 MB)  first_batch    10.95  first_frame    14.73  done   167.28  final_frame   168.98  worker   149.33  store_cpu     8.12  final_sort     8.17  watch_start     0.01  frames  40   G:\rig-bench\tsubame-b1\100k
+private_bytes_end: 84.0 MB
+
+# --- cold-timing-03.txt ---
+tsubame U2 timing (release)
+window_px: 3840x2076 at 168 dpi, paint path hardware
+first_paint_ms (process start to first completed paint): 439.9
+private_bytes_first_paint: 17.3 MB
+all times in ms from the navigation event
+startup   entries      24 (0.0 MB)  first_batch   119.93  first_frame   246.24  done   246.45  final_frame   247.86  worker     4.32  store_cpu     0.03  final_sort     0.00  watch_start     0.09  frames   2   G:\rig-bench\tsubame-b1\gate\tiny\0001
+first     entries    1004 (0.1 MB)  first_batch    36.71  first_frame    43.12  done    43.76  final_frame    66.44  worker     6.28  store_cpu     0.65  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\small\0001
+first     entries      24 (0.1 MB)  first_batch     1.16  first_frame     2.67  done     2.75  final_frame     3.83  worker     0.30  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\tiny\0001
+first     entries  100000 (8.1 MB)  first_batch    10.92  first_frame    13.73  done   219.99  final_frame   221.55  worker   214.18  store_cpu     7.95  final_sort     5.19  watch_start     0.01  frames  41   G:\rig-bench\tsubame-b1\100k
+private_bytes_end: 85.1 MB
+```
+</details>
+
+<details><summary>Raw: idle.txt</summary>
+
+```
+idle.seconds=10
+idle.cpu_ms_first=0
+idle.cpu_ms=31.2
+idle.threads=58
+idle.threads_warm=59
+idle.context_switches_per_s=-1
+idle.pid=28652
+```
+</details>
+
+<details><summary>Raw: leak-gate.txt</summary>
+
+```
+# --- leak-gate-01.txt ---
+tool=tsubame-leak-gate
+version=1
+mode=full-gui
+build=release
+window_px=3840x2076
+window_dpi=168
+paint_path=hardware
+start_paint_path=hardware
+paints=24594
+fixture=G:\rig-bench\tsubame-b1\gate
+folders=204
+largest_folder_entries=10004
+navigations=10000
+tabs=1000
+ops=11000
+warmup_navigations=408
+warmup_tabs=200
+sample_interval=1000
+settle_s=5
+elapsed_s=37.4
+ops_per_s=293.8
+navigations_s=33.9
+tabs_s=3.5
+navigations_per_s=294.9
+tabs_per_s=282.7
+stage_s.load=25.5
+stage_s.paint=13.6
+stage_s.icons=1.7
+steps=25113
+icon_px=16
+private_pct_allow=5
+private_floor_bytes=2097152
+handles_allow=32
+gdi_allow=16
+user_allow=16
+threads_allow=8
+start.private_bytes=87171072
+start.private_mb=83.13
+start.working_set_bytes=80261120
+start.handles=628
+start.gdi=45
+start.user=21
+start.threads=58
+sample.0.private_bytes=87171072
+sample.0.private_mb=83.13
+sample.0.working_set_bytes=80261120
+sample.0.handles=628
+sample.0.gdi=45
+sample.0.user=21
+sample.0.threads=58
+sample.1000.private_bytes=90710016
+sample.1000.private_mb=86.51
+sample.1000.working_set_bytes=82903040
+sample.1000.handles=628
+sample.1000.gdi=45
+sample.1000.user=21
+sample.1000.threads=58
+sample.2000.private_bytes=90976256
+sample.2000.private_mb=86.76
+sample.2000.working_set_bytes=83316736
+sample.2000.handles=630
+sample.2000.gdi=45
+sample.2000.user=21
+sample.2000.threads=58
+sample.3000.private_bytes=90931200
+sample.3000.private_mb=86.72
+sample.3000.working_set_bytes=82976768
+sample.3000.handles=630
+sample.3000.gdi=45
+sample.3000.user=21
+sample.3000.threads=58
+sample.4000.private_bytes=91955200
+sample.4000.private_mb=87.70
+sample.4000.working_set_bytes=83271680
+sample.4000.handles=630
+sample.4000.gdi=45
+sample.4000.user=21
+sample.4000.threads=58
+sample.5000.private_bytes=90972160
+sample.5000.private_mb=86.76
+sample.5000.working_set_bytes=83193856
+sample.5000.handles=627
+sample.5000.gdi=45
+sample.5000.user=21
+sample.5000.threads=57
+sample.6000.private_bytes=89350144
+sample.6000.private_mb=85.21
+sample.6000.working_set_bytes=81903616
+sample.6000.handles=623
+sample.6000.gdi=45
+sample.6000.user=21
+sample.6000.threads=57
+sample.7000.private_bytes=91176960
+sample.7000.private_mb=86.95
+sample.7000.working_set_bytes=83423232
+sample.7000.handles=627
+sample.7000.gdi=45
+sample.7000.user=21
+sample.7000.threads=57
+sample.8000.private_bytes=89657344
+sample.8000.private_mb=85.50
+sample.8000.working_set_bytes=82239488
+sample.8000.handles=627
+sample.8000.gdi=45
+sample.8000.user=21
+sample.8000.threads=57
+sample.9000.private_bytes=91635712
+sample.9000.private_mb=87.39
+sample.9000.working_set_bytes=83804160
+sample.9000.handles=627
+sample.9000.gdi=45
+sample.9000.user=21
+sample.9000.threads=57
+sample.10000.private_bytes=92790784
+sample.10000.private_mb=88.49
+sample.10000.working_set_bytes=84746240
+sample.10000.handles=627
+sample.10000.gdi=45
+sample.10000.user=21
+sample.10000.threads=57
+sample.11000.private_bytes=88797184
+sample.11000.private_mb=84.68
+sample.11000.working_set_bytes=81899520
+sample.11000.handles=627
+sample.11000.gdi=45
+sample.11000.user=21
+sample.11000.threads=57
+end.private_bytes=88797184
+end.private_mb=84.68
+end.working_set_bytes=81899520
+end.handles=627
+end.gdi=45
+end.user=21
+end.threads=57
+idle.private_bytes=68239360
+idle.private_mb=65.08
+idle.working_set_bytes=63860736
+idle.handles=602
+idle.gdi=45
+idle.user=21
+idle.threads=58
+delta.private_bytes_from_idle=20557824
+delta.private_bytes=1626112
+delta.private_pct=1.87
+allow.private_bytes=4358553
+pass.private=1
+delta.handles=-1
+pass.handles=1
+delta.gdi=0
+pass.gdi=1
+delta.user=0
+pass.user=1
+delta.threads=-1
+pass.threads=1
+peak.private_bytes=92790784
+trim.private_bytes=88797184
+trim.private_mb=84.68
+trim.working_set_bytes=81899520
+trim.handles=627
+trim.gdi=45
+trim.user=21
+trim.threads=57
+trim.delta_private_bytes=0
+trim.note=icon cache cleared (1131 entries, cap 2048 items / 6 MB)
+timeouts=0
+gate=PASS
+fail=-
+exit=0
+
+# --- leak-gate-02.txt ---
+tool=tsubame-leak-gate
+version=1
+mode=full-gui
+build=release
+window_px=3840x2076
+window_dpi=168
+paint_path=hardware
+start_paint_path=hardware
+paints=24619
+fixture=G:\rig-bench\tsubame-b1\gate
+folders=204
+largest_folder_entries=10004
+navigations=10000
+tabs=1000
+ops=11000
+warmup_navigations=408
+warmup_tabs=200
+sample_interval=1000
+settle_s=5
+elapsed_s=41.2
+ops_per_s=267.2
+navigations_s=37.2
+tabs_s=4.0
+navigations_per_s=269.0
+tabs_per_s=250.0
+stage_s.load=28.1
+stage_s.paint=14.7
+stage_s.icons=1.6
+steps=25172
+icon_px=16
+private_pct_allow=5
+private_floor_bytes=2097152
+handles_allow=32
+gdi_allow=16
+user_allow=16
+threads_allow=8
+start.private_bytes=84504576
+start.private_mb=80.59
+start.working_set_bytes=78651392
+start.handles=626
+start.gdi=45
+start.user=21
+start.threads=59
+sample.0.private_bytes=84504576
+sample.0.private_mb=80.59
+sample.0.working_set_bytes=78651392
+sample.0.handles=626
+sample.0.gdi=45
+sample.0.user=21
+sample.0.threads=59
+sample.1000.private_bytes=88879104
+sample.1000.private_mb=84.76
+sample.1000.working_set_bytes=81854464
+sample.1000.handles=626
+sample.1000.gdi=45
+sample.1000.user=21
+sample.1000.threads=59
+sample.2000.private_bytes=85827584
+sample.2000.private_mb=81.85
+sample.2000.working_set_bytes=79810560
+sample.2000.handles=626
+sample.2000.gdi=45
+sample.2000.user=21
+sample.2000.threads=59
+sample.3000.private_bytes=89493504
+sample.3000.private_mb=85.35
+sample.3000.working_set_bytes=82374656
+sample.3000.handles=626
+sample.3000.gdi=45
+sample.3000.user=21
+sample.3000.threads=59
+sample.4000.private_bytes=89350144
+sample.4000.private_mb=85.21
+sample.4000.working_set_bytes=82505728
+sample.4000.handles=622
+sample.4000.gdi=45
+sample.4000.user=21
+sample.4000.threads=59
+sample.5000.private_bytes=89903104
+sample.5000.private_mb=85.74
+sample.5000.working_set_bytes=82731008
+sample.5000.handles=625
+sample.5000.gdi=45
+sample.5000.user=21
+sample.5000.threads=58
+sample.6000.private_bytes=87687168
+sample.6000.private_mb=83.62
+sample.6000.working_set_bytes=80896000
+sample.6000.handles=625
+sample.6000.gdi=45
+sample.6000.user=21
+sample.6000.threads=58
+sample.7000.private_bytes=90636288
+sample.7000.private_mb=86.44
+sample.7000.working_set_bytes=83484672
+sample.7000.handles=625
+sample.7000.gdi=45
+sample.7000.user=21
+sample.7000.threads=58
+sample.8000.private_bytes=89702400
+sample.8000.private_mb=85.55
+sample.8000.working_set_bytes=83345408
+sample.8000.handles=623
+sample.8000.gdi=45
+sample.8000.user=21
+sample.8000.threads=58
+sample.9000.private_bytes=87498752
+sample.9000.private_mb=83.45
+sample.9000.working_set_bytes=80609280
+sample.9000.handles=625
+sample.9000.gdi=45
+sample.9000.user=21
+sample.9000.threads=58
+sample.10000.private_bytes=87928832
+sample.10000.private_mb=83.86
+sample.10000.working_set_bytes=80879616
+sample.10000.handles=625
+sample.10000.gdi=45
+sample.10000.user=21
+sample.10000.threads=58
+sample.11000.private_bytes=86888448
+sample.11000.private_mb=82.86
+sample.11000.working_set_bytes=80818176
+sample.11000.handles=623
+sample.11000.gdi=45
+sample.11000.user=21
+sample.11000.threads=56
+end.private_bytes=86888448
+end.private_mb=82.86
+end.working_set_bytes=80818176
+end.handles=623
+end.gdi=45
+end.user=21
+end.threads=56
+idle.private_bytes=66379776
+idle.private_mb=63.30
+idle.working_set_bytes=62623744
+idle.handles=599
+idle.gdi=45
+idle.user=21
+idle.threads=59
+delta.private_bytes_from_idle=20508672
+delta.private_bytes=2383872
+delta.private_pct=2.82
+allow.private_bytes=4225228
+pass.private=1
+delta.handles=-3
+pass.handles=1
+delta.gdi=0
+pass.gdi=1
+delta.user=0
+pass.user=1
+delta.threads=-3
+pass.threads=1
+peak.private_bytes=90636288
+trim.private_bytes=86888448
+trim.private_mb=82.86
+trim.working_set_bytes=80818176
+trim.handles=623
+trim.gdi=45
+trim.user=21
+trim.threads=56
+trim.delta_private_bytes=0
+trim.note=icon cache cleared (1121 entries, cap 2048 items / 6 MB)
+timeouts=0
+gate=PASS
+fail=-
+exit=0
+
+# --- leak-gate-03.txt ---
+tool=tsubame-leak-gate
+version=1
+mode=full-gui
+build=release
+window_px=3840x2076
+window_dpi=168
+paint_path=hardware
+start_paint_path=hardware
+paints=24584
+fixture=G:\rig-bench\tsubame-b1\gate
+folders=204
+largest_folder_entries=10004
+navigations=10000
+tabs=1000
+ops=11000
+warmup_navigations=408
+warmup_tabs=200
+sample_interval=1000
+settle_s=5
+elapsed_s=37.0
+ops_per_s=297.0
+navigations_s=33.4
+tabs_s=3.6
+navigations_per_s=299.1
+tabs_per_s=277.3
+stage_s.load=25.2
+stage_s.paint=13.4
+stage_s.icons=1.6
+steps=25098
+icon_px=16
+private_pct_allow=5
+private_floor_bytes=2097152
+handles_allow=32
+gdi_allow=16
+user_allow=16
+threads_allow=8
+start.private_bytes=86482944
+start.private_mb=82.48
+start.working_set_bytes=78872576
+start.handles=623
+start.gdi=45
+start.user=21
+start.threads=59
+sample.0.private_bytes=86482944
+sample.0.private_mb=82.48
+sample.0.working_set_bytes=78872576
+sample.0.handles=623
+sample.0.gdi=45
+sample.0.user=21
+sample.0.threads=59
+sample.1000.private_bytes=87113728
+sample.1000.private_mb=83.08
+sample.1000.working_set_bytes=79155200
+sample.1000.handles=621
+sample.1000.gdi=45
+sample.1000.user=21
+sample.1000.threads=59
+sample.2000.private_bytes=90374144
+sample.2000.private_mb=86.19
+sample.2000.working_set_bytes=81682432
+sample.2000.handles=623
+sample.2000.gdi=45
+sample.2000.user=21
+sample.2000.threads=59
+sample.3000.private_bytes=90853376
+sample.3000.private_mb=86.64
+sample.3000.working_set_bytes=82567168
+sample.3000.handles=623
+sample.3000.gdi=45
+sample.3000.user=21
+sample.3000.threads=59
+sample.4000.private_bytes=90701824
+sample.4000.private_mb=86.50
+sample.4000.working_set_bytes=82341888
+sample.4000.handles=623
+sample.4000.gdi=45
+sample.4000.user=21
+sample.4000.threads=59
+sample.5000.private_bytes=90611712
+sample.5000.private_mb=86.41
+sample.5000.working_set_bytes=82419712
+sample.5000.handles=622
+sample.5000.gdi=45
+sample.5000.user=21
+sample.5000.threads=58
+sample.6000.private_bytes=91697152
+sample.6000.private_mb=87.45
+sample.6000.working_set_bytes=83206144
+sample.6000.handles=622
+sample.6000.gdi=45
+sample.6000.user=21
+sample.6000.threads=58
+sample.7000.private_bytes=88649728
+sample.7000.private_mb=84.54
+sample.7000.working_set_bytes=80883712
+sample.7000.handles=622
+sample.7000.gdi=45
+sample.7000.user=21
+sample.7000.threads=58
+sample.8000.private_bytes=91144192
+sample.8000.private_mb=86.92
+sample.8000.working_set_bytes=82472960
+sample.8000.handles=620
+sample.8000.gdi=45
+sample.8000.user=21
+sample.8000.threads=58
+sample.9000.private_bytes=88072192
+sample.9000.private_mb=83.99
+sample.9000.working_set_bytes=80371712
+sample.9000.handles=622
+sample.9000.gdi=45
+sample.9000.user=21
+sample.9000.threads=58
+sample.10000.private_bytes=90296320
+sample.10000.private_mb=86.11
+sample.10000.working_set_bytes=81784832
+sample.10000.handles=622
+sample.10000.gdi=45
+sample.10000.user=21
+sample.10000.threads=58
+sample.11000.private_bytes=88297472
+sample.11000.private_mb=84.21
+sample.11000.working_set_bytes=81039360
+sample.11000.handles=622
+sample.11000.gdi=45
+sample.11000.user=21
+sample.11000.threads=58
+end.private_bytes=88297472
+end.private_mb=84.21
+end.working_set_bytes=81039360
+end.handles=622
+end.gdi=45
+end.user=21
+end.threads=58
+idle.private_bytes=67375104
+idle.private_mb=64.25
+idle.working_set_bytes=62492672
+idle.handles=577
+idle.gdi=45
+idle.user=21
+idle.threads=59
+delta.private_bytes_from_idle=20922368
+delta.private_bytes=1814528
+delta.private_pct=2.10
+allow.private_bytes=4324147
+pass.private=1
+delta.handles=-1
+pass.handles=1
+delta.gdi=0
+pass.gdi=1
+delta.user=0
+pass.user=1
+delta.threads=-1
+pass.threads=1
+peak.private_bytes=91697152
+trim.private_bytes=88297472
+trim.private_mb=84.21
+trim.working_set_bytes=81039360
+trim.handles=622
+trim.gdi=45
+trim.user=21
+trim.threads=58
+trim.delta_private_bytes=0
+trim.note=icon cache cleared (1117 entries, cap 2048 items / 6 MB)
+timeouts=0
+gate=PASS
+fail=-
+exit=0
+```
+</details>
