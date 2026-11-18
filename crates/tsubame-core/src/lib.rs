@@ -6,6 +6,8 @@ pub const HIDDEN: u16 = 2;
 pub const SYSTEM: u16 = 4;
 pub const READONLY: u16 = 8;
 pub const REPARSE: u16 = 16;
+/// Tombstone bit of a removed record (internal; masked off every input).
+const DEAD: u16 = 0x8000;
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct EntryRecord {
@@ -22,6 +24,14 @@ pub struct EntryInput<'a> {
     pub size: u64,
     pub modified: i64,
     pub flags: u16,
+}
+/// One change for [`EntryStore::apply`]. `id: Some(live id)` rewrites that entry in
+/// place, name included, so a rename keeps its ID and its selection; any other
+/// `id` inserts a new entry.
+#[derive(Clone, Copy)]
+pub struct Upsert<'a> {
+    pub id: Option<EntryId>,
+    pub input: EntryInput<'a>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Column {
@@ -58,6 +68,10 @@ pub struct EntryStore {
     sort: Sort,
     query: Vec<u16>,
     mode: FilterMode,
+    /// IDs of tombstoned records, reused by `apply` inserts.
+    free: Vec<u32>,
+    /// Name units no live record points at (compacted by `compact_names`).
+    garbage: usize,
 }
 impl EntryStore {
     pub fn new() -> Self {
@@ -71,11 +85,19 @@ impl EntryStore {
             ..Self::default()
         }
     }
+    /// Live entries (tombstones from `apply` removals are not counted).
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.records.len() - self.free.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.len() == 0
+    }
+    /// Size of the ID space: every ID is `< id_bound()`, live or tombstoned.
+    pub fn id_bound(&self) -> usize {
+        self.records.len()
+    }
+    pub fn is_live(&self, id: EntryId) -> bool {
+        self.records.get(id as usize).is_some_and(|r| r.flags & DEAD == 0)
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -90,9 +112,11 @@ impl EntryStore {
         self.records.clear();
         self.index.clear();
         self.query.clear();
+        self.free.clear();
+        self.garbage = 0;
     }
     pub fn record(&self, id: EntryId) -> Option<&EntryRecord> {
-        self.records.get(id as usize)
+        self.records.get(id as usize).filter(|r| r.flags & DEAD == 0)
     }
     pub fn name(&self, id: EntryId) -> Option<&[u16]> {
         self.record(id)
@@ -109,6 +133,7 @@ impl EntryStore {
             + self.records.capacity() * 24
             + self.index.capacity() * 4
             + self.query.capacity() * 2
+            + self.free.capacity() * 4
     }
     /// Atomic validation, then append and sort/merge only matching new entries.
     pub fn push_batch(
@@ -130,27 +155,33 @@ impl EntryStore {
         }
         if units > u32::MAX as usize
             || self
+                .records
                 .len()
                 .checked_add(batch.len())
                 .is_none_or(|n| n > u32::MAX as usize)
         {
             return Err(StoreError::CapacityExceeded);
         }
-        let start = self.len();
+        let start = self.records.len();
         for e in batch {
             self.records.push(EntryRecord {
                 offset: self.names.len() as u32,
                 length: e.name.len() as u16,
                 size: e.size,
                 modified: e.modified,
-                flags: e.flags,
+                flags: e.flags & !DEAD,
             });
             self.names.extend_from_slice(e.name);
         }
-        let mut added: Vec<_> = (start..self.len())
+        let added: Vec<_> = (start..self.records.len())
             .map(|i| i as u32)
             .filter(|&i| self.matches(i))
             .collect();
+        self.merge_ids(added);
+        Ok(())
+    }
+    /// Sorts `added` and merges it into the index in O(n+m).
+    fn merge_ids(&mut self, mut added: Vec<u32>) {
         self.sort_ids(&mut added);
         let old = std::mem::take(&mut self.index);
         self.index = Vec::with_capacity(old.len() + added.len());
@@ -166,10 +197,191 @@ impl EntryStore {
         }
         self.index.extend_from_slice(&old[a..]);
         self.index.extend_from_slice(&added[b..]);
-        Ok(())
     }
-    fn compare(&self, a: u32, b: u32) -> Ordering {
-        let ra = &self.records[a as usize];
+    /// Incremental update without a relist: tombstones `removed`, rewrites or
+    /// inserts `upserts`, and keeps the sorted/filtered index valid. One O(n)
+    /// index pass plus an O(n+m) merge, whatever the number of changes.
+    ///
+    /// IDs of survivors never change. A removed ID is reused by a later insert,
+    /// so the caller must drop it from its `Selection` first (`Selection::forget`).
+    /// Returns the ID of each upsert, in order. Out-of-range or dead IDs in
+    /// `removed` are ignored; validation happens before any mutation.
+    pub fn apply(
+        &mut self,
+        removed: &[EntryId],
+        upserts: &[Upsert<'_>],
+    ) -> Result<Vec<EntryId>, StoreError> {
+        let mut units = self.names.len();
+        for u in upserts {
+            if u.input.name.len() > u16::MAX as usize {
+                return Err(StoreError::NameTooLong);
+            }
+            units = units
+                .checked_add(u.input.name.len())
+                .ok_or(StoreError::CapacityExceeded)?;
+        }
+        if units > u32::MAX as usize
+            || self
+                .records
+                .len()
+                .checked_add(upserts.len())
+                .is_none_or(|n| n > u32::MAX as usize)
+        {
+            return Err(StoreError::CapacityExceeded);
+        }
+        // Pull every touched ID out of the index; they are re-merged at the end.
+        let mut touched = vec![0u64; self.records.len().div_ceil(64)];
+        let mut any = false;
+        for id in removed
+            .iter()
+            .copied()
+            .chain(upserts.iter().filter_map(|u| u.id))
+        {
+            if self.is_live(id) {
+                touched[id as usize / 64] |= 1u64 << (id % 64);
+                any = true;
+            }
+        }
+        if any {
+            self.index
+                .retain(|&i| touched[i as usize / 64] & (1u64 << (i % 64)) == 0);
+        }
+        for &id in removed {
+            if let Some(r) = self.records.get_mut(id as usize).filter(|r| r.flags & DEAD == 0) {
+                self.garbage += r.length as usize;
+                *r = EntryRecord { size: 0, modified: 0, offset: 0, length: 0, flags: DEAD };
+                self.free.push(id);
+            }
+        }
+        let mut ids = Vec::with_capacity(upserts.len());
+        for u in upserts {
+            let e = &u.input;
+            let flags = e.flags & !DEAD;
+            let id = match u.id.filter(|&i| self.is_live(i)) {
+                Some(id) => {
+                    let r = &mut self.records[id as usize];
+                    let old = r.length as usize;
+                    if e.name.len() <= old {
+                        let o = r.offset as usize;
+                        self.names[o..o + e.name.len()].copy_from_slice(e.name);
+                        self.garbage += old - e.name.len();
+                    } else {
+                        self.garbage += old;
+                        r.offset = self.names.len() as u32;
+                        self.names.extend_from_slice(e.name);
+                    }
+                    r.length = e.name.len() as u16;
+                    r.size = e.size;
+                    r.modified = e.modified;
+                    r.flags = flags;
+                    id
+                }
+                None => {
+                    let rec = EntryRecord {
+                        offset: self.names.len() as u32,
+                        length: e.name.len() as u16,
+                        size: e.size,
+                        modified: e.modified,
+                        flags,
+                    };
+                    self.names.extend_from_slice(e.name);
+                    if let Some(id) = self.free.pop() {
+                        self.records[id as usize] = rec;
+                        id
+                    } else {
+                        self.records.push(rec);
+                        (self.records.len() - 1) as u32
+                    }
+                }
+            };
+            ids.push(id);
+        }
+        let mut added = ids.clone();
+        added.sort_unstable();
+        added.dedup();
+        added.retain(|&i| self.matches(i));
+        self.merge_ids(added);
+        if self.garbage > 16 * 1024 && self.garbage * 2 > self.names.len() {
+            self.compact_names();
+        }
+        Ok(ids)
+    }
+    /// Name units that no live entry uses (left behind by removals and renames).
+    pub fn garbage_units(&self) -> usize {
+        self.garbage
+    }
+    /// Rewrites the name buffer without garbage. IDs and order are unchanged.
+    pub fn compact_names(&mut self) {
+        let mut names = Vec::with_capacity(self.names.len().saturating_sub(self.garbage));
+        for r in self.records.iter_mut().filter(|r| r.flags & DEAD == 0) {
+            let o = r.offset as usize;
+            r.offset = names.len() as u32;
+            names.extend_from_slice(&self.names[o..o + r.length as usize]);
+        }
+        self.names = names;
+        self.garbage = 0;
+    }
+    /// ID of the live entry called `name`: an exact match, else a
+    /// case-insensitive one (file names compare that way on Windows).
+    pub fn find(&self, name: &[u16]) -> Option<EntryId> {
+        self.find_many(&[name])[0]
+    }
+    /// [`find`](Self::find) for many names. A few names scan once each; many
+    /// names hash once and scan the store a single time (O(n+m)).
+    pub fn find_many(&self, names: &[&[u16]]) -> Vec<Option<EntryId>> {
+        let mut out: Vec<Option<EntryId>> = vec![None; names.len()];
+        let mut exact = vec![false; names.len()];
+        let mut consider = |q: usize, id: u32, rn: &[u16], out: &mut Vec<Option<EntryId>>| {
+            let name = names[q];
+            if rn == name {
+                if !exact[q] {
+                    exact[q] = true;
+                    out[q] = Some(id);
+                }
+            } else if out[q].is_none() && rn.iter().zip(name).all(|(&a, &b)| fold(a) == fold(b)) {
+                out[q] = Some(id);
+            }
+        };
+        let live = |r: &EntryRecord| r.flags & DEAD == 0;
+        if names.len() <= 8 {
+            for (q, name) in names.iter().enumerate() {
+                for (i, r) in self.records.iter().enumerate() {
+                    if live(r) && r.length as usize == name.len() {
+                        let o = r.offset as usize;
+                        consider(q, i as u32, &self.names[o..o + name.len()], &mut out);
+                        if out[q].is_some() && self.names[o..o + name.len()] == **name {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            // query hash -> first query index; `next` chains queries with equal hashes
+            let mut heads: std::collections::HashMap<u64, u32> =
+                std::collections::HashMap::with_capacity(names.len());
+            let mut next = vec![u32::MAX; names.len()];
+            for (q, name) in names.iter().enumerate() {
+                let h = fold_hash(name);
+                next[q] = heads.insert(h, q as u32).unwrap_or(u32::MAX);
+            }
+            for (i, r) in self.records.iter().enumerate().filter(|(_, r)| live(r)) {
+                let o = r.offset as usize;
+                let rn = &self.names[o..o + r.length as usize];
+                let Some(&head) = heads.get(&fold_hash(rn)) else {
+                    continue;
+                };
+                let mut q = head;
+                while q != u32::MAX {
+                    if names[q as usize].len() == rn.len() {
+                        consider(q as usize, i as u32, rn, &mut out);
+                    }
+                    q = next[q as usize];
+                }
+            }
+        }
+        out
+    }
+    fn compare(&self, a: u32, b: u32) -> Ordering {        let ra = &self.records[a as usize];
         let rb = &self.records[b as usize];
         if self.sort.folders_first {
             let o = (rb.flags & FOLDER).cmp(&(ra.flags & FOLDER));
@@ -244,8 +456,8 @@ impl EntryStore {
             ids.retain(|&i| self.matches(i));
             self.index = ids;
         } else {
-            let mut ids = (0..self.len() as u32)
-                .filter(|&i| self.matches(i))
+            let mut ids = (0..self.records.len() as u32)
+                .filter(|&i| self.is_live(i) && self.matches(i))
                 .collect::<Vec<_>>();
             self.sort_ids(&mut ids);
             self.index = ids;
@@ -283,6 +495,12 @@ fn prefix(mut name: &[u16]) -> u64 {
         }
     }
     u64::from_be_bytes(bytes)
+}
+/// FNV-1a over case-folded units: equal for names that differ only in case.
+fn fold_hash(name: &[u16]) -> u64 {
+    name.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &c| {
+        (h ^ fold(c) as u64).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 fn extension(name: &[u16]) -> &[u16] {
     name.iter()
@@ -390,7 +608,7 @@ impl Selection {
                 ..Self::default()
             };
         }
-        self.bits.resize(s.len().div_ceil(64), 0);
+        self.bits.resize(s.id_bound().div_ceil(64), 0);
         self.epochs.resize(self.bits.len(), u64::MAX);
     }
     pub fn contains(&self, id: EntryId) -> bool {
@@ -423,6 +641,29 @@ impl Selection {
         } else {
             self.count -= 1;
             self.total -= size;
+        }
+    }
+    /// Call before `EntryStore::apply` removes `id`: deselects it and drops it as
+    /// anchor/focus. Removed IDs are reused by later inserts.
+    pub fn forget(&mut self, s: &EntryStore, id: EntryId) {
+        self.bind(s);
+        if s.is_live(id) {
+            self.set(s, id, false);
+        }
+        if self.anchor == Some(id) {
+            self.anchor = None;
+        }
+        if self.focus == Some(id) {
+            self.focus = None;
+        }
+    }
+    /// Call after an in-place update changed the size of selected `id` from
+    /// `old_size`, so the selected-bytes total stays exact.
+    pub fn resized(&mut self, s: &EntryStore, id: EntryId, old_size: u64) {
+        self.bind(s);
+        if self.contains(id) {
+            let new = s.record(id).map_or(old_size, |r| r.size);
+            self.total = self.total - old_size as u128 + new as u128;
         }
     }
     pub fn clear(&mut self) {
@@ -706,5 +947,192 @@ mod regression_tests {
                 result
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+    fn w(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+    fn input(name: &[u16], size: u64) -> EntryInput<'_> {
+        EntryInput { name, size, modified: size as i64, flags: 0 }
+    }
+    fn build(names: &[(&str, u64)], sort: Sort) -> EntryStore {
+        let mut s = EntryStore::new();
+        s.sort(sort);
+        let n: Vec<Vec<u16>> = names.iter().map(|(n, _)| w(n)).collect();
+        let b: Vec<_> = n.iter().zip(names).map(|(n, (_, sz))| input(n, *sz)).collect();
+        s.push_batch(0, &b).unwrap();
+        s
+    }
+    fn listing(s: &EntryStore) -> Vec<(String, u64)> {
+        s.view()
+            .iter()
+            .map(|&id| {
+                (
+                    String::from_utf16(s.name(id).unwrap()).unwrap(),
+                    s.record(id).unwrap().size,
+                )
+            })
+            .collect()
+    }
+    const SORTS: [Sort; 3] = [
+        Sort { column: Column::Name, descending: false, folders_first: true },
+        Sort { column: Column::Size, descending: true, folders_first: false },
+        Sort { column: Column::Type, descending: false, folders_first: true },
+    ];
+
+    #[test]
+    fn apply_matches_full_rebuild() {
+        for sort in SORTS {
+            for query in ["", "a"] {
+                let mut s = build(
+                    &[("a10", 1), ("a2", 2), ("b.txt", 3), ("c.rs", 4), ("Aa", 5), ("d", 6)],
+                    sort,
+                );
+                s.filter(query, FilterMode::Substring);
+                let b2 = w("b.txt");
+                let ids = s.find_many(&[&w("a2"), &w("C.RS"), &w("nope")]);
+                assert_eq!(ids[2], None);
+                // remove a2, resize b.txt, rename c.rs -> ab.rs, insert x1 + a3
+                let (a2, c) = (ids[0].unwrap(), ids[1].unwrap());
+                let b = s.find(&b2).unwrap();
+                let (n_ab, n_x, n_a3) = (w("ab.rs"), w("x1"), w("a3"));
+                let out = s
+                    .apply(
+                        &[a2],
+                        &[
+                            Upsert { id: Some(b), input: input(&b2, 99) },
+                            Upsert { id: Some(c), input: input(&n_ab, 4) },
+                            Upsert { id: None, input: input(&n_x, 7) },
+                            Upsert { id: None, input: input(&n_a3, 8) },
+                        ],
+                    )
+                    .unwrap();
+                assert_eq!(out[0], b);
+                assert_eq!(out[1], c, "rename keeps the ID");
+                assert_eq!(out[2], a2, "tombstoned ID is reused");
+                let mut fresh = build(
+                    &[("a10", 1), ("b.txt", 99), ("ab.rs", 4), ("Aa", 5), ("d", 6), ("x1", 7), ("a3", 8)],
+                    sort,
+                );
+                fresh.filter(query, FilterMode::Substring);
+                // equal sort keys tie-break by ID, which differs; compare as multisets per key
+                let mut got = listing(&s);
+                let mut want = listing(&fresh);
+                if sort.column == Column::Size {
+                    assert_eq!(got, want);
+                } else {
+                    got.sort();
+                    want.sort();
+                    assert_eq!(got, want);
+                }
+                assert_eq!(s.len(), 7);
+            }
+        }
+    }
+
+    #[test]
+    fn tombstones_reuse_and_stay_out_of_views() {
+        let mut s = build(&[("a", 1), ("b", 2), ("c", 3)], Sort::default());
+        let mut sel = Selection::new();
+        sel.single(&s, 1); // b
+        sel.toggle(&s, 2); // c
+        assert_eq!((sel.count(), sel.total_size()), (2, 5));
+        let b = s.find(&w("b")).unwrap();
+        sel.forget(&s, b);
+        s.apply(&[b, b, 999], &[]).unwrap(); // duplicate and bogus ids are ignored
+        assert_eq!((s.len(), s.id_bound()), (2, 3));
+        assert!(!s.is_live(b));
+        assert!(s.record(b).is_none() && s.name(b).is_none());
+        assert_eq!((sel.count(), sel.total_size()), (1, 3));
+        assert_eq!(sel.anchor, Some(2)); // toggle moved anchor to c
+        // a filter rebuild must not resurrect it
+        s.filter("b", FilterMode::Substring);
+        assert!(s.view().is_empty());
+        s.filter("", FilterMode::Substring);
+        assert_eq!(s.view().len(), 2);
+        // insert reuses the ID, selection bit was cleared
+        let n = w("bb");
+        let id = s.apply(&[], &[Upsert { id: None, input: input(&n, 10) }]).unwrap()[0];
+        assert_eq!(id, b);
+        assert!(!sel.contains(id));
+        assert_eq!(s.id_bound(), 3);
+        // resize of a selected entry keeps the total exact
+        let c = s.find(&w("c")).unwrap();
+        let cn = w("c");
+        s.apply(&[], &[Upsert { id: Some(c), input: input(&cn, 50) }]).unwrap();
+        sel.resized(&s, c, 3);
+        assert_eq!(sel.total_size(), 50);
+        // upsert with a dead / out of range ID inserts
+        s.apply(&[id], &[]).unwrap();
+        let z = w("zz");
+        let r = s.apply(&[], &[Upsert { id: Some(id), input: input(&z, 1) }]).unwrap();
+        assert_eq!(s.name(r[0]).unwrap(), &z[..]);
+        assert_eq!(s.len(), 3);
+    }
+
+    #[test]
+    fn find_paths_agree() {
+        let names: Vec<String> = (0..300).map(|i| format!("File{i:03}.TXT")).collect();
+        let pairs: Vec<(&str, u64)> = names.iter().map(|n| (n.as_str(), 1)).collect();
+        let mut s = build(&pairs, Sort::default());
+        // exact beats case-insensitive: two names that differ only in case
+        let (upper, lower) = (w("DUP"), w("dup"));
+        s.apply(&[], &[Upsert { id: None, input: input(&upper, 1) }, Upsert { id: None, input: input(&lower, 1) }]).unwrap();
+        let queries: Vec<Vec<u16>> = (0..300).step_by(7).map(|i| w(&format!("file{i:03}.txt"))).chain([w("dup"), w("DUP"), w("Dup"), w("missing")]).collect();
+        let refs: Vec<&[u16]> = queries.iter().map(|q| q.as_slice()).collect();
+        let many = s.find_many(&refs);
+        for (q, got) in refs.iter().zip(&many) {
+            assert_eq!(*got, s.find(q), "{:?}", String::from_utf16_lossy(q));
+        }
+        assert_eq!(s.name(many[many.len() - 4].unwrap()).unwrap(), &lower[..]);
+        assert_eq!(s.name(many[many.len() - 3].unwrap()).unwrap(), &upper[..]);
+        assert!(many[many.len() - 2].is_some());
+        assert!(many[many.len() - 1].is_none());
+    }
+
+    #[test]
+    fn compaction_keeps_ids_and_order() {
+        let long: Vec<u16> = vec![b'x' as u16; 200];
+        let mut s = EntryStore::new();
+        let initial: Vec<Vec<u16>> = (0..400).map(|i| [long.clone(), w(&i.to_string())].concat()).collect();
+        let b: Vec<_> = initial.iter().map(|n| input(n, 1)).collect();
+        s.push_batch(0, &b).unwrap();
+        let before: Vec<_> = s.view().to_vec();
+        let remove: Vec<u32> = (0..400).step_by(2).collect();
+        s.apply(&remove, &[]).unwrap();
+        assert!(s.garbage_units() > 0);
+        let keep: Vec<_> = s.view().iter().map(|&i| (i, s.name(i).unwrap().to_vec())).collect();
+        s.compact_names();
+        assert_eq!(s.garbage_units(), 0);
+        let after: Vec<_> = s.view().iter().map(|&i| (i, s.name(i).unwrap().to_vec())).collect();
+        assert_eq!(keep, after);
+        assert_eq!(after.len(), 200);
+        assert!(before.len() == 400);
+        // churn: repeated create/remove must not grow the id space or names without bound
+        for round in 0..200 {
+            let n = w(&format!("{}{round}", "t".repeat(50)));
+            let id = s.apply(&[], &[Upsert { id: None, input: input(&n, 1) }]).unwrap()[0];
+            s.apply(&[id], &[]).unwrap();
+        }
+        assert_eq!(s.id_bound(), 400);
+        assert_eq!(s.len(), 200);
+    }
+
+    #[test]
+    fn apply_validates_before_mutating() {
+        let mut s = build(&[("a", 1)], Sort::default());
+        let big = vec![1u16; 65536];
+        let ok = w("ok");
+        let r = s.apply(
+            &[0],
+            &[Upsert { id: None, input: input(&ok, 1) }, Upsert { id: None, input: input(&big, 1) }],
+        );
+        assert_eq!(r.err(), Some(StoreError::NameTooLong));
+        assert_eq!(s.len(), 1);
+        assert!(s.is_live(0));
     }
 }

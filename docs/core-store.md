@@ -14,7 +14,8 @@ One `Vec<u16>` holds names, one `Vec<EntryRecord>` holds metadata, one
   rejects stale generation, >65535-unit names, u32 offset/ID exhaustion. Allocation
   failure follows Rust allocator policy. IDs remain stable until `clear()`.
 - `record(id)`, `name(id)` return optional borrowed data; `at(position)` returns ID;
-  `view()` borrows sorted/filtered IDs. `len()` counts all entries.
+  `view()` borrows sorted/filtered IDs. `len()` counts live entries; `id_bound()` is the
+  ID space (live + tombstoned), `is_live(id)` tells which.
 - `clear()` advances generation, empties listing/filter, retains capacities and sort.
 - `sort(Sort { column, descending, folders_first })` sorts visible IDs. Folders stay
   first in either direction. Equal keys retain insertion order (ID tie-break).
@@ -36,6 +37,28 @@ One `Vec<u16>` holds names, one `Vec<EntryRecord>` holds metadata, one
   operate on visible IDs. Count and u128 byte total update incrementally. Every mutation
   binds generation, resetting selection for new listings. Callers must bind through a
   mutation before reading selection after directory replacement. Anchor/focus are IDs.
+
+## Incremental updates (C4)
+
+For the directory watcher: change a listing without a relist.
+
+- `apply(&removed, &[Upsert]) -> Result<Vec<EntryId>, StoreError>`: one call, one
+  sort merge. `Upsert { id: Option<EntryId>, input: EntryInput }`: `Some(live id)`
+  rewrites that entry in place, name included (rename = same ID, so selection and
+  focus follow it); anything else inserts. Removed IDs become tombstones (`DEAD`
+  flag, invisible) on a free-list; later inserts reuse them. Returns the upserts' IDs,
+  in order.
+- `find(name)` / `find_many(&[name])`: live-entry lookup, exact match first, else
+  case-insensitive. A few names scan once each; many hash once and scan the store once.
+- `compact_names()`: rebuilds the name buffer without dead names (`garbage_units()`
+  counts them). `apply` calls it when garbage is over 16 Ki units and over half the
+  buffer. IDs and order keep.
+- `Selection::forget(&store, id)`: call before `apply` removes `id`; deselects it and
+  clears anchor/focus if it was them. `Selection::resized(&store, id, old_size)`: call
+  after an in-place update to keep the selected-bytes total exact.
+- `id_bound()` is the ID space (live + tombstoned), `is_live(id)` tells which; `len()`
+  is the live count. Anything indexed by ID (selection bitset) sizes by `id_bound()`.
+- `clear()` still resets everything, tombstones and free-list included.
 
 ## Memory
 
