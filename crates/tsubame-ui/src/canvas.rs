@@ -84,6 +84,9 @@ impl Font {
 /// - `text` is one line, vertically centred in `r`, clipped to `r`, and ends
 ///   in an ellipsis when it does not fit. Wider boxes than the text never
 ///   trim, so a scrolled text field draws into a wide box under `clip`.
+///   ("Clipped" allows half a DIP of antialiased ink past `r`: the Direct2D
+///   backend clips only strings whose ink leaves the box, since a clip per
+///   string splits its draw batch.)
 /// - `image` pixels are premultiplied BGRA, `w * h` of them. The backend may
 ///   keep a device copy per `key` until its target goes; the same key must
 ///   always mean the same pixels.

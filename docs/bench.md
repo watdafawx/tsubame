@@ -27,7 +27,7 @@ in `crates/tsubame-bench/src/appbench.rs`.
 | 10 launches | `--bench --dir <100k>` | cold start to first painted frame, 5 s scroll paint p50/p95, private bytes before/after the scroll, exe size |
 | 1 launch | `--timing --timing-dirs <100k> --reps 10` | open a 100,000-entry folder: first rows and complete+sorted, per navigation |
 | 1 launch | plain, `--dir <100k>` | idle CPU over 10 s, twice (the second window is reported), thread count |
-| 1 purge + 1 launch | `gsudo -n tsubame-bench purge --mode working` then `--timing --timing-dirs "<tiny>;<100k>" --reps 1` | cold-cache open of the 100k folder (only if the purge is permitted) |
+| 3 × (purge + 1 launch) | `tsubame-bench purge --mode working` from the elevated ssh session (`gsudo -n` as fallback), wait for rig's disks to settle, then `--timing --timing-dirs "<tiny>;<idle>;<1k>;<tiny>;<100k>" --reps 1` | cold-cache open of the 100k folder: only the last navigation counts, so the warm-up takes the app's own cold start (only if the purge is permitted; `-ColdRuns N`) |
 | 3 launches | `--leak-gate --gate-fixture <gate> --gate-navs 10000 --gate-tabs 1000` | the leak gate: 10,000 navigations + 1,000 tab open/close in one process, counters every 1,000 ops |
 
 Fixtures come from `tsubame-bench gen --root G:\rig-bench\tsubame-b1 --sizes 100k`
@@ -42,7 +42,7 @@ cache is exercised. They stay under 10 GB and are deleted at the end unless
 directory.
 
 Options: `-Runs` (cold-start launches, default 10), `-GateNavs`, `-GateTabs`,
-`-GateRuns` (default 3), `-ColdMode none|standby|working`, `-Slot N`,
+`-GateRuns` (default 3), `-ColdMode none|standby|working`, `-ColdRuns` (default 3), `-Slot N`,
 `-SkipBuild`, `-SkipGen`, `-SkipLeakGate`, `-LeakGateOnly`, `-KeepFixtures`,
 `-Quick`, `-NoLog`, `-LogPath`, `-GateFixture` (override the tree, for bisecting).
 
@@ -96,7 +96,7 @@ is as large as the threshold (see below).
 | Cold start to first painted frame | < 100 ms median of 10 | `--bench` |
 | 100k folder: first rows | < 30 ms median of 9 | `--timing` |
 | 100k folder: complete and sorted | < 200 ms median of 9 | `--timing` |
-| 100k folder, cold cache | < 30 / < 200 ms, or "not measured" | `--timing` after a purge |
+| 100k folder, cold cache | < 30 / < 200 ms median of 3, or "not measured" | `--timing` after a purge, last navigation only |
 | Scroll paint p95, 4K | < 5 ms median of 10 runs' p95 | `--bench` |
 | Idle CPU, 10 s | < 50 ms of CPU (the budget is 0 wake-ups; process CPU time is quantised to ~15.6 ms on rig, so one tick reads as 15.6 ms) | plain launch |
 | Private bytes, one tab, small folder, 4K | < 110 MB | gate's idle sample |
@@ -158,3 +158,13 @@ cold on rig (the worker stays at warm speed); a VHDX dismount does, but at
 ~7x the real disk's cost; worker time is the disk floor and varies 120 ms to
 1.9 s with other load on rig's G:, so compare `overhead` across builds and
 report medians with p95.
+
+PERF3 (2026-11-19): scroll p95 was 6.18 ms median of 10 on main `5b1cafb`, 2.70 ms
+after the fix (interleaved same session, rig CPU 12%). Not U4: 63c27b7, e230e30
+and 4c37edb all read ~6 ms interleaved after a rig reboot left the GPU shared
+(wallpaper, Parsec). Cause: every `text` drew with `D2D1_DRAW_TEXT_OPTIONS_CLIP`,
+a clip per string (~250 per frame) that splits Direct2D's batch; now only layouts
+whose ink overhangs the box clip (`GetOverhangMetrics`), and
+`TSUBAME_TEXT_CLIP=all` restores the old path for A/B (6.19 ms). Guard: `--bench`
+prints per-phase `cpu_build`, `enddraw`, `text_calls`/`text_clipped`, `text_ms`,
+layouts made and bitmaps; `text_clipped` stays 0 in the list.
