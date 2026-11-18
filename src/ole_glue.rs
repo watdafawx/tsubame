@@ -4,24 +4,22 @@
 //! shortcuts. Dropping items onto the folder they are already in, or a folder
 //! into itself, does nothing. See `docs/shell-integration.md`.
 //!
-//! (U3 adds `src/dnd.rs` with the same rules for in-app drags; when both
-//! exist, this file should fold into that one.)
+//! The rules themselves live in `src/dnd.rs` (`resolve`, `refusal`); this file
+//! maps them to DROPEFFECT / MK_* bits and paths.
 
 use std::path::{Path, PathBuf};
 use tsubame_win::dnd::formats::{self, EFFECT_COPY, EFFECT_LINK, EFFECT_MOVE, EFFECT_NONE, MK_ALT, MK_CONTROL, MK_SHIFT};
 use tsubame_win::fileops::Operation;
 
-/// The effect the user asked for with the keys, before `allowed`.
+/// The effect the user asked for with the keys, before `allowed`
+/// (`dnd::resolve` with MK_* bits).
 pub fn wanted(sources: &[PathBuf], target: &Path, keys: u32) -> u32 {
-    let (ctrl, shift, alt) = (keys & MK_CONTROL != 0, keys & MK_SHIFT != 0, keys & MK_ALT != 0);
-    if alt || (ctrl && shift) {
-        EFFECT_LINK
-    } else if ctrl {
-        EFFECT_COPY
-    } else if shift || sources.first().is_some_and(|s| formats::same_volume(s, target)) {
-        EFFECT_MOVE
-    } else {
-        EFFECT_COPY
+    let mods = tsubame_ui::Mods { ctrl: keys & MK_CONTROL != 0, shift: keys & MK_SHIFT != 0, alt: keys & MK_ALT != 0 };
+    let src = sources.first().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    match crate::dnd::resolve(&src, &target.to_string_lossy(), mods) {
+        crate::dnd::DropAction::Link => EFFECT_LINK,
+        crate::dnd::DropAction::Copy => EFFECT_COPY,
+        crate::dnd::DropAction::Move => EFFECT_MOVE,
     }
 }
 
@@ -44,17 +42,10 @@ pub fn choose(sources: &[PathBuf], target: &Path, keys: u32, allowed: u32) -> u3
     }
 }
 
-/// Can `sources` go into `target` at all? Not when every item already sits
-/// there (self-drop), when the target is one of them or inside one, or when
-/// a source has no name (a drive root).
+/// Can `sources` go into `target` at all? `dnd::refusal`'s rules.
 pub fn droppable(sources: &[PathBuf], target: &Path) -> bool {
-    if sources.is_empty() || target.as_os_str().is_empty() {
-        return false;
-    }
-    if sources.iter().any(|s| s.file_name().is_none() || formats::is_within(target, s)) {
-        return false;
-    }
-    !sources.iter().all(|s| s.parent().is_some_and(|p| formats::same_path(p, target)))
+    let payload = crate::dnd::DragPayload::new(sources.iter().map(|s| s.to_string_lossy().into_owned()).collect());
+    crate::dnd::refusal(&payload, &target.to_string_lossy()).is_none()
 }
 
 /// File operations for a drop or a paste of `sources` into folder `target`.

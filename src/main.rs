@@ -980,6 +980,8 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
         open_menu(hwnd, row, x, y);
     }
     shellops::after_frame(hwnd);
+    // a drag started on our rows: OLE's modal loop, outside the app borrow
+    shellops::drag_out(hwnd);
     for p in open {
         places::open_async(p);
     }
@@ -1239,13 +1241,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
-                // a press on a selected row waits: click or drag (shellops)
-                if msg == WM_LBUTTONDOWN && shellops::mouse_down(lp) {
-                    return LRESULT(0);
-                }
-                if msg == WM_LBUTTONUP {
-                    shellops::mouse_up(hwnd);
-                }
                 button_event(hwnd, msg, lp);
                 LRESULT(0)
             }
@@ -1253,9 +1248,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if with(|a| !std::mem::replace(&mut a.tracking, true)).unwrap_or(false) {
                     let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                     let _ = TrackMouseEvent(&mut tme);
-                }
-                if shellops::mouse_move(hwnd, lp, wp) {
-                    return LRESULT(0);
                 }
                 push(hwnd, Event::MouseMove { pos: dip_pt(lp) });
                 LRESULT(0)
@@ -1394,20 +1386,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 invalidate(hwnd);
                 LRESULT(0)
             }
-            WM_TIMER if wp.0 == shellops::OPS_TIMER => {
-                shellops::on_timer(hwnd);
-                LRESULT(0)
-            }
             shellops::WM_APP_SHELLOPS => {
                 shellops::on_app(hwnd);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == OPS_TIMER => {
-                with(|a| {
-                    a.view.poll_ops();
-                    arm_ops(hwnd, a);
-                });
-                invalidate(hwnd);
+                // file-op events: progress, conflicts (a dialog), results
+                shellops::on_ops_timer(hwnd);
+                with(|a| arm_ops(hwnd, a));
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == SAVE_TIMER => {

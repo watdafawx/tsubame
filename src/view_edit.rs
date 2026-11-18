@@ -59,13 +59,14 @@ impl View {
             self.ops.message = None;
             self.press = None;
             let keep = super::KEEP_MULTI.with(|k| k.take());
-            if ui.active() == Some(list_id) && self.rename.is_none() && !self.mode.is_grid() {
+            if ui.active() == Some(list_id) && self.rename.is_none() {
                 let pos = ui.mouse();
                 let ms = now_ms();
                 self.press = match self.row_at(pos) {
                     Some(row) => {
                         let prev = self.last_click.filter(|(r, _)| *r == row).map(|(_, t)| t);
-                        let plain = !self.cur_mods.ctrl && !self.cur_mods.shift;
+                        // slow-click rename: details rows only (a grid label is small)
+                        let plain = !self.cur_mods.ctrl && !self.cur_mods.shift && !self.mode.is_grid();
                         let slow = plain && rename::is_slow_click(prev, self.sole_hist[0] == Some(row), ms);
                         self.last_click = Some((row, ms));
                         Some(PressInfo { pos, slow, collapse: keep.filter(|k| *k == row) })
@@ -104,10 +105,14 @@ impl View {
         released
     }
 
-    /// View row under `p` in the live pane's details list.
+    /// View row (details) or cell (grid) under `p` in the live pane.
     pub(super) fn row_at(&self, p: Pt) -> Option<usize> {
-        if self.mode.is_grid() || !self.list_r.contains_pt(p) {
+        if !self.list_r.contains_pt(p) {
             return None;
+        }
+        let n = self.tab().shown();
+        if self.mode.is_grid() {
+            return self.tab().grid.cell_at(p.x - self.list_r.x, p.y - self.list_r.y, n);
         }
         let l = &self.tab().list;
         let row = ((p.y - self.list_r.y) as f64 + l.scroll) / l.row_h as f64;
@@ -115,22 +120,40 @@ impl View {
         (row < self.tab().shown()).then_some(row)
     }
 
+    /// The press moved far enough: main runs the drag as an OLE drag
+    /// (`shellops::drag_out`), so it can end anywhere, here or in Explorer.
     fn start_drag(&mut self) {
-        let t = self.tab();
-        let paths = t.selected_paths(10_000);
-        if paths.is_empty() {
-            return;
-        }
-        let folder = (paths.len() == 1).then(|| paths[0].clone()).filter(|p| t.store.at(t.list.cursor).is_some() && t.entry_at(t.list.cursor).is_some_and(|(cp, dir)| dir && cp == *p));
-        self.drag = Some(Drag { payload: DragPayload::new(paths), folder, hint: String::new(), last: Pt { x: -1.0, y: -1.0 } });
+        let paths = self.tab().selected_paths(crate::shellops::MAX_ITEMS);
         self.press = None;
+        if !paths.is_empty() && !self.tab().synthetic {
+            self.drag_out = Some(paths);
+        }
     }
 
-    /// Esc: ends a drag, else closes the rename / batch.
-    pub(super) fn cancel_edits(&mut self) -> bool {
-        if self.drag.take().is_some() {
-            return true;
+    /// A drag came over the window (ours or another program's).
+    pub fn drag_enter(&mut self, paths: Vec<String>) {
+        let folder = (paths.len() == 1).then(|| paths[0].clone()).filter(|p| std::path::Path::new(p).is_dir());
+        self.drag = Some(Drag { payload: DragPayload::new(paths), folder, hint: String::new(), last: Pt { x: -1.0, y: -1.0 } });
+        self.drop_dest = None;
+    }
+
+    /// The drag left the window, was dropped or cancelled.
+    pub fn drag_leave(&mut self) {
+        self.drag = None;
+        self.drop_dest = None;
+        self.drag_keys = None;
+    }
+
+    /// A folder dropped between pinned rows.
+    pub fn pin_dropped(&mut self, path: &str, at: usize) {
+        if self.side.pin_at(path, at) {
+            self.ops.message = Some(format!("Pinned {}", dnd::name_of(path)));
+            self.config_dirty = true;
         }
+    }
+
+    /// Esc: closes the rename / batch (a drag is OLE's: Esc cancels it there).
+    pub(super) fn cancel_edits(&mut self) -> bool {
         if self.batch.take().is_some() {
             self.focus_list = true;
             return true;
@@ -229,7 +252,6 @@ impl View {
         let to = crate::nav::join(&e.parent, e.name());
         let replace = matches!(out, RenameOut::Commit { replace: true });
         if self.ops.rename(&e.path, &to, replace) {
-            self.select_after = vec![e.name().to_string()];
             self.ops.message = Some(format!("Renaming to \"{}\"...", e.name()));
         }
         if out == RenameOut::CommitNext {
@@ -328,7 +350,6 @@ impl View {
         }
         let n = pairs.len();
         if self.ops.rename_batch(&pairs) {
-            self.select_after = pairs.iter().map(|(_, new)| crate::dnd::name_of(new).to_string()).collect();
             self.ops.message = Some(format!("Renaming {n} items..."));
         }
         ui.request_repaint();
@@ -338,7 +359,7 @@ impl View {
 
     /// Re-reads `i` of the live pane keeping scroll and selection (`names`
     /// replaces the selection when not empty).
-    fn reload_tab(&mut self, i: usize, names: &[String]) {
+    pub(super) fn reload_tab(&mut self, i: usize, names: &[String]) {
         let wake = self.wake.clone();
         let t = &mut self.tabs.items[i];
         let row = (t.list.scroll / t.list.row_h as f64) as usize;
@@ -348,55 +369,66 @@ impl View {
         t.restore = Some(Restore { scroll_first_row: row, selected });
     }
 
-    /// Drains file-operation events; reloads the folders they changed. True
-    /// when something on screen changed.
-    pub fn poll_ops(&mut self) -> bool {
-        let p = self.ops.poll();
-        if p.refresh.is_empty() && !p.message {
-            return false;
+    /// After file-operation events (`shellops::on_ops_timer`): the jobs that
+    /// ended. Watched tabs follow by themselves (their watcher sees the
+    /// change); they only get the names to select once the new items show
+    /// up. Unwatched tabs showing a changed folder are re-read keeping
+    /// scroll and selection. Every tab of both panes, not just the visible one.
+    pub fn after_ops(&mut self) {
+        let done = self.ops.take_finished();
+        if done.is_empty() {
+            return;
         }
-        let names = std::mem::take(&mut self.select_after);
         let panes = if self.other.is_some() { 2 } else { 1 };
         for slot in 0..panes {
-            let active = slot == self.active || self.other.is_none();
-            let names = &names;
             self.with_pane(slot, |v| {
                 for i in 0..v.tabs.items.len() {
                     let path = v.tabs.items[i].path.clone();
-                    if p.refresh.iter().any(|d| d.eq_ignore_ascii_case(&path)) {
-                        let pick: &[String] = if active && i == v.tabs.active { names } else { &[] };
-                        v.reload_tab(i, pick);
+                    if v.tabs.items[i].synthetic {
+                        continue;
+                    }
+                    let same = |d: &String| d.trim_end_matches('\\').eq_ignore_ascii_case(path.trim_end_matches('\\'));
+                    let mut reload = false;
+                    let mut names: Vec<String> = Vec::new();
+                    for f in &done {
+                        if f.folder.as_ref().is_some_and(same) {
+                            names.extend(f.select.iter().cloned());
+                        }
+                        reload |= f.history || f.touched.iter().any(same);
+                    }
+                    if !reload && names.is_empty() {
+                        continue;
+                    }
+                    let t = &mut v.tabs.items[i];
+                    if t.watched() {
+                        if !names.is_empty() {
+                            t.want_select(names);
+                        }
+                    } else if reload {
+                        v.reload_tab(i, &names);
                     }
                 }
             });
         }
         self.want_drives = true;
-        true
     }
 
-    /// File operations are running: main keeps a timer for `poll_ops`.
+    /// File operations are running: main keeps a timer for their events.
     pub fn ops_busy(&self) -> bool {
         self.ops.busy()
     }
 
     pub(super) fn undo_op(&mut self) {
-        self.mark_all_stale();
         self.ops.undo();
     }
 
     pub(super) fn redo_op(&mut self) {
-        self.mark_all_stale();
         self.ops.redo();
     }
 
-    fn mark_all_stale(&mut self) {
-        let mut dirs = vec![self.tab().path.clone()];
-        if let Some(o) = self.other.as_deref() {
-            dirs.push(o.tabs.items[o.tabs.active].path.clone());
-        }
-        for d in dirs {
-            self.ops.mark_dir(&d);
-        }
+    /// The active pane's list has the keyboard focus (file shortcuts apply).
+    pub fn list_focused(&self, ui: &Ui) -> bool {
+        !self.editing && self.rename.is_none() && self.batch.is_none() && ui.has_focus(pid(self.active, ID_LIST))
     }
 
     /// F5 / F6 with two panes: the selection goes to the other pane's folder.
@@ -415,7 +447,7 @@ impl View {
         }
         let action = if mv { DropAction::Move } else { DropAction::Copy };
         let steps = dnd::plan(&payload, &dest, action);
-        self.ops.submit_steps(&steps);
+        self.ops.submit_steps(&steps, &dest);
     }
 
     /// Files dropped on `folder` (a sidebar row, a folder row, a pane).
@@ -427,7 +459,7 @@ impl View {
         }
         let action = crate::ops::action_for(&d.payload.paths, folder, self.cur_mods);
         let steps = dnd::plan(&d.payload, folder, action);
-        self.ops.submit_steps(&steps);
+        self.ops.submit_steps(&steps, folder);
     }
 
     // ---- drag: targets inside the panes, chip -----------------------------------
@@ -453,13 +485,43 @@ impl View {
         None
     }
 
-    /// After the sidebar and the panes are drawn: handles the drop and draws
-    /// the chip. `released`: the pointer went up this frame; `side_target`: what
-    /// the sidebar says the pointer is over.
-    pub(super) fn finish_drag(&mut self, ui: &mut Ui, g: &mut dyn Canvas, t: &Theme, released: bool, side_target: Option<&crate::sidebar::DropTarget>) {
-        let Some(d) = self.drag.as_ref() else { return };
+    /// The tab under `m` in a pane's strip: (slot, folder of the tab; None
+    /// for a tab that is not a real folder).
+    fn tab_drop_folder(&mut self, m: Pt, th: f32, min_w: f32, max_w: f32) -> Option<(usize, Option<String>)> {
+        let panes = if self.other.is_some() { 2 } else { 1 };
+        for slot in 0..panes {
+            let (strip, scroll) = self.strips[slot];
+            let hit = Rect::new(strip.x, strip.b() - th, strip.w, th);
+            if strip.w <= 0.0 || !hit.contains_pt(m) {
+                continue;
+            }
+            return Some(self.with_pane(slot, |v| {
+                // the same layout as tsubame-ui's tab strip (28 + 4 DIPs for "+")
+                let n = v.tabs.items.len().max(1);
+                let w = ((hit.w - 32.0).max(0.0) / n as f32).clamp(min_w, max_w);
+                let i = ((m.x - (hit.x - scroll)) / w).floor();
+                let tab = (i >= 0.0).then(|| v.tabs.items.get(i as usize)).flatten();
+                let folder = match tab {
+                    Some(t) if !t.synthetic => Some(t.path.clone()),
+                    Some(_) => None,
+                    None => (!v.tab().synthetic).then(|| v.tab().path.clone()),
+                };
+                (slot, folder)
+            }));
+        }
+        None
+    }
+
+    /// While a drag is over the window (after the sidebar and the panes are
+    /// drawn): works out where a drop would land (`drop_dest`, read by the
+    /// OLE drop target) and draws the chip, the hint and the highlight.
+    pub(super) fn finish_drag(&mut self, ui: &mut Ui, g: &mut dyn Canvas, t: &Theme, side_target: Option<&crate::sidebar::DropTarget>) {
+        let Some(d) = self.drag.as_ref() else {
+            self.drop_dest = None;
+            return;
+        };
         let m = ui.mouse();
-        let mods = self.cur_mods;
+        let mods = self.drag_keys.unwrap_or(self.cur_mods);
         let paths = d.payload.paths.clone();
         let count = paths.len();
         let first = d.payload.first_name().to_string();
@@ -467,12 +529,20 @@ impl View {
         // where would it land?
         let mut hint = String::new();
         let mut dest: Option<String> = None;
+        let mut pin: Option<usize> = None;
         let mut over_pane: Option<(usize, Option<usize>)> = None;
+        let mut over_tab = false;
         match side_target {
-            Some(crate::sidebar::DropTarget::Pin(_)) => hint = "Pin to sidebar".into(),
+            Some(crate::sidebar::DropTarget::Pin(k)) => {
+                hint = "Pin to sidebar".into();
+                pin = Some(*k);
+            }
             Some(crate::sidebar::DropTarget::Folder(p)) => dest = Some(p.clone()),
             None => {
-                if let Some((slot, folder, row)) = self.pane_drop_folder(m) {
+                if let Some((_, folder)) = self.tab_drop_folder(m, t.height_tab, t.layout_tab_min_width, t.layout_tab_width) {
+                    over_tab = true;
+                    dest = folder;
+                } else if let Some((slot, folder, row)) = self.pane_drop_folder(m) {
                     over_pane = Some((slot, row));
                     dest = Some(folder);
                 }
@@ -488,24 +558,25 @@ impl View {
                 None => format!("{} {}", crate::ops::action_for(&paths, dir, mods).verb(), dnd::name_of(dir)),
             };
         }
-        if released {
-            // the sidebar already handled its own targets (DropOn / pin)
-            if side_target.is_none()
-                && let Some(dir) = dest
-            {
-                self.drop_selection_on(&dir);
-            }
-            self.drag = None;
-            ui.request_repaint();
-            return;
-        }
+        self.drop_dest = match (pin, &dest) {
+            (Some(k), _) => Some(DropDest::Pin(k)),
+            (None, Some(dir)) => Some(DropDest::Folder(dir.clone())),
+            _ => None,
+        };
+        let _ = over_tab;
         // highlight the pane or the folder row under the pointer
         if let (Some((slot, row)), Some(_)) = (over_pane, &dest) {
             let slot_rect = if self.other.is_some() { self.pane_rects[slot] } else { self.list_r };
             let r = match row {
                 Some(r) => self.with_pane(slot, |v| {
-                    let l = &v.tab().list;
-                    Rect::new(v.list_r.x, v.list_r.y + l.row_top(r) as f32, v.list_r.w - t.layout_scrollbar_width, l.row_h)
+                    if v.mode.is_grid() {
+                        let gs = &v.tab().grid;
+                        let (ox, oy) = gs.cell_origin(r);
+                        Rect::new(v.list_r.x + ox, v.list_r.y + oy, gs.cell_w, gs.cell_h)
+                    } else {
+                        let l = &v.tab().list;
+                        Rect::new(v.list_r.x, v.list_r.y + l.row_top(r) as f32, v.list_r.w - t.layout_scrollbar_width, l.row_h)
+                    }
                 }),
                 None => slot_rect,
             };
@@ -530,6 +601,6 @@ impl View {
     // ---- the status bar's message ----------------------------------------------
 
     pub(super) fn status_message(&self) -> Option<&str> {
-        self.ops.message.as_deref().or((!self.hooks.status.is_empty()).then_some(self.hooks.status.as_str()))
+        self.ops.message.as_deref()
     }
 }
