@@ -41,7 +41,11 @@ One `Vec<u16>` holds names, one `Vec<EntryRecord>` holds metadata, one
   the stable natural sort (tests check against a naive sort on random,
   unicode and tie-heavy names).
 - `filter(query, Substring|Glob)` is case-insensitive. Substring extensions scan only
-  previous results; edits/backspace/mode changes rebuild from all IDs. Glob is anchored,
+  previous results; edits/backspace/mode changes rebuild from all IDs. When a
+  filter starts on the complete sorted view, that order is kept (4 bytes per
+  entry while filtered, freed when the filter is cleared; dropped by any
+  mutation or re-sort): a rebuild then filters it in one ordered pass instead
+  of sorting the matches again. Glob is anchored,
   `*` any units and `?` one UTF-16 unit, iterative backtracking, no escape syntax.
 - Natural comparison treats ASCII digit runs numerically; leading-zero variants and
   case variants tie. Simple one-to-one BMP lowercase supports typical Latin/Greek/

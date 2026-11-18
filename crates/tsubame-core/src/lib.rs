@@ -76,6 +76,10 @@ pub struct EntryStore {
     /// holds the smallest visible entries so far, `index[top..]` is arrival order.
     streaming: bool,
     top: usize,
+    /// The complete sorted view, saved when a filter starts on it: a filter
+    /// rebuild (backspace, mode change) then filters it in order instead of
+    /// sorting the matches again. Dropped by every mutation and by `sort`.
+    unfiltered: Option<Vec<u32>>,
 }
 /// While streaming, this many leading view rows are kept in final sort order
 /// (a few screens); the rest of the view is arrival order until `end_stream`.
@@ -125,6 +129,7 @@ impl EntryStore {
         self.garbage = 0;
         self.streaming = false;
         self.top = 0;
+        self.unfiltered = None;
     }
     /// Starts a streaming listing: `push_batch` then appends without merging
     /// the whole view. Only the first [`STREAM_TOP`] view rows are kept in
@@ -177,6 +182,7 @@ impl EntryStore {
             + self.index.capacity() * 4
             + self.query.capacity() * 2
             + self.free.capacity() * 4
+            + self.unfiltered.as_ref().map_or(0, |u| u.capacity() * 4)
     }
     /// Atomic validation, then append and sort/merge only matching new entries.
     pub fn push_batch(
@@ -187,6 +193,7 @@ impl EntryStore {
         if generation != self.generation {
             return Err(StoreError::StaleGeneration);
         }
+        self.unfiltered = None;
         let mut units = self.names.len();
         for e in batch {
             if e.name.len() > u16::MAX as usize {
@@ -316,6 +323,7 @@ impl EntryStore {
     ) -> Result<Vec<EntryId>, StoreError> {
         // the merge below needs a fully sorted view
         self.end_stream();
+        self.unfiltered = None;
         let mut units = self.names.len();
         for u in upserts {
             if u.input.name.len() > u16::MAX as usize {
@@ -714,6 +722,7 @@ impl EntryStore {
     }
     pub fn sort(&mut self, sort: Sort) {
         self.sort = sort;
+        self.unfiltered = None;
         let mut ids = std::mem::take(&mut self.index);
         self.sort_ids(&mut ids);
         self.index = ids;
@@ -726,6 +735,10 @@ impl EntryStore {
         let next: Vec<u16> = query.encode_utf16().map(fold).collect();
         let refine =
             mode == FilterMode::Substring && self.mode == mode && next.starts_with(&self.query);
+        if self.query.is_empty() && !next.is_empty() && !self.streaming && self.unfiltered.is_none() {
+            // the view is complete and sorted: keep its order for rebuilds
+            self.unfiltered = Some(self.index.clone());
+        }
         self.query = next;
         self.mode = mode;
         if refine {
@@ -738,12 +751,22 @@ impl EntryStore {
             self.index = ids;
             self.top = kept_top;
         } else {
-            let mut ids = (0..self.records.len() as u32)
-                .filter(|&i| self.is_live(i) && self.matches(i))
-                .collect::<Vec<_>>();
-            self.sort_ids(&mut ids);
+            let ids = match self.unfiltered.as_ref().filter(|_| !self.streaming) {
+                // in order already: one pass, no sort
+                Some(all) => all.iter().copied().filter(|&i| self.matches(i)).collect(),
+                None => {
+                    let mut ids = (0..self.records.len() as u32)
+                        .filter(|&i| self.is_live(i) && self.matches(i))
+                        .collect::<Vec<_>>();
+                    self.sort_ids(&mut ids);
+                    ids
+                }
+            };
             self.index = ids;
             self.top = self.index.len().min(STREAM_TOP);
+        }
+        if self.query.is_empty() {
+            self.unfiltered = None;
         }
     }
 }
@@ -1528,6 +1551,45 @@ mod stream_tests {
             }
         }
         v
+    }
+
+    #[test]
+    fn filter_rebuilds_from_saved_order_match_reference() {
+        let n = names(20_000, 11);
+        let b = inputs(&n, 11);
+        let extra = names(300, 12);
+        let eb = inputs(&extra, 12);
+        let mut r = Rng(99);
+        let queries = ["a", "a0", "a00", "img", "img_2", "ä", "7", "*0?", "a*", ""];
+        for sort in all_sorts().into_iter().step_by(3) {
+            let mut s = EntryStore::new();
+            s.sort(sort);
+            s.begin_stream();
+            s.push_batch(0, &b).unwrap();
+            s.end_stream();
+            for step in 0..60 {
+                let q = queries[r.below(queries.len() as u64) as usize];
+                let mode = if q.contains(['*', '?']) { FilterMode::Glob } else { FilterMode::Substring };
+                match r.below(10) {
+                    0 => s.sort(all_sorts()[r.below(16) as usize]),
+                    1 => {
+                        let id = r.below(s.id_bound() as u64) as u32;
+                        if s.is_live(id) {
+                            s.apply(&[id], &[]).unwrap();
+                        }
+                    }
+                    2 => {
+                        let e = eb[r.below(eb.len() as u64) as usize];
+                        s.apply(&[], &[Upsert { id: None, input: e }]).unwrap();
+                    }
+                    _ => s.filter(q, mode),
+                }
+                assert_eq!(s.view(), &reference(&s)[..], "sort {sort:?} step {step} query {q:?}");
+            }
+            s.filter("", FilterMode::Substring);
+            assert!(s.unfiltered.is_none(), "freed once the filter is cleared");
+            assert_eq!(s.view(), &reference(&s)[..]);
+        }
     }
 
     #[test]
