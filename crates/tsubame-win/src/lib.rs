@@ -11,6 +11,7 @@
 //! - [`procinfo`]: process counters for leak checks.
 
 pub mod bitmap;
+pub mod dnd;
 pub mod enumerate;
 pub mod places;
 pub mod procinfo;

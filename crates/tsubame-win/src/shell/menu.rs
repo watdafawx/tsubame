@@ -45,10 +45,30 @@ pub struct MenuResult {
     /// SetForegroundWindow(owner) succeeded; when false, Escape and
     /// click-away do not reach the menu (e.g. the UI thread was in menu mode)
     pub foreground: bool,
+    /// the chosen verb is one of `MenuOpts::intercept`: it was NOT invoked,
+    /// the app runs it (e.g. "delete" through the file-op queue)
+    pub intercepted: Option<String>,
+    /// index into `MenuOpts::extras` of the chosen app entry
+    pub extra: Option<usize>,
+}
+
+/// What the app adds to a shell menu.
+#[derive(Debug, Default, Clone)]
+pub struct MenuOpts {
+    /// `paths[0]` is a folder and the menu is its background menu (right
+    /// click on empty space): `IShellFolder::CreateViewObject(IContextMenu)`
+    pub background: bool,
+    /// app entries put on top of the shell's, then a separator; `""` adds a
+    /// separator
+    pub extras: Vec<String>,
+    /// verbs the app runs itself instead of the shell (case-insensitive)
+    pub intercept: Vec<String>,
 }
 
 const ID_FIRST: u32 = 1;
-const ID_LAST: u32 = 0x7fff;
+const ID_LAST: u32 = 0x7eff;
+/// app entries: ID_EXTRA + index
+const ID_EXTRA: u32 = 0x7f00;
 const CMIC_MASK_UNICODE: u32 = 0x4000;
 const CMIC_MASK_SHIFT_DOWN: u32 = 0x1000_0000;
 const AUTO_CLOSE_TIMER: usize = 0x5453;
@@ -143,7 +163,7 @@ fn parent_of(p: &str) -> &str {
 /// `ui` is the app window that gets the foreground back afterwards (the
 /// hidden host keeps it otherwise, and the UI stops receiving keys).
 #[allow(clippy::too_many_arguments)]
-pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool, auto_close: Option<u32>, owner: Option<isize>, ui: HWND) -> MenuResult {
+pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool, auto_close: Option<u32>, owner: Option<isize>, ui: HWND, opts: &MenuOpts) -> MenuResult {
     let mut r = MenuResult::default();
     let Some(host) = host else {
         r.error = Some("no host window".into());
@@ -153,7 +173,7 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
         r.error = Some("no paths".into());
         return r;
     }
-    if paths.iter().any(|p| !parent_of(p).eq_ignore_ascii_case(parent_of(&paths[0]))) {
+    if !opts.background && paths.iter().any(|p| !parent_of(p).eq_ignore_ascii_case(parent_of(&paths[0]))) {
         r.error = Some("items must share one folder".into());
         return r;
     }
@@ -176,18 +196,11 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
         }
         pidls.0.push(pidl);
     }
-    let folder: IShellFolder = match unsafe { SHBindToParent(pidls.0[0], None) } {
-        Ok(f) => f,
-        Err(e) => {
-            r.error = Some(format!("SHBindToParent {:?}", e.code()));
-            return r;
-        }
-    };
-    let children: Vec<*const ITEMIDLIST> = pidls.0.iter().map(|&p| unsafe { ILFindLastID(p) as *const _ }).collect();
-    let cm: IContextMenu = match unsafe { folder.GetUIObjectOf(host, &children, None) } {
+    let cm = if opts.background { background_menu(pidls.0[0], host) } else { item_menu(&pidls, host) };
+    let cm = match cm {
         Ok(c) => c,
         Err(e) => {
-            r.error = Some(format!("GetUIObjectOf {:?}", e.code()));
+            r.error = Some(e);
             return r;
         }
     };
@@ -209,6 +222,22 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
         return r;
     }
     r.items = unsafe { GetMenuItemCount(Some(hmenu)) }.max(0) as u32;
+    if !opts.extras.is_empty() {
+        // app entries on top, then a separator before the shell's items
+        unsafe {
+            if r.items > 0 {
+                let _ = InsertMenuW(hmenu, 0, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
+            }
+            for (i, label) in opts.extras.iter().enumerate().rev() {
+                if label.is_empty() {
+                    let _ = InsertMenuW(hmenu, 0, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
+                } else {
+                    let w = wide(label);
+                    let _ = InsertMenuW(hmenu, 0, MF_BYPOSITION | MF_STRING, (ID_EXTRA + i as u32) as usize, PCWSTR(w.as_ptr()));
+                }
+            }
+        }
+    }
 
     CM3.with(|c| *c.borrow_mut() = cm.cast::<IContextMenu3>().ok());
     CM2.with(|c| *c.borrow_mut() = cm.cast::<IContextMenu2>().ok());
@@ -239,7 +268,10 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
     r.popup_us = SHOWN_US.get();
     r.shown = r.popup_us.is_some();
 
-    if cmd >= ID_FIRST {
+    if cmd >= ID_EXTRA && ((cmd - ID_EXTRA) as usize) < opts.extras.len() {
+        r.extra = Some((cmd - ID_EXTRA) as usize);
+        r.chosen = Some(format!("extra:{}", opts.extras[(cmd - ID_EXTRA) as usize]));
+    } else if cmd >= ID_FIRST {
         let off = (cmd - ID_FIRST) as usize;
         let mut buf = [0u16; 128];
         let verb = unsafe { cm.GetCommandString(off, GCS_VERBW, None, PSTR(buf.as_mut_ptr() as *mut u8), buf.len() as u32) }
@@ -247,7 +279,11 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
             .map(|_| String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("#{off}"));
-        r.chosen = Some(verb);
+        let skip = opts.intercept.iter().any(|v| v.eq_ignore_ascii_case(&verb));
+        r.chosen = Some(verb.clone());
+        if skip {
+            r.intercepted = Some(verb.to_ascii_lowercase());
+        }
         let ici = CMINVOKECOMMANDINFOEX {
             cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
             fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE | if extended { CMIC_MASK_SHIFT_DOWN } else { 0 },
@@ -258,11 +294,13 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
             ptInvoke: POINT { x, y },
             ..Default::default()
         };
-        let res = unsafe { cm.InvokeCommand(&ici as *const _ as *const CMINVOKECOMMANDINFO) };
-        r.invoked = Some(match res {
-            Ok(()) => "ok".into(),
-            Err(e) => format!("{:?}", e.code()),
-        });
+        if !skip {
+            let res = unsafe { cm.InvokeCommand(&ici as *const _ as *const CMINVOKECOMMANDINFO) };
+            r.invoked = Some(match res {
+                Ok(()) => "ok".into(),
+                Err(e) => format!("{:?}", e.code()),
+            });
+        }
     }
 
     CM3.with(|c| *c.borrow_mut() = None);
@@ -277,6 +315,22 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
     }
     START.set(None);
     r
+}
+
+/// The context menu of items: parent folder + child ids.
+fn item_menu(pidls: &Pidls, host: HWND) -> Result<IContextMenu, String> {
+    let folder: IShellFolder = unsafe { SHBindToParent(pidls.0[0], None) }.map_err(|e| format!("SHBindToParent {:?}", e.code()))?;
+    let children: Vec<*const ITEMIDLIST> = pidls.0.iter().map(|&p| unsafe { ILFindLastID(p) as *const _ }).collect();
+    unsafe { folder.GetUIObjectOf(host, &children, None) }.map_err(|e| format!("GetUIObjectOf {:?}", e.code()))
+}
+
+/// The background menu of folder `pidl` ("New", "Paste", "Properties", ...).
+fn background_menu(pidl: *mut ITEMIDLIST, host: HWND) -> Result<IContextMenu, String> {
+    unsafe {
+        let desktop = SHGetDesktopFolder().map_err(|e| format!("SHGetDesktopFolder {:?}", e.code()))?;
+        let folder: IShellFolder = if (*pidl).mkid.cb == 0 { desktop } else { desktop.BindToObject(pidl, None).map_err(|e| format!("BindToObject {:?}", e.code()))? };
+        folder.CreateViewObject(host).map_err(|e| format!("CreateViewObject {:?}", e.code()))
+    }
 }
 
 #[cfg(test)]

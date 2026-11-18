@@ -7,6 +7,9 @@
 //!   (`auto_close`: `EndMenu` on the first `WM_ENTERIDLE`), alternating one
 //!   and three items. Then one menu held open for 2 s while the UI thread
 //!   repaints every 10 ms, to show the menu does not block it.
+//! - clip: 200 cycles of a context menu with the app's entries and
+//!   intercepted verbs (W1), then a clipboard copy/cut of the same files and a
+//!   clipboard read, all on the shell workers. Writes `s4-stress-clip.txt`.
 //! - thumbs: thumbnails for up to 500 image files of the folder, all queued
 //!   at once; cached vs generated counts and times.
 
@@ -14,6 +17,7 @@ use crate::shellui::{ShellUi, pcts};
 use crate::tab::Tab;
 use std::time::{Duration, Instant};
 use tsubame_win::procinfo::{Counters, counters};
+use tsubame_win::dnd::clipboard::{ClipJob, ClipReply};
 use tsubame_win::shell::{Payload, Pool, Request};
 
 pub const TIMER_ID: usize = 3;
@@ -30,12 +34,16 @@ const IMAGE_EXT: [&str; 9] = ["jpg", "jpeg", "png", "bmp", "gif", "tif", "tiff",
 pub enum Mode {
     Menu,
     Thumbs,
+    /// menu + clipboard cycles (W1)
+    Clip,
 }
 
 enum State {
     Wait(Instant),
     MenuRun { i: usize },
     MenuHold,
+    /// cycle `i`: waiting for the menu (`clip: 0`) or for the two clipboard replies
+    ClipRun { i: usize, clip: usize },
     Thumbs { left: usize },
     Settle(Instant),
     Done,
@@ -65,6 +73,9 @@ pub struct Stress {
     t_bytes: usize,
     t0: Instant,
     log: Vec<String>,
+    clip_us: Vec<u64>,
+    clip_errors: Vec<String>,
+    staging: std::path::PathBuf,
 }
 
 impl Stress {
@@ -92,6 +103,9 @@ impl Stress {
             t_bytes: 0,
             t0: Instant::now(),
             log: Vec::new(),
+            clip_us: Vec::new(),
+            clip_errors: Vec::new(),
+            staging: std::env::temp_dir().join(format!("tsubame-stress-clip-{}", std::process::id())),
         }
     }
 
@@ -109,7 +123,8 @@ impl Stress {
     fn submit_menu(&mut self, pool: &mut Pool, i: usize, hold_ms: Option<u32>) {
         let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
         let paths = self.paths[..n].to_vec();
-        pool.submit(Request::Menu { paths, x: self.pt.0, y: self.pt.1, extended: false, auto_close: Some(hold_ms.unwrap_or(0)), owner: None });
+        let opts = if self.mode == Mode::Clip { crate::shellops::item_opts() } else { Default::default() };
+        pool.submit(Request::Menu { paths, x: self.pt.0, y: self.pt.1, extended: false, auto_close: Some(hold_ms.unwrap_or(0)), owner: None, opts });
         self.asked = Some(Instant::now());
     }
 
@@ -128,7 +143,7 @@ impl Stress {
                     return (false, false);
                 }
                 match self.mode {
-                    Mode::Menu => {
+                    Mode::Menu | Mode::Clip => {
                         self.paths = (0..tab.shown()).filter_map(|i| tab.entry_at(i)).filter(|e| !e.1).take(3).map(|e| e.0).collect();
                         if self.paths.is_empty() {
                             self.log.push("no files in the folder".into());
@@ -138,7 +153,7 @@ impl Stress {
                         self.snap("start (before the first menu)");
                         self.t0 = Instant::now();
                         self.submit_menu(pool, 0, None);
-                        self.state = State::MenuRun { i: 0 };
+                        self.state = if self.mode == Mode::Clip { State::ClipRun { i: 0, clip: 0 } } else { State::MenuRun { i: 0 } };
                     }
                     Mode::Thumbs => {
                         self.paths = (0..tab.shown())
@@ -204,6 +219,78 @@ impl Stress {
                 // keep the UI thread painting while the worker shows the menu
                 (false, true)
             }
+            State::ClipRun { i, clip: 0 } => {
+                let Some((m, _)) = shell.last_menu.take() else { return (false, false) };
+                self.bind_us.push(m.bind_us);
+                self.query_us.push(m.query_us);
+                match m.popup_us {
+                    Some(u) => self.popup_us.push(u),
+                    None => self.not_shown += 1,
+                }
+                if let Some(e) = m.error
+                    && self.menu_errors.len() < 5
+                {
+                    self.menu_errors.push(format!("menu {i}: {e}"));
+                }
+                // the same files to the clipboard (cut on odd cycles), then read back
+                let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
+                let paths = self.paths[..n].iter().map(std::path::PathBuf::from).collect();
+                // the read goes out when the set is done (two workers at once
+                // would race for the clipboard)
+                pool.submit(Request::Clip(ClipJob::SetFiles { paths, cut: !i.is_multiple_of(2) }));
+                self.state = State::ClipRun { i, clip: 1 };
+                (false, true)
+            }
+            State::ClipRun { i, clip } => {
+                let mut got = clip - 1;
+                for r in shell.other_replies.drain(..) {
+                    if let Payload::Clip(c) = r.payload {
+                        got += 1;
+                        self.clip_us.push(r.work_us);
+                        if matches!(c, ClipReply::Set(Ok(_))) {
+                            pool.submit(Request::Clip(ClipJob::Read { staging: self.staging.clone(), cap: 1 << 20, consume_cut: false }));
+                        } else if matches!(c, ClipReply::Set(Err(_))) {
+                            // no read follows a failed set
+                            got += 1;
+                        }
+                        let err = match c {
+                            ClipReply::Set(Err(e)) | ClipReply::Read(Err(e)) => Some(e),
+                            ClipReply::Read(Ok(rd)) if rd.info.paths.is_empty() => Some("read back no files".into()),
+                            _ => None,
+                        };
+                        if let Some(e) = err
+                            && self.clip_errors.len() < 5
+                        {
+                            self.clip_errors.push(format!("cycle {i}: {e}"));
+                        }
+                    }
+                }
+                if got < 2 {
+                    self.state = State::ClipRun { i, clip: got + 1 };
+                    return (false, false);
+                }
+                if let Some(t) = self.asked.take() {
+                    self.menu_total_us.push(t.elapsed().as_micros() as u64);
+                }
+                let i = i + 1;
+                if i == 1 {
+                    self.snap("after menu 1 (shell extensions loaded)");
+                } else if i == 10 {
+                    self.snap("after menu 10");
+                } else if i == 100 {
+                    self.snap("after menu 100");
+                }
+                if i < MENUS {
+                    self.submit_menu(pool, i, None);
+                    self.state = State::ClipRun { i, clip: 0 };
+                } else {
+                    self.snap("after menu 200");
+                    self.log.push(format!("{MENUS} menu + clipboard cycles in {:.1} s", self.t0.elapsed().as_secs_f64()));
+                    let _ = std::fs::remove_dir_all(&self.staging);
+                    self.state = State::Settle(Instant::now() + SETTLE);
+                }
+                (false, true)
+            }
             State::Thumbs { left } => {
                 let mut left = left;
                 for r in shell.other_replies.drain(..) {
@@ -258,7 +345,7 @@ impl Stress {
             o.push_str(&s);
             o.push('\n');
         };
-        line(format!("tsubame S4 stress: {}", if self.mode == Mode::Menu { "context menu" } else { "thumbnails" }));
+        line(format!("tsubame S4 stress: {}", self.mode.label()));
         line(format!("build: {}", if cfg!(debug_assertions) { "debug" } else { "release" }));
         line(format!("items: {}", self.paths.len()));
         for l in &self.log {
@@ -310,7 +397,13 @@ impl Stress {
             line(format!("leak gate: {}", if gate { "PASS" } else { "FAIL" }));
         }
         match self.mode {
-            Mode::Menu => {
+            Mode::Menu | Mode::Clip => {
+                if self.mode == Mode::Clip {
+                    line(format!("clipboard jobs (worker time, set + read): {}", pcts(&self.clip_us)));
+                    for e in &self.clip_errors {
+                        line(format!("clipboard error: {e}"));
+                    }
+                }
                 line(format!("menu on screen (job start to first WM_ENTERIDLE): {}", pcts(&self.popup_us)));
                 line(format!("menu bind (parse + bind + GetUIObjectOf): {}", pcts(&self.bind_us)));
                 line(format!("menu QueryContextMenu: {}", pcts(&self.query_us)));
@@ -339,9 +432,26 @@ impl Stress {
 
     fn write(&self) {
         let text = self.report();
-        let name = format!("s4-stress-{}.txt", if self.mode == Mode::Menu { "menu" } else { "thumbs" });
+        let name = format!("s4-stress-{}.txt", self.mode.name());
         if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
             let _ = std::fs::write(dir.join(name), &text);
+        }
+    }
+}
+
+impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Mode::Menu => "menu",
+            Mode::Thumbs => "thumbs",
+            Mode::Clip => "clip",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Mode::Menu => "context menu",
+            Mode::Thumbs => "thumbnails",
+            Mode::Clip => "context menu + clipboard (W1)",
         }
     }
 }

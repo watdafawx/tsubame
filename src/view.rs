@@ -223,6 +223,8 @@ pub struct View {
     /// the list asked for a context menu: (view row, DIP point); Shift+F10 /
     /// the Menu key give (cursor row, None)
     pub menu_request: Option<(usize, Option<Pt>)>,
+    /// geometry and requests for the shell glue (`src/shellops.rs`)
+    pub hooks: crate::shellops::ViewHooks,
     /// files to open with their default handler (main runs them on a worker)
     pub open_paths: Vec<String>,
     pub win_cmd: Option<WinCmd>,
@@ -267,6 +269,7 @@ impl View {
             pump_more: false,
             last_drive: start.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('C'),
             menu_request: None,
+            hooks: Default::default(),
             open_paths: Vec::new(),
             win_cmd: None,
             quit: false,
@@ -701,6 +704,7 @@ impl View {
         let strip_r = Rect::new(r.x + 40.0, r.y, (ctl.x - r.x - 40.0 - 8.0).max(0.0), r.h);
         let titles: Vec<&str> = self.tabs.items.iter().map(|t| t.title()).collect();
         let resp = tab_strip(ui, g, ID_TABS, strip_r, &mut self.strip, &titles, self.tabs.active);
+        (self.hooks.strip, self.hooks.strip_scroll) = (strip_r, self.strip.scroll);
         if let Some(i) = resp.select {
             self.switch_tab(i);
         }
@@ -920,6 +924,7 @@ impl View {
         let header_r = area.cut_top(t.height_column_header);
         let list_r = area;
         self.list_top = list_r.y;
+        self.hooks.list = list_r;
         let total = main.w - t.layout_scrollbar_width;
         let spans = self.cols.spans(total);
 
@@ -953,10 +958,10 @@ impl View {
             (lr, lr.activated)
         };
         self.last_range = lr.range;
-        if let Some((row, pt)) = lr.context
-            && let Some(row) = row
-        {
-            self.menu_request = Some((row, Some(pt)));
+        match lr.context {
+            Some((Some(row), pt)) => self.menu_request = Some((row, Some(pt))),
+            Some((None, pt)) => self.hooks.bg_menu = Some(pt),
+            None => {}
         }
         if lr.context_key {
             self.menu_request = Some((self.tabs.items[self.tabs.active].list.cursor, None));
@@ -988,6 +993,7 @@ impl View {
         let strip_r = area.cut_top(t.height_column_header);
         let grid_r = area;
         self.list_top = grid_r.y;
+        self.hooks.list = grid_r;
         self.sort_strip(ui, g, strip_r, t);
 
         let (cw, ch, box_dip, icon_dip) = self.mode.dims();
@@ -1010,10 +1016,10 @@ impl View {
             (gr, gr.activated)
         };
         self.last_range = gr.range;
-        if let Some((cell, pt)) = gr.context
-            && let Some(cell) = cell
-        {
-            self.menu_request = Some((cell, Some(pt)));
+        match gr.context {
+            Some((Some(cell), pt)) => self.menu_request = Some((cell, Some(pt))),
+            Some((None, pt)) => self.hooks.bg_menu = Some(pt),
+            None => {}
         }
         if gr.context_key {
             self.menu_request = Some((self.tabs.items[self.tabs.active].grid.cursor, None));
@@ -1099,7 +1105,10 @@ impl View {
             g.text(&s, Rect::new(x, r.y + 1.0, 300.0, r.h - 1.0), f, t.text);
             x += 300.0;
         }
-        let _ = x;
+        if !self.hooks.status.is_empty() {
+            let w = (r.r() - 12.0 - 260.0 - x).max(0.0);
+            g.text(&self.hooks.status, Rect::new(x, r.y + 1.0, w, r.h - 1.0), f, t.text_dim);
+        }
         if let Some((free, total)) = self.side.volume_of(&tab.path) {
             s.clear();
             let (mut a, mut b) = (String::new(), String::new());

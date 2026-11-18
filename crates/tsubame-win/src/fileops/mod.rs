@@ -12,6 +12,7 @@ use std::{
     },
 };
 
+pub mod deletecheck;
 mod fsbackend;
 pub mod journal;
 mod queue;
