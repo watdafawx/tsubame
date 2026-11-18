@@ -139,3 +139,22 @@ scheduling/paging/paint contention, not solely sorting. `final_frame - done`
 is the final presentation tail. Cold app + cold metadata remains the exact
 purge-and-launch scenario; it does not isolate a warm renderer navigating
 into cold metadata. Stale report files are removed before each launch.
+
+PERF2: `tools/open-probe.ps1` is the open-a-folder probe (cold or warm,
+several builds interleaved per run so rig load hits all of them). Cold runs
+purge with `working` from the elevated ssh session, wait until rig's disks
+are idle (the purge starts a paging storm that otherwise dominates), then
+launch with `--timing-dirs "tiny;<idle>;1k;tiny;<dir>"`: the app's startup
+tail (GPU paint path) is over and its paint path is warm again, and only the
+folder is cold. `<idle>` (3 s), `<purge>` (an in-app purge, for an
+already running app) and `<ops>` (sort switch per column and
+filter-as-you-type keystrokes on the folder listed last, UI work) are
+`--timing-dirs` entries; see `src/timing.rs`. The probe also prints
+`overhead` = `final_frame - worker`: what the app adds on top of the disk.
+Reports further print `final_sort` (the one sort at Done), `watch_start`
+(UI time to start the folder watcher; the watcher now opens off the UI
+thread) and `frames`. Lessons: `standby` purges do not make NTFS metadata
+cold on rig (the worker stays at warm speed); a VHDX dismount does, but at
+~7x the real disk's cost; worker time is the disk floor and varies 120 ms to
+1.9 s with other load on rig's G:, so compare `overhead` across builds and
+report medians with p95.
