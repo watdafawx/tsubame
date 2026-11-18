@@ -74,6 +74,7 @@ mod stress;
 mod tab;
 mod tabs;
 mod timing;
+mod updates;
 mod view;
 
 use std::cell::RefCell;
