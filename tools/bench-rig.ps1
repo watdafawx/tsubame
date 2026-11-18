@@ -290,6 +290,17 @@ try {
   Write-Host "bench-rig: slot $slotNum, run dir $RunDir, reports $script:ReportDir"
   Invoke-Rig "New-Item -ItemType Directory -Force $(Q $script:ReportDir) | Out-Null" | Out-Null
 
+  # The exact binary behind every number below: size and SHA-256 of the shipped
+  # exe go into meta.txt, and from there into the bench-log section header. A
+  # stale exe on a warm rig slot once produced a plausible but wrong size row,
+  # so a section now names the file it measured.
+  $appExe = Join-Path $RunShare 'tsubame.exe'
+  $appExeItem = Get-Item -LiteralPath $appExe -ErrorAction SilentlyContinue
+  if (-not $appExeItem) { throw "no tsubame.exe in $RunShare (the build/copy step did not put one there)" }
+  $exeBytes = $appExeItem.Length
+  $exeSha = (Get-FileHash -LiteralPath $appExe -Algorithm SHA256).Hash.ToLowerInvariant()
+  Write-Host "bench-rig: tsubame.exe $('{0:N0}' -f $exeBytes) B sha256 $($exeSha.Substring(0, 16))"
+
   # 2. fixtures (under G:\rig-bench\tsubame-b1; deleted at the end unless -KeepFixtures)
   $benchExe = "$RunDir\tsubame-bench.exe"
   if (-not $SkipGen) {
@@ -418,6 +429,8 @@ Start-Sleep -Seconds 10
     "dirty=$dirty"
     "machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)"
     "build=release (lto, codegen-units=1, strip, panic=abort)"
+    "exe_bytes=$exeBytes"
+    "exe_sha256=$exeSha"
     "mode=$(if ($Quick) { 'quick' } else { 'full' })"
     "runs=$Runs"
     "cache=warm filesystem cache (no purge before these runs)"

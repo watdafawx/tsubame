@@ -36,6 +36,10 @@ pub const BUDGET_IDLE_CPU_MS: f64 = 50.0;
 pub const BUDGET_PRIVATE_4K_MB: f64 = 110.0;
 /// Main exe.
 pub const BUDGET_EXE_MB: f64 = 6.0;
+/// Exe-size tripwire: a jump larger than this against the previous log row is
+/// called out in the section summary. Informational: `BUDGET_EXE_MB` still
+/// decides pass or fail.
+pub const EXE_SIZE_JUMP_PCT: f64 = 10.0;
 /// Leak gate: private bytes return to within this percent of the start...
 pub const BUDGET_LEAK_PCT: f64 = 5.0;
 /// ...ignoring growth below this floor (the gate itself uses the same two).
@@ -480,6 +484,57 @@ fn ms_cell(s: &Series) -> String {
     format!("{:.2} ms median, {:.2} ms p95 (n={})", s.median(), s.p95(), s.values.len())
 }
 
+/// `1714 KB` -> 1755136, the "Measured" cell of a `| Main exe |` table row.
+fn kb_cell(cell: &str) -> Option<u64> {
+    let n: f64 = cell.trim().split_whitespace().next()?.parse().ok()?;
+    (n > 0.0).then_some((n * 1024.0).round() as u64)
+}
+
+/// The exe size of the newest section already in the log, for the tripwire:
+/// this section's `- Exe: 2736128 B ...` header line, else the older
+/// `| Main exe | < 6 MB | 2662 KB | PASS |` row. Sections are appended, so the
+/// last match wins.
+pub fn parse_last_exe_bytes(log: &str) -> Option<u64> {
+    let mut found = None;
+    for line in log.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("- Exe: ") {
+            if let Some(n) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()) {
+                found = Some(n);
+            }
+        } else if line.starts_with("| Main exe |") {
+            // | Main exe | < 6 MB | measured | PASS |
+            if let Some(bytes) = line.split('|').nth(3).and_then(kb_cell) {
+                found = Some(bytes);
+            }
+        }
+    }
+    found
+}
+
+/// The summary's exe-size warning: the shipped exe moved more than
+/// [`EXE_SIZE_JUMP_PCT`] against the previous section. That is almost always a
+/// stale or differently configured build (a pre-release binary, another
+/// profile, a fresh dependency), not a code change, so it is reported next to
+/// the budget verdict rather than folded into it.
+pub fn exe_size_tripwire(new_bytes: u64, prev_bytes: Option<u64>) -> Option<String> {
+    let prev = prev_bytes?;
+    if prev == 0 || new_bytes == 0 {
+        return None;
+    }
+    let jump = (new_bytes as f64 - prev as f64) / prev as f64 * 100.0;
+    if jump.abs() <= EXE_SIZE_JUMP_PCT {
+        return None;
+    }
+    Some(format!(
+        "WARNING: main exe {:.0} KB is {:+.1}% against the previous log row ({:.0} KB), more than the {EXE_SIZE_JUMP_PCT:.0}% tripwire; \
+         check that this run shipped this commit's binary (stale rig exe, another profile or a new dependency). The {BUDGET_EXE_MB:.0} MB budget row above is the verdict.",
+        new_bytes as f64 / 1024.0,
+        jump,
+        prev as f64 / 1024.0
+    ))
+}
+
 /// Everything the budget table judges.
 pub struct Budgets<'a> {
     pub cold_start: &'a Series,
@@ -639,6 +694,11 @@ impl Run {
 /// The markdown section for one run: heading, machine line, table, leak-gate
 /// evidence, raw output.
 pub fn section(run: &Run, commit: &str) -> String {
+    section_with(run, commit, None)
+}
+
+/// [`section`], plus the exe-size tripwire against the previous log row.
+pub fn section_with(run: &Run, commit: &str, prev_exe_bytes: Option<u64>) -> String {
     let stamp = run.meta("stamp").to_string();
     let date = stamp.split('T').next().unwrap_or(&stamp).to_string();
     let time = stamp.split('T').nth(1).map(|t| t.chars().take(5).collect::<String>()).unwrap_or_default();
@@ -648,6 +708,7 @@ pub fn section(run: &Run, commit: &str) -> String {
     let paint_p95: Series = Series { values: run.cold.iter().map(|c| c.paint_p95_ms).collect() };
     let after: Series = Series { values: run.cold.iter().map(|c| c.private_after_mb).collect() };
     let exe_bytes = run.cold.iter().map(|c| c.exe_bytes).max().unwrap_or(0);
+    let exe_bytes = if exe_bytes > 0 { exe_bytes } else { kv_i64(&run.meta, "exe_bytes").unwrap_or(0).max(0) as u64 };
     let idle_cpu = kv_f64(&run.idle, "idle.cpu_ms").unwrap_or(0.0);
     let idle_cpu_first = kv_f64(&run.idle, "idle.cpu_ms_first").unwrap_or(0.0);
     let cold_note = run.meta("cold");
@@ -671,6 +732,15 @@ pub fn section(run: &Run, commit: &str) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "- Mode: {} ({} cold-start runs, {} scroll runs)", run.meta("mode"), run.cold.len(), run.cold.len());
     let _ = writeln!(out, "- Build: {} on rig, branch `{}`, commit `{commit}`{}", run.meta("build"), run.meta("branch"), if run.meta("dirty") == "1" { " (dirty worktree)" } else { "" });
+    // The binary behind every number below. A stale exe on a warm rig slot once
+    // produced a plausible but wrong "Main exe" row, so the section names the
+    // file it measured: size and SHA-256 of what push-to-rig shipped.
+    let _ = writeln!(
+        out,
+        "- Exe: {exe_bytes} B ({:.0} KB), SHA-256 `{}`",
+        exe_bytes as f64 / 1024.0,
+        run.meta("exe_sha256")
+    );
     let _ = writeln!(out, "- Window: {}, paint path `{}`", run.timing.window, run.timing.paint_path);
     let _ = writeln!(out, "- Fixtures: `{}` (100,000 entries), `{}` ({} folders, mixed sizes)", run.meta("fixture_100k"), run.meta("gate_fixture"), gate.folders);
     let _ = writeln!(out, "- Cache: {}; rig load: {}", run.meta("cache"), run.meta("rig_load"));
@@ -717,6 +787,10 @@ pub fn section(run: &Run, commit: &str) -> String {
     }
     if !skipped.is_empty() {
         let _ = writeln!(out, "Not measured: {} ({}).", skipped.join(", "), run.meta("cold"));
+    }
+    if let Some(warning) = exe_size_tripwire(exe_bytes, prev_exe_bytes) {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{warning}");
     }
     if let Some(v) = run.timing.startup_first_rows {
         let _ = writeln!(out);
@@ -894,9 +968,12 @@ pub fn run(dir: &Path, commit: &str, append: Option<&Path>) -> Result<String, St
     }
     let run = Run { meta, idle, cold, timing, cold_timing, gates, raw_timing, raw_gate, raw_idle, raw_cold_timing, cold_runs };
     let commit = if commit.is_empty() { kv(&run.meta, "commit").unwrap_or("unknown") } else { commit }.to_string();
-    let text = section(&run, &commit);
+    // the log is append-only: the newest section already there is the tripwire's baseline,
+    // and reading it first also keeps a failed append from losing it
+    let existing = append.map(|path| std::fs::read_to_string(path).unwrap_or_default()).unwrap_or_default();
+    let prev_exe_bytes = parse_last_exe_bytes(&existing);
+    let text = section_with(&run, &commit, prev_exe_bytes);
     if let Some(path) = append {
-        let existing = std::fs::read_to_string(path).unwrap_or_default();
         let mut all = String::new();
         if existing.trim().is_empty() {
             all.push_str(LOG_HEADER);
@@ -1114,6 +1191,38 @@ exit=0
     }
 
     #[test]
+    fn the_exe_tripwire_flags_a_jump_over_ten_percent() {
+        // the case it exists for: a 1742 KB row that was really a pre-updater exe,
+        // then a real build of the updater-carrying commit
+        let w = exe_size_tripwire(2_750_976, Some(1_783_808)).expect("jump");
+        assert!(w.starts_with("WARNING: main exe "), "{w}");
+        assert!(w.contains(" KB is +54.2% against the previous log row (1742 KB)"), "{w}");
+        assert!(w.contains("6 MB budget row above is the verdict"), "{w}");
+        // inside the tripwire, in both directions
+        assert_eq!(exe_size_tripwire(2_750_976, Some(2_700_000)), None);
+        assert_eq!(exe_size_tripwire(2_500_000, Some(2_750_976)), None);
+        assert_eq!(exe_size_tripwire(1_099, Some(1_000)), None);
+        assert!(exe_size_tripwire(1_101, Some(1_000)).is_some());
+        // nothing to compare, or nothing measured: no warning
+        assert_eq!(exe_size_tripwire(2_750_976, None), None);
+        assert_eq!(exe_size_tripwire(0, Some(1_783_808)), None);
+        assert_eq!(exe_size_tripwire(2_750_976, Some(0)), None);
+    }
+
+    #[test]
+    fn the_newest_exe_size_in_the_log_is_the_baseline() {
+        let old = "## 2026-11-18 19:46\n\n| Metric | Budget | Measured | |\n|---|---|---|---|\n\
+                   | Main exe | < 6 MB | 1714 KB (INT1: 1664 KB; the updater crate and U4 add 50 KB) | PASS |\n";
+        assert_eq!(parse_last_exe_bytes(old), Some(1714 * 1024));
+        let new = "## 2026-11-19 09:00\n\n- Exe: 2750976 B (2686 KB), SHA-256 `abc123`\n";
+        // sections are appended, so the last match wins
+        assert_eq!(parse_last_exe_bytes(&format!("{old}{new}")), Some(2_750_976));
+        assert_eq!(parse_last_exe_bytes(&format!("{new}{old}")), Some(1714 * 1024));
+        assert_eq!(parse_last_exe_bytes(""), None);
+        assert_eq!(parse_last_exe_bytes("| Main exe | < 6 MB | n/a | n/a |"), None);
+    }
+
+    #[test]
     fn kv_parsing_keeps_values_with_equals_and_dots() {
         let v = parse_kv("a=1\nb = 2\nbad line\nc=x=y\nsample.1000.gdi=31\n");
         assert_eq!(kv(&v, "a"), Some("1"));
@@ -1168,7 +1277,7 @@ exit=0
 
     #[test]
     fn section_has_the_table_the_gate_and_the_raw_blocks() {
-        let meta = parse_kv("stamp=2026-11-18T14:22:05\nmachine=rig\nbuild=release\nbranch=main\ncommit=abc1234\nmode=full\ncache=warm filesystem cache\ncold=not measured\nrig_load=idle\ndpi=192\nfixture_100k=G:\\rig-bench\\tsubame-b1\\100k\ngate_fixture=G:\\rig-bench\\tsubame-b1\\gate\n");
+        let meta = parse_kv("stamp=2026-11-18T14:22:05\nmachine=rig\nbuild=release\nbranch=main\ncommit=abc1234\nmode=full\ncache=warm filesystem cache\ncold=not measured\nrig_load=idle\ndpi=192\nexe_bytes=601600\nexe_sha256=deadbeef00112233\nfixture_100k=G:\\rig-bench\\tsubame-b1\\100k\ngate_fixture=G:\\rig-bench\\tsubame-b1\\gate\n");
         let run = Run {
             meta,
             idle: parse_kv("idle.seconds=10\nidle.cpu_ms=0\n"),
@@ -1184,6 +1293,13 @@ exit=0
         };
         let s = section(&run, "abc1234");
         assert!(s.starts_with("## 2026-11-18 14:22 — rig, commit `abc1234`"), "{s}");
+        // the header names the exact binary, the summary has no tripwire without a baseline
+        assert!(s.contains("- Exe: 601600 B (588 KB), SHA-256 `deadbeef00112233`"), "{s}");
+        assert!(!s.contains("WARNING: main exe"), "{s}");
+        // a 3x jump against the previous row is called out, but the verdict stays the budget's
+        let warned = section_with(&run, "abc1234", Some(1_783_808));
+        assert!(warned.contains("WARNING: main exe 588 KB is -66.3% against the previous log row (1742 KB)"), "{warned}");
+        assert!(warned.contains("| Main exe | < 6 MB | 588 KB | PASS |"), "{warned}");
         assert!(s.contains("| Cold start to first painted frame | < 100 ms | 70.50 ms median"), "{s}");
         assert!(s.contains("| 100,000-entry folder, cold cache | < 30 / < 200 ms | not measured"), "{s}");
         assert!(s.contains("Not measured: 100,000-entry folder, cold cache"), "{s}");

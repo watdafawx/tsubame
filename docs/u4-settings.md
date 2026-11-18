@@ -172,6 +172,8 @@ disabled with the tooltip "tsubame-handler.exe was not found next to tsubame.exe
 Rig, release, `tools/bench-rig.ps1` (`docs/bench-log.md`, "U4" section): idle 0 wake-ups (46 ms CPU / 10 s,
 as before), private bytes 64.5 MB idle / 83.8 MB after the 4K scroll run (budgets 90 / 110), leak gate with
 palette + Settings churn in every tab cycle PASS (worst +4.12%, limit 5%), exe 1714 KB (limit 6 MB).
+The exe figure came from a stale rig slot (a pre-updater binary): a real U4 build is ~2.6 MB, still
+well inside the limit - see the correction at the end of `docs/bench-log.md`.
 Scroll paint p95 read 6.7 ms on a loaded rig; the INT1 baseline binary reads 4.7 to 7.5 ms on the same rig
 at different times, so the figure needs a quiet rig. Palette and Settings are `None` while closed, so
 nothing of U4 runs per frame in a list.
