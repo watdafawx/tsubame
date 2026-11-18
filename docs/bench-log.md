@@ -7255,8 +7255,9 @@ failed with 51 compile errors from old sources against newer rlibs, and the exe 
 `1742 KB` row was the PERF2-line `11fe5f3` binary (1,783,808 B), not a `5b1cafb` build.
 
 `push-to-rig.ps1` now sets LastWriteTime = now on exactly the files a run copied (unchanged files
-keep theirs, so warm incremental builds stay warm) and refuses to ship an exe that the build did not
-write; it prints the shipped exe's size, SHA-256 prefix and commit. Sections now also carry
+keep theirs, so warm incremental builds stay warm), puts those mtimes back after a successful build
+(so the next sync copies nothing), and refuses to ship an exe that the build did not write; it
+prints the shipped exe's size, SHA-256 prefix and commit. Sections now also carry
 `- Exe: <bytes> B (<KB>), SHA-256 ...`, and `tsubame-bench app` prints a WARNING when the exe size
 moves more than 10% against the previous row (the 6 MB budget still decides PASS/FAIL).
 

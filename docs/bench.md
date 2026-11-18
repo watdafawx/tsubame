@@ -24,8 +24,9 @@ Freshness: `push-to-rig.ps1` mirrors the source with `robocopy`, which preserves
 each file's LastWriteTime, and cargo's fingerprints are mtime-based - so a warm
 rig slot could reuse a stale artifact and ship the previous exe (that is how a
 pre-updater binary once landed in a `Main exe` row). It now refreshes the mtime
-of exactly the files a run copied and refuses to ship an exe the build did not
-write. Every section also names the binary: `- Exe: <bytes> B, SHA-256 ...`.
+of exactly the files a run copied and puts the source mtimes back after the
+build, so the next sync copies nothing, and it refuses to ship an exe the build
+did not write. Every section also names the binary: `- Exe: <bytes> B, SHA-256`.
 
 ## What a run does
 
