@@ -61,7 +61,7 @@ impl Theme {
         LIGHT
     }
     pub fn is_dark(&self) -> bool {
-        self.name == "dark"
+        crate::themes::luminance(self.bg) < 0.5
     }
     /// This theme with the density preset applied: list row height and the
     /// four text sizes. Always starts from the token values (`base`), so

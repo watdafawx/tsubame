@@ -1098,3 +1098,44 @@ fn image_a_and_device_cache_in_the_test_canvas() {
     assert!(matches!(c.ops.last(), Some(Op::ImageA(k, _, a)) if k == "k" && *a == 0.5));
     assert_eq!(c.images(), vec!["k"]);
 }
+
+// ------------------------------------------------------------- key capture
+
+#[test]
+fn capture_keys_hands_every_chord_to_the_focused_widget() {
+    let mut h = Harness::new();
+    h.ui.shortcuts.bind(Key::Char('T'), Mods::CTRL, 7, true);
+    h.ui.shortcuts.bind(Key::F(2), Mods::NONE, 8, false);
+    const REC: Id = Id::new("rec");
+    let mut seen: Vec<(Key, Mods)> = Vec::new();
+    let mut cmds = Vec::new();
+    let run = |h: &mut Harness, capture: bool, seen: &mut Vec<(Key, Mods)>, cmds: &mut Vec<u32>| {
+        h.ui.capture_keys = capture;
+        h.frame(|ui, c| {
+            let r = Rect::new(0.0, 0.0, 100.0, 20.0);
+            button(ui, c, REC, r, "rec");
+            for (i, ev) in ui.key_input(REC) {
+                if let Event::KeyDown { key, mods, .. } = ev {
+                    seen.push((key, mods));
+                    ui.consume(i);
+                }
+            }
+            cmds.extend_from_slice(ui.commands());
+        });
+    };
+    run(&mut h, false, &mut seen, &mut cmds);
+    h.down(5.0, 5.0);
+    h.up(5.0, 5.0);
+    run(&mut h, true, &mut seen, &mut cmds);
+    // the recorder is focused; Ctrl+T, F2, Esc and Tab all reach it
+    for (k, m) in [(Key::Char('T'), Mods::CTRL), (Key::F(2), Mods::NONE), (Key::Escape, Mods::NONE), (Key::Tab, Mods::NONE)] {
+        h.key(k, m);
+    }
+    run(&mut h, true, &mut seen, &mut cmds);
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    assert!(cmds.is_empty(), "no command ran: {cmds:?}");
+    // capture off: Ctrl+T is the shortcut again
+    h.key(Key::Char('T'), Mods::CTRL);
+    run(&mut h, false, &mut seen, &mut cmds);
+    assert_eq!(cmds, vec![7]);
+}
