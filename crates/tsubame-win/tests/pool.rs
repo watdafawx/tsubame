@@ -92,3 +92,48 @@ fn thumbnail_lane_is_independent_of_the_icon_lane() {
     let b = bmp.as_ref().expect("a bitmap for explorer.exe");
     assert!(b.w.max(b.h) <= 64, "cut to the size asked: {}x{}", b.w, b.h);
 }
+
+/// An own-drawn menu whose build hangs (a shell extension that never returns
+/// from QueryContextMenu, simulated by a sleep before any shell call) is given
+/// up after `ctx_hang_after`: the worker is replaced, the job id is reported
+/// lost, its late batches are dropped, and the next job runs on the fresh worker.
+#[test]
+fn hung_own_drawn_menu_build_is_abandoned() {
+    use tsubame_win::shell::{CtxHandle, CtxOpts};
+    let mut pool = Pool::new(1, 0, 0x8001);
+    pool.ctx_hang_after = Duration::from_millis(200);
+    let h = CtxHandle::new();
+    let opts = CtxOpts { debug_hang_ms: 1_500, ..Default::default() };
+    let hung = pool.submit(Request::ctx(vec![r"C:\Windows".into()], 41, opts, &h));
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(pool.busy(), "a building menu arms the watchdog");
+    assert_eq!(pool.check_hung(), vec![hung.id]);
+    assert_eq!(pool.stats().workers_replaced, 1);
+    assert_eq!(pool.leaked_alive(), 1);
+    let ok = pool.submit(Request::Icon { src: IconSource::Ext(".txt".into()), size: 16 });
+    let r = wait(&mut pool, 1, Duration::from_secs(10));
+    assert!(r.iter().any(|r| r.id == ok.id));
+    // the abandoned build finishes later; nothing of it may arrive
+    std::thread::sleep(Duration::from_millis(1_600));
+    let late = pool.drain();
+    assert!(late.iter().all(|r| r.id != hung.id), "late batches of an abandoned worker are dropped");
+    let t = Instant::now();
+    while pool.leaked_alive() > 0 && t.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(pool.leaked_alive(), 0, "the leaked thread exits once its call returns");
+}
+
+/// A request that cannot bind fails fast with one `Failed` batch of its generation.
+#[test]
+fn own_drawn_menu_without_paths_fails_with_its_generation() {
+    use tsubame_win::shell::ctxmodel::Part;
+    use tsubame_win::shell::{CtxHandle, CtxOpts};
+    let mut pool = Pool::new(1, 0, 0x8001);
+    let h = CtxHandle::new();
+    let t = pool.submit(Request::ctx(vec![], 9, CtxOpts::default(), &h));
+    let r = wait(&mut pool, 1, Duration::from_secs(10));
+    let Payload::Ctx(b) = &r.iter().find(|r| r.id == t.id).expect("reply").payload else { panic!("not a ctx batch") };
+    assert_eq!(b.generation, 9);
+    assert!(matches!(&b.part, Part::Failed(e) if e == "no paths"), "{:?}", b.part);
+}

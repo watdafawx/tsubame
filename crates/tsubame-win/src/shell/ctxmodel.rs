@@ -145,12 +145,8 @@ pub fn parse_label(raw: &str) -> (String, Option<char>, String) {
                 it.next();
                 out.push('&');
             }
-            Some(n) => {
-                if accel.is_none() && !n.is_whitespace() {
-                    accel = n.to_lowercase().next();
-                }
-            }
-            None => {}
+            Some(n) if accel.is_none() && !n.is_whitespace() => accel = n.to_lowercase().next(),
+            _ => {}
         }
     }
     (out.trim().to_string(), accel, shortcut)

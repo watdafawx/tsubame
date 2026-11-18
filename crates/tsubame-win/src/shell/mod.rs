@@ -21,12 +21,14 @@
 //! leaked and exits on its own if its call ever returns. Its reply is thrown
 //! away. See `docs/shell-threading.md`.
 
+pub mod ctxmenu;
 pub mod ctxmodel;
 mod icon;
 mod menu;
 mod thumb;
 
 pub use icon::IconSource;
+pub use ctxmenu::{CtxCmd, CtxHandle, CtxOpts};
 pub use menu::{MenuOpts, MenuResult};
 
 use crate::bitmap::Bitmap;
@@ -59,11 +61,21 @@ pub enum Request {
     Menu { paths: Vec<String>, x: i32, y: i32, extended: bool, auto_close: Option<u32>, owner: Option<isize>, opts: MenuOpts },
     /// Clipboard work and shortcut creation (`crate::dnd::clipboard`).
     Clip(crate::dnd::clipboard::ClipJob),
+    /// The shell's context menu as data for the own-drawn menu (CM1): batches
+    /// of [`ctxmodel::MenuBatch`] arrive as `Payload::Ctx`, the last one
+    /// `Closed`. The worker keeps the menu until `handle` picks or closes.
+    /// Build it with [`Request::ctx`].
+    CtxMenu { paths: Vec<String>, generation: u64, opts: CtxOpts, session: Arc<ctxmenu::CtxSession> },
     /// Simulates a hung shell call: `Sleep(ms)` without pumping.
     Hang { ms: u32 },
 }
 
 impl Request {
+    /// An own-drawn menu request driven by `handle` (see [`CtxHandle`]).
+    pub fn ctx(paths: Vec<String>, generation: u64, opts: CtxOpts, handle: &CtxHandle) -> Request {
+        Request::CtxMenu { paths, generation, opts, session: handle.session.clone() }
+    }
+
     fn kind(&self) -> u8 {
         match self {
             Request::Icon { .. } => K_ICON,
@@ -71,6 +83,7 @@ impl Request {
             Request::Menu { .. } => K_MENU,
             Request::Hang { .. } => K_HANG,
             Request::Clip(_) => K_CLIP,
+            Request::CtxMenu { .. } => K_CTX,
         }
     }
 }
@@ -83,6 +96,9 @@ const K_HANG: u8 = 4;
 /// clipboard / shortcut jobs: not replaced as hung (a slow source app or a
 /// big virtual file is not a hang), like menus
 const K_CLIP: u8 = 5;
+/// building an own-drawn menu (QueryContextMenu + walk): replaced as hung
+/// after `Pool::ctx_hang_after`. Once built it waits for the user as K_MENU.
+const K_CTX: u8 = 6;
 
 #[derive(Clone)]
 pub struct Ticket {
@@ -103,6 +119,8 @@ pub enum Payload {
     Thumb { bmp: Option<Bitmap>, from_cache: bool, probe_us: u64, error: Option<String> },
     Menu(MenuResult),
     Clip(crate::dnd::clipboard::ClipReply),
+    /// one batch of an own-drawn menu (several per request)
+    Ctx(ctxmodel::MenuBatch),
     Hang,
 }
 
@@ -124,7 +142,7 @@ struct Job {
 }
 
 #[derive(Clone, Copy)]
-struct SendHandle(HANDLE);
+pub(crate) struct SendHandle(pub(crate) HANDLE);
 unsafe impl Send for SendHandle {}
 unsafe impl Sync for SendHandle {}
 
@@ -196,6 +214,9 @@ pub struct Pool {
     /// thumbnail decodes legitimately take longer than icons: a thumbnail
     /// worker is replaced after `hang_after * thumb_hang_factor`
     pub thumb_hang_factor: u32,
+    /// an own-drawn menu still building after this is given up: its worker
+    /// is replaced and the UI shows "Some items could not load" + Retry
+    pub ctx_hang_after: Duration,
     /// size of the thumbnail lane; its threads start with the first thumbnail
     /// request (a details-only session never pays for them)
     thumb_workers: usize,
@@ -231,6 +252,7 @@ impl Pool {
             hang_after: Duration::from_secs(3),
             max_replaced: 8,
             thumb_hang_factor: 3,
+            ctx_hang_after: Duration::from_secs(4),
             thumb_workers: 0,
             thumb_started: false,
             stats: PoolStats::default(),
@@ -309,7 +331,7 @@ impl Pool {
     /// user). The UI arms its hang watchdog only while this is true, so an
     /// idle app has no timer.
     pub fn busy(&self) -> bool {
-        !self.shared.queue.lock().unwrap().is_empty() || !self.shared.tqueue.lock().unwrap().is_empty() || self.slots.iter().any(|s| matches!(s.state.kind.load(Relaxed), K_ICON | K_THUMB | K_HANG))
+        !self.shared.queue.lock().unwrap().is_empty() || !self.shared.tqueue.lock().unwrap().is_empty() || self.slots.iter().any(|s| matches!(s.state.kind.load(Relaxed), K_ICON | K_THUMB | K_HANG | K_CTX))
     }
 
     /// Replaces workers stuck in one job for longer than `hang_after`.
@@ -321,7 +343,7 @@ impl Pool {
             let st = &self.slots[i].state;
             let since = st.busy_since.load(Acquire);
             let kind = st.kind.load(Relaxed);
-            let limit = self.hang_after.as_millis() as u64 * if kind == K_THUMB { self.thumb_hang_factor.max(1) as u64 } else { 1 };
+            let limit = if kind == K_CTX { self.ctx_hang_after.as_millis() as u64 } else { self.hang_after.as_millis() as u64 * if kind == K_THUMB { self.thumb_hang_factor.max(1) as u64 } else { 1 } };
             if since == 0 || kind == K_MENU || kind == K_CLIP || now.saturating_sub(since) < limit {
                 continue;
             }
@@ -401,7 +423,18 @@ fn worker(idx: usize, lane: u8, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sende
                 st.kind.store(job.req.kind(), Relaxed);
                 st.busy_since.store(sh.now_ms(), Release);
                 let t = Instant::now();
-                let payload = run(job.req, host, HWND(sh.hwnd as *mut _));
+                let emit = |p: Payload| -> bool {
+                    // an abandoned worker's late batches are thrown away
+                    if st.abandoned.load(SeqCst) {
+                        return false;
+                    }
+                    if tx.send(Reply { id: job.id, worker: idx, queued_us, work_us: t.elapsed().as_micros() as u64, payload: p }).is_ok() && !sh.posted.swap(true, SeqCst) {
+                        let _ = PostMessageW(Some(HWND(sh.hwnd as *mut _)), sh.wake_msg, WPARAM(0), LPARAM(0));
+                    }
+                    true
+                };
+                let waiting = || st.kind.store(K_MENU, Relaxed);
+                let payload = run(job.req, host, HWND(sh.hwnd as *mut _), &emit, &waiting);
                 let work_us = t.elapsed().as_micros() as u64;
                 st.busy_since.store(0, Release);
                 st.kind.store(K_IDLE, Relaxed);
@@ -431,12 +464,13 @@ fn worker(idx: usize, lane: u8, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sende
     }
 }
 
-fn run(req: Request, host: Option<HWND>, ui: HWND) -> Payload {
+fn run(req: Request, host: Option<HWND>, ui: HWND, emit: &dyn Fn(Payload) -> bool, waiting: &dyn Fn()) -> Payload {
     match req {
         Request::Icon { src, size } => Payload::Icon(icon::get(&src, size)),
         Request::Thumb { path, size, cache_only } => thumb::get(&path, size, cache_only),
         Request::Menu { paths, x, y, extended, auto_close, owner, opts } => Payload::Menu(menu::show(host, &paths, x, y, extended, auto_close, owner, ui, &opts)),
         Request::Clip(job) => Payload::Clip(crate::dnd::clipboard::run(job)),
+        Request::CtxMenu { paths, generation, opts, session } => Payload::Ctx(ctxmenu::run(host, ui, &paths, generation, &opts, &session, &|b| emit(Payload::Ctx(b)), waiting)),
         Request::Hang { ms } => {
             unsafe { Sleep(ms) };
             Payload::Hang
