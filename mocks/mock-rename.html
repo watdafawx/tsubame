@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsubame inline rename</title>
+<!--
+  Tsubame U3 mock: inline rename (F2) and batch rename entry. Same window, tokens and rows as mock-main.html (M1).
+  Sidebar and panes are in mock-sidebar-panes.html. Builders: mock-u3.js (needs mock.js). Styles: mock.css + mock-u3.css.
+  URL params: ?theme=dark|light &density=22|26|30 &only=<section id>   ids: rename, rename-states, batch, batch-conflict
+-->
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mock.css">
+<link rel="stylesheet" href="mock-u3.css">
+</head>
+<body>
+<div class="page">
+  <h1>Inline rename</h1>
+  <p class="lede">Task U3 mock (2 of 2). F2 turns the name cell of the focused row into a text field in place: no dialog, no layout shift (row height stays). The kit already has the text input (caret, selection, clipboard, IME); this is that widget inside a cell. Drawing needs only a filled rect, a 1 px stroke, a 2 px line and text.</p>
+  <div class="ctl">
+    <span><span class="lbl">Theme</span><span class="seg"><button data-theme-btn="dark">Dark</button><button data-theme-btn="light">Light</button></span></span>
+    <span><span class="lbl">Density</span><span class="seg"><button data-density-btn="22">Compact 22</button><button data-density-btn="26">Comfortable 26</button><button data-density-btn="30">Spacious 30</button></span></span>
+  </div>
+
+  <div class="sec" id="rename">
+    <h2>1. F2 on a file</h2>
+    <p class="cap">The name cell becomes a <code>field</code> fill with a 1 px <code>focus</code> border. The <b>stem</b> (everything before the last dot) is pre-selected with a <code>selected</code> rect, the extension stays unselected, a solid caret sits at the end of the selection (no blink timer beyond the kit&rsquo;s 10 s focus caret). <code>Enter</code> and <code>Esc</code> caps sit at the right end of the field; the status bar repeats them. Click elsewhere commits; Esc cancels. Dotfiles and folders select the whole name. Rename goes through the C3 queue, so Ctrl+Z undoes it. Other columns keep their text; the row keeps its selection fill.</p>
+    <div class="hintstrip" id="h-rename"></div>
+    <div class="win-frame" id="w-rename"></div>
+  </div>
+
+  <div class="sec" id="rename-states">
+    <h2>2. Field states</h2>
+    <p class="cap">Validation runs on every keystroke. Invalid: border and a 2 px underline in <code>danger</code>, plus a one-line reason bubble (<code>popup</code> fill, 1 px <code>danger</code> border) under the field. Enter is ignored while invalid, the field never closes by itself. Other reasons use the same bubble: &ldquo;Name cannot be empty&rdquo;, &ldquo;Name cannot end with a space or period&rdquo;, &ldquo;&ldquo;CON&rdquo; is a reserved name&rdquo;, &ldquo;Path is too long&rdquo;. Conflict is checked against the folder listing (case-insensitive, as NTFS).</p>
+    <div class="win-frame"><div class="win specs" id="w-rename-states" data-density="22" style="width:auto;height:auto;padding:14px 16px 6px"></div></div>
+  </div>
+
+  <div class="sec" id="batch">
+    <h2>3. Batch rename: entry bar and live preview</h2>
+    <p class="cap">F2 with two or more rows selected opens a docked bar under the toolbar (list below stays visible and selected): title with the count, a pattern field (tokens in <code>accent</code>), <code>Apply</code> (<code>accent</code> fill) and <code>Cancel</code>. The preview is a popup under the bar listing <b>old &rarr; new</b> for every row (first 8, then &ldquo;+ N more&rdquo;), updating on every keystroke. Extension is kept automatically. Apply is one undo step. Tokens in this mock: <code>{name}</code> (stem), <code>{n}</code> (1, 2, 3&hellip;), <code>{date}</code>; the full rule set (find/replace, case, regex) belongs to F4 and reuses this bar.</p>
+    <div class="win-frame" id="w-batch"></div>
+  </div>
+
+  <div class="sec" id="batch-conflict">
+    <h2>4. Batch rename: collisions</h2>
+    <p class="cap">Pattern <code>Invoice</code> (no <code>{n}</code>) makes names collide. Colliding rows get a <code>selected_inactive</code> row fill, a <code>danger</code> new name and a &ldquo;duplicate&rdquo; flag; the header counts them, the footer says how to fix it, and Apply is disabled (outlined, <code>text_disabled</code>). All-or-nothing: nothing is renamed until every name is unique and none exists in the folder.</p>
+    <div class="win-frame" id="w-batch-conflict"></div>
+  </div>
+</div>
+<script src="mock.js"></script>
+<script src="mock-u3.js"></script>
+<script>
+  var st = { theme: Tsu.qs('theme', 'dark'), density: Tsu3.density() };
+  var only = Tsu.qs('only', '');
+  if (only) { document.body.classList.add('only'); document.getElementById(only).classList.add('show'); }
+  var $ = function (id) { return document.getElementById(id); };
+  var K = Tsu3.k, A = Tsu3.A;
+  function pA(x) {
+    var p = { rows: A, cols: 'full', path: ['C:', 'Users', 'Alex', 'Downloads'], sel: {}, focus: -1, hover: -1 };
+    for (var k in x) p[k] = x[k]; return p;
+  }
+  var tabs = [{ t: 'Downloads', active: true }, { t: 'tsubame' }, { t: 'Documents' }];
+  function hint(items) { return items.map(function (i) { return '<span class="grp">' + K(i[0]) + i[1] + '</span>'; }).join(''); }
+  function hs(items) { return items.map(function (i) { return '<span>' + K(i[0]) + i[1] + '</span>'; }).join(''); }
+
+  function draw(upd) {
+    if (upd) for (var k in upd) st[k] = upd[k];
+    Tsu.setTheme(st.theme);
+    var d = st.density;
+    [].forEach.call(document.querySelectorAll('[data-density-btn]'), function (b) { b.classList.toggle('on', +b.dataset.densityBtn === d); });
+    $('h-rename').innerHTML = hs([['F2', 'rename'], ['Enter', 'commit'], ['Esc', 'cancel'], ['Tab', 'commit + next file'], ['Ctrl+Z', 'undo']]);
+
+    // 1 rename in place
+    var name = 'Invoice-Acme-2026-10.pdf', i = Tsu3.idx(A, name);
+    $('w-rename').innerHTML = Tsu3.win({ mode: 'single', h: 720, density: d, tabs: tabs, sb: { cur: ['quick', 2] },
+      panes: [pA({ sel: (function (o) { o[i] = 1; return o; })({}), focus: i, hover: -1, statusLeft: 'Renaming <span class="em">' + name + '</span>',
+        ed: { row: i, text: name, a: 0, b: name.lastIndexOf('.'), keys: true },
+        statusRight: hint([['Enter', 'Commit'], ['Esc', 'Cancel'], ['Tab', 'Next file']]) })] });
+
+    // 2 states specimen sheet
+    function spec(label, rowName, ed) {
+      var r = Tsu3.find(rowName);
+      return '<div class="spec"><div class="sl">' + label + '</div><div class="sr"><div class="rows" style="position:static">' +
+        Tsu3.prow(r, { cls: 'sel', cols: 'full', ed: ed }) + '</div></div></div>';
+    }
+    $('w-rename-states').innerHTML = spec('File: stem selected, caret at its end', 'Invoice-Acme-2026-10.pdf', { text: 'Invoice-Acme-2026-10.pdf', a: 0, b: 20, keys: true }) +
+      spec('Folder: whole name selected', 'Invoices', { text: 'Invoices', a: 0, b: 8, keys: true }) +
+      spec('Typing, valid: no selection, caret after the typed text', 'Invoice-Acme-2026-10.pdf', { text: 'Invoice-Acme-2026-11.pdf', a: 0, b: 0, c: 22, keys: true }) +
+      spec('Invalid character: red underline + reason', 'Invoice-Acme-2026-10.pdf', { text: 'Invoice/Acme-2026-10.pdf', a: 0, b: 0, c: 8, state: 'bad',
+        tip: { text: 'Name cannot contain \\ / : * ? " < > |' } }) +
+      spec('Conflict: name exists in this folder', 'ghidra_11.2_PUBLIC.zip', { text: 'blink-0.9.2-x64.zip', a: 0, b: 0, state: 'bad',
+        tip: { text: 'A file with this name already exists', dim: K('Shift+Enter') + ' replace' } });
+
+    // 3 + 4 batch
+    var items = A.slice(9, 21), sel = {};
+    for (var j = 9; j < 21; j++) sel[j] = 1;
+    function bat(pattern) {
+      return Tsu3.win({ mode: 'single', h: 720, density: d, tabs: tabs, sb: { cur: ['quick', 2] },
+        batch: { pattern: pattern, items: items },
+        panes: [pA({ sel: sel, focus: 11, statusRight: hint([['Enter', 'Apply'], ['Esc', 'Cancel'], ['Ctrl+Z', 'Undo']]) })] });
+    }
+    $('w-batch').innerHTML = bat('{name}_{n}');
+    $('w-batch-conflict').innerHTML = bat('Invoice');
+  }
+  Tsu3.wire(draw);
+  draw();
+</script>
+</body>
+</html>

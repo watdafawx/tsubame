@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsubame sidebar and panes</title>
+<!--
+  Tsubame U3 mock: sidebar, dual pane / splits, drag states. Same tokens, rows and chrome as mock-main.html (M1).
+  Rename and batch rename are in mock-rename.html. Builders: mock-u3.js (needs mock.js). Styles: mock.css + mock-u3.css.
+  URL params: ?theme=dark|light &density=22|26|30 &only=<section id>
+  Sections: sidebar, sidebar-menu, sidebar-reorder, sidebar-collapsed, sidebar-resize, dual-v, dual-h, dual-drag,
+            drag-folder, drag-bookmark, drag-pane, keys
+-->
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mock.css">
+<link rel="stylesheet" href="mock-u3.css">
+</head>
+<body>
+<div class="page">
+  <h1>Sidebar, dual pane, drag states</h1>
+  <p class="lede">Task U3 mock (1 of 2; inline rename is <a href="mock-rename.html" style="color:var(--c-accent)">mock-rename.html</a>). Everything here is flat rects, 1 px strokes, text and the same bitmap icons as M1: nothing needs a shadow, blur or animation. Density buttons mirror <code>Density</code> in the kit (22 / 26 / 30 px rows, text x1 / x1.08 / x1.17); sidebar and chrome heights stay fixed, as in the app today.</p>
+  <div class="ctl">
+    <span><span class="lbl">Theme</span><span class="seg"><button data-theme-btn="dark">Dark</button><button data-theme-btn="light">Light</button></span></span>
+    <span><span class="lbl">Density</span><span class="seg"><button data-density-btn="22">Compact 22</button><button data-density-btn="26">Comfortable 26</button><button data-density-btn="30">Spacious 30</button></span></span>
+  </div>
+
+  <div class="sec" id="sidebar">
+    <h2>1. Sidebar</h2>
+    <p class="cap">Sections top to bottom: <b>Pinned</b> (your bookmarks), <b>Quick access</b> (known folders), <b>Recent</b> (collapsible, <code>Clear</code> in the header), <b>This PC</b> (drives with a 3 px free-space bar: <code>accent</code>, <code>danger</code> when under 10 % free: Games G: here), <b>Network</b>. Chevron collapses a section. Hover row = <code>hover</code> fill; current folder = <code>selected_inactive</code> fill + 2 px accent tick (same as M1). On a hovered pinned row the star turns into the unpin glyph (click = unpin) and a grip appears on the right (drag = reorder). Footer: collapse button + <code>Ctrl+B</code>. The wide window is 840 px high so nothing scrolls; the real sidebar scrolls with the thin scrollbar when it overflows.</p>
+    <div class="hintstrip" id="h-sidebar"></div>
+    <div class="win-frame" id="w-sidebar"></div>
+  </div>
+
+  <div class="sec" id="sidebar-menu">
+    <h2>2. Bookmark context menu</h2>
+    <p class="cap">Right-click (or the menu key) on a pinned row. Stub only, same popup as the file menu (24 px items, 248 px, <code>popup</code> fill, 1 px border). <b>Rename</b> changes the label shown in the sidebar, not the folder. <b>Open in other pane</b> switches to a split first if there is none. Delete key unpins without a prompt (re-pin is one click; no data is lost).</p>
+    <div class="win-frame" id="w-sidebar-menu"></div>
+  </div>
+
+  <div class="sec" id="sidebar-reorder">
+    <h2>3. Drag to reorder / pin by dropping</h2>
+    <p class="cap">Dragging the <i>blink</i> bookmark by its row: the source row greys out (<code>text_disabled</code>), a 2 px <code>accent</code> line with a dot shows where it lands, a small drag image follows the pointer. The same line appears when you drag a <b>folder from a file list</b> into the Pinned section (between rows = pin there; dropping onto a row = copy/move into that folder, see the drag shots below).</p>
+    <div class="win-frame" id="w-sidebar-reorder"></div>
+  </div>
+
+  <div class="sec" id="sidebar-collapsed">
+    <h2>4. Collapsed sidebar (icons only, 48 px)</h2>
+    <p class="cap">Ctrl+B or the footer button. Section headers become 1 px separators, drives keep a 3 px bar under the icon, Recent and Network shrink to one icon each (click opens a flyout list: not mocked). Hover shows a tooltip (<code>popup</code> fill, 1 px border) to the right with the name; for drives it adds the free space. The list gets the 160 px back.</p>
+    <div class="win-frame" id="w-sidebar-collapsed"></div>
+  </div>
+
+  <div class="sec" id="sidebar-resize">
+    <h2>5. Resize handle</h2>
+    <p class="cap">The right edge is a 5 px hit strip (the kit&rsquo;s <code>splitter_w</code>). Hover: 3 px <code>scrollbar_hover</code> line; dragging: 3 px <code>accent</code> line and a small chip with the live width. Range 140 to 360 px; dragging below 120 px snaps to the 48 px collapsed mode. Double-click resets to 208. Here Recent and Network are folded to show the section arrows.</p>
+    <div class="win-frame" id="w-sidebar-resize"></div>
+  </div>
+
+  <div class="sec" id="dual-v">
+    <h2>6. Dual pane, vertical split</h2>
+    <p class="cap">Title-bar switch: single / side by side / stacked, plus the sync-scroll toggle (off = dim with a slash; on = <code>accent</code>, shown in shot 8). With two panes each pane owns its tab strip, toolbar (back / forward / up, path bar, filter button), list and status bar. <b>Active pane</b>: 2 px <code>accent</code> line under its path bar, normal selection colour, focus ring, F5/F6 hints in its status bar when something is selected (the label says the direction). The other pane keeps its selection in <code>selected_inactive</code>, no focus ring, and shows free space instead. The sidebar is shared and follows the active pane. In dual mode the sidebar starts under the title bar (single mode keeps the M1 layout, toolbar across the top). Panes under 640 px hide the Type column.</p>
+    <div class="hintstrip" id="h-dual"></div>
+    <div class="win-frame" id="w-dual-v"></div>
+  </div>
+
+  <div class="sec" id="dual-h">
+    <h2>7. Dual pane, horizontal split</h2>
+    <p class="cap">Same panes stacked. Each pane costs 118 px of chrome (tabs 30 + toolbar 40 + header 24 + status 24), so use a taller window; the F5/F6 hint says &ldquo;to bottom&rdquo; / &ldquo;to top&rdquo;. Bottom pane is the active one here.</p>
+    <div class="win-frame" id="w-dual-h"></div>
+  </div>
+
+  <div class="sec" id="dual-drag">
+    <h2>8. Splitter drag, sync scroll on</h2>
+    <p class="cap">Hover: 1 px <code>scrollbar_hover</code>. Dragging: 3 px <code>accent</code> line plus a chip with the split (62 / 38). Min pane 240 px, double-click resets 50 / 50, Ctrl+\ toggles single/split. The right pane drops its Type column automatically at this width. Sync-scroll is <b>on</b> here (link icon in <code>accent</code>): wheel and keyboard scrolling move both lists by the same row offset.</p>
+    <div class="win-frame" id="w-dual-drag"></div>
+  </div>
+
+  <div class="sec" id="drag-folder">
+    <h2>9. Dragging files over a folder row</h2>
+    <p class="cap">4 selected files dragged inside the left pane onto the <i>Invoices</i> folder. Target row: <code>selected</code> fill + 1 px <code>focus</code> inset stroke. Drag image: file icon, first name, count badge. Tooltip: bold action (&ldquo;Move to Invoices&rdquo;: same drive moves) and the modifier hints. Plain Windows rules: same drive = move, other drive = copy, Ctrl = copy, Shift = move, Alt = shortcut.</p>
+    <div class="win-frame" id="w-drag-folder"></div>
+  </div>
+
+  <div class="sec" id="drag-bookmark">
+    <h2>10. Dragging files over a sidebar bookmark</h2>
+    <p class="cap">Same files dropped onto the <i>blink</i> bookmark (X: is another drive, so the default flips to Copy). Row highlight identical to the folder row. Drops between pinned rows pin instead (shot 3).</p>
+    <div class="win-frame" id="w-drag-bookmark"></div>
+  </div>
+
+  <div class="sec" id="drag-pane">
+    <h2>11. Dragging files over the other pane</h2>
+    <p class="cap">Over the right pane&rsquo;s empty area or any file row: the whole pane gets a 2 px <code>focus</code> frame and the tooltip names the target folder (&ldquo;Copy to Invoices-2026&rdquo;). Over a folder row inside that pane the row highlight from shot 9 wins instead. Releasing on the tab strip of either pane drops into the tab&rsquo;s folder.</p>
+    <div class="win-frame" id="w-drag-pane"></div>
+  </div>
+
+  <div class="sec" id="keys">
+    <h2>12. Keyboard hints</h2>
+    <p class="cap">One small card for the help popup (<code>F1</code> or <code>?</code>, listed per context). The same key caps are used inline in the status bar and menus; nothing else on screen needs a legend.</p>
+    <div id="w-keys" class="win-frame" style="width:max-content"></div>
+  </div>
+</div>
+<script src="mock.js"></script>
+<script src="mock-u3.js"></script>
+<script>
+  var st = { theme: Tsu.qs('theme', 'dark'), density: Tsu3.density() };
+  var only = Tsu.qs('only', '');
+  if (only) { document.body.classList.add('only'); document.getElementById(only).classList.add('show'); }
+  var $ = function (id) { return document.getElementById(id); };
+  var K = Tsu3.k, A = Tsu3.A, B = Tsu3.B;
+  var selA = { 9: 1, 10: 1, 11: 1, 15: 1 };
+  function pA(x) {
+    var p = { rows: A, cols: 'full', tabs: [{ t: 'Downloads', active: true }, { t: 'Documents' }], path: ['C:', 'Users', 'Alex', 'Downloads'], sel: selA, focus: 17, hover: -1, free: '118 GB free' };
+    for (var k in x) p[k] = x[k]; return p;
+  }
+  function pB(x) {
+    var p = { rows: B, cols: 'full', tabs: [{ t: 'Invoices-2026', active: true }, { t: 'tsubame' }, { t: 'rig' }], path: ['X:', 'Dev', 'Invoices-2026'], sel: { 8: 1 }, focus: 8, hover: -1, free: '1.1 TB free' };
+    for (var k in x) p[k] = x[k]; return p;
+  }
+  function hs(items) { return items.map(function (i) { return '<span>' + K(i[0]) + i[1] + '</span>'; }).join(''); }
+  var sbBase = { cur: ['quick', 2] };
+  function sbDual(x) { var s = { cur: ['quick', 2], closed: { recent: true } }; for (var k in x) s[k] = x[k]; return s; }
+
+  function draw(upd) {
+    if (upd) for (var k in upd) st[k] = upd[k];
+    Tsu.setTheme(st.theme);
+    var d = st.density;
+    [].forEach.call(document.querySelectorAll('[data-density-btn]'), function (b) { b.classList.toggle('on', +b.dataset.densityBtn === d); });
+    $('h-sidebar').innerHTML = hs([['Ctrl+B', 'collapse'], ['Alt+\u2191 \u2193', 'reorder pinned'], ['Del', 'unpin'], ['Ctrl+D', 'pin this folder'], ['Ctrl+Enter', 'open in new tab']]);
+    $('h-dual').innerHTML = hs([['Ctrl+\\', 'single / split'], ['Ctrl+Shift+\\', 'vertical / horizontal'], ['Tab', 'switch pane'], ['F5', 'copy to other pane'], ['F6', 'move to other pane']]);
+
+    // 1 sidebar
+    $('w-sidebar').innerHTML = Tsu3.win({ mode: 'single', h: 840, density: d, tabs: [{ t: 'Downloads', active: true }, { t: 'tsubame' }, { t: 'Documents' }],
+      sb: { cur: ['quick', 2], hover: ['pin', 1] }, panes: [pA({ hover: 20 })] });
+    // 2 menu
+    var sbm = Tsu3.sidebar({ cur: ['quick', 2], hover: ['pin', 1] }, 74);
+    $('w-sidebar-menu').innerHTML = Tsu3.win({ mode: 'single', h: 840, density: d, tabs: [{ t: 'Downloads', active: true }, { t: 'tsubame' }, { t: 'Documents' }],
+      sb: { cur: ['quick', 2], hover: ['pin', 1] }, panes: [pA({})], ov: Tsu3.ctxMenu(150, 74 + sbm.pos.pin1 + 12) });
+    // 3 reorder
+    var sbr = Tsu3.sidebar({}, 74);
+    $('w-sidebar-reorder').innerHTML = Tsu3.win({ mode: 'single', h: 840, density: d, tabs: [{ t: 'Downloads', active: true }, { t: 'tsubame' }, { t: 'Documents' }],
+      sb: { cur: ['quick', 2], src: ['pin', 1], ins: 3 }, panes: [pA({})],
+      ov: Tsu3.dragImg(96, 74 + sbr.pos.pin2 + 10, 'blink', 1, Tsu3.ic('star')) });
+    // 4 collapsed
+    $('w-sidebar-collapsed').innerHTML = Tsu3.win({ mode: 'single', h: 720, density: d, tabs: [{ t: 'Downloads', active: true }, { t: 'tsubame' }, { t: 'Documents' }],
+      sb: { collapsed: true, cur: ['quick', 2], hover: ['quick', 4], tip: ['quick', 4] }, panes: [pA({})] });
+    // 5 resize
+    $('w-sidebar-resize').innerHTML = Tsu3.win({ mode: 'single', h: 720, density: d, tabs: [{ t: 'Downloads', active: true }, { t: 'tsubame' }, { t: 'Documents' }],
+      sb: { w: 248, cur: ['quick', 2], handle: 'dragging', chip: 248, closed: { recent: true, net: true } }, panes: [pA({})] });
+    // 6 dual v
+    $('w-dual-v').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sync: false, sb: sbDual(), panes: [pA({ cols: 'narrow' }), pB({ cols: 'narrow', sel: { 8: 1 } })] });
+    // 7 dual h
+    $('w-dual-h').innerHTML = Tsu3.win({ mode: 'h', h: 860, density: d, active: 1, sync: false, sb: sbDual({ cur: ['pc', 1] }),
+      panes: [pA({ sel: { 9: 1 }, focus: 9 }), pB({ sel: { 5: 1, 6: 1, 8: 1 }, focus: 6, path: ['X:', 'Dev', 'Invoices-2026'] })] });
+    // 8 splitter drag, sync on
+    $('w-dual-drag').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sync: true, split: { pct: 62, state: 'dragging' }, sb: sbDual(),
+      panes: [pA({}), pB({ cols: 'narrow' })],
+      ov: '<div class="chip" style="left:880px;top:300px"><span>62 | 38</span><span class="dim">double-click: 50 | 50</span></div>' });
+    // 9 drag onto folder row (pane A, row 1 = Invoices)
+    var rowTop = function (n, off) { return 'calc(94px + var(--height-list-row) * ' + n + ' + ' + off + 'px)'; };
+    $('w-drag-folder').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sb: sbDual(),
+      panes: [pA({ cols: 'narrow', drop: 1, focus: -1,
+        ov: Tsu3.dragImg(150, rowTop(1, 14), 'crash-report-2026-11-09.txt', 4) +
+          Tsu3.dragTip(150, rowTop(1, 44), 'moveto', 'Move to Invoices', [Tsu3.mod('Ctrl', 'Copy'), Tsu3.mod('Alt', 'Shortcut')]) }),
+        pB({ cols: 'narrow' })] });
+    // 10 drag onto bookmark
+    var sbd = Tsu3.sidebar({ closed: { recent: true } }, 34);
+    $('w-drag-bookmark').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sb: sbDual({ drop: ['pin', 1] }),
+      panes: [pA({ cols: 'narrow', focus: -1 }), pB({ cols: 'narrow' })],
+      ov: Tsu3.dragImg(104, 34 + sbd.pos.pin1 + 14, 'crash-report-2026-11-09.txt', 4) +
+        Tsu3.dragTip(104, 34 + sbd.pos.pin1 + 44, 'copyto', 'Copy to blink', ['<span class="dim">X:\\Dev\\blink</span>', Tsu3.mod('Shift', 'Move')]) });
+    // 11 drag over other pane
+    $('w-drag-pane').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sb: sbDual(),
+      panes: [pA({ cols: 'narrow', focus: -1 }), pB({ cols: 'narrow', dropPane: true, sel: {}, focus: -1,
+        ov: Tsu3.dragImg(150, 300, 'crash-report-2026-11-09.txt', 4) +
+          Tsu3.dragTip(150, 330, 'copyto', 'Copy to Invoices-2026', ['<span class="dim">X:\\Dev\\Invoices-2026</span>', Tsu3.mod('Shift', 'Move')]) })] });
+    // 12 keys
+    $('w-keys').innerHTML = Tsu3.keycard();
+  }
+  Tsu3.wire(draw);
+  draw();
+</script>
+</body>
+</html>
