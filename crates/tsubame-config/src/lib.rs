@@ -29,11 +29,14 @@
 mod atomic;
 mod debounce;
 mod locate;
+pub mod menu;
+pub mod nss;
 pub mod session;
 
 pub use atomic::{corrupt_path, write_atomic, write_atomic_with};
 pub use debounce::{Debounce, SAVE_INTERVAL};
 pub use locate::{locate, locate_now, Locations, LocateOptions, CONFIG_NAME, DATA_ENV, PORTABLE_MARKER, PORTABLE_MARKER_LEGACY, SESSION_NAME};
+pub use menu::{EntryKind, MenuEntry, ShowFor, Source};
 pub use session::Session;
 
 use serde::de::DeserializeOwned;
@@ -292,8 +295,14 @@ pub struct Sidebar {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Updates {
-    #[serde(default = "yes")]
+    /// Check for a newer version when the app starts (at most once a day).
+    /// `check` is accepted as an alias.
+    #[serde(default = "yes", alias = "check")]
     pub auto_check: bool,
+    /// Download a verified update in the background and apply it at the next
+    /// restart. Off by default: the user clicks "Download and restart".
+    #[serde(default)]
+    pub auto_install: bool,
     /// `stable` today; the field exists so a beta channel needs no schema bump.
     #[serde(default = "default_channel")]
     pub channel: String,
@@ -301,7 +310,7 @@ pub struct Updates {
 
 impl Default for Updates {
     fn default() -> Self {
-        Updates { auto_check: true, channel: default_channel() }
+        Updates { auto_check: true, auto_install: false, channel: default_channel() }
     }
 }
 
@@ -319,6 +328,22 @@ impl Default for Keys {
     fn default() -> Self {
         Keys { profile: default_profile(), overrides: BTreeMap::new() }
     }
+}
+
+/// `[advanced]`
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Advanced {
+    /// Write a diagnostics log (`<data dir>/logs/tsubame.log`). Off by default.
+    pub diagnostics: bool,
+}
+
+/// `[context_menu]`: the editable right-click menu (`docs/u4-settings.md`).
+/// Empty `entries` means the built-in default menu.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextMenu {
+    pub entries: Vec<MenuEntry>,
 }
 
 /// A rectangle in virtual-screen pixels (a monitor's work area).
@@ -392,12 +417,25 @@ pub struct Config {
     pub sidebar: Sidebar,
     pub updates: Updates,
     pub keys: Keys,
+    pub context_menu: ContextMenu,
+    pub advanced: Advanced,
     pub window: WindowState,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: VERSION, general: General::default(), appearance: Appearance::default(), panes: Panes::default(), sidebar: Sidebar::default(), updates: Updates::default(), keys: Keys::default(), window: WindowState::default() }
+        Config {
+            version: VERSION,
+            general: General::default(),
+            appearance: Appearance::default(),
+            panes: Panes::default(),
+            sidebar: Sidebar::default(),
+            updates: Updates::default(),
+            keys: Keys::default(),
+            context_menu: ContextMenu::default(),
+            advanced: Advanced::default(),
+            window: WindowState::default(),
+        }
     }
 }
 
@@ -498,11 +536,22 @@ impl ConfigFile {
 
 /// Keys the typed config does not know, copied back under the keys it does.
 fn merge_unknown(typed: &mut toml::Table, origin: toml::Table) {
+    merge_unknown_at(typed, origin, "");
+}
+
+/// Tables whose keys are user data (a map the app edits): the typed table is
+/// complete, so a key the user removed must not come back from the old file.
+const OPAQUE_TABLES: &[&str] = &["keys.overrides"];
+
+fn merge_unknown_at(typed: &mut toml::Table, origin: toml::Table, path: &str) {
     for (k, v) in origin {
         match typed.get_mut(&k) {
             Some(toml::Value::Table(t)) => {
-                if let toml::Value::Table(o) = v {
-                    merge_unknown(t, o);
+                let here = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                if let toml::Value::Table(o) = v
+                    && !OPAQUE_TABLES.contains(&here.as_str())
+                {
+                    merge_unknown_at(t, o, &here);
                 }
             }
             // a known key: the typed value wins
@@ -1002,6 +1051,89 @@ names = ["a", "b"]
         assert_eq!(Density::parse("nonsense"), Density::Compact);
         assert_eq!(Density::Normal.as_str(), "normal");
         assert_eq!(Density::ALL.len(), 3);
+    }
+
+    #[test]
+    fn u4_keys_round_trip_through_a_file() {
+        let d = temp_dir("u4");
+        let p = d.join("config.toml");
+        let mut cfg = Config::default();
+        cfg.general.show_hidden = true;
+        cfg.general.show_system = true;
+        cfg.general.confirm_delete = false;
+        cfg.general.delete_to_recycle = false;
+        cfg.appearance.theme = "nord".into();
+        cfg.appearance.accent = Some("#f97316".into());
+        cfg.appearance.font_scale = 1.25;
+        cfg.updates.auto_check = false;
+        cfg.updates.auto_install = true;
+        cfg.advanced.diagnostics = true;
+        cfg.keys.overrides.insert("tab.new".into(), vec!["Ctrl+N".into(), "Ctrl+T".into()]);
+        cfg.keys.overrides.insert("tab.close".into(), vec![]);
+        cfg.context_menu.entries = vec![
+            MenuEntry { id: "builtin.copy".into(), source: Source::Builtin, name: "Copy".into(), hidden: true, ..Default::default() },
+            MenuEntry { id: "custom.1".into(), kind: EntryKind::Submenu, name: "Tools".into(), ..Default::default() },
+            MenuEntry {
+                id: "custom.2".into(),
+                name: "Open in VS Code".into(),
+                command: r"C:\Code\Code.exe".into(),
+                args: "--reuse-window \"{path}\"".into(),
+                extensions: vec!["rs".into(), "toml".into()],
+                show_for: ShowFor { files: true, folders: false, background: true },
+                parent: "custom.1".into(),
+                ..Default::default()
+            },
+        ];
+        let cf = ConfigFile::new(cfg.clone());
+        cf.save(&p).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.contains("[[context_menu.entries]]"), "{text}");
+        let l = ConfigFile::load(&p);
+        assert_eq!(l.status, LoadStatus::Loaded);
+        assert_eq!(l.value.config, cfg);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn updates_check_is_an_alias_and_auto_install_is_off_by_default() {
+        let c: Config = toml::from_str("[updates]
+check = false
+").unwrap();
+        assert!(!c.updates.auto_check);
+        assert!(!c.updates.auto_install);
+        let c = Config::default();
+        assert!(c.updates.auto_check && !c.updates.auto_install);
+        assert!(c.context_menu.entries.is_empty() && !c.advanced.diagnostics);
+    }
+
+    #[test]
+    fn unknown_menu_values_read_as_defaults_not_errors() {
+        let c: Config = toml::from_str("[[context_menu.entries]]
+id = \"x\"
+kind = \"weird\"
+source = \"alien\"
+").unwrap();
+        let e = &c.context_menu.entries[0];
+        assert_eq!((e.kind, e.source), (EntryKind::Item, Source::Custom));
+    }
+
+    #[test]
+    fn a_removed_key_override_does_not_come_back_from_the_old_file() {
+        let d = temp_dir("keys-merge");
+        let p = d.join("config.toml");
+        fs::write(&p, "version = 1
+[keys.overrides]
+\"tab.new\" = [\"Ctrl+N\"]
+\"nav.up\" = [\"Backspace\"]
+").unwrap();
+        let mut l = ConfigFile::load(&p);
+        assert_eq!(l.value.config.keys.overrides.len(), 2);
+        l.value.config.keys.overrides.remove("tab.new");
+        l.value.save(&p).unwrap();
+        let again = ConfigFile::load(&p);
+        assert_eq!(again.value.config.keys.overrides.len(), 1, "{:?}", again.value.config.keys.overrides);
+        assert!(again.value.config.keys.overrides.contains_key("nav.up"));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
