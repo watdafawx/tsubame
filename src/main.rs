@@ -48,6 +48,7 @@ mod bench;
 mod cli;
 mod clip;
 mod cols;
+mod custom_cmd;
 mod commands;
 mod data;
 mod dnd;
