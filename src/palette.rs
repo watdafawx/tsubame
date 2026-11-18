@@ -330,8 +330,10 @@ impl Palette {
     fn prefix_keys(&mut self, ui: &mut Ui) -> Option<Action> {
         for (qi, ev) in ui.key_input(ID_INPUT) {
             match ev {
-                Event::Char(c) if self.input.text.is_empty() && mode_for_prefix(c).is_some() && !c.is_control() => {
+                // an empty box, or everything selected (typing replaces it): a prefix picks the mode
+                Event::Char(c) if (self.input.text.is_empty() || self.input.sel() == (0, self.input.text.len())) && mode_for_prefix(c).is_some() && !c.is_control() => {
                     ui.consume(qi);
+                    self.input.set_text("");
                     let m = mode_for_prefix(c).unwrap();
                     if m != self.mode {
                         self.switch_mode(m);

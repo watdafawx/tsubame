@@ -2525,6 +2525,23 @@ mod tests {
     }
 
     #[test]
+    fn a_prefix_typed_over_a_selection_still_switches_the_mode() {
+        let mut r = Rig::new("u4-prefix");
+        r.key(Key::Char('K'), Mods::CTRL);
+        for c in "rn".chars() {
+            r.ui.push(Event::Char(c));
+            r.frame();
+        }
+        assert_eq!(r.v.palette.as_ref().unwrap().mode, crate::palette::Mode::Commands);
+        r.key(Key::Char('A'), Mods::CTRL);
+        r.ui.push(Event::Char('/'));
+        r.frame();
+        let p = r.v.palette.as_ref().unwrap();
+        assert_eq!(p.mode, crate::palette::Mode::Path);
+        assert!(p.input.text.is_empty());
+    }
+
+    #[test]
     fn running_a_palette_command_puts_it_first_in_the_recents() {
         let mut r = Rig::new("u4-recent");
         let zebra = r.v.zebra;

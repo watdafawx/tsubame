@@ -22,6 +22,7 @@ impl State {
     pub fn focus_command(&mut self, title: &str) {
         self.rec = None;
         self.search.set_text(title);
+        self.focus_first = true;
     }
 }
 
@@ -29,6 +30,8 @@ impl State {
 pub struct State {
     search: TextInput,
     rec: Option<Rec>,
+    /// "Show shortcut": the first row found takes the keyboard focus (Enter records)
+    focus_first: bool,
     /// the "Reset all" button asked once ("Click again to confirm")
     confirm_all: bool,
 }
@@ -222,6 +225,9 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
                 if pg.visible(Rect::new(r.x, r.y, r.w, h)) {
                     let id = ID_ROW.with(cmd.id as u64);
                     let it = pg.ui.interact(id, r, Sense::click().focusable().cursor(Cursor::Hand));
+                    if std::mem::take(&mut st.focus_first) {
+                        pg.ui.set_focus(Some(id));
+                    }
                     if open {
                         pg.g.fill(Rect::new(r.x + 1.0, r.y, r.w - 2.0, h), t.selected_inactive);
                     } else if it.hovered {
@@ -266,7 +272,19 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
                             }
                         }
                     }
-                    if it.clicked == Some(Button::Left) && !applied {
+                    // Enter / Space on the focused row opens the recorder too
+                    let mut activate = it.clicked == Some(Button::Left);
+                    if !open && pg.ui.has_focus(id) {
+                        for (qi, ev) in pg.ui.key_input(id) {
+                            if let Event::KeyDown { key: Key::Enter | Key::Space, mods, .. } = ev
+                                && mods.none()
+                            {
+                                pg.ui.consume(qi);
+                                activate = true;
+                            }
+                        }
+                    }
+                    if activate && !applied {
                         if open {
                             closed = true;
                         } else {
