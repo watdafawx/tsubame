@@ -62,6 +62,7 @@ mod nav;
 mod ole_glue;
 mod ops;
 mod overlay;
+mod palette;
 mod panes;
 mod rename;
 mod session;
