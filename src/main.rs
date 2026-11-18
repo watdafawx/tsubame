@@ -32,7 +32,8 @@
 //!                 start folder), `--gate-navs N`, `--gate-tabs N`,
 //!                 `--gate-sample N` (ops per counter sample, 1,000),
 //!                 `--gate-settle S` (idle seconds before the end sample, 5)
-//!   --stress m    S4 stress run (menu: 200 context menus; thumbs: 500 thumbnails)
+//!   --stress m    S4 stress run (menu: 200 context menus; thumbs: 500 thumbnails;
+//!                 clip: 200 menu + clipboard copy/read cycles)
 //!   --workers N   shell STA workers for icons and menus (default 2)
 //!   --thumb-workers N  STA workers for thumbnails (default 2)
 //!   --view M      details (default), grid-small or grid-large
@@ -265,7 +266,11 @@ fn main() {
     let bench_mode = flag("--bench") || std::env::var_os("TSUBAME_BENCH").is_some_and(|v| v != "0");
     let timing_mode = flag("--timing");
     let gate_mode = flag("--leak-gate");
-    let stress_mode = arg_value(&args, "--stress").map(|m| if m == "thumbs" { stress::Mode::Thumbs } else { stress::Mode::Menu });
+    let stress_mode = arg_value(&args, "--stress").map(|m| match m.as_str() {
+        "thumbs" => stress::Mode::Thumbs,
+        "clip" => stress::Mode::Clip,
+        _ => stress::Mode::Menu,
+    });
     let workers = arg_value(&args, "--workers").and_then(|v| v.parse().ok()).unwrap_or(shellui::ICON_WORKERS);
     let timing_dirs: Vec<String> = arg_value(&args, "--timing-dirs").map(|s| s.split(';').filter(|p| !p.is_empty()).map(str::to_string).collect()).unwrap_or_default();
     // a measurement run: no single instance, no config writes, default appearance
@@ -387,7 +392,7 @@ fn main() {
             pool.hang_after = Duration::from_millis(ms);
         }
         let mut shell = shellui::ShellUi::new(icon_px(dpi));
-        shell.collect_other = stress_mode == Some(stress::Mode::Thumbs);
+        shell.collect_other = matches!(stress_mode, Some(stress::Mode::Thumbs | stress::Mode::Clip));
 
         // enumerator workers wake the UI thread with one coalesced message
         let hw = hwnd.0 as isize;

@@ -46,7 +46,8 @@ const MAX_ITEMS: usize = formats::MAX_PATHS;
 /// Shell verbs the app runs itself instead of the shell.
 const INTERCEPT: [&str; 5] = ["delete", "cut", "copy", "paste", "rename"];
 const ITEM_EXTRAS: [&str; 3] = ["Copy path", "Copy name", "Open terminal here"];
-const BG_EXTRAS: [&str; 4] = ["New folder", "New text file", "Copy path", "Open terminal here"];
+// the shell leaves Paste out of a background menu without a view; ours is on top
+const BG_EXTRAS: [&str; 5] = ["Paste", "New folder", "New text file", "Copy path", "Open terminal here"];
 
 /// What view.rs reports to this module each frame (DIPs).
 #[derive(Default)]
@@ -318,8 +319,8 @@ fn refresh_active(a: &mut App, job: &Job) {
 fn ask_conflict(hwnd: HWND, target: &Path) -> Choice {
     let text = format!(
         "\"{}\" already exists in\n{}\n\nYes: replace it (the old one goes to the Recycle Bin)\nNo: keep both (the new one gets a number)\nCancel: skip it\n\nThe answer applies to the other conflicts of this operation too.",
-        target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-        target.parent().map(|p| p.to_string_lossy()).unwrap_or_default()
+        short(&target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), 80),
+        short(&target.parent().map(|p| p.to_string_lossy()).unwrap_or_default(), 120)
     );
     match unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), &HSTRING::from("Tsubame: item already exists"), MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) } {
         IDYES => Choice::Replace,
@@ -385,7 +386,7 @@ pub fn on_app(hwnd: HWND) {
                     list_names(hazard.iter().map(|(p, w)| (p, Some(w.as_str())))),
                     if hazard.len() == 1 { "it" } else { "them" },
                     if recycle.is_empty() { String::new() } else { format!(" and recycle the other {}", recycle.len()) },
-                    if recycle.is_empty() { "keep them".to_string() } else { format!("only recycle the other {}", recycle.len()) },
+                    if recycle.is_empty() { format!("keep {}", if hazard.len() == 1 { "it" } else { "them" }) } else { format!("only recycle the other {}", recycle.len()) },
                 );
                 with(|a| a.ops.asking = true);
                 let r = unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), &HSTRING::from("Tsubame: delete permanently?"), MB_YESNOCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) };
@@ -404,7 +405,7 @@ pub fn on_app(hwnd: HWND) {
 }
 
 fn count_text(v: &[PathBuf]) -> String {
-    if v.len() == 1 { format!("\"{}\"", name_of(&v[0].to_string_lossy())) } else { format!("these {} items", v.len()) }
+    if v.len() == 1 { format!("\"{}\"", short(&name_of(&v[0].to_string_lossy()), 80)) } else { format!("these {} items", v.len()) }
 }
 fn count_text_n(n: usize) -> String {
     if n == 1 { "1 item".into() } else { format!("{n} items") }
@@ -417,7 +418,7 @@ fn list_names<'a>(it: impl Iterator<Item = (&'a PathBuf, Option<&'a str>)>) -> S
     for (p, why) in it {
         n += 1;
         if n <= 6 {
-            s.push_str(&format!("  {}{}\n", name_of(&p.to_string_lossy()), why.map(|w| format!(": {w}")).unwrap_or_default()));
+            s.push_str(&format!("  {}{}\n", short(&name_of(&p.to_string_lossy()), 80), why.map(|w| format!(": {w}")).unwrap_or_default()));
         }
     }
     if n > 6 {
@@ -427,6 +428,21 @@ fn list_names<'a>(it: impl Iterator<Item = (&'a PathBuf, Option<&'a str>)>) -> S
         s.push('\n');
     }
     s
+}
+
+/// `s` cut in the middle to at most `max` chars ("abc…xyz"), so a dialog
+/// stays readable with a 250-char name.
+fn short(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let head = (max - 1) / 2;
+    let tail = max - 1 - head;
+    let mut out: String = s.chars().take(head).collect();
+    out.push('…');
+    out.extend(s.chars().skip(n - tail));
+    out
 }
 
 fn confirm(hwnd: HWND, text: &str) -> bool {
@@ -645,6 +661,7 @@ fn on_menu(a: &mut App, m: &MenuResult, ctx: MenuCtx) {
     if let Some(i) = m.extra {
         let extras: &[&str] = if ctx.background { &BG_EXTRAS } else { &ITEM_EXTRAS };
         match extras.get(i).copied() {
+            Some("Paste") => paste(a, ctx.folder),
             Some("New folder") => new_item(a, false),
             Some("New text file") => new_item(a, true),
             Some("Copy path") => copy_text(a, path_text(&ctx.paths), "path"),
@@ -677,7 +694,7 @@ fn on_menu(a: &mut App, m: &MenuResult, ctx: MenuCtx) {
 /// reply runs our entries / intercepted verbs and still goes on for stats.
 pub fn on_reply(a: &mut App, r: Reply) -> Option<Reply> {
     match r.payload {
-        Payload::Clip(c) => {
+        Payload::Clip(c) if a.ops.clip_busy.as_ref().is_some_and(|b| b.0 == r.id) => {
             on_clip(a, r.id, c);
             None
         }
@@ -885,6 +902,15 @@ mod tests {
     fn copy_as_path_quotes_each_line() {
         assert_eq!(path_text(&[r"C:\a b\x.txt".into(), r"D:\y".into()]), "\"C:\\a b\\x.txt\"\r\n\"D:\\y\"");
         assert_eq!(path_text(&[]), "");
+    }
+
+    #[test]
+    fn long_names_are_cut_in_the_middle() {
+        assert_eq!(short("abc", 5), "abc");
+        let long = "a".repeat(100) + "Z";
+        let c = short(&long, 21);
+        assert_eq!(c.chars().count(), 21);
+        assert!(c.starts_with("aaaa") && c.ends_with('Z') && c.contains('…'));
     }
 
     #[test]

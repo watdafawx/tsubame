@@ -612,8 +612,14 @@ impl ShellUi {
                 self.menu_status = "hung job finished".into();
                 true
             }
-            // clipboard replies belong to shellops (it takes them before this)
-            Payload::Clip(_) => false,
+            // shellops takes its own clipboard replies before this; the rest
+            // belong to a stress run
+            Payload::Clip(_) => {
+                if self.collect_other {
+                    self.other_replies.push(r);
+                }
+                false
+            }
         }
     }
 

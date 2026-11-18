@@ -74,7 +74,7 @@ fn data_object_round_trip() {
 fn clip_text() -> Option<String> {
     let obj = unsafe { windows::Win32::System::Ole::OleGetClipboard() }.ok()?;
     let b = dnd::get_bytes(&obj, CF_UNICODETEXT.0, -1, 16 << 20)?;
-    let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let u: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     let end = u.iter().position(|&c| c == 0).unwrap_or(u.len());
     Some(String::from_utf16_lossy(&u[..end]))
 }
