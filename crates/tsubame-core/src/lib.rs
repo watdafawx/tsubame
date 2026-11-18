@@ -72,7 +72,16 @@ pub struct EntryStore {
     free: Vec<u32>,
     /// Name units no live record points at (compacted by `compact_names`).
     garbage: usize,
+    /// A streaming listing runs (`begin_stream`): `index[..top]` is sorted and
+    /// holds the smallest visible entries so far, `index[top..]` is arrival order.
+    streaming: bool,
+    top: usize,
 }
+/// While streaming, this many leading view rows are kept in final sort order
+/// (a few screens); the rest of the view is arrival order until `end_stream`.
+pub const STREAM_TOP: usize = 2048;
+/// Sorts at least this big run on several threads (scoped, no pool).
+const PAR_SORT_MIN: usize = 16 * 1024;
 impl EntryStore {
     pub fn new() -> Self {
         Self::default()
@@ -114,6 +123,40 @@ impl EntryStore {
         self.query.clear();
         self.free.clear();
         self.garbage = 0;
+        self.streaming = false;
+        self.top = 0;
+    }
+    /// Starts a streaming listing: `push_batch` then appends without merging
+    /// the whole view. Only the first [`STREAM_TOP`] view rows are kept in
+    /// sort order (what the user sees while it loads); everything after them
+    /// is in arrival order. `end_stream` sorts the whole view once. Cuts the
+    /// per-batch O(n) merge (O(n * batches) natural compares per listing).
+    pub fn begin_stream(&mut self) {
+        if !self.streaming {
+            self.streaming = true;
+            self.top = self.index.len();
+            if self.top > STREAM_TOP {
+                // already sorted (an ordinary push before): keep it
+                self.top = STREAM_TOP;
+            }
+        }
+    }
+    /// Ends a streaming listing: one (parallel) sort of the whole view.
+    pub fn end_stream(&mut self) {
+        if !std::mem::take(&mut self.streaming) {
+            return;
+        }
+        if self.top < self.index.len() {
+            let mut ids = std::mem::take(&mut self.index);
+            self.sort_ids(&mut ids);
+            self.index = ids;
+        }
+        self.top = 0;
+    }
+    /// A streaming listing runs and the view beyond the first
+    /// [`STREAM_TOP`] rows is not sorted yet.
+    pub fn is_streaming(&self) -> bool {
+        self.streaming
     }
     pub fn record(&self, id: EntryId) -> Option<&EntryRecord> {
         self.records.get(id as usize).filter(|r| r.flags & DEAD == 0)
@@ -163,6 +206,8 @@ impl EntryStore {
             return Err(StoreError::CapacityExceeded);
         }
         let start = self.records.len();
+        self.records.reserve(batch.len());
+        self.names.reserve(units - self.names.len());
         for e in batch {
             self.records.push(EntryRecord {
                 offset: self.names.len() as u32,
@@ -177,8 +222,66 @@ impl EntryStore {
             .map(|i| i as u32)
             .filter(|&i| self.matches(i))
             .collect();
-        self.merge_ids(added);
+        if self.streaming {
+            self.stream_ids(added);
+        } else {
+            self.merge_ids(added);
+        }
         Ok(())
+    }
+    /// Reserves room for `entries` more entries and `name_units` more name
+    /// units (a listing that knows its size, e.g. from the first batch).
+    pub fn reserve(&mut self, entries: usize, name_units: usize) {
+        self.records.reserve(entries);
+        self.index.reserve(entries);
+        self.names.reserve(name_units);
+    }
+    /// Streaming insert: new IDs that sort before the last kept top row join
+    /// the sorted top (O(top + new)); the others are appended in arrival order.
+    fn stream_ids(&mut self, mut added: Vec<u32>) {
+        let t = self.top;
+        if t == self.index.len() && t < STREAM_TOP {
+            // the whole view is still the sorted top
+            self.merge_ids(added);
+            self.top = self.index.len().min(STREAM_TOP);
+            return;
+        }
+        if t == 0 {
+            // a refine emptied the top while the tail has rows: arrival order
+            // until `end_stream` (rare: typing a filter while it loads)
+            self.index.append(&mut added);
+            return;
+        }
+        let last = self.index[t - 1];
+        let lk = self.sort_key(last);
+        let (mut cands, mut rest) = (Vec::new(), Vec::with_capacity(added.len()));
+        for id in added.drain(..) {
+            if self.cmp_keyed((self.sort_key(id), id), (lk, last)) == Ordering::Less {
+                cands.push(id);
+            } else {
+                rest.push(id);
+            }
+        }
+        if !cands.is_empty() {
+            self.sort_ids(&mut cands);
+            let mut merged = Vec::with_capacity(t + cands.len());
+            let (mut a, mut b) = (0, 0);
+            while a < t && b < cands.len() {
+                if self.compare(self.index[a], cands[b]) != Ordering::Greater {
+                    merged.push(self.index[a]);
+                    a += 1;
+                } else {
+                    merged.push(cands[b]);
+                    b += 1;
+                }
+            }
+            merged.extend_from_slice(&self.index[a..t]);
+            merged.extend_from_slice(&cands[b..]);
+            // the top keeps its size; what falls out of it joins the tail
+            self.index[..t].copy_from_slice(&merged[..t]);
+            self.index.extend_from_slice(&merged[t..]);
+        }
+        self.index.append(&mut rest);
     }
     /// Sorts `added` and merges it into the index in O(n+m).
     fn merge_ids(&mut self, mut added: Vec<u32>) {
@@ -211,6 +314,8 @@ impl EntryStore {
         removed: &[EntryId],
         upserts: &[Upsert<'_>],
     ) -> Result<Vec<EntryId>, StoreError> {
+        // the merge below needs a fully sorted view
+        self.end_stream();
         let mut units = self.names.len();
         for u in upserts {
             if u.input.name.len() > u16::MAX as usize {
@@ -400,40 +505,211 @@ impl EntryStore {
         };
         (if self.sort.descending { o.reverse() } else { o }).then(a.cmp(&b))
     }
-    fn sort_ids(&self, ids: &mut [u32]) {
+    /// Order-preserving 8-byte key of `id` for the current column: a key
+    /// difference decides, equal keys fall back to `compare`.
+    fn sort_key(&self, id: u32) -> u64 {
+        let r = &self.records[id as usize];
+        match self.sort.column {
+            Column::Size => r.size,
+            Column::Modified => (r.modified as u64) ^ (1 << 63),
+            Column::Name => prefix(self.name(id).unwrap()),
+            Column::Type => prefix(extension(self.name(id).unwrap())),
+        }
+    }
+    /// `compare` on decorated IDs: folder rank, then key, then the full comparator.
+    #[inline]
+    fn cmp_keyed(&self, (ka, a): (u64, u32), (kb, b): (u64, u32)) -> Ordering {
+        if self.sort.folders_first {
+            let o = (self.records[b as usize].flags & FOLDER)
+                .cmp(&(self.records[a as usize].flags & FOLDER));
+            if o != Ordering::Equal {
+                return o;
+            }
+        }
+        let o = ka.cmp(&kb);
+        if o == Ordering::Equal {
+            self.compare(a, b)
+        } else if self.sort.descending {
+            o.reverse()
+        } else {
+            o
+        }
+    }
+    /// Folder rank and key only (equal keys tie: `sort_ties` orders them).
+    #[inline]
+    fn cmp_prefix(&self, (ka, a): (u64, u32), (kb, b): (u64, u32)) -> Ordering {
+        if self.sort.folders_first {
+            let o = (self.records[b as usize].flags & FOLDER)
+                .cmp(&(self.records[a as usize].flags & FOLDER));
+            if o != Ordering::Equal {
+                return o;
+            }
+        }
+        let o = ka.cmp(&kb);
+        if self.sort.descending { o.reverse() } else { o }
+    }
+    fn decorate_sorted(&self, ids: &[u32]) -> Vec<(u64, u32)> {
         // Decorate once: avoid random record/name reads during most comparisons.
-        let mut keys: Vec<(u64, u32)> = ids
-            .iter()
-            .map(|&id| {
-                let r = &self.records[id as usize];
-                let key = match self.sort.column {
-                    Column::Size => r.size,
-                    Column::Modified => (r.modified as u64) ^ (1 << 63),
-                    Column::Name => prefix(self.name(id).unwrap()),
-                    Column::Type => prefix(extension(self.name(id).unwrap())),
-                };
-                (key, id)
-            })
-            .collect();
-        keys.sort_unstable_by(|&(ka, a), &(kb, b)| {
-            if self.sort.folders_first {
-                let o = (self.records[b as usize].flags & FOLDER)
-                    .cmp(&(self.records[a as usize].flags & FOLDER));
-                if o != Ordering::Equal {
-                    return o;
+        let mut keys: Vec<(u64, u32)> = ids.iter().map(|&id| (self.sort_key(id), id)).collect();
+        self.sort_decorated(&mut keys);
+        keys
+    }
+    /// Bucket order of a decorated ID: `cmp_prefix` as one integer.
+    #[inline]
+    fn rank(&self, (k, id): (u64, u32)) -> u128 {
+        let back = self.sort.folders_first && self.records[id as usize].flags & FOLDER == 0;
+        ((back as u128) << 64) | (if self.sort.descending { !k } else { k }) as u128
+    }
+    fn sort_decorated(&self, keys: &mut [(u64, u32)]) {
+        keys.sort_unstable_by(|&a, &b| self.cmp_prefix(a, b));
+        let mut i = 0;
+        while i < keys.len() {
+            let mut j = i + 1;
+            while j < keys.len() && self.cmp_prefix(keys[i], keys[j]) == Ordering::Equal {
+                j += 1;
+            }
+            if j - i > 1 {
+                self.sort_ties(&mut keys[i..j]);
+            }
+            i = j;
+        }
+    }
+    /// The text a name/type key is built from.
+    fn key_text(&self, id: u32) -> &[u16] {
+        let n = self.name(id).unwrap();
+        if self.sort.column == Column::Type { extension(n) } else { n }
+    }
+    /// Orders a run whose folder rank and first key are equal, as `compare` would.
+    fn sort_ties(&self, run: &mut [(u64, u32)]) {
+        match self.sort.column {
+            // the key is the whole value: equal keys tie on the ID
+            Column::Size | Column::Modified => run.sort_unstable_by_key(|&(_, id)| id),
+            Column::Name | Column::Type => {
+                const UNCLEAN: u32 = u32::MAX;
+                let mut v: Vec<(u64, u32, u32)> = run
+                    .iter()
+                    .map(|&(k, id)| (k, id, prefix_from(self.key_text(id), 0).1.map_or(UNCLEAN, |e| e as u32)))
+                    .collect();
+                self.refine_ties(&mut v);
+                for (slot, e) in run.iter_mut().zip(v) {
+                    slot.1 = e.1;
                 }
             }
-            let o = ka.cmp(&kb);
-            if o == Ordering::Equal {
-                self.compare(a, b)
-            } else if self.sort.descending {
-                o.reverse()
-            } else {
-                o
+        }
+    }
+    /// `v` ties on everything consumed so far (`.2` is where each name's key
+    /// ended): sort by the next 8-byte key, recurse into ties; the full
+    /// comparator only where a key was cut or every name ran out.
+    fn refine_ties(&self, v: &mut [(u64, u32, u32)]) {
+        const UNCLEAN: u32 = u32::MAX;
+        if v.len() < 2 {
+            return;
+        }
+        let clean = v.iter().all(|e| e.2 != UNCLEAN);
+        let mut progress = false;
+        if clean {
+            for e in v.iter_mut() {
+                let text = self.key_text(e.1);
+                let (k, end) = prefix_from(text, e.2 as usize);
+                progress |= end != Some(e.2 as usize);
+                e.0 = k;
+                e.2 = end.map_or(UNCLEAN, |x| x as u32);
             }
+        }
+        if clean && !progress {
+            // every text ran out with equal keys all the way: naturally equal
+            v.sort_unstable_by_key(|e| e.1);
+            return;
+        }
+        if !progress {
+            v.sort_by(|a, b| self.compare(a.1, b.1));
+            return;
+        }
+        let desc = self.sort.descending;
+        v.sort_unstable_by(|a, b| {
+            let o = a.0.cmp(&b.0);
+            if desc { o.reverse() } else { o }
         });
-        for (id, (_, value)) in ids.iter_mut().zip(keys) {
-            *id = value;
+        let mut i = 0;
+        while i < v.len() {
+            let mut j = i + 1;
+            while j < v.len() && v[j].0 == v[i].0 {
+                j += 1;
+            }
+            if j - i > 1 {
+                self.refine_ties(&mut v[i..j]);
+            }
+            i = j;
+        }
+    }
+    fn sort_ids(&self, ids: &mut [u32]) {
+        let threads = if ids.len() >= PAR_SORT_MIN {
+            std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(8)
+                .min(ids.len() / (PAR_SORT_MIN / 2))
+        } else {
+            1
+        };
+        if threads <= 1 {
+            let keys = self.decorate_sorted(ids);
+            for (id, (_, value)) in ids.iter_mut().zip(keys) {
+                *id = value;
+            }
+            return;
+        }
+        // Parallel sample sort (scoped threads, no pool): splitters from a
+        // sample of keys cut the key range into one bucket per thread; equal
+        // keys always land in the same bucket, so the sorted buckets simply
+        // concatenate (no merge, no cross-bucket tie compares).
+        // Scratch: ~16 bytes per ID twice over, freed on return.
+        let chunk = ids.len().div_ceil(threads);
+        let step = (ids.len() / (threads * 64)).max(1);
+        let mut sample: Vec<u128> = ids.iter().step_by(step).map(|&id| self.rank((self.sort_key(id), id))).collect();
+        sample.sort_unstable();
+        let splitters: Vec<u128> = (1..threads).map(|b| sample[b * sample.len() / threads]).collect();
+        let bucket_of = |r: u128| splitters.partition_point(|&s| s <= r);
+        // per chunk: decorated IDs split by bucket
+        let parts: Vec<Vec<Vec<(u64, u32)>>> = std::thread::scope(|s| {
+            let hs: Vec<_> = ids
+                .chunks(chunk)
+                .map(|c| {
+                    let bucket_of = &bucket_of;
+                    s.spawn(move || {
+                        let mut out: Vec<Vec<(u64, u32)>> = (0..threads).map(|_| Vec::with_capacity(c.len() / threads + 16)).collect();
+                        for &id in c {
+                            let e = (self.sort_key(id), id);
+                            out[bucket_of(self.rank(e))].push(e);
+                        }
+                        out
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().expect("sort worker")).collect()
+        });
+        let buckets: Vec<Vec<(u64, u32)>> = std::thread::scope(|s| {
+            let parts = &parts;
+            let hs: Vec<_> = (0..threads)
+                .map(|b| {
+                    s.spawn(move || {
+                        let mut v: Vec<(u64, u32)> = Vec::with_capacity(parts.iter().map(|p| p[b].len()).sum());
+                        for p in parts {
+                            v.extend_from_slice(&p[b]);
+                        }
+                        self.sort_decorated(&mut v);
+                        v
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().expect("sort worker")).collect()
+        });
+        drop(parts);
+        let mut at = 0;
+        for b in buckets {
+            for (slot, (_, id)) in ids[at..at + b.len()].iter_mut().zip(&b) {
+                *slot = *id;
+            }
+            at += b.len();
         }
     }
     pub fn sort(&mut self, sort: Sort) {
@@ -441,6 +717,7 @@ impl EntryStore {
         let mut ids = std::mem::take(&mut self.index);
         self.sort_ids(&mut ids);
         self.index = ids;
+        self.top = self.index.len().min(STREAM_TOP);
     }
     fn matches(&self, id: u32) -> bool {
         matches_name(self.name(id).unwrap(), &self.query, self.mode)
@@ -452,49 +729,68 @@ impl EntryStore {
         self.query = next;
         self.mode = mode;
         if refine {
+            // keeps the order; while streaming, the rows kept from the sorted
+            // top are still the smallest (the tail was never below them)
+            let top = self.top.min(self.index.len());
+            let kept_top = self.index[..top].iter().filter(|&&i| self.matches(i)).count();
             let mut ids = std::mem::take(&mut self.index);
             ids.retain(|&i| self.matches(i));
             self.index = ids;
+            self.top = kept_top;
         } else {
             let mut ids = (0..self.records.len() as u32)
                 .filter(|&i| self.is_live(i) && self.matches(i))
                 .collect::<Vec<_>>();
             self.sort_ids(&mut ids);
             self.index = ids;
+            self.top = self.index.len().min(STREAM_TOP);
         }
     }
 }
 // Digit marker terminates key: numeric run length/value needs full comparator.
-fn prefix(mut name: &[u16]) -> u64 {
+fn prefix(name: &[u16]) -> u64 {
+    prefix_from(name, 0).0
+}
+/// The 8-byte natural-order key of `name[start..]`, and where it ended when
+/// it encoded every unit it consumed exactly (no cut digit run, no unit over
+/// 127): then two names with equal keys compare like their rests from there,
+/// so ties can be refined with the next 8 bytes instead of the full comparator.
+fn prefix_from(name: &[u16], start: usize) -> (u64, Option<usize>) {
     let mut bytes = [0u8; 8];
     let mut out = 0;
-    while !name.is_empty() && out < 8 {
-        let c = fold(name[0]);
+    let mut at = start.min(name.len());
+    let mut clean = true;
+    while at < name.len() && out < 8 {
+        let rest = &name[at..];
+        let c = fold(rest[0]);
         if (48..=57).contains(&c) {
-            let n = name.iter().take_while(|&&c| (48..=57).contains(&c)).count();
-            let significant = name[..n].iter().position(|&c| c != 48).unwrap_or(n);
-            let digits = &name[significant..n];
+            let n = rest.iter().take_while(|&&c| (48..=57).contains(&c)).count();
+            let significant = rest[..n].iter().position(|&c| c != 48).unwrap_or(n);
+            let digits = &rest[significant..n];
             for b in [48, (digits.len() >> 8) as u8, digits.len() as u8]
                 .into_iter()
                 .chain(digits.iter().map(|&c| c as u8))
             {
                 if out == 8 {
+                    clean = false;
                     break;
                 }
                 bytes[out] = b;
                 out += 1;
             }
-            name = &name[n..];
+            at += n;
         } else {
             bytes[out] = c.min(128) as u8;
             out += 1;
-            if c >= 128 {
+            // over 127 is a bucket, not a value; 0 looks like the padding
+            if c >= 128 || c == 0 {
+                clean = false;
                 break;
             }
-            name = &name[1..];
+            at += 1;
         }
     }
-    u64::from_be_bytes(bytes)
+    (u64::from_be_bytes(bytes), clean.then_some(at))
 }
 /// FNV-1a over case-folded units: equal for names that differ only in case.
 fn fold_hash(name: &[u16]) -> u64 {
@@ -1165,5 +1461,210 @@ mod apply_tests {
         assert_eq!(r.err(), Some(StoreError::NameTooLong));
         assert_eq!(s.len(), 1);
         assert!(s.is_live(0));
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    /// Small xorshift: deterministic random data without a dependency.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+    const PARTS: [&str; 14] = ["a", "A", "b", "Ä", "ä", "0", "00", "7", "10", "α", "猫", "😀", ".", "_"];
+    /// Random names with heavy ties (case and leading-zero variants, shared prefixes).
+    fn names(n: usize, seed: u64) -> Vec<Vec<u16>> {
+        let mut r = Rng(seed);
+        (0..n)
+            .map(|i| {
+                let mut s = String::new();
+                if r.below(3) == 0 {
+                    s.push_str("IMG_2026_");
+                }
+                for _ in 0..1 + r.below(5) {
+                    s.push_str(PARTS[r.below(PARTS.len() as u64) as usize]);
+                }
+                if r.below(4) == 0 {
+                    s.push_str(&format!("{}", i % 97));
+                }
+                s.encode_utf16().collect()
+            })
+            .collect()
+    }
+    fn inputs(names: &[Vec<u16>], seed: u64) -> Vec<EntryInput<'_>> {
+        let mut r = Rng(seed ^ 0x9e37);
+        names
+            .iter()
+            .map(|n| EntryInput {
+                name: n,
+                size: r.below(50),
+                modified: r.below(40) as i64 - 20,
+                flags: if r.below(10) == 0 { FOLDER } else { 0 },
+            })
+            .collect()
+    }
+    /// The naive reference: every live, matching ID sorted with the full comparator.
+    fn reference(s: &EntryStore) -> Vec<u32> {
+        let mut ids: Vec<u32> = (0..s.id_bound() as u32).filter(|&i| s.is_live(i) && s.matches(i)).collect();
+        ids.sort_by(|&a, &b| s.compare(a, b));
+        ids
+    }
+    fn all_sorts() -> Vec<Sort> {
+        let mut v = Vec::new();
+        for column in [Column::Name, Column::Size, Column::Modified, Column::Type] {
+            for descending in [false, true] {
+                for folders_first in [false, true] {
+                    v.push(Sort { column, descending, folders_first });
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn streaming_top_is_sorted_and_end_matches_reference() {
+        let n = names(9000, 7);
+        let b = inputs(&n, 7);
+        for sort in all_sorts() {
+            let mut s = EntryStore::new();
+            s.sort(sort);
+            s.begin_stream();
+            let mut r = Rng(11);
+            let mut at = 0;
+            while at < b.len() {
+                let k = (1 + r.below(700) as usize).min(b.len() - at);
+                s.push_batch(0, &b[at..at + k]).unwrap();
+                at += k;
+                // invariant: the view's first rows are the final first rows so far
+                let want = reference(&s);
+                let top = s.view().len().min(STREAM_TOP);
+                assert_eq!(&s.view()[..top], &want[..top], "{sort:?} after {at}");
+                assert_eq!(s.view().len(), want.len());
+            }
+            assert!(s.is_streaming());
+            s.end_stream();
+            assert!(!s.is_streaming());
+            assert_eq!(s.view(), reference(&s), "{sort:?}");
+            // after the stream, ordinary pushes merge again
+            let more = names(50, 99);
+            s.push_batch(0, &inputs(&more, 3)).unwrap();
+            assert_eq!(s.view(), reference(&s), "{sort:?} after end");
+        }
+    }
+
+    #[test]
+    fn parallel_sort_matches_naive_and_is_stable() {
+        let n = names(60_000, 3);
+        let b = inputs(&n, 3);
+        let mut s = EntryStore::new();
+        s.push_batch(0, &b).unwrap();
+        for sort in all_sorts() {
+            s.sort(sort);
+            let want = reference(&s);
+            assert_eq!(s.view(), want, "{sort:?}");
+            // ties keep insertion (ID) order: equal neighbours ascend by ID
+            for w in s.view().windows(2) {
+                let (x, y) = (w[0], w[1]);
+                let eq = {
+                    let ra = s.record(x).unwrap();
+                    let rb = s.record(y).unwrap();
+                    let same_folder = !sort.folders_first || (ra.flags & FOLDER) == (rb.flags & FOLDER);
+                    same_folder
+                        && match sort.column {
+                            Column::Name => natural(s.name(x).unwrap(), s.name(y).unwrap()) == Ordering::Equal,
+                            Column::Size => ra.size == rb.size,
+                            Column::Modified => ra.modified == rb.modified,
+                            Column::Type => natural(extension(s.name(x).unwrap()), extension(s.name(y).unwrap())) == Ordering::Equal,
+                        }
+                };
+                if eq {
+                    assert!(x < y, "{sort:?}: tie {x} before {y} breaks stability");
+                }
+            }
+        }
+        // filters rebuild through the same sort
+        s.sort(Sort::default());
+        s.filter("a", FilterMode::Substring);
+        assert_eq!(s.view(), reference(&s));
+        s.filter("a*0", FilterMode::Glob);
+        assert_eq!(s.view(), reference(&s));
+    }
+
+    #[test]
+    fn filter_and_sort_while_streaming() {
+        let n = names(6000, 5);
+        let b = inputs(&n, 5);
+        let mut s = EntryStore::new();
+        s.begin_stream();
+        s.push_batch(0, &b[..2500]).unwrap();
+        // refine keeps the kept top valid; a re-sort sorts what is there
+        s.filter("a", FilterMode::Substring);
+        s.push_batch(0, &b[2500..4000]).unwrap();
+        let want = reference(&s);
+        let top = s.view().len().min(STREAM_TOP);
+        assert_eq!(s.view().len(), want.len());
+        // the kept top is a sorted prefix of the reference (it may be shorter)
+        let kept = s.top.min(top);
+        assert_eq!(&s.view()[..kept], &want[..kept]);
+        s.filter("aa", FilterMode::Substring);
+        s.sort(Sort { column: Column::Size, descending: true, folders_first: true });
+        s.push_batch(0, &b[4000..]).unwrap();
+        let want = reference(&s);
+        let top = s.view().len().min(STREAM_TOP);
+        assert_eq!(&s.view()[..top], &want[..top]);
+        s.end_stream();
+        assert_eq!(s.view(), reference(&s));
+        // apply needs a sorted view: it ends a running stream first
+        let mut s2 = EntryStore::new();
+        s2.begin_stream();
+        s2.push_batch(0, &b).unwrap();
+        let x = w_("zz");
+        s2.apply(&[0, 1], &[Upsert { id: None, input: EntryInput { name: &x, size: 1, modified: 0, flags: 0 } }]).unwrap();
+        assert!(!s2.is_streaming());
+        assert_eq!(s2.view(), reference(&s2));
+        // clear resets the stream
+        s2.begin_stream();
+        s2.clear();
+        assert!(!s2.is_streaming());
+    }
+    #[test]
+    fn tie_refinement_across_key_boundaries() {
+        // long shared prefixes, digit runs that straddle the 8-byte keys,
+        // leading-zero and case variants, NUL, non-ASCII after a long prefix
+        let base = [
+            "IMG_2026_0001.jpg", "IMG_2026_1.jpg", "img_2026_01.JPG", "IMG_2026_10.jpg", "IMG_2026_9.jpg",
+            "IMG_2026_0001.jpeg", "IMG_2026_0001", "IMG_2026_", "IMG_2026", "Report final v2.docx",
+            "Report final v10.docx", "Report final V2.docx", "Report finalé.docx", "Report finale.docx",
+            "abcdefgh", "abcdefgh1", "abcdefgh01", "abcdefghA", "abcdefgh ", "abcdefgh", "a", "a ",
+            "x12345678901234567890", "x12345678901234567891", "x012345678901234567890", "файл 10", "файл 9",
+        ];
+        let mut text: Vec<String> = Vec::new();
+        for round in 0..700 {
+            for b in base {
+                text.push(if round % 3 == 0 { b.to_string() } else { format!("{b}{}", round % 11) });
+            }
+        }
+        let names: Vec<Vec<u16>> = text.iter().map(|t| t.encode_utf16().collect()).collect();
+        let b = inputs(&names, 1);
+        for take in [base.len(), 600, names.len()] {
+            let mut s = EntryStore::new();
+            s.push_batch(0, &b[..take]).unwrap();
+            for sort in all_sorts() {
+                s.sort(sort);
+                assert_eq!(s.view(), reference(&s), "{sort:?} n={take}");
+            }
+        }
+    }
+    fn w_(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
     }
 }
