@@ -29,6 +29,20 @@ pub fn rgba(c: u32, a: f32) -> D2D1_COLOR_F {
     }
 }
 
+/// Device-side image cache cap. Every device copy is also what the GPU (or
+/// WARP) holds in memory, so this is a share of the process budget. Thumbnails
+/// live only here once drawn (the app drops its CPU pixels after the upload),
+/// so keep it above the app's thumbnail cap (12 MB) plus the icons in use.
+/// See docs/icons-thumbnails.md.
+pub const BITMAP_CAP_BYTES: usize = 16 << 20;
+
+struct CachedBitmap {
+    bmp: ID2D1Bitmap,
+    bytes: usize,
+    /// `Gfx::frame` it was last drawn in
+    used: u32,
+}
+
 pub struct Gfx {
     factory: ID2D1Factory,
     dw: IDWriteFactory,
@@ -45,8 +59,10 @@ pub struct Gfx {
     layouts: HashMap<u64, Layout>,
     /// frame counter for `layouts` eviction
     frame: u32,
-    /// images (process icons) by cache key; tied to the render target
-    bitmaps: HashMap<Arc<str>, ID2D1Bitmap>,
+    /// images (icons, thumbnails) by cache key; tied to the render target.
+    /// Bounded in bytes (`BITMAP_CAP_BYTES`), least recently drawn go first.
+    bitmaps: HashMap<Arc<str>, CachedBitmap>,
+    bitmap_bytes: usize,
     hwnd: HWND,
     pub dpi: f32,
     /// last frame's EndDraw (rasterise + present) and render-target creation
@@ -270,6 +286,7 @@ impl Gfx {
                 layouts: HashMap::new(),
                 frame: 0,
                 bitmaps: HashMap::new(),
+                bitmap_bytes: 0,
                 hwnd,
                 dpi: 96.0,
                 end_ms: 0.0,
@@ -284,6 +301,33 @@ impl Gfx {
     /// Cache sizes for reports: (text layouts, text formats, bitmaps).
     pub fn cache_counts(&self) -> (usize, usize, usize) {
         (self.layouts.len(), self.formats.len(), self.bitmaps.len())
+    }
+
+    /// Bytes the device-side image cache holds (BGRA, 4 per pixel).
+    pub fn bitmap_bytes(&self) -> usize {
+        self.bitmap_bytes
+    }
+
+    /// Makes room for `need` more bytes: drops the least recently drawn
+    /// images down to 90% of the cap (so this runs once per several uploads,
+    /// not once per upload).
+    fn evict_bitmaps(&mut self, need: usize) {
+        if self.bitmap_bytes + need <= BITMAP_CAP_BYTES {
+            return;
+        }
+        let target = (BITMAP_CAP_BYTES / 10 * 9).saturating_sub(need);
+        let now = self.frame;
+        let mut order: Vec<(u32, Arc<str>)> = self.bitmaps.iter().map(|(k, v)| (now.wrapping_sub(v.used), k.clone())).collect();
+        // oldest (largest age) first
+        order.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+        for (_, k) in order {
+            if self.bitmap_bytes <= target {
+                break;
+            }
+            if let Some(v) = self.bitmaps.remove(&k) {
+                self.bitmap_bytes -= v.bytes;
+            }
+        }
     }
 
     /// Which render path the current target uses, for log lines.
@@ -492,6 +536,7 @@ impl Gfx {
 
     fn drop_target(&mut self) {
         self.bitmaps.clear();
+        self.bitmap_bytes = 0;
         self.brush = None;
         self.rt = None;
         self.hwnd_rt = None;
@@ -748,6 +793,38 @@ impl Canvas for Gfx {
         }
     }
 
+    /// First line of `s` wrapped to `w`, from the shaper's own line breaking.
+    fn first_line_len(&mut self, s: &str, font: Font, w: f32) -> usize {
+        if s.is_empty() || w <= 1.0 {
+            return s.len();
+        }
+        let fmt = self.format(font.left());
+        let wide: Vec<u16> = s.encode_utf16().collect();
+        unsafe {
+            let Ok(l) = self.dw.CreateTextLayout(&wide, &fmt, w, 1000.0) else { return s.len() };
+            let _ = l.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            // the first call only counts the lines (it reports "buffer too small")
+            let mut n = 0u32;
+            let _ = l.GetLineMetrics(None, &mut n);
+            if n < 2 {
+                return s.len();
+            }
+            let mut lines = vec![DWRITE_LINE_METRICS::default(); n as usize];
+            if l.GetLineMetrics(Some(&mut lines), &mut n).is_err() {
+                return s.len();
+            }
+            // UTF-16 units of line 1 -> bytes
+            let mut u = 0u32;
+            for (i, ch) in s.char_indices() {
+                if u >= lines[0].length {
+                    return i;
+                }
+                u += ch.len_utf16() as u32;
+            }
+            s.len()
+        }
+    }
+
     /// Caret position from the shaped run (kerning and ligatures included).
     fn caret_x(&mut self, s: &str, font: Font, idx: usize) -> f32 {
         let idx = tsubame_ui::canvas::floor_char(s, idx);
@@ -793,21 +870,36 @@ impl Canvas for Gfx {
     /// Draws premultiplied BGRA pixels scaled into `r`. The D2D bitmap is
     /// made once per `key` and kept until the render target goes.
     fn image(&mut self, key: &str, w: u32, h: u32, px: &[u32], r: Rect) {
+        self.image_a(key, w, h, px, r, 1.0)
+    }
+
+    fn image_a(&mut self, key: &str, w: u32, h: u32, px: &[u32], r: Rect, a: f32) {
         if !self.bitmaps.contains_key(key) {
-            if self.bitmaps.len() >= 320 {
-                self.bitmaps.clear();
+            if w == 0 || h == 0 || px.len() < (w as usize) * (h as usize) {
+                return;
             }
+            let bytes = w as usize * h as usize * 4;
+            self.evict_bitmaps(bytes);
             let props = D2D1_BITMAP_PROPERTIES {
                 pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
                 dpiX: 96.0,
                 dpiY: 96.0,
             };
-            let Ok(b) = (unsafe { self.rt().CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(px.as_ptr() as *const _), w * 4, &props) }) else { return };
-            self.bitmaps.insert(Arc::from(key), b);
+            let Ok(bmp) = (unsafe { self.rt().CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(px.as_ptr() as *const _), w * 4, &props) }) else { return };
+            self.bitmap_bytes += bytes;
+            self.bitmaps.insert(Arc::from(key), CachedBitmap { bmp, bytes, used: self.frame });
+        }
+        let frame = self.frame;
+        if let Some(b) = self.bitmaps.get_mut(key) {
+            b.used = frame;
         }
         if let Some(b) = self.bitmaps.get(key) {
-            unsafe { self.rt().DrawBitmap(b, Some(&d2(r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+            unsafe { self.rt().DrawBitmap(&b.bmp, Some(&d2(r)), a.clamp(0.0, 1.0), D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
         }
+    }
+
+    fn has_image(&self, key: &str) -> bool {
+        self.bitmaps.contains_key(key)
     }
 
     fn clip(&mut self, r: Rect) {

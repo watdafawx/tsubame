@@ -68,7 +68,7 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
 
 /// What the app saves on exit.
 pub fn capture(view: &View, window: tsubame_config::WindowState) -> Session {
-    let tabs = view.tabs.items.iter().map(|t| tab_state(t, view.view_mode)).collect();
+    let tabs = view.tabs.items.iter().map(|t| tab_state(t, view.mode.to_config())).collect();
     let pane = SessionPane { active_tab: view.tabs.active, tabs };
     Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: 0, window, panes: vec![pane] }
 }
@@ -120,7 +120,7 @@ pub fn sync_config(view: &View, cfg: &mut tsubame_config::Config) {
     cfg.appearance.theme = if view.dark { tsubame_config::DEFAULT_THEME.to_string() } else { "tsubame-light".to_string() };
     cfg.appearance.density = config_density(view.density);
     cfg.appearance.zebra = view.zebra;
-    cfg.appearance.view_mode = view.view_mode;
+    cfg.appearance.view_mode = view.mode.to_config();
     cfg.panes.sidebar_width = view.sidebar_width;
     cfg.panes.sidebar_collapsed = view.side.collapsed.iter().all(|c| *c);
 }

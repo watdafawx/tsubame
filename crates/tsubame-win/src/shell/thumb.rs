@@ -31,7 +31,9 @@ pub fn get(path: &str, size: u32, cache_only: bool) -> Payload {
         };
         match hbm {
             Ok(h) => {
-                let bmp = bitmap::from_shell_hbitmap(h);
+                // BIGGERSIZEOK can return the cached 256 / 1024 px bitmap: cut it
+                // to the size asked so the UI cache holds what the cell draws
+                let bmp = bitmap::from_shell_hbitmap(h).map(|b| b.fit_within(size));
                 let _ = DeleteObject(h.into());
                 Payload::Thumb { bmp, from_cache, probe_us, error: None }
             }

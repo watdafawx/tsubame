@@ -15,6 +15,8 @@ pub enum Op {
     Circle(f32, f32, f32, Color),
     Text(String, Rect, Font, Color),
     Image(String, Rect),
+    /// `image_a` (opacity below the full 1.0 is what tests look for)
+    ImageA(String, Rect, f32),
     Clip(Rect),
     Unclip,
 }
@@ -26,12 +28,26 @@ pub struct TestCanvas {
     /// `false`: record nothing (counts only)
     pub record: bool,
     pub measures: usize,
+    /// `Some`: the images this canvas "holds on the device"; `has_image`
+    /// answers from it and every drawn image joins it (an upload). `None`
+    /// (default): every image counts as held.
+    pub device: Option<std::collections::HashSet<String>>,
     clip_depth: i32,
 }
 
 impl TestCanvas {
     pub fn new(w: f32, h: f32) -> TestCanvas {
-        TestCanvas { w, h, ops: Vec::new(), record: true, measures: 0, clip_depth: 0 }
+        TestCanvas { w, h, ops: Vec::new(), record: true, measures: 0, device: None, clip_depth: 0 }
+    }
+    /// Every image drawn (plain or with opacity), in order.
+    pub fn images(&self) -> Vec<&str> {
+        self.ops
+            .iter()
+            .filter_map(|o| match o {
+                Op::Image(k, _) | Op::ImageA(k, ..) => Some(k.as_str()),
+                _ => None,
+            })
+            .collect()
     }
     /// Width the test canvas gives `s`.
     pub fn width_of(s: &str, font: Font) -> f32 {
@@ -93,7 +109,19 @@ impl Canvas for TestCanvas {
         Self::width_of(s, font)
     }
     fn image(&mut self, key: &str, _w: u32, _h: u32, _px: &[u32], r: Rect) {
+        if let Some(d) = &mut self.device {
+            d.insert(key.to_string());
+        }
         self.push(Op::Image(key.to_string(), r));
+    }
+    fn image_a(&mut self, key: &str, _w: u32, _h: u32, _px: &[u32], r: Rect, a: f32) {
+        if let Some(d) = &mut self.device {
+            d.insert(key.to_string());
+        }
+        self.push(Op::ImageA(key.to_string(), r, a));
+    }
+    fn has_image(&self, key: &str) -> bool {
+        self.device.as_ref().is_none_or(|d| d.contains(key))
     }
     fn clip(&mut self, r: Rect) {
         self.clip_depth += 1;

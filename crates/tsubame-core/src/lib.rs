@@ -713,6 +713,23 @@ impl Selection {
         self.anchor = Some(if start == pos { id } else { anchor });
         self.focus = Some(id);
     }
+    /// Replaces the selection with exactly `ids` (dead or duplicate ids are
+    /// skipped). Anchor and focus are left alone: the caller sets them. Used
+    /// by rubber-band selection, which recomputes the set every frame.
+    pub fn replace_with(&mut self, s: &EntryStore, ids: impl IntoIterator<Item = EntryId>) {
+        self.bind(s);
+        self.epoch = self
+            .epoch
+            .checked_add(1)
+            .expect("selection epoch exhausted");
+        self.count = 0;
+        self.total = 0;
+        for id in ids {
+            if s.is_live(id) {
+                self.set(s, id, true);
+            }
+        }
+    }
     pub fn select_all(&mut self, s: &EntryStore) {
         self.bind(s);
         for &id in s.view() {
@@ -828,6 +845,20 @@ mod tests {
         assert_eq!(x.count(), 3);
         s.clear();
         x.select_all(&s);
+        assert_eq!(x.count(), 0);
+    }
+    #[test]
+    fn replace_with_sets_exactly() {
+        let s = store(&["a", "b", "c", "d"]);
+        let mut x = Selection::new();
+        x.single(&s, 0);
+        let (anchor, focus) = (x.anchor, x.focus);
+        x.replace_with(&s, [1, 2, 2, 99]);
+        assert!(!x.contains(0) && x.contains(1) && x.contains(2) && !x.contains(3));
+        assert_eq!(x.count(), 2, "duplicates and dead ids ignored");
+        assert_eq!(x.total_size(), 1 + 2);
+        assert_eq!((x.anchor, x.focus), (anchor, focus), "anchor/focus untouched");
+        x.replace_with(&s, []);
         assert_eq!(x.count(), 0);
     }
     #[test]
