@@ -17,8 +17,9 @@
 //! frame (cold start); it is labelled `startup`.
 //!
 //! A `<purge>` entry in `--timing-dirs` is no folder: it runs
-//! `tsubame-bench.exe purge --mode working` (next to the exe; the app must
-//! run elevated) before the next navigation, so `tiny;<purge>;tiny;big`
+//! `tsubame-bench.exe purge --mode standby` (next to the exe; the app must
+//! run elevated; `TSUBAME_TIMING_PURGE=working` for the stronger mode)
+//! before the next navigation, so `tiny;<purge>;tiny;big`
 //! measures a cold folder in a warm app: the second `tiny` re-faults the
 //! app's own pages (paint path, enumerator, store) that the purge dropped,
 //! and `big` is then the only cold thing. Its result is printed as `purge:`.
@@ -37,8 +38,16 @@ use std::time::{Duration, Instant};
 
 /// `--timing-dirs` entry that purges the system caches instead of navigating.
 const PURGE: &str = "<purge>";
-/// Wait after a purge (matches `tools/open-probe.ps1`'s disk settle).
-const PURGE_SETTLE: Duration = Duration::from_secs(15);
+/// Purge mode: `TSUBAME_TIMING_PURGE` (`standby` by default: drops the
+/// cached metadata but no process's pages; `working` also empties every
+/// working set and starts a paging storm on the whole box).
+fn purge_mode() -> String {
+    std::env::var("TSUBAME_TIMING_PURGE").unwrap_or_else(|_| "standby".into())
+}
+/// Wait after a purge: a working-set purge needs its paging storm to pass.
+fn purge_settle(mode: &str) -> Duration {
+    Duration::from_secs(if mode == "working" { 15 } else { 2 })
+}
 /// `--timing-dirs` entry that times sort switches and filter keystrokes.
 const OPS: &str = "<ops>";
 
@@ -49,7 +58,7 @@ fn purge() -> String {
         return "failed: no exe dir".into();
     };
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    match std::process::Command::new(dir.join("tsubame-bench.exe")).args(["purge", "--mode", "working"]).creation_flags(CREATE_NO_WINDOW).output() {
+    match std::process::Command::new(dir.join("tsubame-bench.exe")).args(["purge", "--mode", &purge_mode()]).creation_flags(CREATE_NO_WINDOW).output() {
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stdout);
             let first = text.lines().next().unwrap_or("").trim().to_string();
@@ -156,9 +165,7 @@ impl Run {
                 }
             } else {
                 let note = purge();
-                // the purge makes every process re-fault its pages (a paging storm
-                // for seconds): wait it out so the next runs measure the folder
-                std::thread::sleep(PURGE_SETTLE);
+                std::thread::sleep(purge_settle(&purge_mode()));
                 let _ = writeln!(self.out, "purge: {note}");
             }
             self.n += self.reps;
