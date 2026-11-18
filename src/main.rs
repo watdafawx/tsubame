@@ -52,6 +52,8 @@ mod commands;
 mod data;
 mod dnd;
 mod editing;
+mod fuzzy;
+mod keymap;
 mod leak;
 mod lru;
 mod memdiag;
@@ -1056,6 +1058,8 @@ fn map_key(vk: u16) -> Key {
         v if (VK_F1.0..=VK_F24.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
         v if (0x30..=0x39).contains(&v.0) || (0x41..=0x5a).contains(&v.0) => Key::Char(v.0 as u8 as char),
         v if v.0 == 0xDC => Key::Char('\\'), // VK_OEM_5: the backslash key (Ctrl+\ splits the window)
+        // the other punctuation keys, so they can be bound (Ctrl+, opens Settings)
+        v if crate::keymap::oem_char(v.0).is_some() => Key::Char(crate::keymap::oem_char(v.0).unwrap_or(' ')),
         v => Key::Other(v.0 as u32),
     }
 }
