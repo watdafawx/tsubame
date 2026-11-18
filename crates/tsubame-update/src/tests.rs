@@ -395,3 +395,37 @@ fn production_config_is_https_github_only() {
     assert!(c.download_base.starts_with("https://github.com"));
     assert!(Config::production("not a version", Layout::new("a", "b")).is_err());
 }
+
+#[test]
+fn the_folder_handler_shim_is_swapped_with_the_app_and_rolled_back_with_it() {
+    // docs/default-file-manager.md: the shim sits next to tsubame.exe and must never be older
+    // or newer than it, so it is an updatable file and goes through the same swap/rollback.
+    assert!(manifest::UPDATABLE_FILES.contains(&"tsubame-handler.exe"));
+    let fx = Fx::new();
+    std::fs::write(fx.app.join("tsubame-handler.exe"), b"OLD-SHIM").unwrap();
+    let exe = b"NEW-EXE".as_slice();
+    let shim = b"NEW-SHIM".as_slice();
+    let zip = zip::build_zip(&[("tsubame.exe", exe), ("tsubame-handler.exe", shim)], true);
+    std::fs::write(fx.rel.join("tsubame-0.2.0-win-x64.zip"), &zip).unwrap();
+    let mut m = sample("0.2.0");
+    m.assets[0].size = zip.len() as u64;
+    m.assets[0].sha256 = hash::sha256_hex(&zip).unwrap();
+    m.assets[0].contents = vec![
+        manifest::Content { name: "tsubame.exe".into(), size: exe.len() as u64, sha256: hash::sha256_hex(exe).unwrap() },
+        manifest::Content { name: "tsubame-handler.exe".into(), size: shim.len() as u64, sha256: hash::sha256_hex(shim).unwrap() },
+    ];
+    let bytes = serde_json::to_vec_pretty(&m).unwrap();
+    std::fs::write(fx.rel.join(manifest::MANIFEST_FILE), &bytes).unwrap();
+    std::fs::write(fx.rel.join(manifest::SIGNATURE_FILE), hash::to_hex(dev_keypair().sk.sign(keys::signed_message(&bytes), None).as_ref())).unwrap();
+
+    let up = fx.updater("0.1.0");
+    let rel = up.check(false).unwrap().unwrap();
+    let staged = up.download(&rel, &mut no_progress).unwrap();
+    let applied = up.apply(&staged).unwrap();
+    assert!(applied.replaced.contains(&"tsubame-handler.exe".to_string()), "{:?}", applied.replaced);
+    assert_eq!(std::fs::read(fx.app.join("tsubame-handler.exe")).unwrap(), b"NEW-SHIM");
+    assert_eq!(std::fs::read(fx.app.join("tsubame-handler.exe.old")).unwrap(), b"OLD-SHIM");
+    fx.updater("0.2.0").rollback().unwrap();
+    assert_eq!(std::fs::read(fx.app.join("tsubame-handler.exe")).unwrap(), b"OLD-SHIM");
+    assert_eq!(fx.exe(), b"OLD-EXE");
+}

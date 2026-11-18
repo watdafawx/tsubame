@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Output folder (default dist\<version>\), the files a GitHub Release carries:
-    tsubame-<ver>-win-x64.zip      portable build (tsubame.exe, [tsubame-plughost.exe], portable.txt, LICENSE, README.txt)
+    tsubame-<ver>-win-x64.zip      portable build (tsubame.exe, tsubame-handler.exe, [tsubame-plughost.exe], portable.txt, LICENSE, README.txt)
     tsubame-<ver>-x64-setup.exe    Inno Setup installer (only when iscc.exe is found)
     tsubame-update.json            update manifest (version, assets, sizes, sha256, notes URL, min_supported_version)
     tsubame-update.json.sig        ed25519 signature of the manifest
@@ -17,7 +17,8 @@
   The private key is passed to tsubame-release by file path / variable NAME. This script never
   reads it into a PowerShell variable, never prints it, never writes it anywhere.
 
-  Optional Authenticode (once a certificate exists), applied to the exes and the installer:
+  Optional Authenticode (once a certificate exists), applied to every exe in the package
+  (tsubame.exe, tsubame-handler.exe, tsubame-plughost.exe) and to the installer and its uninstaller:
     -SignThumbprint <sha1>  (or env SIGN_CERT_THUMBPRINT)            certificate in the user/machine store
     env ARTIFACT_SIGNING_DLIB + ARTIFACT_SIGNING_METADATA            Azure Artifact Signing (signtool /dlib)
   Needs signtool.exe from the Windows SDK. Not exercised in the repo yet (no certificate exists).
@@ -46,7 +47,7 @@ param(
     # Sign even if the key's public half is not pinned in keys.rs (the app would reject such a release).
     [switch]$AllowUnpinned,
     [switch]$SkipBuild,
-    # Folder with ready-made tsubame.exe [+ tsubame-plughost.exe] (implies -SkipBuild).
+    # Folder with ready-made tsubame.exe, tsubame-handler.exe [+ tsubame-plughost.exe] (implies -SkipBuild).
     [string]$ExeDir,
     [switch]$WithPlughost,
     [string]$MinSupported = '0.0.1',
@@ -101,7 +102,7 @@ Write-Host "release $Version -> $OutDir"
 $targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
 if ($ExeDir) { $SkipBuild = $true; $exeSrc = (Resolve-Path $ExeDir).Path } else { $exeSrc = Join-Path $targetRoot 'release' }
 if (-not $SkipBuild) {
-    $pk = @('-p', 'tsubame'); if ($WithPlughost) { $pk += @('-p', 'tsubame-plughost') }
+    $pk = @('-p', 'tsubame', '-p', 'tsubame-handler'); if ($WithPlughost) { $pk += @('-p', 'tsubame-plughost') }
     Invoke-Cargo (@('build', '--release') + $pk)
 }
 # the signing tool (maintainer tool, never shipped)
@@ -110,6 +111,11 @@ $tool = Join-Path $targetRoot 'release\tsubame-release.exe'
 if (-not (Test-Path $tool)) { throw "signing tool not found at $tool" }
 
 $exes = @('tsubame.exe'); if ($WithPlughost -or (Test-Path (Join-Path $exeSrc 'tsubame-plughost.exe'))) { $exes += 'tsubame-plughost.exe' }
+# The fail-safe folder-handler shim (docs\default-file-manager.md) ships next to tsubame.exe: it is
+# signed, hashed in the manifest and swapped by the updater together with the app. A rehearsal
+# (-DevKey) may leave it out; a real release may not, or the Settings button stays disabled.
+if (Test-Path (Join-Path $exeSrc 'tsubame-handler.exe')) { $exes += 'tsubame-handler.exe' }
+elseif (-not $DevKey) { throw "missing tsubame-handler.exe in $exeSrc (a real release must ship the fail-safe shim; -DevKey rehearsals may skip it)" }
 foreach ($e in $exes) { if (-not (Test-Path (Join-Path $exeSrc $e))) { throw "missing $e in $exeSrc" } }
 
 # ---- staging area ----------------------------------------------------------------

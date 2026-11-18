@@ -10,11 +10,21 @@ Files attached to the GitHub Release `vX.Y.Z`:
 
 | File | What | Used by |
 |---|---|---|
-| `tsubame-X.Y.Z-win-x64.zip` | portable build: `tsubame.exe`, optional `tsubame-plughost.exe`, `portable.txt`, `LICENSE`, `README.txt` | people, and the in-app updater |
-| `tsubame-X.Y.Z-x64-setup.exe` | Inno Setup installer (per-user, optional all-users) | people |
-| `tsubame-update.json` | manifest: version, assets, sizes, SHA-256, per-exe SHA-256, notes URL, `min_supported_version` | updater |
+| `tsubame-X.Y.Z-win-x64.zip` | portable build: `tsubame.exe`, `tsubame-handler.exe` (the fail-safe folder shim), optional `tsubame-plughost.exe`, `portable.txt`, `LICENSE`, `README.txt` | people, and the in-app updater |
+| `tsubame-X.Y.Z-x64-setup.exe` | Inno Setup installer (per-user, optional all-users); installs the shim, runs `tsubame-handler.exe --remove` on uninstall | people |
+| `tsubame-update.json` | manifest: version, assets, sizes, SHA-256, per-exe SHA-256 (each exe in the zip, shim included), notes URL, `min_supported_version` | updater |
 | `tsubame-update.json.sig` | ed25519 signature of the manifest | updater |
 | `SHA256SUMS` | SHA-256 of all of the above (for humans, `winget`, `scoop`) | people |
+
+### The folder shim (`tsubame-handler.exe`)
+
+`release.ps1` builds it with the app (`cargo build --release -p tsubame -p tsubame-handler`, about 183 KB,
+budget 300 KB) and treats it like any other exe: it goes into the zip, into the installer, through the
+Authenticode signing loop (every exe in the package list is signed, so sign the shim or sign nothing) and
+into the manifest's per-exe SHA-256 list. A real release **fails** when the shim is missing; `-DevKey`
+rehearsals only warn. The updater swaps it together with `tsubame.exe` (`UPDATABLE_FILES`). It is
+documented in `docs\default-file-manager.md`. Defender note: submit the shim together with the other exes to
+the Microsoft file-submission portal (checklist item 18 in that doc).
 
 ## One-time setup (you, manually)
 

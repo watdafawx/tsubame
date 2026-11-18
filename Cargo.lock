@@ -1008,6 +1008,14 @@ name = "tsubame-ext-api"
 version = "0.0.1"
 
 [[package]]
+name = "tsubame-handler"
+version = "0.0.1"
+dependencies = [
+ "embed-resource",
+ "windows",
+]
+
+[[package]]
 name = "tsubame-plughost"
 version = "0.0.1"
 dependencies = [
@@ -1034,6 +1042,7 @@ name = "tsubame-win"
 version = "0.0.1"
 dependencies = [
  "tsubame-core",
+ "tsubame-handler",
  "windows",
  "windows-core",
 ]

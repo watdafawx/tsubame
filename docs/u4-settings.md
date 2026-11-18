@@ -15,7 +15,7 @@ Implementation shots (rig, 4K at 200%, scaled): `docs/shots/u4-impl-*.png`.
 | View glue | `src/view_u4.rs` | opens/closes both, applies `C_*` change bits live, themed() |
 | Custom menu entries | `src/custom_cmd.rs`, `src/shellops.rs` | argv builder, spawn thread, extras appended to the W1 native menu |
 | Updater wiring | `src/updates.rs` | `tsubame-update` behind a small state machine, see `docs/updater.md` |
-| Default file manager | `crates/tsubame-win/src/defaultfm.rs` | registry trait + fake + real HKCU writer |
+| Default file manager | `crates/tsubame-win/src/defaultfm.rs`, `crates/tsubame-handler` | re-exports the shared registry logic (trait + fake) from the handler crate, real HKCU writer; the shim itself |
 | Config schema | `crates/tsubame-config` | `[general] [appearance] [updates] [keys] [context_menu] [advanced]`, `nss.rs`, `menu.rs` |
 
 Lifetime: the palette is a `Box<Palette>` created when it opens and dropped when it closes. The
@@ -88,7 +88,7 @@ config writer. A "Find a setting" box in the nav filters the page list by title 
 | Context menu | list of entries with visibility toggles, drag to reorder, add custom entry (name, command line, optional extension filter), Nilesoft import, reset |
 | Keys | see above |
 | Updates | version, channel, last checked, state line (see below), Check now, Download and restart, Roll back, "Check automatically" and "Install updates automatically" (off) |
-| Default file manager | opt-in R1 state + buttons (see below) |
+| Default file manager | opt-in state, switch, Repair, Remove (see below, `docs/default-file-manager.md`) |
 | Advanced | open config folder, reset all settings (asks first; the old file is kept as `config.toml.bak`), diagnostics toggle, memory readout, portable indicator |
 
 Density naming: config `compact/normal/comfortable` = kit `Compact/Comfortable/Spacious` = 22/26/30 px.
@@ -156,12 +156,16 @@ Skipped, each listed with its line and reason in the import report: `admin` item
 
 ### Default file manager (opt-in, R1 Tier 1)
 
-Only the design in `docs/research-default-explorer-defender.md`: a HKCU
-`Software\Classes\Directory\shell\...` verb that starts the fail-safe shim, plus a Remove button and the
-current state. No shell-hijack keys, no HKLM. The registry code is behind a trait (`Registry`): the fake
-is used by tests, and the real `WinRegistry` refuses to write under `cfg(test)` or with
-`TSUBAME_NO_REGISTRY_WRITE=1`. **The shim (`tsubame-handler.exe`) does not exist yet**, so the button is
-disabled with the tooltip "shim not built yet".
+Built (R2); full description, exact registry contents and failure modes in `docs/default-file-manager.md`.
+A HKCU `Software\Classes\Directory\shell\Tsubame` verb starts the fail-safe shim `tsubame-handler.exe`
+(`crates/tsubame-handler`); the page shows the real state (Not set / Active / Needs repair / Not set
+(another app)), a switch, a Repair button (only when the helper moved or is gone) and a Remove button.
+No shell-hijack keys, no HKLM, no `Folder\shell`, no Win+E takeover. The registry code lives in
+`tsubame-handler::registry` behind a trait (`Registry`) and is shared by the page and the shim; the fake is
+used by tests, and the real writer refuses to write under `cfg(test)` or with
+`TSUBAME_NO_REGISTRY_WRITE=1`. The registry is read when the page opens and on Refresh, written only by
+the buttons, never re-applied by the app. With no `tsubame-handler.exe` next to `tsubame.exe` the switch is
+disabled with the tooltip "tsubame-handler.exe was not found next to tsubame.exe".
 
 ## Budgets
 
