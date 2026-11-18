@@ -1,0 +1,809 @@
+//! The own-drawn context menu's data model (CM1). Pure data and rules, no
+//! Win32: everything here is unit tested with fake menus.
+//!
+//! Flow (see `docs/ctxmenu-spike.md`):
+//! 1. The UI makes a [`MenuModel`] with its own items at t = 0
+//!    ([`MenuModel::new`]) and paints them at once.
+//! 2. A shell worker builds the shell's HMENU, walks it into [`RawItem`]s and
+//!    turns them into [`MenuItem`]s ([`build_native`]). They come back as
+//!    [`MenuBatch`]es carrying the request's generation; batches of another
+//!    generation are dropped ([`MenuModel::apply`]).
+//! 3. [`compose`] merges Tsubame, user and native items and applies the
+//!    user's edits from the Settings > Context menu list
+//!    ([`tsubame_config::MenuEntry`], the same list the U4 editor writes).
+//! 4. A pick goes back to the worker that owns the menu by command id
+//!    (`Route::Shell`), or is run by the app (`Route::App`).
+
+use crate::bitmap::Bitmap;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use tsubame_config::menu::{EntryKind, MenuEntry, Source};
+
+/// Item state bits (`MenuItem::flags`).
+pub mod flag {
+    pub const DISABLED: u16 = 1;
+    pub const CHECKED: u16 = 2;
+    pub const DEFAULT: u16 = 4;
+    /// check mark is a radio dot (`MFT_RADIOCHECK`)
+    pub const RADIO: u16 = 8;
+    /// the handler draws it (`MFT_OWNERDRAW`): no reliable text
+    pub const OWNERDRAW: u16 = 16;
+    /// the bitmap is `HBMMENU_CALLBACK`: the handler draws the icon
+    pub const ICON_CALLBACK: u16 = 32;
+    /// a submenu whose children are not known yet (empty when walked)
+    pub const LAZY: u16 = 64;
+    /// starts a new column (`MFT_MENUBREAK`/`MFT_MENUBARBREAK`); ignored when drawn
+    pub const BREAK: u16 = 128;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemSource {
+    /// from the shell's HMENU (Windows and shell extensions)
+    Native,
+    /// Tsubame's own (Open in new tab, Copy path, ...)
+    Tsubame,
+    /// the user's custom / imported entries
+    User,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemKind {
+    Command,
+    Separator,
+    Submenu,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuItem {
+    /// native: the HMENU command id (0 for separators and submenus);
+    /// Tsubame / user items: 0 (they are run by `action`)
+    pub id: u32,
+    pub kind: ItemKind,
+    pub source: ItemSource,
+    /// text with `&` markers removed (`&&` -> `&`) and no `\t` part
+    pub label: String,
+    /// the letter after a single `&`, lower-case
+    pub accel: Option<char>,
+    /// the text after `\t` ("Ctrl+C"), if any
+    pub shortcut: String,
+    /// canonical verb (`GetCommandString(GCS_VERBW)`), lower-case
+    pub verb: Option<String>,
+    pub help: Option<String>,
+    pub flags: u16,
+    /// key into [`IconCache`] (content hash of a 16 px premultiplied bitmap)
+    pub icon: Option<u64>,
+    pub children: Vec<MenuItem>,
+    /// what running it means for Tsubame / user items: an app command id
+    /// (`file.copy`) or a menu entry id (`custom.3`)
+    pub action: String,
+    /// the key the user's edits are stored under ([`native_key`])
+    pub key: String,
+}
+
+impl MenuItem {
+    pub fn separator(source: ItemSource) -> MenuItem {
+        MenuItem { id: 0, kind: ItemKind::Separator, source, label: String::new(), accel: None, shortcut: String::new(), verb: None, help: None, flags: 0, icon: None, children: Vec::new(), action: String::new(), key: String::new() }
+    }
+    pub fn command(source: ItemSource, label: &str, action: &str) -> MenuItem {
+        let (label, accel, shortcut) = parse_label(label);
+        MenuItem { kind: ItemKind::Command, label, accel, shortcut, action: action.to_string(), ..MenuItem::separator(source) }
+    }
+    pub fn is_separator(&self) -> bool {
+        self.kind == ItemKind::Separator
+    }
+    pub fn disabled(&self) -> bool {
+        self.flags & flag::DISABLED != 0
+    }
+    /// Items in the tree, this one included.
+    pub fn count(&self) -> usize {
+        1 + self.children.iter().map(MenuItem::count).sum::<usize>()
+    }
+}
+
+/// One HMENU item as `GetMenuItemInfoW` reports it, before any cleaning.
+/// The worker fills these; tests write them by hand.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RawItem {
+    /// `MENUITEMINFOW::wID`
+    pub id: u32,
+    /// raw text with `&` and `\t` (empty for separators and owner-drawn items)
+    pub text: String,
+    pub separator: bool,
+    pub ownerdraw: bool,
+    pub radio: bool,
+    pub menubreak: bool,
+    pub disabled: bool,
+    pub checked: bool,
+    pub default: bool,
+    /// `Some` = submenu; an empty vec = submenu that stayed empty
+    pub submenu: Option<Vec<RawItem>>,
+    pub verb: Option<String>,
+    pub help: Option<String>,
+    /// `hbmpItem` was `HBMMENU_CALLBACK`
+    pub icon_callback: bool,
+    /// the converted item bitmap (16 px)
+    pub icon: Option<Arc<Bitmap>>,
+}
+
+/// `"&Open with\tCtrl+O"` -> (`"Open with"`, `Some('o')`, `"Ctrl+O"`).
+/// `&&` is a literal `&`; the first single `&` marks the accelerator.
+pub fn parse_label(raw: &str) -> (String, Option<char>, String) {
+    let (text, shortcut) = match raw.split_once('\t') {
+        Some((a, b)) => (a, b.trim().to_string()),
+        None => (raw, String::new()),
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut accel = None;
+    let mut it = text.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '&' {
+            out.push(c);
+            continue;
+        }
+        match it.peek().copied() {
+            Some('&') => {
+                it.next();
+                out.push('&');
+            }
+            Some(n) if accel.is_none() && !n.is_whitespace() => accel = n.to_lowercase().next(),
+            _ => {}
+        }
+    }
+    (out.trim().to_string(), accel, shortcut)
+}
+
+/// Key a native item's edits are stored under: the canonical verb when the
+/// handler has one (stable across languages and updates), else the cleaned
+/// label. Both lower-case. Matches the ids of `Source::Windows` entries in the
+/// U4 menu list (`windows.verb:open`, `windows.label:7-zip`).
+pub fn native_key(verb: Option<&str>, label: &str) -> String {
+    match verb.filter(|v| !v.is_empty() && !v.starts_with('#')) {
+        Some(v) => format!("windows.verb:{}", v.to_lowercase()),
+        None => format!("windows.label:{}", label.to_lowercase()),
+    }
+}
+
+/// Upper bounds for one walked menu (a broken handler must not make it huge).
+pub const MAX_DEPTH: usize = 4;
+pub const MAX_ITEMS: usize = 512;
+
+/// Turns the walked HMENU into model items: labels parsed, flags folded,
+/// separators cleaned (none leading, trailing or doubled), empty submenus
+/// kept but marked [`flag::LAZY`], depth and count capped. Icons are moved
+/// into `icons`.
+pub fn build_native(raw: &[RawItem], icons: &mut IconCache) -> Vec<MenuItem> {
+    let mut budget = MAX_ITEMS;
+    build_level(raw, icons, 0, &mut budget)
+}
+
+fn build_level(raw: &[RawItem], icons: &mut IconCache, depth: usize, budget: &mut usize) -> Vec<MenuItem> {
+    let mut out: Vec<MenuItem> = Vec::new();
+    for r in raw {
+        if *budget == 0 {
+            break;
+        }
+        if r.separator {
+            if out.last().is_some_and(|l| !l.is_separator()) {
+                out.push(MenuItem::separator(ItemSource::Native));
+            }
+            continue;
+        }
+        let (label, accel, shortcut) = parse_label(&r.text);
+        let label = if label.is_empty() { r.verb.clone().or_else(|| r.help.clone()).unwrap_or_default() } else { label };
+        if label.is_empty() && !r.ownerdraw {
+            // a nameless, non-drawn item cannot be shown
+            continue;
+        }
+        *budget -= 1;
+        let mut flags = 0;
+        for (b, f) in [(r.disabled, flag::DISABLED), (r.checked, flag::CHECKED), (r.default, flag::DEFAULT), (r.radio, flag::RADIO), (r.ownerdraw, flag::OWNERDRAW), (r.icon_callback, flag::ICON_CALLBACK), (r.menubreak, flag::BREAK)] {
+            if b {
+                flags |= f;
+            }
+        }
+        let verb = r.verb.as_ref().map(|v| v.to_lowercase()).filter(|v| !v.is_empty());
+        let (kind, children) = match &r.submenu {
+            Some(sub) if depth + 1 < MAX_DEPTH => {
+                let c = build_level(sub, icons, depth + 1, budget);
+                if c.is_empty() {
+                    flags |= flag::LAZY;
+                }
+                (ItemKind::Submenu, c)
+            }
+            Some(_) => {
+                flags |= flag::LAZY;
+                (ItemKind::Submenu, Vec::new())
+            }
+            None => (ItemKind::Command, Vec::new()),
+        };
+        let icon = r.icon.as_ref().map(|b| icons.put(b.clone()));
+        let key = native_key(verb.as_deref(), &label);
+        out.push(MenuItem { id: if kind == ItemKind::Command { r.id } else { 0 }, kind, source: ItemSource::Native, label, accel, shortcut, verb, help: r.help.clone(), flags, icon, children, action: String::new(), key });
+    }
+    while out.last().is_some_and(MenuItem::is_separator) {
+        out.pop();
+    }
+    out
+}
+
+/// Finds the item at `path` (indices from the top).
+pub fn at_path<'a>(items: &'a [MenuItem], path: &[usize]) -> Option<&'a MenuItem> {
+    let (&first, rest) = path.split_first()?;
+    let it = items.get(first)?;
+    if rest.is_empty() { Some(it) } else { at_path(&it.children, rest) }
+}
+
+fn at_path_mut<'a>(items: &'a mut [MenuItem], path: &[usize]) -> Option<&'a mut MenuItem> {
+    let (&first, rest) = path.split_first()?;
+    let it = items.get_mut(first)?;
+    if rest.is_empty() { Some(it) } else { at_path_mut(&mut it.children, rest) }
+}
+
+// ---- routing ------------------------------------------------------------
+
+/// Verbs Tsubame runs itself even when picked from the shell's part of the
+/// menu: they go through the app's own clipboard, rename and file-op queue
+/// (with its Recycle Bin hazard checks and undo). Same set as the native
+/// menu's `MenuOpts::intercept` in the app.
+pub const APP_VERBS: [&str; 5] = ["delete", "cut", "copy", "paste", "rename"];
+
+/// Tsubame built-in command -> the shell verb it replaces in the native part
+/// (so the menu never shows "Copy" twice).
+pub const BUILTIN_VERBS: [(&str, &str); 7] = [("file.open", "open"), ("file.cut", "cut"), ("file.copy", "copy"), ("file.paste", "paste"), ("file.rename", "rename"), ("file.delete", "delete"), ("file.properties", "properties")];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// `invoke(id)` on the worker that owns the menu
+    Shell(u32),
+    /// an app command (`file.copy`) or a menu entry id (`custom.3`)
+    App(String),
+}
+
+/// What picking `item` does.
+pub fn route(item: &MenuItem) -> Route {
+    match item.source {
+        ItemSource::Native => match item.verb.as_deref() {
+            Some(v) if APP_VERBS.contains(&v) => Route::App(format!("file.{v}")),
+            _ => Route::Shell(item.id),
+        },
+        // Tsubame rows such as Properties may still end in a shell verb: the
+        // app looks it up with [`native_by_verb`] and sends `Shell(id)`
+        ItemSource::Tsubame | ItemSource::User => Route::App(item.action.clone()),
+    }
+}
+
+/// The command id of the native item with `verb` (searched depth first), so a
+/// Tsubame row like Properties or Open can run the shell's verb.
+pub fn native_by_verb(native: &[MenuItem], verb: &str) -> Option<u32> {
+    native.iter().find_map(|n| if n.kind == ItemKind::Command && n.verb.as_deref() == Some(verb) { Some(n.id) } else { native_by_verb(&n.children, verb) })
+}
+
+// ---- composing and the user's edits --------------------------------------
+
+/// Tsubame's and the user's items for a click, from the U4 list: visible
+/// built-ins (except the `Windows` placeholders, which the native part fills)
+/// and the program entries that apply to `target`.
+pub fn own_items(entries: &[MenuEntry], target: tsubame_config::menu::Target, ext: &str) -> (Vec<MenuItem>, Vec<MenuItem>) {
+    let mut tsubame = Vec::new();
+    for e in entries.iter().filter(|e| e.parent.is_empty()) {
+        match (e.source, e.kind) {
+            (Source::Builtin, EntryKind::Separator) => {
+                if tsubame.last().is_some_and(|l: &MenuItem| !l.is_separator()) {
+                    tsubame.push(MenuItem::separator(ItemSource::Tsubame));
+                }
+            }
+            (Source::Builtin, EntryKind::Item) if !e.hidden && e.matches(target, ext) => {
+                let mut it = MenuItem::command(ItemSource::Tsubame, &e.name, &e.command);
+                it.key = e.id.clone();
+                tsubame.push(it);
+            }
+            _ => {}
+        }
+    }
+    while tsubame.last().is_some_and(MenuItem::is_separator) {
+        tsubame.pop();
+    }
+    let user = tsubame_config::menu::program_entries(entries, target, ext)
+        .into_iter()
+        .map(|(e, label)| {
+            let mut it = MenuItem::command(ItemSource::User, &label, &e.id);
+            it.key = e.id.clone();
+            it
+        })
+        .collect();
+    (tsubame, user)
+}
+
+/// Applies the user's edits to native items, recursively: an entry of source
+/// `Windows` whose id is the item's [`native_key`] hides it (`hidden`),
+/// renames it (`name`, when not empty) and orders it: items that have an
+/// entry are put in the list's order inside the slots they occupy, items
+/// without one keep their place. Separators left dangling are cleaned.
+pub fn apply_overrides(items: &mut Vec<MenuItem>, entries: &[MenuEntry]) {
+    let find = |key: &str| entries.iter().position(|e| e.source == Source::Windows && !key.is_empty() && e.id.eq_ignore_ascii_case(key));
+    items.retain(|it| find(&it.key).is_none_or(|i| !entries[i].hidden));
+    let mut slots = Vec::new();
+    for (pos, it) in items.iter_mut().enumerate() {
+        if let Some(i) = find(&it.key) {
+            let name = entries[i].name.trim();
+            if !name.is_empty() && !name.eq_ignore_ascii_case(&it.label) {
+                let (l, a, _) = parse_label(name);
+                it.label = l;
+                it.accel = a.or(it.accel);
+            }
+            slots.push((pos, i));
+        }
+        if !it.children.is_empty() {
+            apply_overrides(&mut it.children, entries);
+        }
+    }
+    let mut order: Vec<usize> = slots.iter().map(|s| s.1).collect();
+    order.sort_unstable();
+    let picked: Vec<MenuItem> = order.iter().map(|&ei| items[slots.iter().find(|s| s.1 == ei).unwrap().0].clone()).collect();
+    for ((pos, _), it) in slots.iter().zip(picked) {
+        items[*pos] = it;
+    }
+    clean_separators(items);
+}
+
+fn clean_separators(items: &mut Vec<MenuItem>) {
+    let mut out: Vec<MenuItem> = Vec::with_capacity(items.len());
+    for it in items.drain(..) {
+        if it.is_separator() && out.last().is_none_or(MenuItem::is_separator) {
+            continue;
+        }
+        out.push(it);
+    }
+    while out.last().is_some_and(MenuItem::is_separator) {
+        out.pop();
+    }
+    *items = out;
+}
+
+/// The menu as drawn: Tsubame's group, the native items (minus verbs a
+/// Tsubame row already covers, with the user's edits), then the user's
+/// entries. Groups are split by separators.
+pub fn compose(tsubame: &[MenuItem], native: &[MenuItem], user: &[MenuItem], entries: &[MenuEntry]) -> Vec<MenuItem> {
+    let covered: Vec<&str> = tsubame.iter().filter_map(|t| BUILTIN_VERBS.iter().find(|(c, _)| *c == t.action).map(|(_, v)| *v)).collect();
+    let mut nat: Vec<MenuItem> = native.iter().filter(|n| !n.verb.as_deref().is_some_and(|v| covered.contains(&v))).cloned().collect();
+    apply_overrides(&mut nat, entries);
+    let mut out = Vec::with_capacity(tsubame.len() + nat.len() + user.len() + 2);
+    for group in [tsubame, &nat[..], user] {
+        if group.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(MenuItem::separator(group[0].source));
+        }
+        out.extend(group.iter().cloned());
+    }
+    clean_separators(&mut out);
+    out
+}
+
+/// The editor row for a native item the user edits for the first time (a
+/// `Source::Windows` entry keyed by [`native_key`]; can be hidden, renamed
+/// and moved, never deleted).
+pub fn native_entry(item: &MenuItem) -> MenuEntry {
+    MenuEntry { id: item.key.clone(), source: Source::Windows, name: item.label.clone(), kind: if item.kind == ItemKind::Submenu { EntryKind::Submenu } else { EntryKind::Item }, ..Default::default() }
+}
+
+// ---- batches and the model the UI holds ----------------------------------
+
+#[derive(Clone, Debug)]
+pub enum Part {
+    /// the native top level (QueryContextMenu done, submenus walked)
+    Native(Vec<MenuItem>),
+    /// a lazily filled submenu at `path` of the native items, filled later
+    Submenu { path: Vec<usize>, items: Vec<MenuItem> },
+    /// icons for keys already sent
+    Icons(Vec<(u64, Arc<Bitmap>)>),
+    /// building failed (or the worker gave up: the UI shows Retry)
+    Failed(String),
+    /// result of an invoke
+    Invoked { id: u32, verb: Option<String>, result: Result<(), String> },
+    /// the worker released the menu (after an invoke, a close or a timeout)
+    Closed,
+}
+
+#[derive(Clone, Debug)]
+pub struct MenuBatch {
+    /// the request's generation; the UI drops other generations
+    pub generation: u64,
+    pub part: Part,
+    /// worker timings in microseconds: bind, QueryContextMenu, walk
+    pub timing: [u64; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadState {
+    /// own items shown, the shell has not answered (thin loading line)
+    Loading,
+    Ready,
+    /// "Some items could not load" + Retry
+    Failed,
+}
+
+/// The menu the UI paints. Own items exist from t = 0; native ones arrive.
+pub struct MenuModel {
+    pub generation: u64,
+    pub tsubame: Vec<MenuItem>,
+    pub user: Vec<MenuItem>,
+    pub native: Vec<MenuItem>,
+    pub state: LoadState,
+    pub error: Option<String>,
+    pub icons: IconCache,
+}
+
+impl MenuModel {
+    pub fn new(generation: u64, tsubame: Vec<MenuItem>, user: Vec<MenuItem>) -> MenuModel {
+        MenuModel { generation, tsubame, user, native: Vec::new(), state: LoadState::Loading, error: None, icons: IconCache::new(ICON_CACHE_CAP) }
+    }
+
+    /// Takes a batch. Returns false (and changes nothing) for another
+    /// generation's batch.
+    pub fn apply(&mut self, b: MenuBatch) -> bool {
+        if b.generation != self.generation {
+            return false;
+        }
+        match b.part {
+            Part::Native(items) => {
+                self.native = items;
+                self.state = LoadState::Ready;
+            }
+            Part::Submenu { path, items } => {
+                if let Some(it) = at_path_mut(&mut self.native, &path) {
+                    it.flags &= !flag::LAZY;
+                    it.children = items;
+                }
+            }
+            Part::Icons(v) => {
+                for (k, bmp) in v {
+                    self.icons.insert(k, bmp);
+                }
+            }
+            Part::Failed(e) => {
+                self.state = LoadState::Failed;
+                self.error = Some(e);
+            }
+            Part::Invoked { .. } | Part::Closed => {}
+        }
+        true
+    }
+
+    /// The rows to draw now.
+    pub fn rows(&self, entries: &[MenuEntry]) -> Vec<MenuItem> {
+        compose(&self.tsubame, &self.native, &self.user, entries)
+    }
+}
+
+// ---- icon cache ------------------------------------------------------------
+
+/// Icons per process the UI keeps (16 px, ~1 KB each).
+pub const ICON_CACHE_CAP: usize = 256;
+
+/// Bounded LRU of menu icons keyed by content hash, so the same icon from
+/// many handlers / menus is stored (and uploaded as a texture) once.
+pub struct IconCache {
+    cap: usize,
+    map: std::collections::HashMap<u64, Arc<Bitmap>>,
+    order: VecDeque<u64>,
+}
+
+impl IconCache {
+    pub fn new(cap: usize) -> IconCache {
+        IconCache { cap: cap.max(1), map: Default::default(), order: VecDeque::new() }
+    }
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+    pub fn get(&mut self, k: u64) -> Option<Arc<Bitmap>> {
+        let v = self.map.get(&k)?.clone();
+        self.touch(k);
+        Some(v)
+    }
+    fn touch(&mut self, k: u64) {
+        if let Some(i) = self.order.iter().position(|&o| o == k) {
+            self.order.remove(i);
+        }
+        self.order.push_back(k);
+    }
+    pub fn insert(&mut self, k: u64, b: Arc<Bitmap>) {
+        if self.map.insert(k, b).is_none() {
+            while self.map.len() > self.cap {
+                let Some(old) = self.order.pop_front() else { break };
+                self.map.remove(&old);
+            }
+        }
+        self.touch(k);
+    }
+    /// Stores `b` under its content hash and returns the key.
+    pub fn put(&mut self, b: Arc<Bitmap>) -> u64 {
+        let k = icon_hash(&b);
+        self.insert(k, b);
+        k
+    }
+    /// Entries, oldest first (for sending to the UI).
+    pub fn entries(&self) -> Vec<(u64, Arc<Bitmap>)> {
+        self.order.iter().filter_map(|k| self.map.get(k).map(|b| (*k, b.clone()))).collect()
+    }
+}
+
+/// FNV-1a over size and pixels.
+pub fn icon_hash(b: &Bitmap) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |v: u32| {
+        for byte in v.to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    eat(b.w);
+    eat(b.h);
+    for &p in &b.px {
+        eat(p);
+    }
+    h
+}
+
+/// The tree as indented text (the `ctxmenu_dump` harness and tests).
+pub fn dump(items: &[MenuItem], out: &mut String) {
+    dump_level(items, 0, out);
+}
+
+fn dump_level(items: &[MenuItem], depth: usize, out: &mut String) {
+    use std::fmt::Write;
+    for it in items {
+        let pad = "  ".repeat(depth);
+        if it.is_separator() {
+            let _ = writeln!(out, "{pad}----");
+            continue;
+        }
+        let mut f = String::new();
+        for (b, s) in [(flag::DISABLED, "disabled"), (flag::CHECKED, "checked"), (flag::DEFAULT, "default"), (flag::RADIO, "radio"), (flag::OWNERDRAW, "ownerdraw"), (flag::ICON_CALLBACK, "icon-cb"), (flag::LAZY, "lazy")] {
+            if it.flags & b != 0 {
+                f.push_str(s);
+                f.push(' ');
+            }
+        }
+        let _ = writeln!(
+            out,
+            "{pad}{}{} [id {}{}{}{}] {}{}",
+            it.label,
+            if it.kind == ItemKind::Submenu { " >" } else { "" },
+            it.id,
+            it.verb.as_deref().map(|v| format!(" verb={v}")).unwrap_or_default(),
+            it.accel.map(|a| format!(" &{a}")).unwrap_or_default(),
+            if it.icon.is_some() { " icon" } else { "" },
+            f.trim_end(),
+            if it.shortcut.is_empty() { String::new() } else { format!(" \\t{}", it.shortcut) },
+        );
+        dump_level(&it.children, depth + 1, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tsubame_config::menu::{ShowFor, Target, default_entries};
+
+    fn raw(id: u32, text: &str) -> RawItem {
+        RawItem { id, text: text.into(), ..Default::default() }
+    }
+    fn sep() -> RawItem {
+        RawItem { separator: true, ..Default::default() }
+    }
+    fn verb(mut r: RawItem, v: &str) -> RawItem {
+        r.verb = Some(v.into());
+        r
+    }
+    fn labels(v: &[MenuItem]) -> Vec<String> {
+        v.iter().map(|i| if i.is_separator() { "--".to_string() } else { i.label.clone() }).collect()
+    }
+    fn px(c: u32) -> Arc<Bitmap> {
+        Arc::new(Bitmap { w: 16, h: 16, px: vec![c; 256] })
+    }
+
+    #[test]
+    fn labels_lose_markers_but_keep_accelerator_and_shortcut() {
+        assert_eq!(parse_label("&Open"), ("Open".into(), Some('o'), String::new()));
+        assert_eq!(parse_label("Open &with\tCtrl+W"), ("Open with".into(), Some('w'), "Ctrl+W".into()));
+        assert_eq!(parse_label("Tom && Jerry"), ("Tom & Jerry".into(), None, String::new()));
+        assert_eq!(parse_label("A&&B &Copy &Later"), ("A&B Copy Later".into(), Some('c'), String::new()));
+        assert_eq!(parse_label("trailing&"), ("trailing".into(), None, String::new()));
+        assert_eq!(parse_label("Ö&ffnen"), ("Öffnen".into(), Some('f'), String::new()));
+    }
+
+    #[test]
+    fn native_build_cleans_separators_flags_and_submenus() {
+        let mut icons = IconCache::new(8);
+        let mut open = verb(raw(1, "&Open"), "Open");
+        open.default = true;
+        open.icon = Some(px(0xff00_00ff));
+        let mut dis = raw(3, "Pr&int");
+        dis.disabled = true;
+        let mut chk = raw(4, "Pinned");
+        chk.checked = true;
+        chk.radio = true;
+        let sendto = RawItem { text: "Se&nd to".into(), submenu: Some(vec![raw(10, "Desktop"), sep(), raw(11, "Mail")]), ..Default::default() };
+        let empty = RawItem { text: "Open with".into(), submenu: Some(vec![]), ..Default::default() };
+        let od = RawItem { id: 20, ownerdraw: true, icon_callback: true, verb: Some("7z.add".into()), ..Default::default() };
+        let nameless = raw(21, "");
+        let v = vec![sep(), open, sep(), sep(), dis, chk, sendto, empty, od, nameless, sep()];
+        let m = build_native(&v, &mut icons);
+        assert_eq!(labels(&m), ["Open", "--", "Print", "Pinned", "Send to", "Open with", "7z.add"]);
+        assert_eq!(m[0].flags, flag::DEFAULT);
+        assert_eq!(m[0].verb.as_deref(), Some("open"));
+        assert_eq!(m[0].key, "windows.verb:open");
+        assert_eq!(m[0].accel, Some('o'));
+        assert!(m[0].icon.is_some() && icons.len() == 1);
+        assert!(m[2].disabled() && m[2].accel == Some('i'));
+        assert_eq!(m[3].flags, flag::CHECKED | flag::RADIO);
+        assert_eq!(m[4].kind, ItemKind::Submenu);
+        assert_eq!(m[4].id, 0, "submenus have no command id");
+        assert_eq!(labels(&m[4].children), ["Desktop", "--", "Mail"]);
+        assert_eq!(m[5].flags, flag::LAZY);
+        assert_eq!(m[6].flags, flag::OWNERDRAW | flag::ICON_CALLBACK);
+        assert_eq!(m[2].key, "windows.label:print");
+    }
+
+    #[test]
+    fn walk_is_capped_in_depth_and_count() {
+        let mut deep = raw(99, "leaf");
+        for d in 0..8 {
+            deep = RawItem { text: format!("level {d}"), submenu: Some(vec![deep]), ..Default::default() };
+        }
+        let m = build_native(&[deep], &mut IconCache::new(4));
+        let mut depth = 0;
+        let mut it = &m[0];
+        while let Some(c) = it.children.first() {
+            depth += 1;
+            it = c;
+        }
+        assert_eq!(depth, MAX_DEPTH - 1);
+        assert!(it.flags & flag::LAZY != 0);
+        let many: Vec<RawItem> = (0..2000).map(|i| raw(i + 1, &format!("item {i}"))).collect();
+        assert_eq!(build_native(&many, &mut IconCache::new(4)).len(), MAX_ITEMS);
+    }
+
+    #[test]
+    fn routes_send_app_verbs_to_the_app_and_the_rest_to_the_shell() {
+        let mut icons = IconCache::new(4);
+        let m = build_native(&[verb(raw(5, "Delete"), "delete"), verb(raw(6, "Properties"), "properties"), raw(7, "Add to archive..."), verb(raw(8, "Rename"), "rename")], &mut icons);
+        assert_eq!(route(&m[0]), Route::App("file.delete".into()));
+        assert_eq!(route(&m[1]), Route::Shell(6));
+        assert_eq!(route(&m[2]), Route::Shell(7));
+        assert_eq!(route(&m[3]), Route::App("file.rename".into()));
+        let user = MenuItem::command(ItemSource::User, "VS Code", "custom.1");
+        assert_eq!(route(&user), Route::App("custom.1".into()));
+    }
+
+    fn win(id: &str, name: &str, hidden: bool) -> MenuEntry {
+        MenuEntry { id: id.into(), source: Source::Windows, name: name.into(), hidden, ..Default::default() }
+    }
+
+    #[test]
+    fn overrides_hide_rename_and_reorder_by_verb_or_label() {
+        let mut icons = IconCache::new(4);
+        let base = build_native(&[verb(raw(1, "&Open"), "open"), raw(2, "7-Zip"), sep(), verb(raw(3, "Share"), "Windows.ModernShare"), raw(4, "Git Bash Here"), sep(), verb(raw(5, "Properties"), "properties")], &mut icons);
+        // hide Share and Properties (the separator before Properties goes too)
+        let mut m = base.clone();
+        apply_overrides(&mut m, &[win("windows.verb:windows.modernshare", "", true), win("windows.verb:properties", "", true)]);
+        assert_eq!(labels(&m), ["Open", "7-Zip", "--", "Git Bash Here"]);
+        // rename by label key, keep the accelerator of the new name
+        let mut m = base.clone();
+        apply_overrides(&mut m, &[win("windows.label:7-zip", "&Archive", false)]);
+        assert_eq!(m[1].label, "Archive");
+        assert_eq!(m[1].accel, Some('a'));
+        // reorder: Git before Open; unlisted items stay where they are
+        let mut m = base.clone();
+        apply_overrides(&mut m, &[win("windows.label:git bash here", "", false), win("windows.verb:open", "", false)]);
+        assert_eq!(labels(&m), ["Git Bash Here", "7-Zip", "--", "Share", "Open", "--", "Properties"]);
+        // case does not matter, other sources never match native items
+        let mut m = base.clone();
+        apply_overrides(&mut m, &[MenuEntry { source: Source::Custom, ..win("windows.verb:open", "", true) }, win("WINDOWS.VERB:OPEN", "Run", false)]);
+        assert_eq!(m[0].label, "Run");
+    }
+
+    #[test]
+    fn overrides_reach_into_submenus() {
+        let mut icons = IconCache::new(4);
+        let sub = RawItem { text: "Send to".into(), submenu: Some(vec![raw(10, "Desktop (create shortcut)"), raw(11, "Mail recipient")]), ..Default::default() };
+        let mut m = build_native(&[sub], &mut icons);
+        apply_overrides(&mut m, &[win("windows.label:mail recipient", "", true)]);
+        assert_eq!(labels(&m[0].children), ["Desktop (create shortcut)"]);
+    }
+
+    #[test]
+    fn compose_puts_groups_in_order_and_drops_covered_verbs() {
+        let entries = default_entries();
+        let (ts, _) = own_items(&entries, Target::File, "txt");
+        assert!(ts.iter().any(|t| t.action == "file.copy"));
+        assert!(!ts.iter().any(|t| t.label == "Open with" || t.label == "Show more options"), "Windows placeholders are filled by the native part");
+        let user = vec![MenuItem::command(ItemSource::User, "VS Code", "custom.1")];
+        let mut icons = IconCache::new(4);
+        let native = build_native(&[verb(raw(1, "Open"), "open"), verb(raw(2, "Copy"), "copy"), raw(3, "7-Zip"), verb(raw(4, "Properties"), "properties")], &mut icons);
+        let rows = compose(&ts, &native, &user, &entries);
+        let l = labels(&rows);
+        assert_eq!(l.iter().filter(|s| *s == "Copy").count(), 1, "{l:?}");
+        assert_eq!(l.iter().filter(|s| *s == "Properties").count(), 1, "{l:?}");
+        let seven = l.iter().position(|s| s == "7-Zip").unwrap();
+        let vs = l.iter().position(|s| s == "VS Code").unwrap();
+        assert!(seven < vs && l[vs - 1] == "--");
+        assert!(rows.iter().all(|r| r.is_separator() || r.source != ItemSource::Native || r.label == "7-Zip"));
+        // a hidden built-in frees its verb: the shell's Copy shows instead
+        let mut e2 = entries.clone();
+        e2.iter_mut().find(|e| e.id == "builtin.copy").unwrap().hidden = true;
+        let (ts2, _) = own_items(&e2, Target::File, "txt");
+        let rows = compose(&ts2, &native, &[], &e2);
+        assert!(rows.iter().any(|r| r.source == ItemSource::Native && r.label == "Copy"));
+    }
+
+    #[test]
+    fn own_items_follow_target_and_user_entries() {
+        let mut entries = default_entries();
+        entries.push(MenuEntry { show_for: ShowFor { files: false, folders: false, background: true }, ..MenuEntry::custom("custom.1", "Terminal", "wt.exe", "-d {path}") });
+        let (_, user) = own_items(&entries, Target::Background, "");
+        assert_eq!(labels(&user), ["Terminal"]);
+        assert_eq!(user[0].action, "custom.1");
+        let (_, user) = own_items(&entries, Target::File, "txt");
+        assert!(user.is_empty());
+        let e = native_entry(&build_native(&[verb(raw(1, "Open"), "open")], &mut IconCache::new(2))[0]);
+        assert_eq!((e.id.as_str(), e.source, e.name.as_str()), ("windows.verb:open", Source::Windows, "Open"));
+    }
+
+    #[test]
+    fn model_drops_stale_generations_and_fills_lazy_submenus() {
+        let mut m = MenuModel::new(7, vec![MenuItem::command(ItemSource::Tsubame, "Copy path", "file.copy-path")], vec![]);
+        assert_eq!(m.state, LoadState::Loading);
+        assert_eq!(labels(&m.rows(&[])), ["Copy path"], "own items at t = 0");
+        let mut icons = IconCache::new(4);
+        let native = build_native(&[raw(1, "7-Zip"), RawItem { text: "Open with".into(), submenu: Some(vec![]), ..Default::default() }], &mut icons);
+        assert!(!m.apply(MenuBatch { generation: 6, part: Part::Native(native.clone()), timing: [0; 3] }), "stale");
+        assert!(m.native.is_empty());
+        assert!(m.apply(MenuBatch { generation: 7, part: Part::Native(native), timing: [0; 3] }));
+        assert_eq!(m.state, LoadState::Ready);
+        assert!(m.native[1].flags & flag::LAZY != 0);
+        let kids = build_native(&[raw(30, "Notepad")], &mut icons);
+        assert!(m.apply(MenuBatch { generation: 7, part: Part::Submenu { path: vec![1], items: kids }, timing: [0; 3] }));
+        assert_eq!(m.native[1].flags & flag::LAZY, 0);
+        assert_eq!(at_path(&m.native, &[1, 0]).unwrap().label, "Notepad");
+        assert!(m.apply(MenuBatch { generation: 7, part: Part::Failed("timeout".into()), timing: [0; 3] }));
+        assert_eq!(m.state, LoadState::Failed);
+        assert!(m.apply(MenuBatch { generation: 7, part: Part::Icons(vec![(1, px(1)), (2, px(2))]), timing: [0; 3] }));
+        assert_eq!(m.icons.len(), 2);
+    }
+
+    #[test]
+    fn icon_cache_is_bounded_lru_and_dedupes_by_content() {
+        let mut c = IconCache::new(3);
+        let a = c.put(px(1));
+        assert_eq!(c.put(px(1)), a, "same pixels, same key");
+        assert_eq!(c.len(), 1);
+        let b = c.put(px(2));
+        let d = c.put(px(3));
+        assert!(c.get(a).is_some(), "touch a: b is now oldest");
+        let e = c.put(px(4));
+        assert_eq!(c.len(), 3);
+        assert!(c.get(b).is_none(), "oldest evicted");
+        assert!(c.get(a).is_some() && c.get(d).is_some() && c.get(e).is_some());
+        for i in 0..1000 {
+            c.put(px(100 + i));
+        }
+        assert_eq!(c.len(), 3);
+        assert_eq!(c.entries().len(), 3);
+        assert_ne!(icon_hash(&Bitmap { w: 1, h: 2, px: vec![0, 0] }), icon_hash(&Bitmap { w: 2, h: 1, px: vec![0, 0] }));
+    }
+
+    #[test]
+    fn dump_prints_a_readable_tree() {
+        let mut icons = IconCache::new(4);
+        let m = build_native(&[verb(raw(1, "&Open\tEnter"), "open"), sep(), RawItem { text: "Send to".into(), submenu: Some(vec![raw(9, "Desktop")]), ..Default::default() }], &mut icons);
+        let mut s = String::new();
+        dump(&m, &mut s);
+        assert_eq!(s, "Open [id 1 verb=open &o]  \\tEnter\n----\nSend to > [id 0] \n  Desktop [id 9] \n");
+    }
+}

@@ -65,12 +65,12 @@ pub struct MenuOpts {
     pub intercept: Vec<String>,
 }
 
-const ID_FIRST: u32 = 1;
-const ID_LAST: u32 = 0x7eff;
+pub(super) const ID_FIRST: u32 = 1;
+pub(super) const ID_LAST: u32 = 0x7eff;
 /// app entries: ID_EXTRA + index
 const ID_EXTRA: u32 = 0x7f00;
-const CMIC_MASK_UNICODE: u32 = 0x4000;
-const CMIC_MASK_SHIFT_DOWN: u32 = 0x1000_0000;
+pub(super) const CMIC_MASK_UNICODE: u32 = 0x4000;
+pub(super) const CMIC_MASK_SHIFT_DOWN: u32 = 0x1000_0000;
 const AUTO_CLOSE_TIMER: usize = 0x5453;
 
 thread_local! {
@@ -83,6 +83,13 @@ thread_local! {
 }
 
 static REGISTER: Once = Once::new();
+
+/// Routes the host window's menu messages to `cm` (`None` stops it). The
+/// own-drawn path (`ctxmenu`) uses it while it walks and invokes a menu.
+pub(super) fn set_handlers(cm: Option<&IContextMenu>) {
+    CM3.with(|c| *c.borrow_mut() = cm.and_then(|m| m.cast::<IContextMenu3>().ok()));
+    CM2.with(|c| *c.borrow_mut() = cm.and_then(|m| m.cast::<IContextMenu2>().ok()));
+}
 
 /// The worker's hidden menu owner. Created once per worker thread.
 pub fn host_window() -> Option<HWND> {
@@ -146,7 +153,7 @@ extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
     }
 }
 
-struct Pidls(Vec<*mut ITEMIDLIST>);
+pub(super) struct Pidls(pub(super) Vec<*mut ITEMIDLIST>);
 impl Drop for Pidls {
     fn drop(&mut self) {
         for &p in &self.0 {
@@ -155,7 +162,7 @@ impl Drop for Pidls {
     }
 }
 
-fn parent_of(p: &str) -> &str {
+pub(super) fn parent_of(p: &str) -> &str {
     let p = p.trim_end_matches('\\');
     p.rfind('\\').map(|i| &p[..i]).unwrap_or("")
 }
@@ -318,14 +325,14 @@ pub fn show(host: Option<HWND>, paths: &[String], x: i32, y: i32, extended: bool
 }
 
 /// The context menu of items: parent folder + child ids.
-fn item_menu(pidls: &Pidls, host: HWND) -> Result<IContextMenu, String> {
+pub(super) fn item_menu(pidls: &Pidls, host: HWND) -> Result<IContextMenu, String> {
     let folder: IShellFolder = unsafe { SHBindToParent(pidls.0[0], None) }.map_err(|e| format!("SHBindToParent {:?}", e.code()))?;
     let children: Vec<*const ITEMIDLIST> = pidls.0.iter().map(|&p| unsafe { ILFindLastID(p) as *const _ }).collect();
     unsafe { folder.GetUIObjectOf(host, &children, None) }.map_err(|e| format!("GetUIObjectOf {:?}", e.code()))
 }
 
 /// The background menu of folder `pidl` ("New", "Paste", "Properties", ...).
-fn background_menu(pidl: *mut ITEMIDLIST, host: HWND) -> Result<IContextMenu, String> {
+pub(super) fn background_menu(pidl: *mut ITEMIDLIST, host: HWND) -> Result<IContextMenu, String> {
     unsafe {
         let desktop = SHGetDesktopFolder().map_err(|e| format!("SHGetDesktopFolder {:?}", e.code()))?;
         let folder: IShellFolder = if (*pidl).mkid.cb == 0 { desktop } else { desktop.BindToObject(pidl, None).map_err(|e| format!("BindToObject {:?}", e.code()))? };
