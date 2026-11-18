@@ -111,3 +111,30 @@ create/delete in both folders shown without F5 with the selection kept. Light
 theme in dual pane; dark theme in single pane (paste, Delete then Ctrl+Z, F2
 rename then Ctrl+Z). Screenshots: `docs/shots/int1-*.png`. Numbers: the INT1
 section in `docs/bench-log.md`.
+
+## U4: palette, Settings tab, keys (glue)
+
+Full design in `docs/u4-settings.md`. What touches the rest of the app:
+
+- **Lifetime.** `View::palette: Option<Box<Palette>>` and `View::settings: Option<Box<Settings>>` exist only
+  while open (Settings = while its tab exists). Closing drops them. `View::churn_u4` builds and drops both;
+  it runs in `--leak-smoke` and in every tab cycle of `--leak-gate`, and a unit test runs it 1000 times.
+- **One command runner.** Every shortcut, menu line and palette row ends in `View::run_command(id)`. The key map
+  (`src/keymap.rs`) only maps chords to ids; `shellops::on_key` asks it, so a rebound key works everywhere
+  at once. The published current map (`keymap::set_current`) is what menus and the palette print.
+- **Settings edits `View::prefs`** (master `Config`) and ORs change bits into `Cx::changed`
+  (`C_APPEARANCE`, `C_ZEBRA`, `C_HIDE`, `C_KEYS`, `C_UPDATES`, `C_MENU`, `C_OTHER`). `View::apply_prefs(ui, bits)`
+  makes them live (theme/density/font/accent, every tab's hide rule, key re-registration, updater switch,
+  `shellops` menu extras) and sets `config_dirty`, which the debounced atomic config writer picks up.
+  The session file skips the Settings tab.
+- **Key capture.** While the palette or the key recorder is painted, `ui.capture_keys` is true for that frame
+  (reset each frame in `view.rs`), so list shortcuts and type-ahead stay quiet.
+- **Context menu.** The W1 native menu (`tsubame-win/src/shell/menu.rs`) is unchanged. `shellops` builds the
+  `extras` list from the built-ins that are not hidden plus enabled custom entries that match the click; running
+  one goes through `custom_cmd` (argv, no shell, own thread).
+- **Updater.** `src/updates.rs` starts after the first paint, on its own thread, and wakes the UI only on a phase
+  change. "Download and restart" sets `AFTER_EXIT` in `main.rs`; the swap happens after the window is gone.
+- **Default file manager** is opt-in HKCU only and refuses to write under `cfg(test)` or
+  `TSUBAME_NO_REGISTRY_WRITE=1`.
+- **Shared test globals** (`tab::HIDE`, `keymap::CURRENT`, `shellops::MENU`): tests that change them restore them;
+  temp dirs of view tests are named `tsubame-u2-view-{tag}-{pid}` with a unique tag (new U4 tests use `u4-*`).
