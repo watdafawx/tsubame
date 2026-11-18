@@ -22,8 +22,30 @@ One `Vec<u16>` holds names, one `Vec<EntryRecord>` holds metadata, one
 - Append sorts only matching new IDs, then merges old/new indices in O(n+m).
   Full sort decorates with temporary u64 prefix keys; numeric runs encode significant
   length and digits without integer overflow. Prefix ties use full natural comparison.
+- Streaming (PERF2): `begin_stream()` before the first batch of a listing,
+  `end_stream()` at Done. While streaming, `push_batch` keeps only the top
+  `STREAM_TOP` (2048) rows of the view sorted (what the first screens show)
+  and appends the rest unsorted, so a batch costs O(batch · log) instead of an
+  O(n) merge (100k in 256/4096 batches: 107–134 ms of merges before, 11 ms
+  now). `end_stream()` sorts the whole view once. `apply()`, `sort()`,
+  `filter()` and `clear()` keep the top consistent; `apply()` ends a stream.
+  The listing is complete and sorted only after `end_stream()`.
+- Full sort (`sort_ids`): below 16k IDs serial; above, a sample sort on
+  `std::thread::scope` threads (at most 8): sampled splitters on the
+  (folder rank, prefix key) rank, threads split chunks into buckets, then
+  sort the buckets in parallel. Within a bucket, entries sort by prefix key,
+  and runs of equal keys refine with the next 8 name bytes (Name/Type) until
+  they differ, the name ends (naturally equal: ID order) or a key is unclean
+  (a digit run cut at 8 bytes, a non-ASCII unit or NUL), which falls back to
+  the full natural comparison. Size/Modified ties sort by ID. Result equals
+  the stable natural sort (tests check against a naive sort on random,
+  unicode and tie-heavy names).
 - `filter(query, Substring|Glob)` is case-insensitive. Substring extensions scan only
-  previous results; edits/backspace/mode changes rebuild from all IDs. Glob is anchored,
+  previous results; edits/backspace/mode changes rebuild from all IDs. When a
+  filter starts on the complete sorted view, that order is kept (4 bytes per
+  entry while filtered, freed when the filter is cleared; dropped by any
+  mutation or re-sort): a rebuild then filters it in one ordered pass instead
+  of sorting the matches again. Glob is anchored,
   `*` any units and `?` one UTF-16 unit, iterative backtracking, no escape syntax.
 - Natural comparison treats ASCII digit runs numerically; leading-zero variants and
   case variants tie. Simple one-to-one BMP lowercase supports typical Latin/Greek/
@@ -68,8 +90,10 @@ plus query capacity. At 1M entries with average 11 UTF-16 units: ~50 MB;
 selection adds ~250 KB (bits + epoch words). Benchmark reserves 256 spare entries:
 **50,011,776 bytes**. <=60 MB gate **PASS**; strict <=50,000,000-byte stretch
 **FAIL** by 11,776 bytes. Long names necessarily increase memory; 60 MB cannot
-hold arbitrary 255-unit names. Full sort scratch uses 16 bytes/visible entry;
-merge temporarily retains old and new ID vectors. Peak memory exceeds resident figure.
+hold arbitrary 255-unit names. Full sort scratch uses 16 bytes/visible entry
+serial, up to 32 bytes/visible entry in the parallel sample sort (buckets plus
+the gathered bucket; ~32 MB at 1M, freed when the sort returns); merge
+temporarily retains old and new ID vectors. Peak memory exceeds resident figure.
 
 ## FOX CCD1 measurements, 2026-11-17
 

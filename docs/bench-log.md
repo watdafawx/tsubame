@@ -5804,3 +5804,69 @@ quieter (21:34) and a 7.5 ms median when run again from the same binary at 21:55
 U4 builds gave 6.0 to 6.7 ms in between (`815a440`, `e1de2ee`, `da7b850`). Nothing U4 added runs per
 row or per frame in the list (palette and Settings are `None` while closed), so the spread is rig load, not a
 measured regression; rerun on a quiet rig before relying on the figure.
+
+## PERF2 — 2026-11-18, rig, base 63c27b7 vs main 29a1d3b vs perf2 (`4c37edb`)
+
+Method: `tools/open-probe.ps1`, 6 runs per point (warm: repeats), release.
+Cold = ssh working purge, disk settle, launch `tiny;<idle>;1k;tiny;<dir>`
+(only the folder is cold; standby purge does not cool NTFS metadata, VHDX
+dismount is ~7x real disk). overhead = final_frame - worker (app's own cost).
+
+Bisect (startup-overlapped method, median / p95 ms, 100k cold):
+
+| commit | first frame | final | worker | overhead |
+|---|---|---|---|---|
+| 63c27b7 | 90.1 / 162 | 410 / 703 | 164 | 248 |
+| 4a0c29a | 75.8 / 189 | 339 / 424 | 149 | 166 |
+| b2df364 | 97.7 / 152 | 381 / 455 | 157 | 204 |
+| 7e6c65b | 80.8 / 1146 | 582 / 4164 | 153 | 416 |
+| e230e30 | 75.6 / 175 | 423 / 500 | 155 | 257 |
+| 29a1d3b | 77.4 / 121 | 385 / 762 | 163 | 223 |
+
+No step commit; old method noise (startup tail + rig disk) dominates. Clean
+method: overhead base 32 -> main 44 cold, 36 -> 51 warm; main store_cpu
+65-68 ms (merge per batch into sorted view) is the cause.
+
+Results (median / p95 ms):
+
+| case | build | first rows | complete+sorted | worker | overhead |
+|---|---|---|---|---|---|
+| cold 100k | base | 22.9 / 40.7 | 180 / 306 | 148 | 32 |
+| cold 100k | main | 13.9 / 30.4 | 182 / 211 | 137 | 44 |
+| cold 100k | perf2 | 14.2 / 23.5 | 163 / 179 | 148 | 14 |
+| cold 1M | base | 23.8 / 82 | 3147 / 3255 | 1452 | 1691 |
+| cold 1M | main | 22.8 / 146 | 3490 / 3682 | 1490 | 2014 |
+| cold 1M | perf2 | 44.6 / 970 | 1624 / 3405 | 1565 | 57 |
+| warm 100k | base | 5.1 / 5.8 | 70.8 / 74.7 | – | 36 |
+| warm 100k | main | 5.9 / 6.8 | 85.9 / 94.5 | – | 51 |
+| warm 100k | perf2 | 6.7 / 11.0 | 43.2 / 49.3 | – | 10 |
+| warm 1M | base | 6.6 | 2298 / 3179 | – | – |
+| warm 1M | main | 6.9 | 2619 / 2681 | – | – |
+| warm 1M | perf2 | 7.0 / 7.7 | 430 / 514 | – | 51 |
+
+perf2 cold 100k: store_cpu 9.1, final_sort 6.5, watch_start 0.0 (was one
+227 ms outlier before `DirWatcher::spawn`). 1M p95 outliers are disk.
+
+Ops (`<ops>`, perf2, UI work only, median ms; filter p95 max in brackets):
+
+| op | 100k | 1M |
+|---|---|---|
+| sort size / modified / type | 3.5 / 2.5 / 5.6 | 28 / 30 / 84 |
+| sort name (from type order) | 16.8 | 166 |
+| sort name desc / asc | 6.7 / 5.3 | 69 / 66 |
+| filter type +1..+5 | 3.7 / 1.9 / 0.2 / 0.1 / 0.1 | 37 / 19 / 1.8 / 0.5 / 0.5 |
+| filter erase -4..-0 | 3.9 / 4.2 / 4.3 / 3.6 / 0.4 [4.9] | 39 / 42 / 43 / 36 / 4.9 |
+
+Erase before saved-order fix: 100k -1 10.6 / 21.3.
+
+bench-rig perf2 (`-ColdMode none`): cold first paint 88.1, 100k first rows
+6.23 / 27.29, sorted 44.64 / 140.64, scroll p95 4.75, idle CPU 31 ms, private
+65.7 / 84.1 MB, exe 1728 KB: PASS. Leak gate private +5.45 / +4.82 / +5.43 %
+(handles, GDI, threads flat): FAIL; same-day main 29a1d3b +4.96 / +4.00 /
++4.07 PASS. Cause: a thread per navigation in `DirWatcher::spawn`. Fix
+`dd1cd89` (one long-lived opener thread): +2.76 / +3.52 / +3.01 % PASS.
+
+Open: 1M name sort from another column 166 ms and 1M filter keystroke ~40 ms
+(> 50 / 16 ms); paint pacing (main.rs invalidates every pump, ~4 ms frames
+while streaming; needs a 16 ms timer, U4 file); cold 1M budget is disk-bound
+(worker ~1.5 s).
