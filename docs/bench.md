@@ -158,3 +158,13 @@ cold on rig (the worker stays at warm speed); a VHDX dismount does, but at
 ~7x the real disk's cost; worker time is the disk floor and varies 120 ms to
 1.9 s with other load on rig's G:, so compare `overhead` across builds and
 report medians with p95.
+
+PERF3 (2026-11-19): scroll p95 was 6.18 ms median of 10 on main `5b1cafb`, 2.70 ms
+after the fix (interleaved same session, rig CPU 12%). Not U4: 63c27b7, e230e30
+and 4c37edb all read ~6 ms interleaved after a rig reboot left the GPU shared
+(wallpaper, Parsec). Cause: every `text` drew with `D2D1_DRAW_TEXT_OPTIONS_CLIP`,
+a clip per string (~250 per frame) that splits Direct2D's batch; now only layouts
+whose ink overhangs the box clip (`GetOverhangMetrics`), and
+`TSUBAME_TEXT_CLIP=all` restores the old path for A/B (6.19 ms). Guard: `--bench`
+prints per-phase `cpu_build`, `enddraw`, `text_calls`/`text_clipped`, `text_ms`,
+layouts made and bitmaps; `text_clipped` stays 0 in the list.
