@@ -65,3 +65,7 @@ From PLAN section 7 P2: C3 file-op queue (GPT), C4 directory watcher (GPT), W1 s
 
 ## Update 8: P2 started (2026-11-18)
 - MEM1 (Opus, memory), C3 (GPT stopped early: base only, branch `t3/fileops-queue-undo-journal` @ 8d8b0cd) continued as C3b (Sonnet; GPT quota kept for later), C4 (Sonnet instead of GPT) launched. C4 merged: `tsubame-win::watch` (one IOCP thread for all watchers, 60 ms debounce, 0 idle CPU, apply 10k into 100k store ~4 ms), core store incremental API (`EntryStore::apply` etc.; `len()` is now the live count). UI hookup to tabs not done (docs/watcher.md).
+
+## Update 9: C3 merged (2026-11-18)
+- C3b (Sonnet) finished the file-op queue: `tsubame-win::fileops` (STA worker, IFileOperation recycle + restore, Replace via recycle, queue-wide totals, journal save/load, 45 tests; docs/fileops.md). 10k small files 5.8 s vs robocopy 8.3 s (median of 5, one 10.4 s outlier).
+- **Hazards for the UI card**: paths >= 260 chars are refused for recycling (the shell deletes them permanently); items larger than the bin limit are deleted permanently by the shell and cannot be detected in advance, so the UI must check size before offering recycle. Not done: grouped undo, wake callback, reparse-point-safe cross-volume moves, batching deletes into one IFileOperation.
