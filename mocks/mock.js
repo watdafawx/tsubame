@@ -56,6 +56,8 @@
     size = size || 16;
     return '<svg class="ic ' + (extra || '') + '" width="' + size + '" height="' + size + '" viewBox="0 0 16 16">' + IC[name] + '</svg>';
   }
+  // U4: expose the helpers mock-u4.js reuses (one line, nothing else in this file changed)
+  window.TsuInternals = { IC: IC, ic: function (n, s, e) { return ic(n, s, e); }, folderIcon: function (s) { return folderIcon(s); }, fileIcon: function (k) { return fileIcon(k); }, logo: function () { return logo(); }, winctl: function (n) { return winctl(n); }, esc: function (s) { return esc(s); }, fmtSize: function (b) { return fmtSize(b); } };
   function winctl(name) {
     var p = { min: '<path d="M0 5h10"/>', max: '<rect x=".5" y=".5" width="9" height="9"/>', close: '<path d="M0 0l10 10M10 0 0 10"/>' }[name];
     return '<svg class="ic" width="10" height="10" viewBox="0 0 10 10" style="stroke-width:1">' + p + '</svg>';

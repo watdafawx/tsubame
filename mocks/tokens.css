@@ -27,6 +27,8 @@
   --height-button: 28px;
   --height-column-header: 24px;
   --height-list-row: 22px;
+  --height-list-row-normal: 26px;
+  --height-list-row-comfortable: 30px;
   --height-sidebar-header: 26px;
   --height-sidebar-item: 24px;
   --height-sidebar-drive: 32px;
@@ -34,6 +36,17 @@
   --height-menu-item: 24px;
   --height-menu-separator: 9px;
   --height-progress-line: 2px;
+  --height-palette-input: 44px;
+  --height-palette-mode: 28px;
+  --height-palette-item: 34px;
+  --height-palette-section: 24px;
+  --height-palette-footer: 28px;
+  --height-field: 28px;
+  --height-keycap: 18px;
+  --height-settings-nav-item: 30px;
+  --height-settings-row: 52px;
+  --height-key-row: 32px;
+  --height-menu-edit-row: 30px;
   --icon-list: 16px;
   --icon-sidebar: 16px;
   --icon-toolbar: 16px;
@@ -54,6 +67,15 @@
   --layout-filter-width: 220px;
   --layout-drive-bar-height: 3px;
   --layout-focus-ring-width: 1px;
+  --layout-palette-width: 640px;
+  --layout-palette-top: 56px;
+  --layout-settings-nav-width: 232px;
+  --layout-settings-content-width: 880px;
+  --layout-toggle-width: 34px;
+  --layout-toggle-height: 18px;
+  --layout-theme-card-width: 132px;
+  --layout-theme-card-height: 76px;
+  --layout-slider-width: 200px;
 }
 :root, :root[data-theme="dark"] {
   color-scheme: dark;
