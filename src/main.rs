@@ -36,6 +36,7 @@ mod cols;
 mod data;
 mod leak;
 mod lru;
+mod memdiag;
 mod nav;
 mod shellui;
 mod sidebar;
@@ -81,6 +82,10 @@ const WATCH_MS: u32 = 1000;
 const HANG_MS: u32 = 20_000;
 /// Resize border of the frameless window, DIPs.
 const RESIZE_BORDER: f32 = 6.0;
+
+#[cfg(feature = "memdiag")]
+#[global_allocator]
+static ALLOC: memdiag::counting::Counting = memdiag::counting::Counting;
 
 static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
 static PLACES_BUSY: AtomicBool = AtomicBool::new(false);
@@ -158,6 +163,9 @@ fn parse_density(s: &str) -> Option<Density> {
 }
 
 fn main() {
+    // the first frame's software stand-in device, made while the window and
+    // the folder are set up
+    tsubame_d2d::prewarm_software();
     let args: Vec<String> = std::env::args().collect();
     let flag = |n: &str| args.iter().any(|a| a == n);
     let bench_mode = flag("--bench") || std::env::var_os("TSUBAME_BENCH").is_some_and(|v| v != "0");
@@ -420,8 +428,10 @@ unsafe fn on_paint(hwnd: HWND) {
         let mut rc = RECT::default();
         let _ = unsafe { GetClientRect(hwnd, &mut rc) };
         let ms = bench::ms_since_process_start();
+        let create_ms = a.gfx.create_ms;
         if let Some(b) = a.bench.as_mut() {
             b.first_paint(path, (rc.right, rc.bottom), a.gfx.dpi);
+            b.first_frame = format!("first_frame: paint_start_ms={:.1} total_ms={total_ms:.1} create_ms={create_ms:.1} enddraw_ms={end_ms:.1}", ms - total_ms as f64);
         }
         if let Some(t) = a.timing.as_mut() {
             t.first_paint(ms, bench::memory().0);
@@ -536,6 +546,8 @@ unsafe fn on_bench_tick(hwnd: HWND) {
                 a.pool.leaked_alive()
             ));
             extra.push_str(&format!("icon cache: {} entries, {:.2} MB, evictions {}\n", a.shell.icons.len(), a.shell.icons.bytes() as f64 / 1048576.0, a.shell.icons.evictions));
+            let (layouts, formats, bitmaps) = a.gfx.cache_counts();
+            extra.push_str(&format!("gfx caches: {layouts} layouts, {formats} formats, {bitmaps} bitmaps\n"));
             if a.hang_bench {
                 extra.push_str(&format!("hang test: {} workers hung {} ms each at scroll start; threshold {} ms\n", a.pool.workers(), HANG_MS, a.pool.hang_after.as_millis()));
             }

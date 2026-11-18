@@ -133,13 +133,17 @@ pub fn run(start: &str) -> String {
     let folders = pick_folders(&mut v, start);
     round(&mut v, &folders, 20, 5); // warm-up
     let before = counters();
-    round(&mut v, &folders, NAVS, TABS);
+    let n: usize = std::env::var("SMOKE_NAVS").ok().and_then(|v| v.parse().ok()).unwrap_or(NAVS); // DIAGTEMP
+    let mut dl = crate::memdiag::line("smoke 0"); // DIAGTEMP
+    for k in 0..10 { round(&mut v, &folders, n / 10, 0); dl.push_str(&crate::memdiag::line(&format!("smoke {}", (k + 1) * n / 10))); } // DIAGTEMP
+    round(&mut v, &folders, 0, TABS);
     // let detached enumerator threads finish before measuring
     std::thread::sleep(Duration::from_millis(500));
     let after = counters();
     let mut s = String::new();
     s.push_str(&format!("leak-smoke: {NAVS} navigations over {} folders, {TABS} tab open/close, start {start}\n", folders.len()));
     s.push_str(&format!("before: {}\n", before.line()));
+    s.push_str(&dl); // DIAGTEMP
     s.push_str(&format!("after:  {}\n", after.line()));
     s.push_str(&format!(
         "delta: private {:+.2} MB, working set {:+.2} MB, handles {:+}, gdi {:+}, user {:+}\n",
@@ -297,6 +301,8 @@ pub struct Gate {
     end: Option<Snap>,
     trim: Option<Snap>,
     trim_note: String,
+    /// TSUBAME_MEMDIAG blocks (start, end, after the trim)
+    memdiag: String,
     notes: Vec<String>,
     run_started: Option<Instant>,
     /// start of the current measured phase (navs, then tabs)
@@ -357,6 +363,7 @@ impl Gate {
             end: None,
             trim: None,
             trim_note: String::new(),
+            memdiag: String::new(),
             notes: Vec::new(),
             run_started: None,
             phase_started: Instant::now(),
@@ -399,6 +406,7 @@ impl Gate {
     fn sample(&mut self, ops: usize) -> Snap {
         let s = Snap::take();
         self.timeline.push(Sample { ops, snap: s });
+        self.memdiag.push_str(&crate::memdiag::line(&format!("{ops} ops")));
         s
     }
 
@@ -659,6 +667,7 @@ impl Gate {
                     return Step::Wait;
                 }
                 self.start = Some(self.sample(0));
+                self.memdiag.push_str(&crate::memdiag::sample("gate_start"));
                 self.start_folder = v.tab().path.clone();
                 self.start_path = self.paint_path;
                 self.phase = Phase::RunNav;
@@ -676,6 +685,7 @@ impl Gate {
                 }
                 let end = self.sample(self.navs + self.tabs);
                 self.end = Some(end);
+                self.memdiag.push_str(&crate::memdiag::sample("gate_end"));
                 self.phase = Phase::Trim;
                 Step::Wait
             }
@@ -684,6 +694,7 @@ impl Gate {
                 shell.icons = crate::lru::Lru::new(crate::shellui::ICON_CAP_ITEMS, crate::shellui::ICON_CAP_BYTES);
                 self.trim_note = format!("icon cache cleared ({before} entries, cap {} items / {} MB)", crate::shellui::ICON_CAP_ITEMS, crate::shellui::ICON_CAP_BYTES / 1048576);
                 self.trim = Some(Snap::take());
+                self.memdiag.push_str(&crate::memdiag::sample_opt("gate_trim"));
                 let text = self.report_text();
                 let name = std::env::var("TSUBAME_LEAK_OUT").unwrap_or_else(|_| "leak-gate.txt".into());
                 crate::bench::write_text_report(&name, &text);
@@ -860,6 +871,7 @@ impl Gate {
         for n in &self.notes {
             let _ = writeln!(s, "note={n}");
         }
+        s.push_str(&self.memdiag);
         let _ = writeln!(s, "gate={}", if self.pass { "PASS" } else { "FAIL" });
         let _ = writeln!(s, "fail={}", if failed.is_empty() { "-".to_string() } else { failed.join(",") });
         let _ = writeln!(s, "exit={}", (!self.pass) as u8);
