@@ -43,7 +43,8 @@ param(
   [string] $Report = 'u2-timing.txt',
   [int]    $SettleDiskPct = 15,                         # cold: after the purge, wait until rig's disks are this idle
   [int]    $SettleMaxSec = 20,
-  [switch] $StartupNav,                                 # cold: navigate right after startup (no <idle>)
+  [switch] $StartupNav,
+  [switch] $Ops,                                        # warm: also time sort switches + filter keystrokes (<ops>) on <dir>                                 # cold: navigate right after startup (no <idle>)
   [Parameter(Mandatory)] [string] $Out
 )
 $ErrorActionPreference = 'Stop'
@@ -103,6 +104,7 @@ if (Test-Path `$rep) { 'ok'; Get-Content `$rep } else { 'noreport' }
 
 $keys = 'first_batch', 'first_frame', 'done', 'final_frame', 'worker', 'store_cpu', 'final_sort', 'watch_start'
 $rows = [Collections.Generic.List[object]]::new()
+$opRows = [Collections.Generic.List[object]]::new()
 for ($i = 1; $i -le $Runs; $i++) {
   foreach ($b in $list) {
     if ($Mode -eq 'cold') {
@@ -127,9 +129,18 @@ for ($i = 1; $i -le $Runs; $i++) {
       # the storm pass, re-warms itself on the tiny folder, then opens <dir>
       $text = Invoke-Launch $b "--timing --timing-dirs `"$Tiny;<purge>;$Tiny;$Dir`" --reps 1 $ExtraArgs" -Elevated
     } else {
-      $text = Invoke-Launch $b "--timing --timing-dirs `"$Dir`" --reps $WarmReps $ExtraArgs"
+      $dirs = if ($Ops) { "$Dir;<ops>" } else { $Dir }
+      $text = Invoke-Launch $b "--timing --timing-dirs `"$dirs`" --reps $WarmReps $ExtraArgs"
     }
     $text | Set-Content -Path (Join-Path $Out ('{0}-{1:d2}.txt' -f $b.Label, $i))
+    # ops: "ops: entries N  sort  size 1.23 ..." / "ops: filter "abc"  +1 0.50 (123) ..."
+    foreach ($l in $text) {
+      if ($l -match '^ops: entries') {
+        foreach ($m in [regex]::Matches($l, '  (\w+) ([\d.]+)')) { $opRows.Add([pscustomobject]@{ label = $b.Label; op = "sort_$($m.Groups[1].Value)"; ms = [double]$m.Groups[2].Value }) }
+      } elseif ($l -match '^ops: filter') {
+        foreach ($m in [regex]::Matches($l, '  ([+-]\d+) ([\d.]+) \(')) { $opRows.Add([pscustomobject]@{ label = $b.Label; op = "filter$($m.Groups[1].Value)"; ms = [double]$m.Groups[2].Value }) }
+      }
+    }
     # cold: the row after `startup`; warm: every `repeat` row (and `first` separately)
     foreach ($l in $text) {
       if ($l -notmatch '^(startup|first|repeat \d+)\s+entries\s+(\d+)') { continue }
@@ -166,5 +177,14 @@ foreach ($kind in ($rows | Select-Object -ExpandProperty kind -Unique)) {
       if ($v.Count) { $line += "  $k $(Stat $v)" }
     }
     Write-Host $line
+  }
+}
+if ($opRows.Count) {
+  Write-Host "`nops (UI work, no paint): median / p95 [min,max] ms"
+  foreach ($b in $list) {
+    foreach ($op in ($opRows | Where-Object label -eq $b.Label | Select-Object -ExpandProperty op -Unique)) {
+      $v = @($opRows | Where-Object { $_.label -eq $b.Label -and $_.op -eq $op } | ForEach-Object ms)
+      Write-Host ("{0,-10} {1,-16} {2}" -f $b.Label, $op, (Stat $v))
+    }
   }
 }
