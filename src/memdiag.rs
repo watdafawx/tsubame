@@ -306,3 +306,28 @@ pub fn sample_opt(label: &str) -> String {
     }
     s
 }
+
+/// One compact line (for per-sample timelines): private, all heaps committed,
+/// process heap busy / free, outside heaps, writable images, mapped, Rust live.
+pub fn line(label: &str) -> String {
+    if !enabled() {
+        return String::new();
+    }
+    let s = snapshot();
+    let mb = |b: usize| b as f64 / 1048576.0;
+    let committed: usize = s.heaps.iter().map(|h| h.committed).sum();
+    let (busy, free) = s.heaps.iter().find(|h| h.process_heap).map(|h| (h.busy, h.committed.saturating_sub(h.busy))).unwrap_or((0, 0));
+    let rust = rust_live().map(|(l, _)| mb(l)).unwrap_or(-1.0);
+    format!(
+        "memdiag.line {label}: private={:.2} heaps={:.2} heap0_busy={:.2} heap0_free={:.2} outside={:.2} allocs={} images={:.2} mapped={:.2} rust={:.2}\n",
+        mb(s.private_usage),
+        mb(committed),
+        mb(busy),
+        mb(free),
+        mb(s.private_outside_heaps),
+        s.outside_allocs,
+        mb(s.image_writable),
+        mb(s.mapped_commit),
+        rust
+    )
+}

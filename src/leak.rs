@@ -133,13 +133,17 @@ pub fn run(start: &str) -> String {
     let folders = pick_folders(&mut v, start);
     round(&mut v, &folders, 20, 5); // warm-up
     let before = counters();
-    round(&mut v, &folders, NAVS, TABS);
+    let n: usize = std::env::var("SMOKE_NAVS").ok().and_then(|v| v.parse().ok()).unwrap_or(NAVS); // DIAGTEMP
+    let mut dl = crate::memdiag::line("smoke 0"); // DIAGTEMP
+    for k in 0..10 { round(&mut v, &folders, n / 10, 0); dl.push_str(&crate::memdiag::line(&format!("smoke {}", (k + 1) * n / 10))); } // DIAGTEMP
+    round(&mut v, &folders, 0, TABS);
     // let detached enumerator threads finish before measuring
     std::thread::sleep(Duration::from_millis(500));
     let after = counters();
     let mut s = String::new();
     s.push_str(&format!("leak-smoke: {NAVS} navigations over {} folders, {TABS} tab open/close, start {start}\n", folders.len()));
     s.push_str(&format!("before: {}\n", before.line()));
+    s.push_str(&dl); // DIAGTEMP
     s.push_str(&format!("after:  {}\n", after.line()));
     s.push_str(&format!(
         "delta: private {:+.2} MB, working set {:+.2} MB, handles {:+}, gdi {:+}, user {:+}\n",
@@ -402,6 +406,7 @@ impl Gate {
     fn sample(&mut self, ops: usize) -> Snap {
         let s = Snap::take();
         self.timeline.push(Sample { ops, snap: s });
+        self.memdiag.push_str(&crate::memdiag::line(&format!("{ops} ops")));
         s
     }
 
