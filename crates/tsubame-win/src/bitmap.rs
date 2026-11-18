@@ -16,11 +16,17 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, HICON, ICONINFO};
 
 /// Premultiplied BGRA pixels, top-down rows.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Bitmap {
     pub w: u32,
     pub h: u32,
     pub px: Vec<u32>,
+}
+
+impl std::fmt::Debug for Bitmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Bitmap({}x{})", self.w, self.h)
+    }
 }
 
 impl Bitmap {

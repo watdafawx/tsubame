@@ -21,6 +21,7 @@
 //! leaked and exits on its own if its call ever returns. Its reply is thrown
 //! away. See `docs/shell-threading.md`.
 
+pub mod ctxmodel;
 mod icon;
 mod menu;
 mod thumb;
