@@ -5727,3 +5727,61 @@ the second (the table's figure). Private bytes 66.2 MB idle (budget 90 MB
 windowed), 84.2 MB after the 4K scroll run (budget 110 MB). Leak gate PASS
 (+3.7% worst run). Exe 1664 KB. The two cold-cache rows (n=1, disk-bound
 after a working-set purge) miss their budgets; INT1 did not touch listing.
+
+## PERF1 investigation — 2026-11-18, base e230e30 (incomplete)
+
+Rig, slots 2/3; same generated seed-20261117 100k fixture on G: NVMe,
+System32 for menus. Actual desktop 3840x2076 at 168 dpi, not earlier 192 dpi.
+Production allocator for cold timing; memdiag allocator only for menu attribution.
+Two Minecraft processes, 26 Docker containers; observed CPU 10–12% (not a
+continuous load recording). Six independent working-purge + tiny-folder startup
++ 100k navigation processes per build. Stale-report attempts were discarded.
+
+| Metric ms, median [min,max], n=6 | 63c27b7 | e230e30 + timing counter |
+|---|---|---|
+| 100k first rows presented | 68.88 [36.07,192.41] | 78.70 [39.83,136.20] |
+| 100k sorted frame | 283.99 [246.04,407.10] | 423.68 [304.01,609.29] |
+| enumerator worker elapsed | 150.73 [132.96,158.15] | 149.39 [143.02,177.81] |
+| UI conversion + store + incremental sort | unavailable | 93.21 [88.42,101.58] |
+
+Every run fails 30/200 ms. Similar worker time and slower main UI endpoint
+point toward app-side delivery/rendering/paging rather than slower disk
+enumeration. This is not a complete causal regression attribution: runs were
+sequential, load was not continuously controlled, and app pages are purged too.
+Main sample with 304.01 ms final: worker 161.96, store CPU 88.42,
+Done 298.61, final presentation tail 5.40 ms. Worker and store overlap;
+subtracting both from total is not a valid stall measurement. Nt syscall-only,
+insertion-only versus sort-only, first-paint CPU and UI stall tracing remain open.
+
+Cold FindFirstFileEx floor (same fixture, elevated `tsubame-bench enum --method
+find --runs 6 --cold --purge-mode working`): first-batch median 8.921 ms,
+complete median 120.717, range 116.521–133.695. Disk floor does not establish
+200 ms is impossible. No budget wording change proposed.
+
+Tried binary-search/copy of the unchanged old prefix before incremental merge:
+core 13 tests and app 149 tests pass, but cold store CPU median 100.27 ms
+[94.18,113.18], sorted frame 388.51 [276.87,1234.05], first frame 115.97
+[49.73,665.34]. No demonstrated improvement; experiment reverted.
+Three scroll probes of that experimental binary: p95 7.28/5.92/4.99 ms
+(median 5.92, FAIL), endpoint private 84.3/83.8/83.9 MB (PASS 110 MB),
+exe 1,704,960 bytes (PASS 6 MB). These are not final-patch scroll validation.
+No final idle wake-up, windowed-memory or 10k-nav/1k-tab gate rerun.
+
+MENU-LEAK: unmodified main 10->200 72.6->78.1 MB (+7.5%). Diagnostic main
+72.39->77.98 (+7.7%): heap commit +0.46 MB; outside heaps +4.77 MB,
+127->318 allocations; Rust live +0.01 MB; mapped writable flat.
+Main 1000 menus 10/100/1000 = 71.8/74.6/98.6 MB; no plateau.
+Historical S4 e2fa069 10/100/200 = 89.4/82.3/84.9; extended S4
+10/100/1000 = 88.3/82.4/107.3. S4's negative gate masks existing growth
+with delayed renderer release. HWND A/B on main also masks it (-3.8% at
+200), yet 100->200 grows 82.7->85.5 MB. No passing long-run historical
+endpoint, so new-leak bisect premise fails. Exact native allocation owner is
+unresolved; do not label it SegmentHeap fragmentation. See shell-threading.md.
+Clip stress and native allocation-stack capture were not run. Gates unchanged.
+
+Retained changes: stress memdiag/checkpoints/configurable count, timing store
+CPU counter, stale-report removal in bench harness. No menu lifetime fix or
+speed optimization claimed. No U4-owned files edited. Local CCD1 check with
+memdiag passed; app 149 tests and core 13 tests passed. Existing dead-code
+warnings remain. Cleanup stops only owned slots and removes owned fixtures,
+extra worktrees and scratch files. No push/merge.

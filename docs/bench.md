@@ -131,3 +131,11 @@ Measured on `7eac782` (U2 merged), first real entry: `docs/bench-log.md`.
   measurement that isolates the folder would need the app to purge mid-run.
 - Idle wake-ups were not counted with ETW; `Get-Counter \Thread(*)` has no
   instances for this process on rig, so only CPU time is reported.
+
+PERF1: timing reports additionally print `store_cpu` (cumulative UI batch
+conversion + store insertion + incremental sorting). It overlaps `worker`,
+so do not add them to infer elapsed time. `done - worker` includes UI
+scheduling/paging/paint contention, not solely sorting. `final_frame - done`
+is the final presentation tail. Cold app + cold metadata remains the exact
+purge-and-launch scenario; it does not isolate a warm renderer navigating
+into cold metadata. Stale report files are removed before each launch.

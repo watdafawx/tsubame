@@ -43,7 +43,7 @@ impl Run {
         let tm = t.timing;
         let _ = writeln!(
             self.out,
-            "{label:<9} entries {:>7} ({:.1} MB)  first_batch {}  first_frame {}  done {}  final_frame {}  worker {}   {}",
+            "{label:<9} entries {:>7} ({:.1} MB)  first_batch {}  first_frame {}  done {}  final_frame {}  worker {}  store_cpu {}   {}",
             t.store.len(),
             t.memory_bytes() as f64 / 1048576.0,
             ms(tm.first_batch),
@@ -51,6 +51,7 @@ impl Run {
             ms(tm.done),
             ms(tm.final_frame),
             ms(tm.worker),
+            ms(Some(tm.store_cpu)),
             t.path
         );
     }
