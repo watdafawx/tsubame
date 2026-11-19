@@ -1,4 +1,4 @@
-# Context menu verification (CM2, CM3, CM5)
+# Context menu verification (CM2–CM6)
 
 Implementation inherited the CM1 model/STA worker and the WIP menu widget,
 composition, right-click wiring and loading state. Completion repaired the
@@ -162,3 +162,67 @@ The escape-hatch pick is covered by routing tests and uses that same native path
 Cleanup: stopped the owned test app through its slot; removed task fixtures,
 headless-browser scratch/profile and local scratch files. No unrelated app was
 closed. Standard harness raw report directories remain as measurement evidence.
+
+## CM4 + CM6: input polish and lazy submenus
+
+Same method as above: release build of commit `83c307e` (exe 2,887,680 B,
+SHA-256 prefix `3dc29a397d945a7e`, +1.0% vs CM2's 2,859,008 B) on the remote
+test desktop, keyboard-only screenshots, focused-window check before each key.
+
+### Screenshots (`docs/shots/`)
+
+| File | Checks |
+|---|---|
+| `cm4-mouse-dark.png` | Mouse open: no accelerator underlines; Copy and Copy name use different glyphs |
+| `cm4-filter-dark.png` | Filter field (glyph, caret, "N matches", Esc cap), match highlight, dim "Send to › " prefix, separators collapsed |
+| `cm4-keyboard-dark.png` | Keyboard open: underlines and focus ring |
+| `cm4-submenu-kb-dark.png` | Alt+N opens Send to with its first row focused; Left returns to the parent |
+| `cm4-alt-held-light.png` | Alt held after a mouse open shows underlines; keyup hides them |
+| `cm4-filter-loading-light.png`, `cm4-filter-arrived-light.png` | Filtering while shell rows load; focus stays on the first match as 36 matches arrive |
+| `cm6-sub-loading-light.png`, `cm6-sub-filled-light.png` | Lazy submenu shows "Loading…" (`TSUBAME_CTX_SUB_DELAY_MS`), then its rows with the first focused |
+
+First Esc with a filter clears it and keeps the menu; the next Esc closes.
+
+Deviations from the mock: shell handler icons vary between runs (some handlers
+return no bitmap); the filtered menu widens to fit prefixed labels; the
+"Loading…" row has no icon.
+
+### Menu timing (`--stress ctxmenu`, 200 menus, same binary and fixtures)
+
+Raw reports: `docs/measurements/cm6-lazy.txt`, `docs/measurements/cm6-eager.txt`.
+
+| Metric | CM2 (before) | CM6 lazy (default) | Eager (`TSUBAME_CTX_EAGER=1`) |
+|---|---|---|---|
+| Warm first paint p50 / p95 | 1.29 ms p50 | 1.46 / 1.83 ms | 1.27 / 1.67 ms |
+| Warm right-click to top-level items p50 / p95 | (same as all) | 35.81 / 41.69 ms | 35.72 / 41.36 ms |
+| Warm right-click to all items p50 / p95 | 162.21 / 200.98 ms | 35.81 / 41.69 ms (submenus on demand) | 184.91 / 246.53 ms |
+| Cold first paint / top level / all | 615 ms all | 2.571 / 557.1 / 557.1 ms | 2.405 / 573.0 / 798.9 ms |
+| Lazy submenu answer | n/a | p50 55 / p95 64 / max 112 ms (200 of 200) | n/a |
+| Private, menu 10 → 200 | +4.8 MB (native +5.7) | 73.1 → 77.5 MB (+4.4 MB) | 72.4 → 77.5 MB (+5.1 MB) |
+| Failures | 0 | 0 | 0 |
+
+The lazy first-paint p50 is 0.17 ms above CM2; the eager run on the same binary
+measured 1.27 ms, so the difference is within run-to-run noise.
+
+### Budget harness
+
+Full output: `docs/measurements/cm4-cm6-budgets.md`. Cold start 61.40 ms median
+(PASS), scroll p95 2.76 ms (PASS), private 63.0 MB small folder at 4K and
+83.9 MB max after the 100k scroll (PASS), leak gate +2.1% (PASS), exe 2820 KB
+(PASS). Idle CPU: 0 ms over the first window, 78 ms over the second (FAIL, the
+same pattern as CM2's 93.8 ms; no menu was open, so no menu timer existed, and
+the menu tick timer is armed only while `CtxMenu::ticking()` is true).
+Cold-cache 100k open was not measured (needs elevation).
+
+### Tests
+
+`test --workspace`: 660 passed, 0 failed. New unit tests cover submenu
+open/close timing and the safe triangle, accelerator cycling, filter matching
+and prefixes, page/Home/End focus, wheel scrolling, focus fallback when a row
+vanishes, `SubLoads` state, lazy "Loading…"/failure rows and distinct Copy /
+Copy name glyphs.
+
+### Not verified on the test desktop
+
+Hover open/close timing and the safe triangle, wheel scrolling, the Retry row
+for a slow lazy submenu and the "No matching items" row are unit-tested only.
