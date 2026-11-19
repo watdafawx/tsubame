@@ -295,3 +295,93 @@ handlers and the real worker batches for a path (`TSUBAME_PKG_PROBE`).
   PC has one; covered by the model test only.
 - A hung packaged handler: it would trip the 4 s watchdog like a hung classic
   handler: the shell rows go and the failure row with Retry shows (own rows stay).
+
+## CM8: editing the menu
+
+Release build of commit `41fcbf9` (exe 3,070,976 B, SHA-256 prefix
+`d286386d193194f7`) against a release build of `10aa230` (CM7 + CM9, exe
+2,974,208 B) on the remote test desktop (one 4K monitor at 200 %),
+`TSUBAME_GPU_PARK=0`. Fixture: a folder with one subfolder and five `.txt`
+files. The CM8 stress menus carry a fixed set of edits (one hidden and one
+renamed native item, 40 remembered items), so the override pass runs on
+every menu; the CM7 build ignores them.
+
+### Menu timing (`--stress ctxmenu`, 200 menus, runs interleaved CM8, CM7, CM8, CM7)
+
+| Metric | CM8 run 1 | CM8 run 2 | CM7 run 1 | CM7 run 2 |
+|---|---|---|---|---|
+| Warm first paint p50 / p95 | 1.51 / 1.87 ms | 1.48 / 1.97 ms | 1.47 / 1.89 ms | 1.46 / 1.81 ms |
+| Warm top level p50 / p95 | 36.25 / 40.31 ms | 36.19 / 42.46 ms | 35.81 / 40.88 ms | 36.38 / 40.65 ms |
+| Warm all items p50 / p95 | 45.90 / 50.72 ms | 45.96 / 53.25 ms | 45.37 / 51.16 ms | 45.39 / 51.23 ms |
+| Cold first paint / top level / all | 2.8 / 810.5 / 887.2 ms | 2.7 / 565.8 / 580.9 ms | 2.4 / 567.4 / 583.3 ms | 2.5 / 572.9 / 589.8 ms |
+| Failures | 0 | 0 | 0 | 0 |
+
+The warm top level is within noise of CM7 on the same machine and day, and
+under the CM7 figures above (38.38 / 44.78 ms). The first CM8 cold figure is
+the first start of a freshly copied binary; the second CM8 run matches CM7.
+Both builds measured about 570 ms cold that day, above the 477 ms recorded
+for CM7, so the difference is the machine, not CM8.
+
+### Growth over 200 menus
+
+| | CM8 run 1 | CM8 run 2 | CM7 run 1 | CM7 run 2 |
+|---|---|---|---|---|
+| Private bytes, menu 10 -> 200 | +6.7 % | +7.3 % | +7.4 % | +6.9 % |
+| Handles, menu 10 -> 200 | +5 | +2 | +6 | +20 |
+| GDI / USER, menu 10 -> 200 | +0 / +4 | +0 / +0 | +0 / +2 | -1 / +3 |
+| Private bytes end vs start | +21.9 % | +22.6 % | +22.2 % | +21.7 % |
+
+CM8 grows no more than CM7. Both builds fail the harness's 5 % private-bytes
+gates on this fixture (the CM7 build too, so it predates CM8); handles, GDI
+and USER objects stay flat.
+
+### Checked on the test desktop
+
+Debug build, keyboard only, focused window checked before keys, a scratch
+folder of 20 `.txt` files and one subfolder, config restored afterwards.
+
+- Shift+F10 on a row of the open menu opens its edit menu beside the row:
+  header with the source tag (Tsubame / Windows), Hide (Del), Rename (F2),
+  Move up / down (Alt+arrows), Edit in Settings. A Windows item shows the
+  note and greyed moves; an extra like "Copy name" greys the moves too.
+- Del hides the row; the menu stays open and the strip
+  "Hid “Copy as path” | Undo | Manage" shows at the bottom. End, Enter
+  (Undo) brings the row back.
+- F2 on "Add to Favorites" turns the row into a field; Enter saves
+  "Favourite it", the row shows it at once, and the config has
+  `name = "Favourite it"` on key `windows.verb:pintohomefile`.
+- Alt+Up on "Copy as path" moves it one place up in the list (config order
+  changed). Its neighbour Paste is folded into the icon row on that menu,
+  so the visible list did not change.
+- Edit in Settings closes the menu and opens Settings > Context menu with
+  the search set to the row's name and the row selected.
+- The first menu ever learned 23 items, none tagged New.
+- Settings: groups with counts, chips, search across both lists, the
+  learned-items card with source tags.
+
+Found and fixed during the check: every Windows item of the first menu was
+tagged New (the shell batch came after the Tsubame rows were learned); an
+edit made the escape-hatch row read "Show more options"; with a search, the
+learned-items card overlapped the preview.
+
+### Tests
+
+New unit tests: row keys (verb, label, packaged family + CLSID, `app:`
+extras, a translated label keeps the key), overrides (hide, rename, no
+reorder, submenus, unknown keys change nothing, CM7 CLSID keys still apply,
+the escape hatch keeps its label), group order, learning (first menu tags
+nothing, later ones tag new items once), config round trip and a bad item or
+group dropped alone, the edit menu (mouse and keyboard hit testing, rename
+field, Esc layering, strip Undo / Manage), move up / down limits, and the
+editor's search, chips, counts and Reset.
+
+### Not verified on the test desktop
+
+- Mouse paths: right-click on a menu row, the eye toggles, double-click
+  rename, the grip drags and the chips in Settings (mouse input does not
+  reach the remote desktop); covered by widget and editor tests.
+- The Menu key (same code path as Shift+F10, unit-tested).
+- Shift+F10 while typing to filter: the edit menu is off while a filter is
+  active, by design (filtered rows are flattened paths).
+- Packaged rows (`windows.pkg:` keys): no packaged row showed on the test
+  fixture; covered by the model test.
