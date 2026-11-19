@@ -659,11 +659,33 @@ fn native_bg_menu(a: &mut App, folder: String, sx: i32, sy: i32, extended: bool)
 /// its handle closes it on its worker, its late batches are dropped).
 fn open_own(a: &mut App, t: crate::ctxui::Target) {
     a.view.ctx = None;
-    let entries = MENU.read().map(|m| m.clone()).unwrap_or_default();
+    let mut menu = a.view.prefs.context_menu.clone();
+    menu.entries = tsubame_config::menu::effective(&menu.entries);
     let icon_px = ((16.0 * a.view.dpi / 96.0 * (a.ui.theme.font_size_sm / 12.0).max(1.0)).round() as u32).clamp(16, 64);
     let dual = a.view.dual();
     let paste_ok = crate::ctxui::clipboard_has_files();
-    a.view.ctx = Some(Box::new(crate::ctxui::CtxMenu::open(t, entries, dual, paste_ok, icon_px, &mut a.pool)));
+    a.view.ctx = Some(Box::new(crate::ctxui::CtxMenu::open(t, menu, dual, paste_ok, icon_px, &mut a.pool)));
+}
+
+/// CM8: what the open menu changed in the menu settings goes to the config
+/// (debounced atomic save through `apply_prefs`), and "Edit in Settings…" /
+/// Manage open Settings > Context menu on that item.
+fn ctx_save_edits(a: &mut App) {
+    let Some(c) = a.view.ctx.as_mut() else { return };
+    let (edited, learned) = (std::mem::take(&mut c.edited), std::mem::take(&mut c.learned));
+    let focus = c.settings_key.take();
+    if edited || learned {
+        let saved = &mut a.view.prefs.context_menu;
+        if edited {
+            saved.entries = c.menu.entries.clone();
+        }
+        saved.items = c.menu.items.clone();
+        a.view.apply_prefs(&mut a.ui, crate::settings::C_MENU);
+    }
+    if let Some(key) = focus {
+        a.view.ctx = None;
+        a.view.open_menu_item(&key);
+    }
 }
 
 /// After a frame: a right click on empty space opens the folder's menu.
@@ -712,15 +734,17 @@ pub fn ctx_after_frame(hwnd: HWND) {
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let ran = with(|a| {
-        let c = a.view.ctx.as_mut()?;
+        let saved = a.view.ctx.as_ref().is_some_and(|c| c.edited || c.settings_key.is_some());
+        ctx_save_edits(a);
+        let Some(c) = a.view.ctx.as_mut() else { return saved.then_some(()) };
         let retry = std::mem::take(&mut c.retry);
         if retry {
             c.retry_now(&mut a.pool);
         }
         let pick = c.picked.take();
-        let changed = retry || pick.is_some() || c.finished();
+        let changed = saved || retry || pick.is_some() || c.finished();
         let t = c.target.clone();
-        let entries = c.entries.clone();
+        let entries = c.menu.entries.clone();
         match pick {
             Some(crate::ctxui::Pick::Shell(id)) => c.invoke(id, shift, ctrl),
             Some(crate::ctxui::Pick::App(act)) if act == "file.properties" => c.invoke_verb("properties"),

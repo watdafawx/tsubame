@@ -260,9 +260,134 @@ pub fn program_entries(entries: &[MenuEntry], target: Target, ext: &str) -> Vec<
     out
 }
 
+// ---- items learned from real menus (CM8) ------------------------------------
+
+/// `[[context_menu.items]]`: the user's view of an item the own-drawn menu
+/// showed that is not in `entries` (Windows' classic and packaged items, and
+/// Tsubame rows such as Copy name). Keyed by `key`, never by label:
+/// `windows.verb:<verb>` (classic items with a canonical verb),
+/// `windows.label:<label>` (classic items without one),
+/// `windows.pkg:<package family>/{clsid}` (packaged Win11 items) and
+/// `app:<action>` (Tsubame rows outside the list).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ItemPref {
+    pub key: String,
+    /// the label first seen (shown in Settings; not updated afterwards)
+    pub label: String,
+    /// where it comes from: `Windows`, `Tsubame` or a package family
+    pub from: String,
+    pub hidden: bool,
+    /// the user's label; empty = the item's own
+    pub name: String,
+    /// appeared since the Settings page was last opened
+    pub new: bool,
+}
+
+/// The menu's groups, top to bottom (`groups` in `[context_menu]`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Group {
+    /// Tsubame's built-ins and own rows
+    Tsubame,
+    /// the classic shell items
+    Windows,
+    /// packaged (Win11) items of installed apps
+    Apps,
+    /// the user's custom and imported entries
+    Custom,
+}
+
+impl Group {
+    pub const ALL: [Group; 4] = [Group::Tsubame, Group::Windows, Group::Apps, Group::Custom];
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Tsubame => "Tsubame",
+            Group::Windows => "Windows",
+            Group::Apps => "Installed apps",
+            Group::Custom => "Custom",
+        }
+    }
+}
+
+/// The group order to draw: `saved` without duplicates, then any group it
+/// lacks in the default order.
+pub fn group_order(saved: &[Group]) -> Vec<Group> {
+    let mut v: Vec<Group> = Vec::with_capacity(4);
+    for g in saved.iter().chain(Group::ALL.iter()) {
+        if !v.contains(g) {
+            v.push(*g);
+        }
+    }
+    v
+}
+
+/// Most items remembered; past it the oldest ones the user never edited go.
+pub const MAX_ITEMS: usize = 400;
+
+/// The pref for `key` (case-insensitive), if any.
+pub fn item<'a>(items: &'a [ItemPref], key: &str) -> Option<&'a ItemPref> {
+    if key.is_empty() {
+        return None;
+    }
+    items.iter().find(|p| p.key.eq_ignore_ascii_case(key))
+}
+
+pub fn item_mut<'a>(items: &'a mut [ItemPref], key: &str) -> Option<&'a mut ItemPref> {
+    if key.is_empty() {
+        return None;
+    }
+    items.iter_mut().find(|p| p.key.eq_ignore_ascii_case(key))
+}
+
+/// Adds the items of `seen` (key, label, from) not known yet, tagged new and
+/// visible. `fresh` = false marks them as already seen (the first menu after
+/// an upgrade must not tag everything New). Returns whether `items` changed.
+pub fn learn(items: &mut Vec<ItemPref>, seen: &[(String, String, String)], fresh: bool) -> bool {
+    let mut changed = false;
+    for (key, label, from) in seen {
+        if key.is_empty() || item(items, key).is_some() {
+            continue;
+        }
+        items.push(ItemPref { key: key.clone(), label: label.clone(), from: from.clone(), new: fresh, ..Default::default() });
+        changed = true;
+    }
+    while items.len() > MAX_ITEMS {
+        match items.iter().position(|p| !p.hidden && p.name.is_empty()) {
+            Some(i) => {
+                items.remove(i);
+            }
+            None => break,
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_order_dedupes_and_appends_missing_groups() {
+        assert_eq!(group_order(&[]), Group::ALL.to_vec());
+        assert_eq!(group_order(&[Group::Custom, Group::Custom, Group::Windows]), vec![Group::Custom, Group::Windows, Group::Tsubame, Group::Apps]);
+    }
+
+    #[test]
+    fn learn_adds_unknown_items_once_and_keeps_edited_ones_past_the_cap() {
+        let s = |k: &str, l: &str| (k.to_string(), l.to_string(), "Windows".to_string());
+        let mut v = vec![ItemPref { key: "windows.verb:share".into(), label: "Share".into(), hidden: true, ..Default::default() }];
+        assert!(learn(&mut v, &[s("WINDOWS.VERB:SHARE", "Teilen"), s("windows.verb:print", "Print")], true));
+        assert_eq!(v.len(), 2);
+        assert!(v[1].new && !v[1].hidden);
+        assert_eq!(v[0].label, "Share", "a known item keeps its first label");
+        assert!(!learn(&mut v, &[s("windows.verb:print", "Drucken")], true));
+        let many: Vec<_> = (0..MAX_ITEMS + 5).map(|i| s(&format!("windows.label:x{i}"), "x")).collect();
+        learn(&mut v, &many, false);
+        assert_eq!(v.len(), MAX_ITEMS);
+        assert!(item(&v, "windows.verb:share").is_some_and(|p| p.hidden), "edited items survive the cap");
+        assert!(!item(&v, &format!("windows.label:x{}", MAX_ITEMS + 4)).unwrap().new);
+    }
 
     #[test]
     fn defaults_have_unique_ids_and_the_mock_order() {

@@ -344,6 +344,11 @@ pub struct Advanced {
 #[serde(default)]
 pub struct ContextMenu {
     pub entries: Vec<MenuEntry>,
+    /// `[[context_menu.items]]`: Windows' and app items the menu has shown,
+    /// with the user's hide / rename (CM8, `docs/ctxmenu.md`)
+    pub items: Vec<menu::ItemPref>,
+    /// group order, top to bottom; missing groups follow in the default order
+    pub groups: Vec<menu::Group>,
 }
 
 /// A rectangle in virtual-screen pixels (a monitor's work area).
@@ -1449,10 +1454,16 @@ names = ["a", "b"]
                 ..Default::default()
             },
         ];
+        cfg.context_menu.items = vec![
+            menu::ItemPref { key: "windows.verb:share".into(), label: "Share".into(), from: "Windows".into(), hidden: true, ..Default::default() },
+            menu::ItemPref { key: "windows.pkg:Microsoft.WindowsNotepad_8wekyb3d8bbwe/{ca6cc9f1-867a-481e-951e-a28c5e4f01ea}".into(), label: "Edit in Notepad".into(), from: "Microsoft.WindowsNotepad_8wekyb3d8bbwe".into(), name: "Notepad".into(), new: true, ..Default::default() },
+        ];
+        cfg.context_menu.groups = vec![menu::Group::Custom, menu::Group::Tsubame];
         let cf = ConfigFile::new(cfg.clone());
         cf.save(&p).unwrap();
         let text = fs::read_to_string(&p).unwrap();
         assert!(text.contains("[[context_menu.entries]]"), "{text}");
+        assert!(text.contains("[[context_menu.items]]"), "{text}");
         let l = ConfigFile::load(&p);
         assert_eq!(l.status, LoadStatus::Loaded);
         assert_eq!(l.value.config, cfg);
@@ -1480,6 +1491,32 @@ source = \"alien\"
 ").unwrap();
         let e = &c.context_menu.entries[0];
         assert_eq!((e.kind, e.source), (EntryKind::Item, Source::Custom));
+    }
+
+    #[test]
+    fn a_bad_menu_item_or_group_is_dropped_alone() {
+        let d = temp_dir("menu-items-bad");
+        let p = d.join("config.toml");
+        fs::write(&p, "version = 1
+[context_menu]
+groups = [\"custom\", \"martian\", \"windows\"]
+[[context_menu.items]]
+key = \"windows.verb:share\"
+hidden = true
+[[context_menu.items]]
+key = \"windows.verb:print\"
+hidden = \"yes please\"
+[[context_menu.items]]
+key = \"app:file.copy-name\"
+name = \"Name only\"
+future_field = 3
+").unwrap();
+        let l = ConfigFile::load(&p);
+        let m = &l.value.config.context_menu;
+        assert_eq!(m.items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["windows.verb:share", "app:file.copy-name"]);
+        assert!(m.items[0].hidden && m.items[1].name == "Name only");
+        assert_eq!(m.groups, [menu::Group::Custom, menu::Group::Windows]);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

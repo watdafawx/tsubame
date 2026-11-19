@@ -313,7 +313,11 @@ impl Session {
                 }
             };
             match self.raw(&cmd, Some(&clsid)) {
-                Some(r) => out.push(r),
+                Some(mut r) => {
+                    // the family keys the user's edits (`windows.pkg:<family>/{clsid}`)
+                    r.package = all.iter().find(|h| h.clsid == clsid).map(|h| h.package.clone()).filter(|p| !p.is_empty());
+                    out.push(r)
+                }
                 None => self.skipped += 1,
             }
         }
@@ -333,8 +337,9 @@ impl Session {
         let text = take(unsafe { cmd.GetTitle(&self.arr) })?;
         let help = take(unsafe { cmd.GetToolTip(&self.arr) });
         let icon = take(unsafe { cmd.GetIcon(&self.arr) }).and_then(|loc| load_icon(&loc, self.icon_px)).map(Arc::new);
-        // the CLSID is the stable identity (`windows.verb:{clsid}` keys the
-        // user's edits); sub-commands use their canonical name if they have one
+        // the CLSID is the stable identity (with the package family, set by
+        // `top`, it keys the user's edits: `windows.pkg:<family>/{clsid}`);
+        // sub-commands use their canonical name if they have one
         let verb = clsid.map(str::to_string).or_else(|| unsafe { cmd.GetCanonicalName() }.ok().filter(|g| *g != GUID::zeroed()).map(|g| norm_clsid(&format!("{g:?}"))));
         let mut r = RawItem { text, help, verb, icon, disabled: state & ECS_DISABLED.0 != 0, checked: state & ECS_CHECKED.0 != 0, radio: state & ECS_RADIOCHECK.0 != 0, ..Default::default() };
         if flags & ECF_HASSUBCOMMANDS.0 != 0 {

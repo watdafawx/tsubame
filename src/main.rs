@@ -1124,6 +1124,10 @@ fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32, keyboard: bool) {
 }
 
 /// Keyboard-invoked menu, at the cursor row.
+fn own_menu_open() -> bool {
+    with(|a| a.view.ctx.as_ref().is_some_and(|c| c.open)).unwrap_or(false)
+}
+
 fn key_menu(hwnd: HWND) {
     ctxui::note_input();
     let p = with(|a| {
@@ -1539,8 +1543,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_CONTEXTMENU if lp.0 == -1 => {
-                // keyboard (menu key): at the cursor row
-                key_menu(hwnd);
+                // keyboard (menu key): at the cursor row. While the own menu
+                // is open the key went to it as a KeyDown (CM8: the focused
+                // row's edit menu), so it does not reopen the menu.
+                if !own_menu_open() {
+                    key_menu(hwnd);
+                }
                 LRESULT(0)
             }
             WM_SYSKEYDOWN | WM_SYSKEYUP if wp.0 as u16 == VK_F10.0 => {
@@ -1548,7 +1556,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 // UI thread, and while any menu is active the worker's
                 // SetForegroundWindow fails, so Escape never reaches its menu.
                 if msg == WM_SYSKEYDOWN && GetKeyState(VK_SHIFT.0 as i32) < 0 {
-                    key_menu(hwnd);
+                    if own_menu_open() {
+                        // CM8: Shift+F10 in the own menu opens the focused row's edit menu
+                        push(hwnd, Event::KeyDown { key: Key::F(10), mods: mods(), repeat: lp.0 & (1 << 30) != 0 });
+                    } else {
+                        key_menu(hwnd);
+                    }
                 }
                 LRESULT(0)
             }

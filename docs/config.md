@@ -119,6 +119,17 @@ extensions = []
 hidden = false
 source = "custom"
 
+[context_menu]
+groups = ["tsubame", "windows", "apps", "custom"]   # menu order; missing groups follow
+
+[[context_menu.items]]       # Windows', apps' and Tsubame's rows outside the list (CM8)
+key = "windows.verb:windows.modernshare"
+label = "Share"               # first label seen (Settings shows it)
+from = "Windows"              # Windows | Tsubame | a package family
+hidden = true
+name = ""                     # the user's label; empty = the item's own
+new = false                   # appeared since Settings > Context menu was last opened
+
 [advanced]
 diagnostics = false          # persists; the log writer is not wired yet
 
@@ -154,6 +165,8 @@ maximized = false
 | `keys.overrides` | empty | rebound shortcuts, applied live; Settings > Keys, format in `docs/u4-settings.md` |
 | `keys.profile` | `"default"` | read, not wired |
 | `context_menu.entries` | empty | what Tsubame adds to the native context menu (`docs/u4-settings.md`) |
+| `context_menu.items` | empty | hide / rename of the menu's other rows, keyed by `key`, never by label: `windows.verb:<verb>` (classic item with a canonical verb), `windows.label:<label>` (classic item without one), `windows.pkg:<package family>/{clsid}` (packaged Win11 item), `app:<action>` (Tsubame rows such as Copy name). Learned from real menus (at most 400; the oldest unedited ones go first); Settings > Context menu and the menu's own edit menu change them. A wrong-shaped item is dropped alone. Old `source = "windows"` entries in `entries` (and CM7's `windows.verb:{clsid}` keys) are still honoured, read only |
+| `context_menu.groups` | empty | group order, top to bottom: `tsubame`, `windows`, `apps`, `custom`; duplicates are dropped, missing ones follow in that order, an unknown value is dropped alone |
 | `advanced.diagnostics` | `false` | persists; no log writer behind it yet |
 | `window.*` | `0,0,1120,720,false` | geometry on a plain start |
 

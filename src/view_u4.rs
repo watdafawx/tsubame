@@ -193,6 +193,15 @@ impl View {
         }
     }
 
+    /// "Edit in Settings…" / Manage from the own-drawn menu (CM8): Settings >
+    /// Context menu with the row of `key` searched for and selected.
+    pub fn open_menu_item(&mut self, key: &str) {
+        self.open_settings(Some(Page::ContextMenu));
+        if let Some(st) = self.settings.as_deref_mut() {
+            st.menu.focus_item(key);
+        }
+    }
+
     /// Draws the Settings pages in `area` and applies what they changed.
     pub(super) fn paint_settings(&mut self, ui: &mut Ui, g: &mut dyn Canvas, area: Rect) {
         if self.private_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
