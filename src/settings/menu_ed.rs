@@ -294,12 +294,13 @@ pub fn reset_menu(m: &mut tsubame_config::ContextMenu) {
         p.hidden = false;
         p.name.clear();
         p.group.clear();
+        p.pin = false;
     }
 }
 
 /// Anything Reset to defaults would change.
 pub fn menu_changed(m: &tsubame_config::ContextMenu) -> bool {
-    !m.entries.is_empty() || !m.groups.is_empty() || !m.user_groups.is_empty() || m.items.iter().any(|p| p.hidden || !p.name.is_empty() || !p.group.is_empty())
+    !m.entries.is_empty() || !m.groups.is_empty() || !m.user_groups.is_empty() || m.items.iter().any(|p| p.hidden || p.pin || !p.name.is_empty() || !p.group.is_empty())
 }
 
 fn chip(pg: &mut Pg, id: Id, x: f32, y: f32, label: &str, count: Option<usize>, on: bool) -> (bool, Rect) {

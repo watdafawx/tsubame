@@ -197,8 +197,11 @@ nothing of U4 runs per frame in a list.
 - "Match Windows" colour mode reads the system theme once at startup/selection; it does not follow a
   live change.
 - Context menu editor: no row "..." menu (its contents are not in the mock), no "Several items" / "Drive"
-  kinds, no "Refresh from last menu", no Pin to top, Nilesoft import without the file-detected state or a
-  file picker. User groups are stored and drawn in Settings, but the real menu does not compose them yet.
+  kinds, no "Refresh from last menu" button (the logic exists, `ctxui::refresh_learned`; no approved place
+  for the button), no Pin to top control in Settings (the pin is set from the menu's edit menu and Reset
+  clears it), Nilesoft import without the file-detected state or a file picker.
+- The real menu composes user groups (a plain separator-delimited block, no header row, at the group's
+  `pos`) and honours `items.pin` (first in its group).
 - `advanced.diagnostics` persists, the log writer is not wired.
 - `updates.channel` is read; the updater is pinned to stable.
 - The memory readout on Advanced refreshes on repaint (about once a second while the page is visible),

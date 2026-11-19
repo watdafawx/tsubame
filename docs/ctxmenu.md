@@ -133,6 +133,28 @@ retain and a relabel per level. Items the menu shows are remembered in
 `items` so Settings can list them (new ones are tagged New; the first menu
 after an upgrade tags nothing), and the config is written only when one is new.
 Nothing is removed from Windows.
+
+User groups and Pin to top (compose). `compose_all` draws the group order of
+Settings (`menu::full_order`: the four built-in groups and the user's groups at
+their `pos`). A row whose pref has `group = <id>` of an existing user group
+leaves its native group and joins that one, in menu order (Tsubame's rows, then
+Windows', then the apps'). A user group is a plain block between separators:
+no header row, no name drawn (popups have no group captions). An empty group
+draws nothing; an unknown group id leaves the row where it was. Pin to top
+(`ItemPref.pin`) puts a row first in its group, or first in its user group.
+Both steps run only when some pref has a group or a pin, and each costs one
+retain / partition per level (top level only, submenus keep their order), so
+the worker and the top-level timing are unchanged. Pin is offered, in the edit
+menu under Move down, for the rows Move cannot reorder (Windows', the apps' and
+the app rows such as Copy name); it toggles to "Unpin" and keeps the edit menu
+open like Move. Rows of the U4 list keep Move up / down and have the Pin row
+disabled. Reset to defaults clears pins.
+
+Refresh from last menu. The last complete menu's top-level keys are kept in
+memory (`ctxui::LAST_SHOWN`); `ctxui::refresh_learned` drops the learned items
+nobody touched (not hidden, renamed, pinned or in a group) that menu did not
+show (`menu::refresh_learned`). They come back when a menu shows them. No
+button calls it yet (see the gaps list).
 ## Widget and input (CM4)
 
 The widget uses popup-layer hit testing, theme tokens, density/font metrics,
@@ -193,9 +215,13 @@ Windows), counts on the chips, New group, user groups
 into a group (`ItemPref.group`) and Ctrl+F. Not built, because the mock does not
 show it: the row "..." menu (its contents), the kind switch's "Several items" and
 "Drive" (no data behind them), "Refresh from last menu", Pin to top, the file
-picker and file-detected state of the Nilesoft import. The real right-click menu
-does not compose user groups yet: items moved into one keep their native place
-there (the one hook needed is in the group composition of `ctxmodel`).
+picker and file-detected state of the Nilesoft import. Built on the menu side
+since: user groups in the real menu, Pin to top (edit menu row, not in mock 6a:
+it reuses the existing row look) and the refresh logic. Still missing, needing
+a mock first: the "Refresh from last menu" button and its place, a Pin control
+in Settings, the row "..." menu's contents, how a user group is named in the
+menu (popups have no group captions, so the name is not drawn there), and any
+Pin / group state in the edit menu header.
 
 ## Later-card seams
 

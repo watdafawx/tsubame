@@ -499,13 +499,32 @@ pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuIt
     // Tsubame's own rows outside the list (`app:` keys) can be hidden too
     let mut own = tsubame.to_vec();
     apply_overrides(&mut own, menu);
+    // user groups (items moved into them) and Pin to top: one retain / insert
+    // per level, only when some pref asks for it
+    let mut ugroups: Vec<(&str, Vec<MenuItem>)> = Vec::new();
+    if menu.items.iter().any(|p| p.pin || !p.group.is_empty()) {
+        for u in menu.user_groups.iter().filter(|u| !u.id.is_empty()) {
+            if !ugroups.iter().any(|(i, _)| *i == u.id) {
+                ugroups.push((&u.id, Vec::new()));
+            }
+        }
+        if !ugroups.is_empty() {
+            for list in [&mut own, &mut nat, &mut pkg] {
+                move_to_user_groups(list, menu, &mut ugroups);
+            }
+        }
+        for list in [&mut own, &mut nat, &mut pkg].into_iter().chain(ugroups.iter_mut().map(|(_, v)| v)) {
+            pin_first(list, menu);
+        }
+    }
     let mut out = Vec::with_capacity(own.len() + nat.len() + pkg.len() + user.len() + 3);
-    for g in menu::group_order(&menu.groups) {
-        let group: &[MenuItem] = match g {
-            Group::Tsubame => &own,
-            Group::Windows => &nat,
-            Group::Apps => &pkg,
-            Group::Custom => user,
+    for g in menu::full_order(&menu.groups, &menu.user_groups) {
+        let group: &[MenuItem] = match &g {
+            menu::GroupRef::Builtin(Group::Tsubame) => &own,
+            menu::GroupRef::Builtin(Group::Windows) => &nat,
+            menu::GroupRef::Builtin(Group::Apps) => &pkg,
+            menu::GroupRef::Builtin(Group::Custom) => user,
+            menu::GroupRef::User(id) => ugroups.iter().find(|(i, _)| *i == id.as_str()).map_or(&[][..], |(_, v)| &v[..]),
         };
         if group.is_empty() {
             continue;
@@ -517,6 +536,44 @@ pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuIt
     }
     clean_separators(&mut out);
     out
+}
+
+/// Moves the rows of `list` the user put into a user group (`ItemPref.group`)
+/// into that group's list, in the order met. Separators stay behind.
+fn move_to_user_groups<'a>(list: &mut Vec<MenuItem>, menu: &ContextMenu, groups: &mut [(&'a str, Vec<MenuItem>)]) {
+    let mut moved = false;
+    let mut keep = Vec::with_capacity(list.len());
+    for it in list.drain(..) {
+        let slot = if it.is_separator() {
+            None
+        } else {
+            menu::item(&menu.items, &it.key).filter(|p| !p.group.is_empty()).and_then(|p| groups.iter().position(|(i, _)| *i == p.group))
+        };
+        match slot {
+            Some(s) => {
+                groups[s].1.push(it);
+                moved = true;
+            }
+            None => keep.push(it),
+        }
+    }
+    *list = keep;
+    if moved {
+        clean_separators(list);
+    }
+}
+
+/// Pin to top: rows with `ItemPref.pin` go first in their group, in their
+/// own order. Top level only.
+fn pin_first(list: &mut Vec<MenuItem>, menu: &ContextMenu) {
+    let pinned = |it: &MenuItem| !it.is_separator() && menu::item(&menu.items, &it.key).is_some_and(|p| p.pin);
+    if !list.iter().any(pinned) {
+        return;
+    }
+    let (mut head, tail): (Vec<MenuItem>, Vec<MenuItem>) = list.drain(..).partition(pinned);
+    head.extend(tail);
+    *list = head;
+    clean_separators(list);
 }
 
 /// Packaged items minus the ones the classic menu (or a Tsubame row) already
@@ -1061,6 +1118,56 @@ mod tests {
         ts2[0].key = "app:file.open".into();
         assert_eq!(labels(&compose(&ts2, &native, &user, &hide)), ["My tool", "--", "7-Zip"], "an app row hides like a native one");
     }
+    #[test]
+    fn user_groups_gather_moved_rows_as_a_separator_block_at_their_place() {
+        let mut icons = IconCache::new(4);
+        let native = build_native(&[verb(raw(1, "Open"), "open"), verb(raw(3, "Share"), "Windows.ModernShare"), raw(2, "7-Zip"), verb(raw(4, "Print"), "print")], &mut icons);
+        let mut own = vec![MenuItem::command(ItemSource::Tsubame, "Copy name", "x.copy-name"), MenuItem::command(ItemSource::Tsubame, "Copy", "file.copy")];
+        own[0].key = "app:x.copy-name".into();
+        own[1].key = "builtin.copy".into();
+        let user = vec![MenuItem::command(ItemSource::User, "My tool", "custom.1")];
+        let mut m = ContextMenu::default();
+        // no groups configured: unchanged
+        let plain = labels(&compose_all(&own, &native, &[], &user, &m));
+        assert_eq!(plain, ["Copy name", "Copy", "--", "Open", "Share", "7-Zip", "Print", "--", "My tool"]);
+        // a pref naming a group that does not exist changes nothing
+        m.items.push(menu::ItemPref { group: "nope".into(), ..pref("windows.verb:windows.modernshare", "", false) });
+        assert_eq!(labels(&compose_all(&own, &native, &[], &user, &m)), plain);
+        // two rows moved into g1 (top, pos 0), one into g2 (after Windows)
+        m.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 0 }, menu::UserGroup { id: "g2".into(), name: "Misc".into(), pos: 2 }];
+        m.items = vec![
+            menu::ItemPref { group: "g1".into(), ..pref("windows.verb:windows.modernshare", "", false) },
+            menu::ItemPref { group: "g1".into(), ..pref("app:x.copy-name", "", false) },
+            menu::ItemPref { group: "g2".into(), ..pref("windows.verb:print", "", false) },
+        ];
+        assert_eq!(labels(&compose_all(&own, &native, &[], &user, &m)), ["Copy name", "Share", "--", "Copy", "--", "Print", "--", "Open", "7-Zip", "--", "My tool"]);
+        // an emptied group draws nothing and leaves no stray separator
+        m.items.truncate(1);
+        assert_eq!(labels(&compose_all(&own, &native, &[], &user, &m)), ["Share", "--", "Copy name", "Copy", "--", "Open", "7-Zip", "Print", "--", "My tool"]);
+        // a hidden row stays hidden in its group
+        m.items[0].hidden = true;
+        assert!(!labels(&compose_all(&own, &native, &[], &user, &m)).contains(&"Share".to_string()));
+    }
+
+    #[test]
+    fn pin_to_top_puts_a_row_first_in_its_group_or_user_group() {
+        let mut icons = IconCache::new(4);
+        let native = build_native(&[verb(raw(1, "Open"), "open"), raw(2, "7-Zip"), raw(3, "Git Bash Here")], &mut icons);
+        let mut m = prefs(vec![menu::ItemPref { pin: true, ..pref("windows.label:git bash here", "", false) }]);
+        assert_eq!(labels(&compose_all(&[], &native, &[], &[], &m)), ["Git Bash Here", "Open", "7-Zip"]);
+        // pinned and hidden: hidden wins; unknown pins change nothing
+        m.items.push(menu::ItemPref { pin: true, ..pref("windows.label:7-zip", "", true) });
+        m.items.push(menu::ItemPref { pin: true, ..pref("windows.label:gone", "", false) });
+        assert_eq!(labels(&compose_all(&[], &native, &[], &[], &m)), ["Git Bash Here", "Open"]);
+        // inside a user group: top of that group
+        let mut m = prefs(vec![
+            menu::ItemPref { group: "g1".into(), ..pref("windows.label:7-zip", "", false) },
+            menu::ItemPref { group: "g1".into(), pin: true, ..pref("windows.label:git bash here", "", false) },
+        ]);
+        m.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 4 }];
+        assert_eq!(labels(&compose_all(&[], &native, &[], &[], &m)), ["Open", "--", "Git Bash Here", "7-Zip"]);
+    }
+
     #[test]
     fn compose_puts_groups_in_order_and_drops_covered_verbs() {
         let entries = default_entries();
