@@ -150,6 +150,8 @@ pub const EDIT_RENAME: u64 = 0xed17_0002;
 pub const EDIT_UP: u64 = 0xed17_0003;
 pub const EDIT_DOWN: u64 = 0xed17_0004;
 pub const EDIT_SETTINGS: u64 = 0xed17_0005;
+/// Pin to top / Unpin: like Move up, the row moves under the open edit menu.
+pub const EDIT_PIN: u64 = 0xed17_0006;
 /// The Undo strip's row key.
 pub const KEY_STRIP: u64 = 0xed17_00ff;
 /// The edit menu's popup id is `id.with(EDIT_POPUP)` (above every level).
@@ -1021,7 +1023,7 @@ fn run_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, k: u6
             st.rename = Some(Rename { lv: e.lv, path: e.path, input, orig: label, fresh: true });
         }
         // the row moves under the open edit menu
-        EDIT_UP | EDIT_DOWN => resp.edit = Some((e.path, k)),
+        EDIT_UP | EDIT_DOWN | EDIT_PIN => resp.edit = Some((e.path, k)),
         EDIT_SETTINGS => {
             st.edit = None;
             ui.close_all_popups();

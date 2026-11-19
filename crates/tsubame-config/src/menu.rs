@@ -285,6 +285,10 @@ pub struct ItemPref {
     /// id of the user group (`[[context_menu.user_groups]]`) the item was
     /// moved into; empty = the group it belongs to by origin
     pub group: String,
+    /// drawn first in its group (Pin to top, from the menu's edit menu); an
+    /// old file has none
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pin: bool,
 }
 
 /// `[[context_menu.user_groups]]`: a group the user made. Items are moved into
@@ -463,9 +467,53 @@ pub fn learn(items: &mut Vec<ItemPref>, seen: &[(String, String, String)], fresh
     changed
 }
 
+/// "Refresh from last menu": forgets the learned items the user never touched
+/// (not hidden, renamed, pinned or moved into a group) that `shown` (the keys
+/// of the last menu Tsubame drew) does not list. They come back the next time
+/// a menu shows them. Returns how many went.
+pub fn refresh_learned(items: &mut Vec<ItemPref>, shown: &[String]) -> usize {
+    let n = items.len();
+    items.retain(|p| p.hidden || p.pin || !p.name.is_empty() || !p.group.is_empty() || shown.iter().any(|k| k.eq_ignore_ascii_case(&p.key)));
+    n - items.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_and_refresh_keep_old_configs_loading_and_round_trip() {
+        // an old file: no `pin` anywhere
+        let old = "[[items]]\nkey = \"windows.verb:share\"\nhidden = true\n";
+        #[derive(Deserialize, Serialize)]
+        struct W {
+            items: Vec<ItemPref>,
+        }
+        let w: W = toml::from_str(old).unwrap();
+        assert!(w.items[0].hidden && !w.items[0].pin);
+        assert!(!toml::to_string(&W { items: w.items.clone() }).unwrap().contains("pin"), "an unpinned item writes no `pin`");
+        let mut w2 = W { items: w.items.clone() };
+        w2.items[0].pin = true;
+        let back: W = toml::from_str(&toml::to_string(&w2).unwrap()).unwrap();
+        assert!(back.items[0].pin && back.items[0].hidden);
+
+        let k = |s: &str, f: &dyn Fn(&mut ItemPref)| {
+            let mut p = ItemPref { key: s.into(), ..Default::default() };
+            f(&mut p);
+            p
+        };
+        let mut v = vec![
+            k("windows.verb:old", &|_| {}),
+            k("windows.verb:shown", &|_| {}),
+            k("windows.verb:hid", &|p| p.hidden = true),
+            k("windows.verb:pinned", &|p| p.pin = true),
+            k("windows.verb:named", &|p| p.name = "X".into()),
+            k("windows.verb:grouped", &|p| p.group = "g1".into()),
+        ];
+        assert_eq!(refresh_learned(&mut v, &["WINDOWS.VERB:SHOWN".to_string()]), 1);
+        assert!(!v.iter().any(|p| p.key == "windows.verb:old"));
+        assert_eq!(v.len(), 5);
+    }
 
     #[test]
     fn user_groups_slot_into_the_order_and_round_trip() {

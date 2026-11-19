@@ -398,3 +398,44 @@ round trip, drop rules, chip rules, config partial load).
 Config: `[[context_menu.user_groups]]` and `items.group` are new; an old file
 loads unchanged and a bad group or item is dropped alone. Exe 5.42 MB. The menu
 code that builds the right-click (and its timings) was not touched.
+
+## CM8-skip B: user groups, Pin to top, refresh logic (menu side)
+
+Release build on the remote test desktop (one 4K monitor at 200 %),
+`TSUBAME_GPU_PARK=0`, same fixture as CM8 (a subfolder and five `.txt` files).
+This build against the CM8 exe (`41fcbf9`), `--stress ctxmenu`, 200 menus,
+runs interleaved new, CM8, new, CM8. The stress menus carry no group and no
+pin, so this measures the fast path every menu pays (one `any` over the learned
+items); the grouped path is a retain / partition per level and is covered by
+unit tests only.
+
+| Metric | new run 1 | new run 2 | CM8 run 1 | CM8 run 2 |
+|---|---|---|---|---|
+| Warm first paint p50 / p95 | 1.45 / 1.81 ms | 1.44 / 1.82 ms | 1.41 / 1.82 ms | 1.46 / 1.82 ms |
+| Warm top level p50 / p95 | 31.83 / 35.66 ms | 31.71 / 35.25 ms | 31.51 / 35.89 ms | 31.90 / 35.09 ms |
+| Warm all items p50 / p95 | 36.83 / 40.82 ms | 36.60 / 39.57 ms | 36.29 / 40.64 ms | 36.65 / 40.95 ms |
+| Growth menu 10 -> 200 (private) | +6.7 % | +6.2 % | +7.3 % | +5.3 % |
+| Failures | 0 | 0 | 0 | 0 |
+
+Top level is within noise of CM8 (the machine ran faster than on the earlier
+day, so the absolute figures are below the 36.2 / 40.3-42.5 ms recorded
+then). Growth shows the same pre-existing failure of the 5 % private-bytes gate
+as CM7 and CM8; handles +0.4..0.8 %, GDI +0, USER +1. Exe 3,136,512 B (< 6 MB).
+
+### Checked on the test desktop
+
+Release build, keyboard only (Shift+F10, arrows, Enter), foreground window
+checked, a scratch folder with a throwaway data dir (`TSUBAME_DATA_DIR`), all
+removed afterwards. Config: user group `g1` "Tools" at pos 1, learned item
+`windows.verb:pintohomefile` in it, `app:x.terminal` pinned.
+
+- The menu drew "Open terminal here" first in the Tsubame group, and "Add to
+  Favorites" alone in its own separator-delimited block right after the
+  Tsubame group (no header row).
+- Shift+F10 on "Copy name": the edit menu shows the new "Pin to top" row under
+  the disabled Move up / down. Enter on it pinned the row: "Copy name" moved to
+  the top, the edit menu stayed open on it and now reads "Unpin"; the config
+  gained `pin = true` for `app:x.copy-name`.
+
+Only unit-tested: refresh from last menu (no button), Pin on packaged items,
+pin inside a user group, deleting a group with pinned items.
