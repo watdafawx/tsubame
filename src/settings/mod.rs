@@ -14,6 +14,7 @@ mod defaultfm_page;
 mod general;
 mod keys_page;
 mod menu_ed;
+mod nss_pick;
 mod updates_page;
 
 use lay::Pg;

@@ -142,7 +142,12 @@ list (built-ins included) so hidden state and order survive newer builds (ids ar
 
 ### Nilesoft Shell import (`crates/tsubame-config/src/nss.rs`)
 
-Reads `shell.nss` (never changes it). Supported:
+Reads `shell.nss` (never changes it). The button opens the Windows file dialog (`IFileOpenDialog`, filter
+`*.nss`, own thread, owned by the Tsubame window; `src/settings/nss_pick.rs`). On opening the page the usual
+places are looked at (`%ProgramFiles%`, `%APPDATA%`, `%LOCALAPPDATA%` + `Nilesoft Shellshell.nss`): a found
+file shows "Nilesoft Shell found in ...: N entries (M can be imported, K are skipped)" with Review and import
+(`nss::detect`). After an import a report (`nss::Report`) lists what was added and each skipped statement
+with line and reason, with Undo import and Show imported. Supported:
 
 - `item(...)`, `menu(...) { ... }` (nested), `separator` / `sep`, `sep=before|after|both` on an item
 - properties `title`, `cmd`, `args` (`cmd-line`), `type` (`file`, `dir`/`directory`, `back`, `*`), `find` (extension filter)
@@ -199,7 +204,9 @@ nothing of U4 runs per frame in a list.
 - Context menu editor: no row "..." menu (its contents are not in the mock), no "Several items" / "Drive"
   kinds, no "Refresh from last menu" button (the logic exists, `ctxui::refresh_learned`; no approved place
   for the button), no Pin to top control in Settings (the pin is set from the menu's edit menu and Reset
-  clears it), Nilesoft import without the file-detected state or a file picker.
+  clears it), Nilesoft import without a selection screen (choose which entries to keep: not in the mock;
+  the logic exists, `nss::Import::choices` / `keep_only`) and placing the import in a named group (the
+  mock says "Placed in the group Tools"; imports go to the end of the menu, tagged From Nilesoft).
 - The real menu composes user groups (a plain separator-delimited block, no header row, at the group's
   `pos`) and honours `items.pin` (first in its group).
 - `advanced.diagnostics` persists, the log writer is not wired.
