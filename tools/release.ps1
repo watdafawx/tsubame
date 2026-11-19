@@ -124,9 +124,10 @@ $work = Join-Path $OutDir '_work'
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 $null = New-Item -ItemType Directory -Force $work
 foreach ($e in $exes) { Copy-Item (Join-Path $exeSrc $e) (Join-Path $work $e) }
-foreach ($doc in 'LICENSE', 'README.txt') {
-    if (Test-Path (Join-Path $root $doc)) { Copy-Item (Join-Path $root $doc) $work }
-}
+if (Test-Path (Join-Path $root 'LICENSE')) { Copy-Item (Join-Path $root 'LICENSE') $work }
+# The zip ships README.txt; the repo keeps it as README.md.
+$readme = @('README.txt', 'README.md') | Where-Object { Test-Path (Join-Path $root $_) } | Select-Object -First 1
+if ($readme) { Copy-Item (Join-Path $root $readme) (Join-Path $work 'README.txt') }
 
 # ---- Authenticode (optional) -----------------------------------------------------
 function Find-SignTool {
