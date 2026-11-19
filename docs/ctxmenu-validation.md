@@ -637,5 +637,37 @@ Unit tests: selection and skipped rows, tri-state, chip filters, placement defau
 used one), place + undo of a created group (`nss.rs`, `nss_sel.rs`).
 
 Limits: no per-entry icons on the selection rows (the import carries none). Placement is stored on the entry
-(`group`) and shown in the Settings group count; the real menu does not draw imported entries inside the group
-yet. Focus is not restored to a control after Import (the first Tab starts at the top of the page).
+(`group`) and shown in the Settings group count (D3: the real menu now draws them inside the group). Focus is not restored to a control after Import (the first Tab starts at the top of the page).
+
+## D3: imported entries in their group, group name row, Several items and Drive kinds
+
+Release build on the remote test desktop, `TSUBAME_GPU_PARK=0`, fixture: a subfolder and five files, throwaway
+data dir. `--stress ctxmenu`, 200 menus, this build (`bf998e3e0ac662e8`, 41ea750 plus docs) against the D2 exe
+(`58f17b3b1c0e5cba`, 2ae0147), same day, same fixture, runs interleaved (base run 1 report was overwritten by the
+next base run, so base has one kept report):
+
+| Metric | new run 1 | new run 2 | new run 3 | D2 base |
+|---|---|---|---|---|
+| Warm first paint p50 / p95 | 1.48 / 2.09 ms | 1.48 / 2.05 ms | 1.48 / 2.02 ms | 1.48 / 2.16 ms |
+| Warm top level p50 / p95 | 34.45 / 41.32 ms | 34.46 / 40.69 ms | 34.79 / 40.02 ms | 34.49 / 40.88 ms |
+| Warm all items p50 / p95 | 39.58 / 45.95 ms | n/a | n/a | 39.73 / 46.58 ms |
+| Growth menu 10 -> 200 (private) | +5.8 % | +6.2 % | +6.0 % | +6.1 % |
+
+Top level unchanged within noise against the same-day D2 exe (the machine was slower today than on the earlier
+31-33 / 35-39 ms days; the stress menus carry no group, so this is the fast path every menu pays). The growth gate
+fails as documented (Work Folders handler); gate code and thresholds are unchanged.
+
+Unit tests added: ShowFor back-compat and round trip, Several / Drive entry sets, learned kinds, group name flag,
+imported entries inside their group and the opt-in name row (`ctxmodel`), kind classification, Several / Drive menus
+(`ctxui`), Settings kind lists, add form boxes, "Name in menu" (`menu_ed`), run-once vs run-per-item
+(`custom_cmd`).
+
+Seen on the test desktop (keyboard only, screenshots `docs/shots/ctxmenu-d3-*.png`):
+- `ctxmenu-d3-file-menu.png`: group "Tools" with its dim name row, then its two imported entries inside the block.
+- `ctxmenu-d3-several-menu.png`: two files selected; menu opens with the Several set.
+- `ctxmenu-d3-settings-kinds.png`: kind switch File / Folder / Empty area / Several items / Drive.
+
+Limits: the Drive right-click was not driven on the test desktop (the address bar does not take "This PC" and no
+keyboard path to a drive row was found); it is covered by the unit tests only. Variant A (group without name row)
+is covered by the unit test, not a screenshot. The mock's Add-form text says Several items is off by default but
+its screenshot shows it ticked; implemented ticked (Drive unticked).

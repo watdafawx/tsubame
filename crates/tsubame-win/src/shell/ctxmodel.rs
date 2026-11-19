@@ -35,6 +35,8 @@ pub mod flag {
     pub const LAZY: u16 = 64;
     /// starts a new column (`MFT_MENUBREAK`/`MFT_MENUBARBREAK`); ignored when drawn
     pub const BREAK: u16 = 128;
+    /// a dim, non-interactive label row (a user group's name, "Name in menu")
+    pub const LABEL: u16 = 256;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,7 +504,10 @@ pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuIt
     // user groups (items moved into them) and Pin to top: one retain / insert
     // per level, only when some pref asks for it
     let mut ugroups: Vec<(&str, Vec<MenuItem>)> = Vec::new();
-    if menu.items.iter().any(|p| p.pin || !p.group.is_empty()) {
+    // imported / custom entries placed in a user group (`MenuEntry.group`)
+    let placed_entries = menu.entries.iter().any(|e| !e.group.is_empty());
+    let mut user_rest: Option<Vec<MenuItem>> = None;
+    if placed_entries || menu.items.iter().any(|p| p.pin || !p.group.is_empty()) {
         for u in menu.user_groups.iter().filter(|u| !u.id.is_empty()) {
             if !ugroups.iter().any(|(i, _)| *i == u.id) {
                 ugroups.push((&u.id, Vec::new()));
@@ -516,7 +521,20 @@ pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuIt
         for list in [&mut own, &mut nat, &mut pkg].into_iter().chain(ugroups.iter_mut().map(|(_, v)| v)) {
             pin_first(list, menu);
         }
+        // placed entries come after what was moved in; a group that is gone
+        // leaves the entry in the Custom group
+        if placed_entries && !ugroups.is_empty() {
+            let mut rest = Vec::with_capacity(user.len());
+            for it in user {
+                match entry_group(&menu.entries, &it.key).and_then(|g| ugroups.iter().position(|(i, _)| *i == g)) {
+                    Some(s) => ugroups[s].1.push(it.clone()),
+                    None => rest.push(it.clone()),
+                }
+            }
+            user_rest = Some(rest);
+        }
     }
+    let user: &[MenuItem] = user_rest.as_deref().unwrap_or(user);
     let mut out = Vec::with_capacity(own.len() + nat.len() + pkg.len() + user.len() + 3);
     for g in menu::full_order(&menu.groups, &menu.user_groups) {
         let group: &[MenuItem] = match &g {
@@ -532,10 +550,38 @@ pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuIt
         if !out.is_empty() {
             out.push(MenuItem::separator(group[0].source));
         }
+        // "Name in menu": a label row heads the group's block
+        if let menu::GroupRef::User(id) = &g
+            && let Some(u) = menu.user_groups.iter().find(|u| u.id == *id && u.show_name && !u.name.trim().is_empty())
+        {
+            out.push(label_row(&u.name, group[0].source));
+        }
         out.extend(group.iter().cloned());
     }
     clean_separators(&mut out);
     out
+}
+
+/// The non-interactive name row of a user group (no key, no action).
+pub fn label_row(name: &str, source: ItemSource) -> MenuItem {
+    MenuItem { kind: ItemKind::Command, label: name.trim().to_string(), flags: flag::LABEL | flag::DISABLED, ..MenuItem::separator(source) }
+}
+
+/// The user group the entry `id` was placed in: its own `group`, or the one of
+/// the top-level submenu it sits under (an import places the top level; the
+/// children go with it). Empty ids and unknown entries: `None`.
+fn entry_group<'a>(entries: &'a [MenuEntry], id: &str) -> Option<&'a str> {
+    let mut e = entries.iter().find(|e| e.id == id)?;
+    for _ in 0..5 {
+        if !e.group.is_empty() {
+            return Some(e.group.as_str());
+        }
+        if e.parent.is_empty() {
+            return None;
+        }
+        e = entries.iter().find(|p| p.id == e.parent)?;
+    }
+    None
 }
 
 /// Moves the rows of `list` the user put into a user group (`ItemPref.group`)
@@ -1134,7 +1180,7 @@ mod tests {
         m.items.push(menu::ItemPref { group: "nope".into(), ..pref("windows.verb:windows.modernshare", "", false) });
         assert_eq!(labels(&compose_all(&own, &native, &[], &user, &m)), plain);
         // two rows moved into g1 (top, pos 0), one into g2 (after Windows)
-        m.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 0 }, menu::UserGroup { id: "g2".into(), name: "Misc".into(), pos: 2 }];
+        m.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 0, ..Default::default() }, menu::UserGroup { id: "g2".into(), name: "Misc".into(), pos: 2, ..Default::default() }];
         m.items = vec![
             menu::ItemPref { group: "g1".into(), ..pref("windows.verb:windows.modernshare", "", false) },
             menu::ItemPref { group: "g1".into(), ..pref("app:x.copy-name", "", false) },
@@ -1147,6 +1193,45 @@ mod tests {
         // a hidden row stays hidden in its group
         m.items[0].hidden = true;
         assert!(!labels(&compose_all(&own, &native, &[], &user, &m)).contains(&"Share".to_string()));
+    }
+
+    #[test]
+    fn placed_entries_draw_inside_their_group_and_the_name_row_is_opt_in() {
+        let mut icons = IconCache::new(4);
+        let native = build_native(&[verb(raw(1, "Open"), "open")], &mut icons);
+        let mut copy = MenuItem::command(ItemSource::Tsubame, "Copy", "file.copy");
+        copy.key = "builtin.copy".into();
+        let user: Vec<MenuItem> = [("custom.1", "Tool A"), ("custom.2", "Tool B"), ("custom.3", "Tool C")]
+            .iter()
+            .map(|(id, l)| {
+                let mut it = MenuItem::command(ItemSource::User, l, id);
+                it.key = (*id).into();
+                it
+            })
+            .collect();
+        // custom.1 is placed in g1; custom.3 sits in the submenu custom.9, which is placed in g1
+        let entry = |id: &str, parent: &str, group: &str, kind: EntryKind| MenuEntry { id: id.into(), parent: parent.into(), group: group.into(), kind, source: Source::Custom, name: id.into(), command: "x.exe".into(), ..Default::default() };
+        let mut m = ContextMenu::default();
+        m.entries = vec![entry("custom.1", "", "g1", EntryKind::Item), entry("custom.2", "", "", EntryKind::Item), entry("custom.9", "", "g1", EntryKind::Submenu), entry("custom.3", "custom.9", "", EntryKind::Item)];
+        // no such group yet: everything stays in Custom (End of menu)
+        let end = ["Copy", "--", "Open", "--", "Tool A", "Tool B", "Tool C"];
+        assert_eq!(labels(&compose_all(&[copy.clone()], &native, &[], &user, &m)), end);
+        m.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 1, ..Default::default() }];
+        let plain = labels(&compose_all(&[copy.clone()], &native, &[], &user, &m));
+        assert_eq!(plain, ["Copy", "--", "Tool A", "Tool C", "--", "Open", "--", "Tool B"], "A and C (through its submenu) sit in the group, B stays");
+        // opt in to the name row: first row of the block, not a separator, no key, not selectable
+        m.user_groups[0].show_name = true;
+        let rows = compose_all(&[copy.clone()], &native, &[], &user, &m);
+        assert_eq!(labels(&rows), ["Copy", "--", "Tools", "Tool A", "Tool C", "--", "Open", "--", "Tool B"]);
+        let l = &rows[2];
+        assert!(l.flags & flag::LABEL != 0 && l.key.is_empty() && l.action.is_empty() && l.disabled());
+        // an empty name draws no label
+        m.user_groups[0].name = "  ".into();
+        assert_eq!(labels(&compose_all(&[copy.clone()], &native, &[], &user, &m)), plain);
+        // an emptied group draws neither block nor label
+        m.user_groups[0].name = "Tools".into();
+        m.entries.iter_mut().for_each(|e| e.group.clear());
+        assert_eq!(labels(&compose_all(&[copy], &native, &[], &user, &m)), end);
     }
 
     #[test]
@@ -1164,7 +1249,7 @@ mod tests {
             menu::ItemPref { group: "g1".into(), ..pref("windows.label:7-zip", "", false) },
             menu::ItemPref { group: "g1".into(), pin: true, ..pref("windows.label:git bash here", "", false) },
         ]);
-        m.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 4 }];
+        m.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 4, ..Default::default() }];
         assert_eq!(labels(&compose_all(&[], &native, &[], &[], &m)), ["Open", "--", "Git Bash Here", "7-Zip"]);
     }
 
@@ -1196,7 +1281,7 @@ mod tests {
     #[test]
     fn own_items_follow_target_and_user_entries() {
         let mut entries = default_entries();
-        entries.push(MenuEntry { show_for: ShowFor { files: false, folders: false, background: true }, ..MenuEntry::custom("custom.1", "Terminal", "wt.exe", "-d {path}") });
+        entries.push(MenuEntry { show_for: ShowFor::classic(false, false, true), ..MenuEntry::custom("custom.1", "Terminal", "wt.exe", "-d {path}") });
         let (_, user) = own_items(&entries, Target::Background, "");
         assert_eq!(labels(&user), ["Terminal"]);
         assert_eq!(user[0].action, "custom.1");

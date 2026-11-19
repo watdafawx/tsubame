@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn the_group_flyout_marks_the_current_group() {
-        let users = vec![UserGroup { id: "g1".into(), name: "Archives and tools".into(), pos: 0 }, UserGroup { id: "g2".into(), name: "Clipboard".into(), pos: 1 }];
+        let users = vec![UserGroup { id: "g1".into(), name: "Archives and tools".into(), pos: 0, ..Default::default() }, UserGroup { id: "g2".into(), name: "Clipboard".into(), pos: 1, ..Default::default() }];
         let mut p = pref("windows.verb:share", "Share", false);
         p.group = "g2".into();
         let f = Facts::learned(&p, &users, false, false);

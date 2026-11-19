@@ -53,17 +53,56 @@ impl Source {
 
 /// What the entry shows for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "ShowForRaw")]
 pub struct ShowFor {
     pub files: bool,
     pub folders: bool,
     /// right click on the folder background
     pub background: bool,
+    /// right click on 2 or more selected items
+    pub multiple: bool,
+    /// right click on a drive root (This PC, the sidebar)
+    pub drives: bool,
 }
 
 impl Default for ShowFor {
     fn default() -> Self {
-        ShowFor { files: true, folders: true, background: false }
+        ShowFor { files: true, folders: true, background: false, multiple: true, drives: true }
+    }
+}
+
+impl ShowFor {
+    /// The three classic kinds; `multiple` follows files / folders and
+    /// `drives` follows folders, which is what such an entry did before the
+    /// two kinds existed (a drive root counted as a folder, a selection by its
+    /// first item).
+    pub fn classic(files: bool, folders: bool, background: bool) -> ShowFor {
+        ShowFor { files, folders, background, multiple: files || folders, drives: folders }
+    }
+}
+
+/// `show_for` as an older file wrote it: no `multiple` / `drives`, which then
+/// follow the entry's old behaviour ([`ShowFor::classic`]).
+#[derive(Deserialize)]
+#[serde(default)]
+struct ShowForRaw {
+    files: bool,
+    folders: bool,
+    background: bool,
+    multiple: Option<bool>,
+    drives: Option<bool>,
+}
+
+impl Default for ShowForRaw {
+    fn default() -> Self {
+        ShowForRaw { files: true, folders: true, background: false, multiple: None, drives: None }
+    }
+}
+
+impl From<ShowForRaw> for ShowFor {
+    fn from(r: ShowForRaw) -> ShowFor {
+        let c = ShowFor::classic(r.files, r.folders, r.background);
+        ShowFor { multiple: r.multiple.unwrap_or(c.multiple), drives: r.drives.unwrap_or(c.drives), ..c }
     }
 }
 
@@ -73,6 +112,23 @@ pub enum Target {
     File,
     Folder,
     Background,
+    /// 2 or more items
+    Multiple,
+    /// a drive root
+    Drive,
+}
+
+impl Target {
+    /// The bit [`ItemPref::kinds`] keeps for this kind.
+    pub fn bit(self) -> u8 {
+        match self {
+            Target::File => 1,
+            Target::Folder => 2,
+            Target::Background => 4,
+            Target::Multiple => 8,
+            Target::Drive => 16,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -108,7 +164,7 @@ impl MenuEntry {
         MenuEntry { id: id.to_string(), kind: EntryKind::Separator, source: Source::Builtin, ..Default::default() }
     }
     pub fn builtin(id: &str, name: &str, command: &str) -> MenuEntry {
-        MenuEntry { id: id.to_string(), source: Source::Builtin, name: name.to_string(), command: command.to_string(), show_for: ShowFor { files: true, folders: true, background: false }, ..Default::default() }
+        MenuEntry { id: id.to_string(), source: Source::Builtin, name: name.to_string(), command: command.to_string(), show_for: ShowFor::default(), ..Default::default() }
     }
     pub fn custom(id: &str, name: &str, command: &str, args: &str) -> MenuEntry {
         MenuEntry { id: id.to_string(), source: Source::Custom, name: name.to_string(), command: command.to_string(), args: args.to_string(), ..Default::default() }
@@ -128,6 +184,9 @@ impl MenuEntry {
             }
             Target::Folder => self.show_for.folders,
             Target::Background => self.show_for.background,
+            // `ext` is the extension all the selected files share ("" = mixed)
+            Target::Multiple => self.show_for.multiple && (self.extensions.is_empty() || (!ext.is_empty() && self.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))),
+            Target::Drive => self.show_for.drives,
         }
     }
 }
@@ -294,6 +353,26 @@ pub struct ItemPref {
     /// old file has none
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pin: bool,
+    /// the kinds of right-click whose menu showed it ([`Target::bit`] ORed);
+    /// 0 = learned before kinds were tracked
+    #[serde(skip_serializing_if = "is_zero")]
+    pub kinds: u8,
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
+}
+
+impl ItemPref {
+    /// Is it listed for `kind` in Settings? File, Folder and Empty area list
+    /// every learned item (as before); Several items and Drive only the ones
+    /// a menu of that kind has shown.
+    pub fn listed_for(&self, kind: Target) -> bool {
+        match kind {
+            Target::Multiple | Target::Drive => self.kinds & kind.bit() != 0,
+            _ => true,
+        }
+    }
 }
 
 /// `[[context_menu.user_groups]]`: a group the user made. Items are moved into
@@ -305,6 +384,10 @@ pub struct UserGroup {
     pub id: String,
     pub name: String,
     pub pos: usize,
+    /// "Name in menu": the group's block starts with a dim, non-interactive
+    /// label row with its name (off = no header)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub show_name: bool,
 }
 
 /// One slot of the full group order.
@@ -358,7 +441,7 @@ pub fn add_group(users: &mut Vec<UserGroup>, saved: &[Group], name: &str) -> Str
     let id = format!("g{n}");
     let name = name.trim();
     let pos = group_order(saved).len() + users.len();
-    users.push(UserGroup { id: id.clone(), name: if name.is_empty() { "New group".into() } else { name.into() }, pos });
+    users.push(UserGroup { id: id.clone(), name: if name.is_empty() { "New group".into() } else { name.into() }, pos, show_name: false });
     id
 }
 
@@ -451,14 +534,22 @@ pub fn item_mut<'a>(items: &'a mut [ItemPref], key: &str) -> Option<&'a mut Item
 
 /// Adds the items of `seen` (key, label, from) not known yet, tagged new and
 /// visible. `fresh` = false marks them as already seen (the first menu after
-/// an upgrade must not tag everything New). Returns whether `items` changed.
-pub fn learn(items: &mut Vec<ItemPref>, seen: &[(String, String, String)], fresh: bool) -> bool {
+/// an upgrade must not tag everything New). Every item of `seen` is also
+/// marked as shown for `kind`. Returns whether `items` changed.
+pub fn learn(items: &mut Vec<ItemPref>, seen: &[(String, String, String)], fresh: bool, kind: Target) -> bool {
     let mut changed = false;
     for (key, label, from) in seen {
-        if key.is_empty() || item(items, key).is_some() {
+        if key.is_empty() {
             continue;
         }
-        items.push(ItemPref { key: key.clone(), label: label.clone(), from: from.clone(), new: fresh, ..Default::default() });
+        if let Some(p) = item_mut(items, key) {
+            if p.kinds & kind.bit() == 0 {
+                p.kinds |= kind.bit();
+                changed = true;
+            }
+            continue;
+        }
+        items.push(ItemPref { key: key.clone(), label: label.clone(), from: from.clone(), new: fresh, kinds: kind.bit(), ..Default::default() });
         changed = true;
     }
     while items.len() > MAX_ITEMS {
@@ -536,8 +627,8 @@ mod tests {
         assert_eq!(full_order(&saved, &users), o);
         assert!(saved.is_empty(), "built-in order untouched = default");
         // duplicate / empty ids are ignored, a far pos is last
-        users.push(UserGroup { id: "g1".into(), name: "dup".into(), pos: 0 });
-        users.push(UserGroup { id: String::new(), name: "x".into(), pos: 0 });
+        users.push(UserGroup { id: "g1".into(), name: "dup".into(), pos: 0, ..Default::default() });
+        users.push(UserGroup { id: String::new(), name: "x".into(), pos: 0, ..Default::default() });
         users[1].pos = 99;
         assert_eq!(full_order(&saved, &users).len(), 6);
         assert_eq!(full_order(&saved, &users).last(), Some(&GroupRef::User("g2".into())));
@@ -545,7 +636,7 @@ mod tests {
 
     #[test]
     fn deleting_a_group_frees_its_items() {
-        let mut users = vec![UserGroup { id: "g1".into(), name: "T".into(), pos: 0 }];
+        let mut users = vec![UserGroup { id: "g1".into(), name: "T".into(), pos: 0, ..Default::default() }];
         let mut items = vec![ItemPref { key: "windows.verb:share".into(), ..Default::default() }];
         assert!(move_item_to_group(&mut items, &users, "windows.verb:SHARE", "g1"));
         assert_eq!(items[0].group, "g1");
@@ -577,13 +668,13 @@ mod tests {
     fn learn_adds_unknown_items_once_and_keeps_edited_ones_past_the_cap() {
         let s = |k: &str, l: &str| (k.to_string(), l.to_string(), "Windows".to_string());
         let mut v = vec![ItemPref { key: "windows.verb:share".into(), label: "Share".into(), hidden: true, ..Default::default() }];
-        assert!(learn(&mut v, &[s("WINDOWS.VERB:SHARE", "Teilen"), s("windows.verb:print", "Print")], true));
+        assert!(learn(&mut v, &[s("WINDOWS.VERB:SHARE", "Teilen"), s("windows.verb:print", "Print")], true, Target::File));
         assert_eq!(v.len(), 2);
         assert!(v[1].new && !v[1].hidden);
         assert_eq!(v[0].label, "Share", "a known item keeps its first label");
-        assert!(!learn(&mut v, &[s("windows.verb:print", "Drucken")], true));
+        assert!(!learn(&mut v, &[s("windows.verb:print", "Drucken")], true, Target::File));
         let many: Vec<_> = (0..MAX_ITEMS + 5).map(|i| s(&format!("windows.label:x{i}"), "x")).collect();
-        learn(&mut v, &many, false);
+        learn(&mut v, &many, false, Target::File);
         assert_eq!(v.len(), MAX_ITEMS);
         assert!(item(&v, "windows.verb:share").is_some_and(|p| p.hidden), "edited items survive the cap");
         assert!(!item(&v, &format!("windows.label:x{}", MAX_ITEMS + 4)).unwrap().new);
@@ -647,7 +738,7 @@ mod tests {
     fn program_entries_filter_by_target_extension_and_hidden() {
         let mut sub = MenuEntry { id: "tools".into(), kind: EntryKind::Submenu, name: "Tools".into(), source: Source::Custom, ..Default::default() };
         let a = MenuEntry { parent: "tools".into(), extensions: vec!["txt".into(), "MD".into()], ..MenuEntry::custom("a", "Edit", "ed.exe", "{path}") };
-        let b = MenuEntry { show_for: ShowFor { files: false, folders: false, background: true }, ..MenuEntry::custom("b", "Terminal here", "wt.exe", "-d {path}") };
+        let b = MenuEntry { show_for: ShowFor::classic(false, false, true), ..MenuEntry::custom("b", "Terminal here", "wt.exe", "-d {path}") };
         let c = MenuEntry { hidden: true, ..MenuEntry::custom("c", "Hidden", "h.exe", "") };
         let mut v = vec![sub.clone(), a, b, c, MenuEntry::builtin("builtin.copy", "Copy", "file.copy")];
         let files = program_entries(&v, Target::File, "md");
@@ -660,5 +751,89 @@ mod tests {
         sub.hidden = true;
         v[0] = sub;
         assert!(program_entries(&v, Target::File, "md").is_empty(), "a hidden submenu hides its items");
+    }
+
+    #[test]
+    fn an_old_show_for_keeps_its_kinds_and_the_new_ones_round_trip() {
+        #[derive(Deserialize, Serialize)]
+        struct W {
+            show_for: ShowFor,
+        }
+        // written before "Several items" and "Drive": they follow the old behaviour
+        let w: W = toml::from_str("[show_for]
+files = true
+folders = false
+background = true
+").unwrap();
+        assert_eq!(w.show_for, ShowFor { files: true, folders: false, background: true, multiple: true, drives: false });
+        let w: W = toml::from_str("[show_for]
+files = false
+folders = true
+").unwrap();
+        assert_eq!(w.show_for, ShowFor { files: false, folders: true, background: false, multiple: true, drives: true });
+        let w: W = toml::from_str("[show_for]
+background = true
+files = false
+folders = false
+").unwrap();
+        assert!(!w.show_for.multiple && !w.show_for.drives);
+        // explicit values win and survive a save
+        let w = W { show_for: ShowFor { files: true, folders: true, background: false, multiple: false, drives: true } };
+        let back: W = toml::from_str(&toml::to_string(&w).unwrap()).unwrap();
+        assert_eq!(back.show_for, w.show_for);
+        // a missing table is the default
+        #[derive(Deserialize)]
+        struct E {
+            #[serde(default)]
+            show_for: ShowFor,
+        }
+        assert_eq!(toml::from_str::<E>("").unwrap().show_for, ShowFor::default());
+    }
+
+    #[test]
+    fn several_items_and_drive_pick_their_own_entries() {
+        let both = MenuEntry { show_for: ShowFor { multiple: true, drives: false, ..ShowFor::default() }, ..MenuEntry::custom("a", "A", "a.exe", "{selection}") };
+        let drive = MenuEntry { show_for: ShowFor { multiple: false, drives: true, ..ShowFor::default() }, ..MenuEntry::custom("b", "B", "b.exe", "{path}") };
+        let by_ext = MenuEntry { extensions: vec!["txt".into()], ..MenuEntry::custom("c", "C", "c.exe", "{selection}") };
+        let v = vec![both, drive, by_ext];
+        let names = |t: Target, ext: &str| program_entries(&v, t, ext).into_iter().map(|(e, _)| e.id).collect::<Vec<_>>();
+        assert_eq!(names(Target::Multiple, ""), ["a"], "an extension filter needs every file to share it");
+        assert_eq!(names(Target::Multiple, "txt"), ["a", "c"]);
+        assert_eq!(names(Target::Drive, ""), ["b", "c"], "extensions only filter files");
+        assert_eq!(names(Target::Folder, ""), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn learning_remembers_which_kinds_showed_an_item() {
+        let s = |k: &str| (k.to_string(), "x".to_string(), "Windows".to_string());
+        let mut v = Vec::new();
+        assert!(learn(&mut v, &[s("windows.verb:share")], false, Target::File));
+        assert!(!learn(&mut v, &[s("windows.verb:share")], false, Target::File), "same kind again: no change");
+        assert!(v[0].listed_for(Target::File) && v[0].listed_for(Target::Background));
+        assert!(!v[0].listed_for(Target::Drive) && !v[0].listed_for(Target::Multiple));
+        assert!(learn(&mut v, &[s("windows.verb:share")], false, Target::Drive), "a new kind is a change");
+        assert!(v[0].listed_for(Target::Drive) && !v[0].listed_for(Target::Multiple));
+        // an old pref (no kinds) lists for the old kinds only
+        let old = ItemPref { key: "k".into(), ..Default::default() };
+        assert!(old.listed_for(Target::Folder) && !old.listed_for(Target::Drive));
+    }
+
+    #[test]
+    fn group_name_flag_round_trips_and_old_groups_have_none() {
+        #[derive(Deserialize, Serialize)]
+        struct W {
+            g: Vec<UserGroup>,
+        }
+        let w: W = toml::from_str("[[g]]
+id = \"g1\"
+name = \"Tools\"
+pos = 4
+").unwrap();
+        assert!(!w.g[0].show_name);
+        assert!(!toml::to_string(&w).unwrap().contains("show_name"), "off writes nothing");
+        let mut w = w;
+        w.g[0].show_name = true;
+        let back: W = toml::from_str(&toml::to_string(&w).unwrap()).unwrap();
+        assert!(back.g[0].show_name);
     }
 }

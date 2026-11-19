@@ -164,12 +164,33 @@ struct A11yOut {
     published: bool,
 }
 
-/// The right-clicked kind and extension for the U4 rules.
+/// The extension (lower-case, no dot) all of `paths` share, "" when they
+/// differ, when one has none or when `is_dir` says one is a folder. What the
+/// extension filter of an entry is held against on a selection.
+pub fn common_ext(paths: &[String], is_dir: impl Fn(&str) -> bool) -> String {
+    let ext = |p: &str| std::path::Path::new(p).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let Some(first) = paths.first() else { return String::new() };
+    if is_dir(first) {
+        return String::new();
+    }
+    let e = ext(first);
+    if paths.iter().all(|p| !is_dir(p) && ext(p) == e) { e } else { String::new() }
+}
+
+/// The right-clicked kind and extension for the U4 rules: the background, a
+/// selection of 2 or more (the extension is the one all of them share), a
+/// drive root, a folder or a file.
 pub fn kind_of(target: &Target) -> (Kind, String) {
     if target.background {
         return (Kind::Background, String::new());
     }
+    if target.paths.len() >= 2 {
+        return (Kind::Multiple, common_ext(&target.paths, |p| target.folders.iter().any(|f| f == p)));
+    }
     let first = target.paths.first().map(String::as_str).unwrap_or("");
+    if is_root(first) {
+        return (Kind::Drive, String::new());
+    }
     if target.folders.iter().any(|p| p == first) {
         return (Kind::Folder, String::new());
     }
@@ -190,7 +211,7 @@ pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
         Kind::Background => vec![c("Paste", "file.paste"), c("New folder", "x.new-folder"), c("New text file", "x.new-file"), c("Copy as path", "file.copy-path"), c("Open terminal here", "x.terminal"), c("Refresh", "x.refresh")],
         _ => {
             let mut v = vec![c("Copy name", "x.copy-name"), c("Open terminal here", "x.terminal")];
-            if dual && n == 1 && kind == Kind::Folder {
+            if dual && n == 1 && matches!(kind, Kind::Folder | Kind::Drive) {
                 v.insert(0, c("Open in other pane", "x.other-pane"));
             }
             v
@@ -202,7 +223,7 @@ pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
 pub fn tsubame_rows(entries: &[MenuEntry], kind: Kind, ext: &str, n: usize, dual: bool) -> Vec<MenuItem> {
     let mut rows = ctxmodel::own_rows(entries, kind, ext, &extras(kind, n, dual));
     // a new tab only opens folders
-    if kind != Kind::Folder {
+    if matches!(kind, Kind::File | Kind::Background) {
         rows.retain(|r| r.action != "tab.open-selected");
     }
     for r in &mut rows {
@@ -224,6 +245,10 @@ fn own_parts(target: &Target, entries: &[MenuEntry], dual: bool) -> (Vec<MenuIte
                 row.flags |= flag::DISABLED;
             }
         }
+    }
+    // a selection without a folder has nothing to open in a tab
+    if kind == Kind::Multiple && !target.paths.iter().any(|p| target.folders.contains(p)) {
+        tsubame.retain(|r| r.action != "tab.open-selected");
     }
     (tsubame, ctxmodel::own_items(entries, kind, &ext).1)
 }
@@ -411,7 +436,7 @@ impl CtxMenu {
         if seen.is_empty() {
             return;
         }
-        self.learned |= menu::learn(&mut self.menu.items, &seen, self.tag_new);
+        self.learned |= menu::learn(&mut self.menu.items, &seen, self.tag_new, kind_of(&self.target).0);
     }
 
     /// Rebuilds the Tsubame and user rows after an edit of the list.
@@ -1106,6 +1131,9 @@ impl Rows<'_> {
         if it.is_separator() {
             return MenuRow::separator();
         }
+        if it.flags & flag::LABEL != 0 {
+            return MenuRow { key: item_key(it), kind: RowKind::Label, label: it.label.clone(), ..Default::default() };
+        }
         let own = it.source != ItemSource::Native;
         let accel = if own { own_accel(it) } else { it.accel };
         let action = it.action.as_str();
@@ -1225,6 +1253,45 @@ mod tests {
         assert_eq!(kind_of(&t), (Kind::File, "txt".into()));
         t.background = true;
         assert_eq!(kind_of(&t), (Kind::Background, String::new()));
+    }
+
+    #[test]
+    fn two_or_more_items_are_several_and_a_drive_root_is_a_drive() {
+        let mut t = Target { paths: vec![r"C:\a\x.TXT".into(), r"C:\a\y.txt".into()], ..Default::default() };
+        assert_eq!(kind_of(&t), (Kind::Multiple, "txt".into()), "the shared extension");
+        t.paths.push(r"C:\a\z.md".into());
+        assert_eq!(kind_of(&t), (Kind::Multiple, String::new()), "mixed extensions: none");
+        t.paths = vec![r"C:\a\x.txt".into(), r"C:\a\sub.txt".into()];
+        t.folders = vec![r"C:\a\sub.txt".into()];
+        assert_eq!(kind_of(&t), (Kind::Multiple, String::new()), "a folder in it: none");
+        // a drive root alone; a root among others is still a selection
+        let d = Target { paths: vec![r"D:\".into()], folders: vec![r"D:\".into()], ..Default::default() };
+        assert_eq!(kind_of(&d), (Kind::Drive, String::new()));
+        let both = Target { paths: vec![r"C:\".into(), r"D:\".into()], folders: vec![r"C:\".into(), r"D:\".into()], ..Default::default() };
+        assert_eq!(kind_of(&both).0, Kind::Multiple);
+        assert_eq!(common_ext(&[], |_| false), "");
+    }
+
+    #[test]
+    fn several_and_drive_menus_use_their_own_entry_sets() {
+        let mut e = menu::default_entries();
+        // Delete is a selection verb only: off for a drive root by its flag
+        e.iter_mut().filter(|x| x.id == "builtin.delete").for_each(|x| x.show_for.drives = false);
+        e.iter_mut().filter(|x| x.id == "builtin.open-tab").for_each(|x| x.show_for.multiple = false);
+        let names = |k: Kind| tsubame_rows(&e, k, "", 2, false).into_iter().map(|r| r.label).collect::<Vec<_>>();
+        assert!(!names(Kind::Drive).contains(&"Delete".to_string()), "Drive follows show_for.drives");
+        assert!(names(Kind::Multiple).contains(&"Delete".to_string()));
+        assert!(!names(Kind::Multiple).contains(&"Open in new tab".to_string()), "Several items follows show_for.multiple");
+        assert!(names(Kind::Drive).contains(&"Open in new tab".to_string()), "a drive opens in a tab");
+        // a custom entry that only has the Several flag does not show on one item, nor on a drive
+        let mut c = MenuEntry::custom("custom.1", "Zip all", "z.exe", "{selection}");
+        c.show_for = menu::ShowFor { files: false, folders: false, background: false, multiple: true, drives: false };
+        e.push(c);
+        let user = |t: &Target| own_parts(t, &e, false).1.len();
+        let two = Target { paths: vec![r"C:\a.txt".into(), r"C:\b.txt".into()], ..Default::default() };
+        let one = Target { paths: vec![r"C:\a.txt".into()], ..Default::default() };
+        let drive = Target { paths: vec![r"D:\".into()], folders: vec![r"D:\".into()], ..Default::default() };
+        assert_eq!((user(&two), user(&one), user(&drive)), (1, 0, 0));
     }
 
     #[test]
@@ -1532,7 +1599,7 @@ mod tests {
     fn delete_entry_removes_a_custom_row_and_undo_brings_it_back() {
         let mut c = test_menu(vec![]);
         let mut e = MenuEntry::custom("custom.1", "Open in VS Code", "code.exe", "");
-        e.show_for = menu::ShowFor { files: true, folders: true, background: false };
+        e.show_for = menu::ShowFor::default();
         c.menu.entries.push(e);
         c.rebuild_own();
         refresh(&mut c);

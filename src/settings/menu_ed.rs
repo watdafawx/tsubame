@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tsubame_config::menu::{self, EntryKind, MenuEntry, ShowFor, Source};
 use tsubame_config::nss;
 use tsubame_ui::widgets::menu::{EDIT_DELETE, EDIT_DOWN, EDIT_ENTRY, EDIT_GROUP, EDIT_GROUP_BASE, EDIT_GROUP_NATIVE, EDIT_GROUP_NEW, EDIT_HIDE, EDIT_PIN, EDIT_RENAME, EDIT_UP, edit_only};
-use tsubame_ui::{Button, Cursor, Event, Id, Key, MenuRow, MenuSource, MenuState, MenuStyle, Mods, Pt, Rect, Sense, TextInput, f, text_input};
+use tsubame_ui::{Button, Cursor, Event, Id, Key, MenuRow, MenuSource, MenuState, MenuStyle, Mods, Pt, Rect, Sense, TextInput, f, text_input, toggle};
 
 const ID_GRIP: Id = Id::new("menu-grip");
 const ID_ROW: Id = Id::new("menu-row");
@@ -31,6 +31,7 @@ const ID_ITEM_EDIT: Id = Id::new("menu-item-rename");
 const ID_KIND: Id = Id::new("menu-kind");
 const ID_GROW: Id = Id::new("menu-group-row");
 const ID_GDEL: Id = Id::new("menu-group-del");
+const ID_GNAME: Id = Id::new("menu-group-name");
 const ID_GEDIT: Id = Id::new("menu-group-rename");
 const ID_IGRIP: Id = Id::new("menu-item-grip");
 const ID_HDR: Id = Id::new("menu-item-hdr");
@@ -44,9 +45,11 @@ const ID_POP: Id = Id::new("menu-rowpop");
 const CHIPS: [&str; 5] = ["All", "Windows", "3rd party", "Tsubame", "Hidden"];
 
 /// The kind switch (mock 6b): which right-click the list is shown for. The
-/// config has `show_for` flags per entry (file, folder, background); "Several
-/// items" and "Drive" have no data behind them, so they are not offered.
-const KINDS: [&str; 3] = ["File", "Folder", "Empty area"];
+/// config has `show_for` flags per entry (file, folder, background, multiple,
+/// drives). "Several items" lists the entries that show for 2 or more selected
+/// items, "Drive" the ones for a drive root; both also list only the learned
+/// items a menu of that kind has shown.
+const KINDS: [&str; 5] = ["File", "Folder", "Empty area", "Several items", "Drive"];
 
 #[derive(Default)]
 pub struct State {
@@ -114,9 +117,18 @@ struct AddForm {
     cmd: TextInput,
     args: TextInput,
     ext: TextInput,
+    /// "Show for": File, Folder, Empty area, Several items, Drive
+    show: ShowFor,
     err: Option<String>,
     /// Edit entry: the id of the entry the form changes (None: a new one)
     edit: Option<String>,
+}
+
+impl AddForm {
+    /// A new entry's form: it shows for files, folders and a selection of several.
+    fn blank() -> AddForm {
+        AddForm { show: ShowFor { multiple: true, drives: false, ..ShowFor::default() }, ..Default::default() }
+    }
 }
 
 impl State {
@@ -161,7 +173,7 @@ pub fn new_entry(list: &[MenuEntry], name: &str, program: &str, args: &str, exts
     crate::custom_cmd::split_args(args).map_err(|e| format!("The arguments are not valid: {e}"))?;
     let mut e = MenuEntry::custom(&menu::next_id(list, "custom"), name, program, args.trim());
     e.extensions = parse_exts(exts);
-    e.show_for = ShowFor { files: true, folders: true, background: false };
+    e.show_for = ShowFor { multiple: true, drives: false, ..ShowFor::default() };
     Ok(e)
 }
 
@@ -229,6 +241,15 @@ fn label_field(pg: &mut Pg, id: Id, label: &str, input: &mut TextInput, x: f32, 
 
 /// Does a learned item pass the search `q` (lower-case) and the chip?
 pub fn item_shown(p: &menu::ItemPref, q: &str, chip: usize) -> bool {
+    item_shown_for(p, q, chip, None)
+}
+
+/// [`item_shown`] for the kind switch's pick (`None`: every kind). Several
+/// items and Drive list only the learned items a menu of that kind showed.
+pub fn item_shown_for(p: &menu::ItemPref, q: &str, chip: usize, kind: Option<usize>) -> bool {
+    if kind.and_then(kind_target).is_some_and(|k| !p.listed_for(k)) {
+        return false;
+    }
     let ours = p.key.starts_with("app:");
     let chip_ok = match chip {
         1 => !ours && !menu::is_third_party(p),
@@ -253,6 +274,8 @@ pub fn entry_shown(e: &MenuEntry, q: &str, chip: usize, kind: Option<usize>) -> 
         Some(0) => e.show_for.files,
         Some(1) => e.show_for.folders,
         Some(2) => e.show_for.background,
+        Some(3) => e.show_for.multiple,
+        Some(4) => e.show_for.drives,
         _ => true,
     };
     chip_ok && kind_ok && (q.is_empty() || (!e.is_separator() && (e.name.to_lowercase().contains(q) || e.source.label().to_lowercase().contains(q))))
@@ -337,7 +360,7 @@ pub fn move_group(order: &[menu::GroupRef], k: usize, dir: isize) -> Option<Vec<
 pub fn chip_counts(list: &[MenuEntry], items: &[menu::ItemPref], kind: Option<usize>) -> [usize; 5] {
     let mut n = [0usize; 5];
     for (c, slot) in n.iter_mut().enumerate() {
-        *slot = list.iter().filter(|e| !e.is_separator() && entry_shown(e, "", c, kind)).count() + items.iter().filter(|p| item_shown(p, "", c)).count();
+        *slot = list.iter().filter(|e| !e.is_separator() && entry_shown(e, "", c, kind)).count() + items.iter().filter(|p| item_shown_for(p, "", c, kind)).count();
     }
     n
 }
@@ -405,7 +428,48 @@ struct Deleted {
 
 /// The add form filled with `e`, saving into it.
 fn edit_form(e: &MenuEntry) -> AddForm {
-    AddForm { name: TextInput::new(&e.name), cmd: TextInput::new(&e.command), args: TextInput::new(&e.args), ext: TextInput::new(&e.extensions.join(", ")), err: None, edit: Some(e.id.clone()) }
+    AddForm { name: TextInput::new(&e.name), cmd: TextInput::new(&e.command), args: TextInput::new(&e.args), ext: TextInput::new(&e.extensions.join(", ")), show: e.show_for, err: None, edit: Some(e.id.clone()) }
+}
+
+/// "Name in menu" of user group `id`. Returns whether it changed.
+pub fn set_group_name_shown(users: &mut [menu::UserGroup], id: &str, on: bool) -> bool {
+    match users.iter_mut().find(|u| u.id == id) {
+        Some(u) if u.show_name != on => {
+            u.show_name = on;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The five "Show for" boxes of the add form (mock `ctxgap-kinds` C), in the
+/// kind switch's order.
+const SHOW_FOR: [&str; 5] = ["File", "Folder", "Empty area", "Several items", "Drive"];
+
+fn show_for_flag(s: &mut ShowFor, i: usize) -> &mut bool {
+    match i {
+        0 => &mut s.files,
+        1 => &mut s.folders,
+        2 => &mut s.background,
+        3 => &mut s.multiple,
+        _ => &mut s.drives,
+    }
+}
+
+fn show_for_row(pg: &mut Pg, show: &mut ShowFor, x: f32, y: f32) {
+    let t = pg.t;
+    pg.g.text("Show for", Rect::new(x, y, 90.0, 22.0), t.font_small(), t.text_dim);
+    let mut cx = x + 96.0;
+    for (i, l) in SHOW_FOR.iter().enumerate() {
+        let on = *show_for_flag(show, i);
+        let b = Rect::new(cx, y + 3.0, 16.0, 16.0);
+        if tsubame_ui::checkbox(pg.ui, pg.g, ID_FORM.with(20 + i as u64), b, on) {
+            *show_for_flag(show, i) = !on;
+        }
+        let lw = pg.g.measure(l, t.font_small());
+        pg.g.text(l, Rect::new(b.r() + 6.0, y, lw + 2.0, 22.0), t.font_small(), t.text);
+        cx = b.r() + 6.0 + lw + 18.0;
+    }
 }
 
 /// What a row "..." menu is for.
@@ -531,6 +595,8 @@ fn kind_target(i: usize) -> Option<menu::Target> {
         0 => Some(menu::Target::File),
         1 => Some(menu::Target::Folder),
         2 => Some(menu::Target::Background),
+        3 => Some(menu::Target::Multiple),
+        4 => Some(menu::Target::Drive),
         _ => None,
     }
 }
@@ -858,7 +924,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         }
         cxp = r.r() + 6.0;
     }
-    let hint = if st.kind.is_some() { "Entries that show for this right-click. Items learned from Windows are the same for every kind." } else { "Pick a kind to see which entries show for it." };
+    let hint = if st.kind.is_some() { "Entries that show for this right-click. Windows' items for File, Folder and Empty area are listed together; Several items and Drive list what their own menus showed." } else { "Pick a kind to see which entries show for it." };
     pg.g.text(hint, Rect::new(cxp + 8.0, ty, (pg.x + pg.w - cxp - 8.0).max(0.0), t.height_field), t.font_small(), t.text_dim);
     pg.y += t.height_field + 6.0;
 
@@ -915,7 +981,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         st.refresh = Refresh::Idle;
     }
     if add {
-        st.add = if st.add.is_some() { None } else { Some(Box::default()) };
+        st.add = if st.add.is_some() { None } else { Some(Box::new(AddForm::blank())) };
         st.msg = None;
     }
     if imp && st.picker.is_none() {
@@ -966,7 +1032,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
 
     // add form
     if let Some(form) = st.add.as_mut() {
-        let fh = 4.0 * 36.0 + 12.0 + 44.0;
+        let fh = 4.0 * 36.0 + 12.0 + 44.0 + 30.0;
         let r = Rect::new(pg.x, pg.y, pg.w, fh + 24.0);
         pg.g.round(r, t.radius_lg, t.panel);
         pg.g.round_stroke(r, t.radius_lg, t.accent, 1.0);
@@ -981,6 +1047,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         y += 36.0;
         label_field(pg, ID_FORM.with(4), "File types", &mut form.ext, fx, y, fw, "optional: txt, md (empty = every file)");
         y += 36.0;
+        show_for_row(pg, &mut form.show, fx, y);
+        y += 30.0;
         pg.g.text("{path} first selected item   {selection} every selected item   {dir} this folder   {name} {ext} {parent}", Rect::new(fx, y - 2.0, r.w - 32.0, 16.0), t.font_small(), t.text_dim);
         y += 20.0;
         let (ok, rr) = button(pg.ui, pg.g, ID_FORM.with(10), fx, y, if form.edit.is_some() { "Save" } else { "Add to menu" }, Look::Primary, true, false);
@@ -999,10 +1067,11 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
                             old.command = e.command;
                             old.args = e.args;
                             old.extensions = e.extensions;
+                            old.show_for = form.show;
                         }
                         st.msg = Some(("Saved.".into(), false));
                     } else {
-                        list.push(e);
+                        list.push(MenuEntry { show_for: form.show, ..e });
                         st.msg = Some(("Added. It shows at the end of the menu.".into(), false));
                     }
                     modified = true;
@@ -1147,6 +1216,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     let mut gstart: Option<String> = None;
     let mut gcommit: Option<(String, String)> = None;
     let mut gcancel = false;
+    let mut gname: Option<(String, bool)> = None;
     // keyboard: a move (index, direction) and the row that takes the focus afterwards
     let mut gmove: Option<(usize, isize)> = None;
     let mut gfocus: Option<usize> = None;
@@ -1209,7 +1279,17 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             }
             rx -= 30.0;
         }
-        tag(pg, rx, r.y + 5.0, r.h - 10.0, if uid.is_some() { "Your group" } else { "Group" }, uid.is_some(), false);
+        let tr = tag(pg, rx, r.y + 5.0, r.h - 10.0, if uid.is_some() { "Your group" } else { "Group" }, uid.is_some(), false);
+        // "Name in menu": the group's block starts with its name (variant B of the mock `ctxgap-groupname`)
+        if let Some(u) = uid.as_ref().and_then(|id| cx.prefs.context_menu.user_groups.iter().find(|u| u.id == *id)) {
+            let (tw, th) = (t.layout_toggle_width, t.layout_toggle_height);
+            let tg = Rect::new(tr.x - 14.0 - tw, r.y + (r.h - th) / 2.0, tw, th);
+            let lw = pg.g.measure("Name in menu", t.font_small());
+            pg.g.text("Name in menu", Rect::new(tg.x - 8.0 - lw, r.y, lw + 2.0, r.h), t.font_small(), t.text_dim);
+            if toggle(pg.ui, pg.g, ID_GNAME.with(k as u64), tg, u.show_name) {
+                gname = Some((u.id.clone(), !u.show_name));
+            }
+        }
         let editing = uid.as_ref().is_some_and(|id| st.gedit.as_ref().is_some_and(|(e, _)| e == id));
         if editing {
             let nr = Rect::new(gr.r() + 6.0, r.y + 2.0, 220.0, r.h - 4.0);
@@ -1289,6 +1369,11 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
     if gcancel {
         st.gedit = None;
+    }
+    if let Some((id, on)) = gname
+        && set_group_name_shown(&mut cx.prefs.context_menu.user_groups, &id, on)
+    {
+        cx.changed |= C_MENU;
     }
     if let Some(id) = gdelete {
         let m = &mut cx.prefs.context_menu;
@@ -1624,7 +1709,7 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
     let rh = t.height_menu_edit_row;
     let order = menu::full_order(&cx.prefs.context_menu.groups, &cx.prefs.context_menu.user_groups);
     let users = cx.prefs.context_menu.user_groups.clone();
-    let shown: Vec<usize> = (0..cx.prefs.context_menu.items.len()).filter(|&i| !filtered || item_shown(&cx.prefs.context_menu.items[i], q, st.chip)).collect();
+    let shown: Vec<usize> = (0..cx.prefs.context_menu.items.len()).filter(|&i| item_shown_for(&cx.prefs.context_menu.items[i], q, st.chip, st.kind)).collect();
     // rows: a header per group (unfiltered: the user's groups always, a built-in one when it has items), then its items
     // (grouped like the menu: pinned first, then first seen first)
     let mut rows: Vec<(Option<usize>, menu::GroupRef)> = Vec::new();
@@ -1824,6 +1909,19 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
         st.iedit = None;
     }
     pg.y = card.b() + 12.0;
+    // Several items / Drive before their first right-click: say why the list is short (mock `ctxgap-kinds` B)
+    if matches!(st.kind, Some(3 | 4)) && st.chip == 0 && q.is_empty() && shown.is_empty() {
+        pg.note("\u{E946}", kind_empty_note(st.kind == Some(4)), false);
+    }
+}
+
+/// The note under an empty Several items / Drive list.
+fn kind_empty_note(drive: bool) -> &'static str {
+    if drive {
+        "No drive items learned yet. Windows\u{2019} and apps\u{2019} drive entries (Format, Check disk, BitLocker, Defender) appear here after the first right-click on a drive in This PC or the sidebar. Until then only Tsubame\u{2019}s own rows are listed."
+    } else {
+        "No items learned yet for a selection. Windows\u{2019} and apps\u{2019} entries for several items appear here after the first right-click on two or more items. Until then only Tsubame\u{2019}s own rows are listed."
+    }
 }
 
 /// Reads `path` (never writes it) and opens the selection screen for what Tsubame can run. A file
@@ -2092,8 +2190,56 @@ mod tests {
     #[test]
     fn the_kind_switch_follows_show_for() {
         let mut e = MenuEntry::custom("custom.1", "VS Code", "code.exe", "");
-        e.show_for = ShowFor { files: true, folders: false, background: true };
+        e.show_for = ShowFor::classic(true, false, true);
         assert!(entry_shown(&e, "", 0, Some(0)) && !entry_shown(&e, "", 0, Some(1)) && entry_shown(&e, "", 0, Some(2)) && entry_shown(&e, "", 0, None));
+    }
+
+    #[test]
+    fn several_items_and_drive_lists_follow_their_flags_and_learned_kinds() {
+        assert_eq!(KINDS.len(), 5);
+        assert_eq!((kind_target(3), kind_target(4), kind_target(5)), (Some(menu::Target::Multiple), Some(menu::Target::Drive), None));
+        let mut e = MenuEntry::custom("custom.1", "Compare", "cmp.exe", "{selection}");
+        e.show_for = ShowFor { files: true, folders: false, background: false, multiple: true, drives: false };
+        assert!(entry_shown(&e, "", 0, Some(3)) && !entry_shown(&e, "", 0, Some(4)) && entry_shown(&e, "", 0, Some(0)));
+        e.show_for.drives = true;
+        e.show_for.multiple = false;
+        assert!(!entry_shown(&e, "", 0, Some(3)) && entry_shown(&e, "", 0, Some(4)));
+        // learned items: every kind of old lists them; Several / Drive only after such a menu showed them
+        let mut p = pref("windows.verb:share", "Share", "Windows");
+        assert!(item_shown_for(&p, "", 0, Some(0)) && item_shown_for(&p, "", 0, Some(2)) && item_shown_for(&p, "", 0, None));
+        assert!(!item_shown_for(&p, "", 0, Some(3)) && !item_shown_for(&p, "", 0, Some(4)), "not learned for them yet (the empty-state note)");
+        p.kinds = menu::Target::Drive.bit();
+        assert!(item_shown_for(&p, "", 0, Some(4)) && !item_shown_for(&p, "", 0, Some(3)) && !item_shown_for(&p, "sha", 2, Some(4)));
+        let counts = chip_counts(&menu::default_entries(), &[p], Some(4));
+        let real = menu::default_entries().iter().filter(|e| !e.is_separator() && e.show_for.drives).count();
+        assert_eq!(counts[0], real + 1, "the learned drive item counts under All");
+        assert!(kind_empty_note(true).contains("drive") && kind_empty_note(false).contains("several"));
+    }
+
+    #[test]
+    fn the_add_form_keeps_its_show_for_boxes() {
+        let b = AddForm::blank();
+        assert_eq!(b.show, ShowFor { files: true, folders: true, background: false, multiple: true, drives: false });
+        let mut s = b.show;
+        for (i, want) in [(0, true), (1, true), (2, false), (3, true), (4, false)] {
+            assert_eq!(*show_for_flag(&mut s, i), want, "{}", SHOW_FOR[i]);
+        }
+        *show_for_flag(&mut s, 4) = true;
+        assert!(s.drives);
+        let mut e = MenuEntry::custom("custom.1", "X", "x.exe", "");
+        e.show_for = s;
+        assert_eq!(edit_form(&e).show, s, "Edit entry opens with the entry's own boxes");
+        assert!(new_entry(&menu::default_entries(), "N", "n.exe", "{path}", "").unwrap().show_for.multiple);
+    }
+
+    #[test]
+    fn name_in_menu_switches_per_group() {
+        let mut users = vec![menu::UserGroup { id: "g1".into(), name: "A".into(), ..Default::default() }, menu::UserGroup { id: "g2".into(), name: "B".into(), ..Default::default() }];
+        assert!(set_group_name_shown(&mut users, "g2", true));
+        assert!(!set_group_name_shown(&mut users, "g2", true), "no change");
+        assert!(!set_group_name_shown(&mut users, "nope", true));
+        assert_eq!((users[0].show_name, users[1].show_name), (false, true), "per group, off by default");
+        assert!(set_group_name_shown(&mut users, "g2", false));
     }
 
     #[test]
@@ -2113,7 +2259,7 @@ mod tests {
         assert_eq!(drop_group(&share, &menu::GroupRef::User("g1".into())), Some("g1".to_string()));
         assert_eq!(drop_group(&share, &menu::GroupRef::Builtin(menu::Group::Windows)), Some(String::new()), "home group = back");
         assert_eq!(drop_group(&share, &menu::GroupRef::Builtin(menu::Group::Apps)), None);
-        let users = vec![menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 0 }];
+        let users = vec![menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 0, ..Default::default() }];
         share.group = "g1".into();
         assert_eq!(item_group(&share, &users), menu::GroupRef::User("g1".into()));
         share.group = "gone".into();
@@ -2132,7 +2278,7 @@ mod tests {
         m.groups = vec![menu::Group::Custom];
         m.entries = menu::default_entries();
         assert!(menu_changed(&m));
-        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 0 });
+        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 0, ..Default::default() });
         m.items[0].group = "g1".into();
         assert!(menu_changed(&m));
         reset_menu(&mut m);
@@ -2156,7 +2302,7 @@ mod tests {
 
     fn gorder() -> Vec<menu::GroupRef> {
         let mut m = tsubame_config::ContextMenu::default();
-        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 2 });
+        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 2, ..Default::default() });
         menu::full_order(&m.groups, &m.user_groups)
     }
 
@@ -2193,7 +2339,7 @@ mod tests {
         assert_eq!(move_group(&o, o.len(), -1), None);
         // stored like a drag: the built-in order and the user group's place round-trip
         let mut m = tsubame_config::ContextMenu::default();
-        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 2 });
+        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 2, ..Default::default() });
         menu::set_full_order(&mut m.groups, &mut m.user_groups, &up);
         assert_eq!(menu::full_order(&m.groups, &m.user_groups), up);
         let top = move_group(&up, 0, 1).unwrap();
@@ -2203,7 +2349,7 @@ mod tests {
 
     #[test]
     fn deleting_a_group_by_key_frees_its_items() {
-        let mut users = vec![menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 0 }];
+        let mut users = vec![menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 0, ..Default::default() }];
         let mut items = vec![menu::ItemPref { group: "g1".into(), ..pref("windows.verb:share", "Share", "Windows") }];
         assert_eq!(group_key(Key::Delete, Mods::NONE, true), Some(GroupKey::Delete));
         assert!(menu::delete_group(&mut users, &mut items, "g1"));

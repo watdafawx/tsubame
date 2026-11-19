@@ -93,7 +93,14 @@ fn target_of(background: bool, paths: &[String]) -> (tsubame_config::menu::Targe
     if background {
         return (Target::Background, String::new());
     }
+    // two or more items: the extension they share (no folder probing)
+    if paths.len() >= 2 {
+        return (Target::Multiple, crate::ctxui::common_ext(paths, |_| false));
+    }
     let first = paths.first().map(String::as_str).unwrap_or("");
+    if crate::ctxui::is_root(first) {
+        return (Target::Drive, String::new());
+    }
     // a network path is not probed on the UI thread
     if !first.starts_with("\\\\") && Path::new(first).is_dir() {
         return (Target::Folder, String::new());
@@ -130,21 +137,38 @@ fn extras_for(background: bool, paths: &[String]) -> (Vec<String>, Vec<Option<Ex
 /// Runs a custom entry on a short thread (never a shell, never on the UI thread).
 fn run_custom(a: &mut App, e: &tsubame_config::MenuEntry, ctx: &MenuCtx) {
     let paths: &[String] = if ctx.background { &[] } else { &ctx.paths };
-    match crate::custom_cmd::build_argv(e, &crate::custom_cmd::Ctx { paths, dir: &ctx.folder }) {
-        Ok(argv) => {
+    match crate::custom_cmd::build_all(e, &crate::custom_cmd::Ctx { paths, dir: &ctx.folder }) {
+        Ok(argvs) => {
             let h = a.ops.hwnd;
-            crate::custom_cmd::spawn(argv, move |err| {
-                if let Some(m) = err {
-                    if let Ok(mut g) = CUSTOM_ERRS.lock() {
-                        g.push(m);
-                    }
-                    let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_SHELLOPS, WPARAM(0), LPARAM(0)) };
+            // one program per item can be a lot of windows: ask first (the
+            // question is a modal box, so it waits for WM_APP_SHELLOPS)
+            if argvs.len() > crate::custom_cmd::CONFIRM_ABOVE {
+                if let Ok(mut g) = RUNS.lock() {
+                    g.push((e.name.clone(), argvs));
                 }
-            });
+                let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_SHELLOPS, WPARAM(0), LPARAM(0)) };
+                return;
+            }
+            start_custom(h, argvs);
             status(a, format!("Started {}", e.name));
         }
         Err(m) => status(a, m),
     }
+}
+
+/// Custom entries that run once per item on more than `CONFIRM_ABOVE` items,
+/// waiting for the user's yes (name, programs).
+static RUNS: Mutex<Vec<(String, Vec<crate::custom_cmd::Argv>)>> = Mutex::new(Vec::new());
+
+fn start_custom(h: isize, argvs: Vec<crate::custom_cmd::Argv>) {
+    crate::custom_cmd::spawn_all(argvs, move |err| {
+        if let Some(m) = err {
+            if let Ok(mut g) = CUSTOM_ERRS.lock() {
+                g.push(m);
+            }
+            let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_SHELLOPS, WPARAM(0), LPARAM(0)) };
+        }
+    });
 }
 
 #[derive(Default)]
@@ -303,6 +327,16 @@ pub fn on_app(hwnd: HWND) {
     if let Some(m) = errs.into_iter().last() {
         with(|a| status(a, m));
     }
+    let runs: Vec<_> = RUNS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
+    for (name, argvs) in runs {
+        if confirm_run(hwnd, &name, argvs.len()) {
+            let n = argvs.len();
+            start_custom(hwnd.0 as isize, argvs);
+            with(|a| status(a, format!("Started {name} on {n} items")));
+        } else {
+            with(|a| status(a, format!("Cancelled {name}")));
+        }
+    }
     let confirm_delete = with(|a| a.view.prefs.general.confirm_delete).unwrap_or(true);
     let done: Vec<DeleteResult> = DELETES.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
     for (verdicts, shift) in done {
@@ -402,6 +436,15 @@ fn short(s: &str, max: usize) -> String {
     out.push('…');
     out.extend(s.chars().skip(n - tail));
     out
+}
+
+/// "Run X once for each of N items?" (a custom entry on a big selection).
+fn confirm_run(hwnd: HWND, name: &str, n: usize) -> bool {
+    let text = format!("\"{name}\" runs once for each selected item: {n} programs will start. Continue?");
+    with(|a| a.view.ops.asking = true);
+    let r = unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), &HSTRING::from("Tsubame: run for each item?"), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) };
+    with(|a| a.view.ops.asking = false);
+    r == IDYES
 }
 
 fn confirm(hwnd: HWND, text: &str) -> bool {

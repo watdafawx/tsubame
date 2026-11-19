@@ -147,6 +147,51 @@ pub fn build_argv(entry: &MenuEntry, ctx: &Ctx) -> Result<Argv, String> {
     Ok(Argv { program, args, dir: ctx.dir.to_string() })
 }
 
+/// A selection of more items than this asks before an entry that runs once
+/// per item starts that many programs.
+pub const CONFIRM_ABOVE: usize = 10;
+
+/// Does the entry take the whole selection (`{selection}` or `%*`, alone or
+/// inside an argument)? Then it runs once with every path.
+pub fn uses_selection(entry: &MenuEntry) -> bool {
+    entry.args.contains("{selection}") || entry.args.contains("%*")
+}
+
+/// The programs to start for `entry` on `ctx`: one with every path when the
+/// entry uses `{selection}` / `%*` (or there is at most one item), else one per
+/// selected item, each with that item as `{path}`.
+pub fn build_all(entry: &MenuEntry, ctx: &Ctx) -> Result<Vec<Argv>, String> {
+    if ctx.paths.len() < 2 || uses_selection(entry) {
+        return build_argv(entry, ctx).map(|a| vec![a]);
+    }
+    ctx.paths.iter().map(|p| build_argv(entry, &Ctx { paths: std::slice::from_ref(p), dir: ctx.dir })).collect()
+}
+
+/// Starts every program of `argvs` in order on one short thread. `done` gets
+/// `None` when all started, else the first error text (and how many failed).
+pub fn spawn_all(argvs: Vec<Argv>, done: impl FnOnce(Option<String>) + Send + 'static) {
+    let spawned = std::thread::Builder::new().name("custom-entry".into()).spawn(move || {
+        let (mut first, mut failed) = (None, 0usize);
+        for argv in &argvs {
+            if let Err(e) = start(argv) {
+                failed += 1;
+                first.get_or_insert(e);
+            }
+        }
+        done(first.map(|e| if failed > 1 { format!("{e} ({failed} of {} failed)", argvs.len()) } else { e }));
+    });
+    let _ = spawned;
+}
+
+fn start(argv: &Argv) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(&argv.program);
+    cmd.args(&argv.args);
+    if !argv.dir.is_empty() && std::path::Path::new(&argv.dir).is_dir() {
+        cmd.current_dir(&argv.dir);
+    }
+    cmd.spawn().map(drop).map_err(|e| format!("Could not start {}: {e}", file_name(&argv.program)))
+}
+
 /// Starts the program on a short thread. `done` gets `None` when it started
 /// and the error text when it did not (the caller shows it in the status bar).
 pub fn spawn(argv: Argv, done: impl FnOnce(Option<String>) + Send + 'static) {
@@ -225,6 +270,39 @@ mod tests {
         // inside a larger argument they are joined with spaces (one argument)
         let a = run("t.exe", "--list={selection}", &[r"C:\a", r"C:\b"], r"C:\");
         assert_eq!(a.args, [r"--list=C:\a C:\b"]);
+    }
+
+    #[test]
+    fn several_items_run_once_with_all_paths_or_once_per_item() {
+        let paths: Vec<String> = [r"C:\a b.txt", r"C:\c.txt", r"C:\d.txt"].iter().map(|s| s.to_string()).collect();
+        let ctx = Ctx { paths: &paths, dir: r"C:\" };
+        // {selection} / %*, alone or inside an argument: one run with every path
+        for args in ["{selection}", "--add {selection}", "%*", "--list={selection}", "--x=%*"] {
+            let v = build_all(&entry("t.exe", args), &ctx).unwrap();
+            assert_eq!(v.len(), 1, "{args}");
+            assert!(uses_selection(&entry("t.exe", args)));
+        }
+        assert_eq!(build_all(&entry("t.exe", "{selection}"), &ctx).unwrap()[0].args, [r"C:\a b.txt", r"C:\c.txt", r"C:\d.txt"]);
+        // {path}, %1 or nothing: once per item, that item as {path}
+        for args in ["{path}", "%1 --x", ""] {
+            let v = build_all(&entry("t.exe", args), &ctx).unwrap();
+            assert_eq!(v.len(), 3, "{args:?}");
+            assert!(!uses_selection(&entry("t.exe", args)));
+        }
+        let per = build_all(&entry("t.exe", "--open {path} {dir}"), &ctx).unwrap();
+        assert_eq!(per[0].args, ["--open", r"C:\a b.txt", r"C:\"]);
+        assert_eq!(per[2].args, ["--open", r"C:\d.txt", r"C:\"]);
+        // one item, none (background) or a bad entry: a single run / the error
+        let one = [r"C:\a.txt".to_string()];
+        assert_eq!(build_all(&entry("t.exe", "{path}"), &Ctx { paths: &one, dir: r"C:\" }).unwrap().len(), 1);
+        assert_eq!(build_all(&entry("t.exe", "{path}"), &Ctx { paths: &[], dir: r"D:\Proj" }).unwrap().len(), 1);
+        assert!(build_all(&entry("", "{path}"), &ctx).is_err());
+        // the app asks before starting more than CONFIRM_ABOVE programs
+        let many: Vec<String> = (0..CONFIRM_ABOVE + 1).map(|i| format!(r"C:\f{i}")).collect();
+        let v = build_all(&entry("t.exe", "{path}"), &Ctx { paths: &many, dir: r"C:\" }).unwrap();
+        assert!(v.len() > CONFIRM_ABOVE);
+        let v = build_all(&entry("t.exe", "{selection}"), &Ctx { paths: &many, dir: r"C:\" }).unwrap();
+        assert!(v.len() <= CONFIRM_ABOVE, "one run with every path never asks");
     }
 
     #[test]
