@@ -183,6 +183,20 @@ existing bounded cache. Only visible rows draw.
 - `--stress menu --dir DIR`: existing native comparison.
 - `TSUBAME_STRESS_MENUS=N`: cycle count, clamped to 200..10000.
 
+### Settings editor: what is still not built
+
+Built since CM8: the kind switch (File / Folder / Empty area, from each entry's
+`show_for`), the "3rd party" chip (a packaged item whose package family is not
+Microsoft's; the classic menu names no owner, so classic items count as
+Windows), counts on the chips, New group, user groups
+(`[[context_menu.user_groups]]`: `id`, `name`, `pos`), dragging a learned item
+into a group (`ItemPref.group`) and Ctrl+F. Not built, because the mock does not
+show it: the row "..." menu (its contents), the kind switch's "Several items" and
+"Drive" (no data behind them), "Refresh from last menu", Pin to top, the file
+picker and file-detected state of the Nilesoft import. The real right-click menu
+does not compose user groups yet: items moved into one keep their native place
+there (the one hook needed is in the group composition of `ctxmodel`).
+
 ## Later-card seams
 
 CM10: UI Automation provider and high-contrast verification remain separate.

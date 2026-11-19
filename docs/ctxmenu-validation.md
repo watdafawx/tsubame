@@ -385,3 +385,16 @@ editor's search, chips, counts and Reset.
   active, by design (filtered rows are flattened paths).
 - Packaged rows (`windows.pkg:` keys): no packaged row showed on the test
   fixture; covered by the model test.
+## CM8-skip A: editor kind switch, 3rd party, groups, Ctrl+F
+
+Checked on the test desktop (slot build, keyboard only): Settings > Context
+menu shows the kind switch, the five chips with counts (All 11, Windows 2,
+3rd party 0, Tsubame 9, Hidden 0 on the fixture), the Ctrl+F badge in the
+search field and the New group button. Not seen on screen: Ctrl+F itself, New
+group, renaming and dragging (another window took the foreground and mouse
+input does not register); those paths are covered by unit tests (group order
+round trip, drop rules, chip rules, config partial load).
+
+Config: `[[context_menu.user_groups]]` and `items.group` are new; an old file
+loads unchanged and a bad group or item is dropped alone. Exe 5.42 MB. The menu
+code that builds the right-click (and its timings) was not touched.

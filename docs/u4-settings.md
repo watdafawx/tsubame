@@ -101,7 +101,12 @@ Settings > Context menu edits the own-drawn menu (`docs/ctxmenu.md`; mock state 
 - search (name, original label, source) and the chips All / Windows / Tsubame / Hidden;
 - Add custom entry, New submenu, Add separator, Import from Nilesoft Shell…, Reset to defaults (asks
   once; drops every hide, rename, reorder and the group order, keeps the learned items);
-- Groups: Tsubame, Windows, Installed apps, Custom, with a grip to reorder (`context_menu.groups`);
+- the kind switch (File / Folder / Empty area: the entries whose `show_for` covers it) above the search;
+  chips All / Windows / 3rd party / Tsubame / Hidden with counts ("3rd party" = a packaged item whose
+  package family is not Microsoft's); Ctrl+F focuses the search;
+- Groups: Tsubame, Windows, Installed apps, Custom and the user's own (New group; double-click renames, x
+  deletes and frees its items), with a grip to reorder (`context_menu.groups`, `context_menu.user_groups`);
+  the grip on a learned item drags it into a group (`items.group`);
 - the U4 list (Tsubame's built-ins and the custom / imported entries): grip (off while filtered), eye,
   double-click rename ("— was …" for a renamed built-in), source tag, × on custom rows;
 - the items learned from real right-clicks (`[[context_menu.items]]`): eye, double-click rename
@@ -191,9 +196,9 @@ nothing of U4 runs per frame in a list.
   packs, hover preview of a theme, Win+E takeover and the extra Explorer verb.
 - "Match Windows" colour mode reads the system theme once at startup/selection; it does not follow a
   live change.
-- Context menu editor (CM8): no user-defined groups ("New group", dragging a Windows item into a group),
-  no "3rd party" chip (classic items expose no owning program), no "Refresh from last menu", no Pin to
-  top, no row "…" menu, no Ctrl+F, Nilesoft import without the file-detected state or a file picker.
+- Context menu editor: no row "..." menu (its contents are not in the mock), no "Several items" / "Drive"
+  kinds, no "Refresh from last menu", no Pin to top, Nilesoft import without the file-detected state or a
+  file picker. User groups are stored and drawn in Settings, but the real menu does not compose them yet.
 - `advanced.diagnostics` persists, the log writer is not wired.
 - `updates.channel` is read; the updater is pinned to stable.
 - The memory readout on Advanced refreshes on repaint (about once a second while the page is visible),
