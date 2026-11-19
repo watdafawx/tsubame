@@ -611,3 +611,31 @@ Menu-open cost: none. No code on the right-click path changed; the new code runs
 in the edit menu.
 
 Limit: Edit entry from the menu-side edit menu opens the Settings form at the top of the page (no scroll-to).
+
+## Nilesoft selection screen (rig, 2026-11-20)
+
+Built to approved mock state 5. Checked on rig (debug build, throwaway `TSUBAME_DATA_DIR`, a small
+`shell.nss` with one submenu, two Files+Folders items, an Empty-area item and one unsupported `admin` item),
+keyboard only. Screenshots `docs/shots/ctxmenu-d2-*.png`.
+
+| State | Result |
+|---|---|
+| Selection screen after the file dialog: header counts, All / Importable / Skipped chips, Select all / none, "N of M selected" | pass (`ctxmenu-d2-selection.png`) |
+| Submenu box is tri-state (minus when one child is off), children tick on their own | pass |
+| "Shows for" per row (Files, folders / Folders / Files / Empty area / extensions) | pass |
+| Skipped row: named by its title, reason, line number, box disabled, Space does nothing | pass |
+| Placement dropdown opens upward, radio dot, rule above the fixed rows, Up/Down/Home/End, Enter picks, Esc closes | pass (`ctxmenu-d2-dropdown.png`) |
+| Default placement: new group "Nilesoft"; Enter in the name field imports | pass |
+| Report: "Added in the group “Nilesoft”, tagged “From Nilesoft”"; group row "Nilesoft, 4 items", "Your group" tag | pass (`ctxmenu-d2-report.png`) |
+| Undo import removes the entries and the group the import created | pass (`ctxmenu-d2-undo.png`) |
+| Tab order: Select all, Select none, chips, list, dropdown, name, Cancel, Import | pass |
+
+Found and fixed on the rig: the page closed any popup that was not the row menu (`popups_open() > 0` with no
+row popup), so the dropdown opened and shut in the same frame. The page now leaves the dropdown alone.
+
+Unit tests: selection and skipped rows, tri-state, chip filters, placement default (new group, then the last
+used one), place + undo of a created group (`nss.rs`, `nss_sel.rs`).
+
+Limits: no per-entry icons on the selection rows (the import carries none). Placement is stored on the entry
+(`group`) and shown in the Settings group count; the real menu does not draw imported entries inside the group
+yet. Focus is not restored to a control after Import (the first Tab starts at the top of the page).

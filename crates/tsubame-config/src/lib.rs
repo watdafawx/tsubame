@@ -351,6 +351,10 @@ pub struct ContextMenu {
     pub groups: Vec<menu::Group>,
     /// `[[context_menu.user_groups]]`: groups the user made (an old file has none)
     pub user_groups: Vec<menu::UserGroup>,
+    /// where the last Nilesoft import went: a user group's id, `end` (the end of the menu), or
+    /// empty (never imported: the first import offers a new group "Nilesoft")
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nss_group: String,
 }
 
 /// A rectangle in virtual-screen pixels (a monitor's work area).

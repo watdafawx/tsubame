@@ -219,11 +219,15 @@ nothing of U4 runs per frame in a list.
   packs, hover preview of a theme, Win+E takeover and the extra Explorer verb.
 - "Match Windows" colour mode reads the system theme once at startup/selection; it does not follow a
   live change.
-- Context menu editor: no "Several items" / "Drive" kinds (no data behind them), "Edit entry" from the menu's
-  edit menu opens the form at the top of the page (no scroll-to hook), Nilesoft import without a selection
-  screen (choose which entries to keep: not in the mock;
-  the logic exists, `nss::Import::choices` / `keep_only`) and placing the import in a named group (the
-  mock says "Placed in the group Tools"; imports go to the end of the menu, tagged From Nilesoft).
+- Context menu editor: no "Several items" / "Drive" kinds (no data behind them) and "Edit entry" from the menu's
+  edit menu opens the form at the top of the page (no scroll-to hook).
+- Nilesoft import has the selection screen (`ctxgap-nss`): tick entries (a submenu box is tri-state), "shows for",
+  skipped rows with reason and line, Select all / none, All / Importable / Skipped chips, "Placed in group"
+  (your groups, New group... with a name field, End of the menu; first time a new group "Nilesoft", then the last
+  used, remembered in `context_menu.nss_group`). Keys: Tab, Up / Down / Home / End / PgUp / PgDn and Space in the
+  list, Enter imports, Esc cancels. Undo import also removes a group the import made. Not drawn: the per-entry
+  icons of the mock. The placement is stored (`MenuEntry.group`) and shown in the group's count in Settings; the
+  real menu does not draw imported entries inside the group yet (group composition there is still learned items only).
 - The real menu composes user groups (a plain separator-delimited block, no header row, at the group's
   `pos`) and honours `items.pin` (first in its group).
 - `advanced.diagnostics` persists, the log writer is not wired.
