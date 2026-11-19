@@ -258,6 +258,12 @@ impl CtxMenu {
                 return false;
             }
             part => {
+                if let Part::Failed(ref error) = part {
+                    self.handle = None;
+                    if self.pending_verb.take().is_some() {
+                        self.invoke_result = Some(Err(error.clone()));
+                    }
+                }
                 let native = matches!(part, Part::Native(_));
                 self.model.apply(MenuBatch { part, ..b });
                 self.dirty = true;
@@ -554,6 +560,24 @@ mod tests {
         assert_eq!(kind_of(&t), (Kind::File, "txt".into()));
         t.background = true;
         assert_eq!(kind_of(&t), (Kind::Background, String::new()));
+    }
+
+    #[test]
+    fn failed_pending_verb_finishes_and_stale_failure_does_not() {
+        let mut c = CtxMenu {
+            generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), entries: vec![],
+            handle: None, ticket: 0, state: MenuState::default(), open: false,
+            input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, all_items: None,
+            picked: None, retry: false, pending_verb: Some("properties".into()), invoked: false, invoke_result: None,
+            items: vec![], dirty: false, paste_ok: false, icon_px: 16,
+        };
+        let failed = |generation| MenuBatch { generation, part: Part::Failed("bind failed".into()), timing: [0; 3] };
+        c.apply(failed(1));
+        assert!(!c.finished());
+        assert_eq!(c.pending_verb.as_deref(), Some("properties"));
+        c.apply(failed(2));
+        assert!(c.finished());
+        assert_eq!(c.invoke_result, Some(Err("bind failed".into())));
     }
 
     #[test]
