@@ -1102,6 +1102,44 @@ fn image_a_and_device_cache_in_the_test_canvas() {
 // ------------------------------------------------------------- key capture
 
 #[test]
+fn a_claimed_chord_skips_the_global_shortcut_for_one_frame() {
+    let mut h = Harness::new();
+    h.ui.shortcuts.bind(Key::Up, Mods::ALT, 9, true);
+    const ROW: Id = Id::new("row");
+    let mut seen = 0;
+    let mut cmds = Vec::new();
+    let run = |h: &mut Harness, claim: bool, seen: &mut i32, cmds: &mut Vec<u32>| {
+        h.frame(|ui, c| {
+            let r = Rect::new(0.0, 0.0, 100.0, 20.0);
+            button(ui, c, ROW, r, "row");
+            if ui.has_focus(ROW) && claim {
+                ui.claimed.push((Key::Up, Mods::ALT));
+            }
+            for (i, ev) in ui.key_input(ROW) {
+                if matches!(ev, Event::KeyDown { key: Key::Up, .. }) {
+                    *seen += 1;
+                    ui.consume(i);
+                }
+            }
+            cmds.extend_from_slice(ui.commands());
+        });
+    };
+    run(&mut h, false, &mut seen, &mut cmds);
+    h.down(5.0, 5.0);
+    h.up(5.0, 5.0);
+    run(&mut h, true, &mut seen, &mut cmds);
+    // claimed on the frame before: the row gets Alt+Up, the shortcut does not run
+    h.key(Key::Up, Mods::ALT);
+    run(&mut h, true, &mut seen, &mut cmds);
+    assert_eq!((seen, cmds.is_empty()), (1, true), "{cmds:?}");
+    // not claimed again: the shortcut is global once more
+    run(&mut h, false, &mut seen, &mut cmds);
+    h.key(Key::Up, Mods::ALT);
+    run(&mut h, false, &mut seen, &mut cmds);
+    assert_eq!(cmds, vec![9]);
+}
+
+#[test]
 fn capture_keys_hands_every_chord_to_the_focused_widget() {
     let mut h = Harness::new();
     h.ui.shortcuts.bind(Key::Char('T'), Mods::CTRL, 7, true);

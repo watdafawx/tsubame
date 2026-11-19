@@ -294,6 +294,10 @@ pub struct Ui {
     /// Esc-closes-popup and Tab focus stepping, and go to the focused widget
     /// (the settings Keys page records the next chord; Esc cancels there).
     pub capture_keys: bool,
+    /// Chords the focused widget wants for itself (Alt+Up on a reorderable
+    /// row): they skip the global shortcuts for the next frame only. A widget
+    /// that has the focus claims them again each frame it draws.
+    pub claimed: Vec<(Key, Mods)>,
 
     popups: Vec<Popup>,
     /// `popup_begin` nesting (clip depth to undo)
@@ -350,6 +354,7 @@ impl Ui {
             drag_pt: Pt::default(),
             caret_on: true,
             capture_keys: false,
+            claimed: Vec::new(),
             popups: Vec::new(),
             popup_depth: 0,
             composition: String::new(),
@@ -526,7 +531,7 @@ impl Ui {
                         let top = self.popups.last().unwrap().id;
                         self.close_popup(top);
                         self.queue[i].used = true;
-                    } else if let Some(cmd) = self.shortcuts.lookup(key, mods, true) {
+                    } else if let Some(cmd) = self.shortcuts.lookup(key, mods, true).filter(|_| !self.claimed.contains(&(key, mods))) {
                         self.commands.push(cmd);
                         self.queue[i].used = true;
                     } else if key == Key::Tab && !mods.ctrl && !mods.alt {
@@ -537,6 +542,7 @@ impl Ui {
                 _ => {}
             }
         }
+        self.claimed.clear();
         // `hits_prev` stays last frame's list for the whole frame; `hits`
         // collects this frame's
         self.hits.clear();

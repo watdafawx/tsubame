@@ -10,7 +10,7 @@ use super::{C_MENU, Cx, nss_pick};
 use crate::keymap::KeyMap;
 use tsubame_config::menu::{self, EntryKind, MenuEntry, ShowFor, Source};
 use tsubame_config::nss;
-use tsubame_ui::{Button, Cursor, Id, Rect, Sense, TextInput, f, text_input};
+use tsubame_ui::{Button, Cursor, Event, Id, Key, Mods, Rect, Sense, TextInput, f, text_input};
 
 const ID_GRIP: Id = Id::new("menu-grip");
 const ID_ROW: Id = Id::new("menu-row");
@@ -273,6 +273,36 @@ pub fn drop_group(p: &menu::ItemPref, target: &menu::GroupRef) -> Option<String>
         menu::GroupRef::User(id) => Some(id.clone()),
         menu::GroupRef::Builtin(b) => (*b == origin_group(p)).then(String::new),
     }
+}
+
+/// What a key does on a focused group header (the keyboard twins of the
+/// double-click, the x and the grip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupKey {
+    Rename,
+    Delete,
+    /// one place up (-1) or down (+1)
+    Move(isize),
+}
+
+/// The action for `key` on a group header. Rename and Delete only exist for
+/// the user's own groups (`user`); every group can move.
+pub fn group_key(key: Key, mods: Mods, user: bool) -> Option<GroupKey> {
+    match key {
+        Key::F(2) | Key::Enter if user && mods.none() => Some(GroupKey::Rename),
+        Key::Delete if user && mods.none() => Some(GroupKey::Delete),
+        Key::Up if mods.alt && !mods.ctrl && !mods.shift => Some(GroupKey::Move(-1)),
+        Key::Down if mods.alt && !mods.ctrl && !mods.shift => Some(GroupKey::Move(1)),
+        _ => None,
+    }
+}
+
+/// `order` with group `k` moved one place by `dir`; `None` at either end.
+pub fn move_group(order: &[menu::GroupRef], k: usize, dir: isize) -> Option<Vec<menu::GroupRef>> {
+    let to = k.checked_add_signed(dir).filter(|&t| k < order.len() && t < order.len())?;
+    let mut o = order.to_vec();
+    o.swap(k, to);
+    Some(o)
 }
 
 /// What each chip counts (the small number on the chip).
@@ -613,6 +643,9 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     let mut gstart: Option<String> = None;
     let mut gcommit: Option<(String, String)> = None;
     let mut gcancel = false;
+    // keyboard: a move (index, direction) and the row that takes the focus afterwards
+    let mut gmove: Option<(usize, isize)> = None;
+    let mut gfocus: Option<usize> = None;
     for (k, g) in order.iter().enumerate() {
         let r = Rect::new(gcard.x + 1.0, gcard.y + 1.0 + k as f32 * rh, gcard.w - 2.0, rh);
         if k > 0 {
@@ -622,7 +655,30 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             pg.g.fill(r, t.selected);
         }
         let uid = if let menu::GroupRef::User(id) = g { Some(id.clone()) } else { None };
-        let row = pg.ui.interact(ID_GROW.with(k as u64), r, Sense::click().cursor(Cursor::Arrow));
+        let rid = ID_GROW.with(k as u64);
+        let row = pg.ui.interact(rid, r, Sense::click().focusable().cursor(Cursor::Arrow));
+        if pg.ui.has_focus(rid) && pg.ui.window_focused() {
+            pg.g.round_stroke(r.pad(-2.0), t.radius_sm, t.focus, 1.0);
+            // Alt+Up / Alt+Down move the group here, not "Up one folder"
+            pg.ui.claimed.extend([(Key::Up, Mods::ALT), (Key::Down, Mods::ALT)]);
+        }
+        for (qi, ev) in pg.ui.key_input(rid) {
+            if let Event::KeyDown { key, mods, .. } = ev
+                && let Some(act) = group_key(key, mods, uid.is_some())
+            {
+                pg.ui.consume(qi);
+                pg.ui.request_repaint();
+                match act {
+                    GroupKey::Rename => gstart = uid.clone(),
+                    GroupKey::Delete => {
+                        gdelete = uid.clone();
+                        // the focus stays at this place (the one before it at the end)
+                        gfocus = Some(k.min(order.len().saturating_sub(2)));
+                    }
+                    GroupKey::Move(d) => gmove = Some((k, d)),
+                }
+            }
+        }
         let gr = Rect::new(r.x + 6.0, r.y, 18.0, r.h);
         let gi = pg.ui.interact(ID_GROUP.with(k as u64), gr, Sense::click().cursor(Cursor::Hand));
         for (dx, dy) in [(0.0, -4.0), (4.0, -4.0), (0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (4.0, 4.0)] {
@@ -667,6 +723,10 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             } else if resp.cancelled {
                 gcancel = true;
             }
+            // Enter / Esc hand the keyboard back to the header (a click elsewhere does not)
+            if resp.submitted || resp.cancelled {
+                gfocus = Some(k);
+            }
         } else {
             let nw = pg.g.measure(&name, t.font_md().b());
             pg.g.text(&name, Rect::new(gr.r() + 6.0, r.y, nw + 4.0, r.h), t.font_md().b(), t.text);
@@ -699,6 +759,14 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         }
         pg.ui.request_repaint();
     }
+    if let Some((k, d)) = gmove
+        && let Some(o) = move_group(&order, k, d)
+    {
+        let m = &mut cx.prefs.context_menu;
+        menu::set_full_order(&mut m.groups, &mut m.user_groups, &o);
+        cx.changed |= C_MENU;
+        gfocus = Some(k.saturating_add_signed(d));
+    }
     if let Some(id) = gstart {
         if let Some(u) = cx.prefs.context_menu.user_groups.iter().find(|u| u.id == id) {
             st.gedit = Some((id, TextInput::new(&u.name)));
@@ -726,6 +794,9 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         if st.gedit.as_ref().is_some_and(|(e, _)| *e == id) {
             st.gedit = None;
         }
+    }
+    if let Some(k) = gfocus {
+        pg.ui.set_focus(Some(ID_GROW.with(k as u64)));
     }
     pg.y = gcard.b() + 12.0;
 
@@ -1334,6 +1405,62 @@ mod tests {
         assert_eq!(group_count(&list, &items, &[], &b(menu::Group::Apps)), 1);
         // built-ins + the classic-menu row + Copy name (Open with is filled by Windows)
         assert_eq!(group_count(&list, &items, &[], &b(menu::Group::Tsubame)), list.iter().filter(|e| !e.is_separator() && e.id != "windows.open-with" && !e.source.runs_program()).count() + 1);
+    }
+
+    fn gorder() -> Vec<menu::GroupRef> {
+        let mut m = tsubame_config::ContextMenu::default();
+        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 2 });
+        menu::full_order(&m.groups, &m.user_groups)
+    }
+
+    #[test]
+    fn group_keys_rename_delete_and_move() {
+        let alt = Mods { alt: true, ..Mods::NONE };
+        // F2 and Enter rename, Delete deletes: only the user's own groups
+        assert_eq!(group_key(Key::F(2), Mods::NONE, true), Some(GroupKey::Rename));
+        assert_eq!(group_key(Key::Enter, Mods::NONE, true), Some(GroupKey::Rename));
+        assert_eq!(group_key(Key::Delete, Mods::NONE, true), Some(GroupKey::Delete));
+        assert_eq!(group_key(Key::F(2), Mods::NONE, false), None);
+        assert_eq!(group_key(Key::Enter, Mods::NONE, false), None);
+        assert_eq!(group_key(Key::Delete, Mods::NONE, false), None);
+        // Alt+Up / Alt+Down move any group; plain or other-modifier arrows do not
+        assert_eq!(group_key(Key::Up, alt, false), Some(GroupKey::Move(-1)));
+        assert_eq!(group_key(Key::Down, alt, true), Some(GroupKey::Move(1)));
+        assert_eq!(group_key(Key::Up, Mods::NONE, true), None);
+        assert_eq!(group_key(Key::Down, Mods::CTRL, true), None);
+        assert_eq!(group_key(Key::Delete, Mods::SHIFT, true), None);
+        assert_eq!(group_key(Key::Enter, alt, true), None);
+    }
+
+    #[test]
+    fn a_group_moves_one_place_and_stays_put_at_the_ends() {
+        let o = gorder();
+        let k = o.iter().position(|g| *g == menu::GroupRef::User("g1".into())).unwrap();
+        let up = move_group(&o, k, -1).unwrap();
+        assert_eq!(up[k - 1], menu::GroupRef::User("g1".into()));
+        assert_eq!(up[k], o[k - 1]);
+        let down = move_group(&o, k, 1).unwrap();
+        assert_eq!(down[k + 1], menu::GroupRef::User("g1".into()));
+        assert_eq!(move_group(&o, 0, -1), None);
+        assert_eq!(move_group(&o, o.len() - 1, 1), None);
+        assert_eq!(move_group(&o, o.len(), -1), None);
+        // stored like a drag: the built-in order and the user group's place round-trip
+        let mut m = tsubame_config::ContextMenu::default();
+        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 2 });
+        menu::set_full_order(&mut m.groups, &mut m.user_groups, &up);
+        assert_eq!(menu::full_order(&m.groups, &m.user_groups), up);
+        let top = move_group(&up, 0, 1).unwrap();
+        menu::set_full_order(&mut m.groups, &mut m.user_groups, &top);
+        assert_eq!(menu::full_order(&m.groups, &m.user_groups), top);
+    }
+
+    #[test]
+    fn deleting_a_group_by_key_frees_its_items() {
+        let mut users = vec![menu::UserGroup { id: "g1".into(), name: "Mine".into(), pos: 0 }];
+        let mut items = vec![menu::ItemPref { group: "g1".into(), ..pref("windows.verb:share", "Share", "Windows") }];
+        assert_eq!(group_key(Key::Delete, Mods::NONE, true), Some(GroupKey::Delete));
+        assert!(menu::delete_group(&mut users, &mut items, "g1"));
+        assert!(users.is_empty() && items[0].group.is_empty());
     }
 
     #[test]
