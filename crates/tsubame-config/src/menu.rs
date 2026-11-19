@@ -282,6 +282,106 @@ pub struct ItemPref {
     pub name: String,
     /// appeared since the Settings page was last opened
     pub new: bool,
+    /// id of the user group (`[[context_menu.user_groups]]`) the item was
+    /// moved into; empty = the group it belongs to by origin
+    pub group: String,
+}
+
+/// `[[context_menu.user_groups]]`: a group the user made. Items are moved into
+/// it with [`ItemPref::group`]. `pos` is its place in the full group order
+/// (0 = top), counted over the built-in groups and the user groups together.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserGroup {
+    pub id: String,
+    pub name: String,
+    pub pos: usize,
+}
+
+/// One slot of the full group order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GroupRef {
+    Builtin(Group),
+    User(String),
+}
+
+/// The full order to draw: the built-in groups as [`group_order`] gives them,
+/// each user group inserted at its `pos` (past the end = last). A user group
+/// with an empty or duplicate id is ignored.
+pub fn full_order(saved: &[Group], users: &[UserGroup]) -> Vec<GroupRef> {
+    let mut v: Vec<GroupRef> = group_order(saved).into_iter().map(GroupRef::Builtin).collect();
+    let mut seen: Vec<&str> = Vec::new();
+    let mut us: Vec<&UserGroup> = Vec::new();
+    for u in users {
+        if u.id.is_empty() || seen.contains(&u.id.as_str()) {
+            continue;
+        }
+        seen.push(&u.id);
+        us.push(u);
+    }
+    us.sort_by_key(|u| u.pos);
+    for u in us {
+        let at = u.pos.min(v.len());
+        v.insert(at, GroupRef::User(u.id.clone()));
+    }
+    v
+}
+
+/// Stores `order` back: the built-in order in `saved` (empty when it is the
+/// default) and each user group's `pos`.
+pub fn set_full_order(saved: &mut Vec<Group>, users: &mut [UserGroup], order: &[GroupRef]) {
+    let b: Vec<Group> = order.iter().filter_map(|g| if let GroupRef::Builtin(g) = g { Some(*g) } else { None }).collect();
+    *saved = if b == Group::ALL { Vec::new() } else { b };
+    for u in users.iter_mut() {
+        if let Some(i) = order.iter().position(|g| *g == GroupRef::User(u.id.clone())) {
+            u.pos = i;
+        }
+    }
+}
+
+/// A new user group named `name` (trimmed; empty = "New group") at the end of
+/// the order. Returns its id.
+pub fn add_group(users: &mut Vec<UserGroup>, saved: &[Group], name: &str) -> String {
+    let mut n = 1;
+    while users.iter().any(|u| u.id == format!("g{n}")) {
+        n += 1;
+    }
+    let id = format!("g{n}");
+    let name = name.trim();
+    let pos = group_order(saved).len() + users.len();
+    users.push(UserGroup { id: id.clone(), name: if name.is_empty() { "New group".into() } else { name.into() }, pos });
+    id
+}
+
+/// Deletes user group `id`; its items go back to the group of their origin.
+pub fn delete_group(users: &mut Vec<UserGroup>, items: &mut [ItemPref], id: &str) -> bool {
+    let n = users.len();
+    users.retain(|u| u.id != id);
+    for p in items.iter_mut().filter(|p| p.group == id) {
+        p.group.clear();
+    }
+    users.len() != n
+}
+
+/// Moves item `key` into user group `group` (empty = back to its origin
+/// group). A group that does not exist counts as empty.
+pub fn move_item_to_group(items: &mut [ItemPref], users: &[UserGroup], key: &str, group: &str) -> bool {
+    let g = if users.iter().any(|u| u.id == group) { group } else { "" };
+    match item_mut(items, key) {
+        Some(p) if p.group != g => {
+            p.group = g.to_string();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The "3rd party" chip. The classic menu hands out no owning program, so the
+/// only evidence is a packaged (Win11) item whose package family is not
+/// Microsoft's.
+pub fn is_third_party(p: &ItemPref) -> bool {
+    let f = p.from.as_str();
+    !(f.is_empty() || f == "Windows" || f == "Tsubame" || p.key.starts_with("app:") || f.starts_with("Microsoft.") || f.starts_with("MicrosoftWindows.") || f.starts_with("Windows."))
 }
 
 /// The menu's groups, top to bottom (`groups` in `[context_menu]`).
@@ -366,6 +466,53 @@ pub fn learn(items: &mut Vec<ItemPref>, seen: &[(String, String, String)], fresh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_groups_slot_into_the_order_and_round_trip() {
+        let mut saved: Vec<Group> = Vec::new();
+        let mut users: Vec<UserGroup> = Vec::new();
+        let a = add_group(&mut users, &saved, "  Tools ");
+        let b = add_group(&mut users, &saved, "");
+        assert_eq!((a.as_str(), b.as_str(), users[0].name.as_str(), users[1].name.as_str()), ("g1", "g2", "Tools", "New group"));
+        let mut o = full_order(&saved, &users);
+        assert_eq!(o.len(), 6);
+        assert_eq!(o[4], GroupRef::User("g1".into()));
+        let g = o.remove(4);
+        o.insert(1, g);
+        set_full_order(&mut saved, &mut users, &o);
+        assert_eq!(full_order(&saved, &users), o);
+        assert!(saved.is_empty(), "built-in order untouched = default");
+        // duplicate / empty ids are ignored, a far pos is last
+        users.push(UserGroup { id: "g1".into(), name: "dup".into(), pos: 0 });
+        users.push(UserGroup { id: String::new(), name: "x".into(), pos: 0 });
+        users[1].pos = 99;
+        assert_eq!(full_order(&saved, &users).len(), 6);
+        assert_eq!(full_order(&saved, &users).last(), Some(&GroupRef::User("g2".into())));
+    }
+
+    #[test]
+    fn deleting_a_group_frees_its_items() {
+        let mut users = vec![UserGroup { id: "g1".into(), name: "T".into(), pos: 0 }];
+        let mut items = vec![ItemPref { key: "windows.verb:share".into(), ..Default::default() }];
+        assert!(move_item_to_group(&mut items, &users, "windows.verb:SHARE", "g1"));
+        assert_eq!(items[0].group, "g1");
+        assert!(!move_item_to_group(&mut items, &users, "windows.verb:share", "g1"));
+        assert!(move_item_to_group(&mut items, &users, "windows.verb:share", "nope"), "unknown group = origin");
+        assert!(items[0].group.is_empty());
+        move_item_to_group(&mut items, &users, "windows.verb:share", "g1");
+        assert!(delete_group(&mut users, &mut items, "g1"));
+        assert!(users.is_empty() && items[0].group.is_empty());
+    }
+
+    #[test]
+    fn third_party_means_a_non_microsoft_package() {
+        let p = |key: &str, from: &str| ItemPref { key: key.into(), from: from.into(), ..Default::default() };
+        assert!(is_third_party(&p("windows.pkg:Foo.App_abc/{x}", "Foo.App_abc")));
+        assert!(!is_third_party(&p("windows.pkg:Microsoft.WindowsTerminal_8w/{x}", "Microsoft.WindowsTerminal_8w")));
+        assert!(!is_third_party(&p("windows.verb:share", "Windows")));
+        assert!(!is_third_party(&p("windows.verb:x", "")));
+        assert!(!is_third_party(&p("app:file.copy-name", "Tsubame")));
+    }
 
     #[test]
     fn group_order_dedupes_and_appends_missing_groups() {
