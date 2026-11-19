@@ -307,6 +307,9 @@ pub struct View {
     pub keymap: crate::keymap::KeyMap,
     /// the command palette, built when it opens and dropped when it closes
     palette: Option<Box<crate::palette::Palette>>,
+    /// the own-drawn context menu (open, or waiting for its shell invoke);
+    /// main opens it and runs its picks (`shellops::ctx_after_frame`)
+    pub ctx: Option<Box<crate::ctxui::CtxMenu>>,
     /// command ids run from the palette, most recent first
     recents: Vec<u32>,
     /// the Settings tab's pages, built when the tab opens and dropped when it closes
@@ -394,6 +397,7 @@ impl View {
             theme_id: tsubame_ui::themes::tsubame(dark).id.to_string(),
             keymap: crate::keymap::KeyMap::defaults(),
             palette: None,
+            ctx: None,
             recents: Vec::new(),
             settings: None,
             env: crate::settings::Env::default(),
@@ -873,7 +877,7 @@ impl View {
         self.with_pane(slot, |v| v.go(path));
     }
 
-    fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
+    pub(crate) fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
         if self.tab().settings && !u4::settings_tab_allows(cmd) {
             return;
         }
@@ -1059,6 +1063,12 @@ impl View {
         self.list_top + l.row_top(i) as f32 + l.row_h / 2.0
     }
 
+    /// Keyboard menus follow the focused pane/cell, including horizontal grids.
+    pub fn menu_anchor(&self, row: usize) -> Pt {
+        let dx = if self.mode.is_grid() { self.tab().grid.cell_origin(row).0 } else { 0.0 };
+        Pt::new(self.list_r.x + dx + 12.0, self.row_mid_y(row))
+    }
+
     /// Paths for a context menu on `row`: the selection if `row` is in it,
     /// else just `row` (at most 64).
     pub fn menu_paths(&self, row: usize) -> Vec<String> {
@@ -1148,6 +1158,13 @@ impl View {
         self.side_act(ui, oa);
         self.paint_batch_preview(g, &t, (w, h));
         self.paint_palette(ui, g, (w, h));
+        // the context menu is on top of everything
+        if let Some(c) = self.ctx.as_mut() {
+            c.paint(ui, g, Rect::new(0.0, 0.0, w, h));
+        } else {
+            // dropped by the app (picked, replaced, stress run): its popups go too
+            ui.close_popup(crate::ctxui::ID_CTX.with(0));
+        }
         let target = self.side_target.take();
         self.finish_drag(ui, g, &t, target.as_ref());
         self.sole_hist = [self.sole_hist[1], self.sole_row()];
@@ -1187,6 +1204,7 @@ impl View {
             out.repaint = true;
         }
         g.end();
+        if let Some(c) = self.ctx.as_mut() { c.presented(); }
         Some(out)
     }
 
@@ -2383,12 +2401,14 @@ mod tests {
         r.right_click(l1.x + 40.0, l1.b() - 10.0);
         assert_eq!(r.v.active, 1);
         assert!(r.v.bg_menu.take().is_some());
+        assert!(l1.contains_pt(r.v.menu_anchor(0)), "keyboard anchor follows pane 1");
         assert!(r.v.menu_request.is_none());
         // a row of pane 0: the item menu for that row, pane 0 active again
         let (l0, _) = r.list_of(0);
         r.right_click(l0.x + 40.0, l0.y + rh * 1.5);
         assert_eq!(r.v.active, 0);
         assert_eq!(r.v.menu_request.take().map(|m| m.0), Some(1));
+        assert!(l0.contains_pt(r.v.menu_anchor(1)), "keyboard anchor follows pane 0");
         // the shell menu's Rename: inline rename of that row on the next frame
         r.v.rename_request = true;
         r.frame();

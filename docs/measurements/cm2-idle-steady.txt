@@ -1,0 +1,5 @@
+Response: idle.window1.cpu_ms=0
+idle.window2.cpu_ms=15.6
+idle.window3.cpu_ms=15.6
+
+Status Code: 0

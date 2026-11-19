@@ -738,7 +738,7 @@ body:not(.only) .sec.hide{display:none}
 
   /* ---------- file menu, in groups (so other states can re-use the pieces) ---------- */
   function ts(kind) {
-    var a = [HDR('Tsubame', { logo: 1 })];
+    var a = [];
     if (kind === 'file') a.push(I('&Preview', { ic: 'preview', sc: 'Space', id: 'ts-prev' }), I('Open in &other pane', { ic: 'otherpane', sc: 'Ctrl+Shift+Enter', id: 'ts-pane' }), I('Copy pa&th as', { ic: 'path', sub: copyPathSub(), id: 'ts-cp' }), I('Co&mpare with…', { ic: 'compare', id: 'ts-cmp' }),
       I('Open in VS Code', { ic: 'code', cus: 1, id: 'c-vsc' }), I('SHA-256 to clipboard', { ic: 'hash', cus: 1, id: 'c-sha' }), I('Upload to server', { ic: 'upload', cus: 1, id: 'c-up' }));
     if (kind === 'folder') a.push(I('Open in new &tab', { ic: 'newtab', sc: 'Ctrl+Enter' }), I('Open in &other pane', { ic: 'otherpane', sc: 'Ctrl+Shift+Enter' }), I('Open &terminal here', { ic: 'term', sc: 'Ctrl+Alt+T' }), I('Co&mpare with…', { ic: 'compare' }),
@@ -788,13 +788,13 @@ body:not(.only) .sec.hide{display:none}
     return [I('&View', { ic: 'view', sub: [1] }), I('S&ort by', { ic: 'sort', sub: [1] }), I('&Group by', { ic: 'group', sub: [1] }), I('&Refresh', { ic: 'refresh', sc: 'F5' }), SEP,
       I('&Paste', { ic: 'paste', sc: 'Ctrl+V' }), I('Paste &shortcut', { ic: 'shortcut', off: 1 }), I('&Undo Rename', { ic: 'undo', sc: 'Ctrl+Z' }), SEP,
       I('Ne&w', { ic: 'newfolder', sub: newSub() }), SEP,
-      HDR('Tsubame', { logo: 1 }), I('Open &terminal here', { ic: 'term', sc: 'Ctrl+Alt+T' }), I('Copy folder pa&th', { ic: 'path' }), I('Open in VS Code', { ic: 'code', cus: 1 }), I('Git Bash here', { ic: 'git', cus: 1 }), SEP,
+      I('Open &terminal here', { ic: 'term', sc: 'Ctrl+Alt+T' }), I('Copy folder pa&th', { ic: 'path' }), I('Open in VS Code', { ic: 'code', cus: 1 }), I('Git Bash here', { ic: 'git', cus: 1 }), SEP,
       I('Git GUI &here', { ic: 'git' }), I('Open in &Windows Terminal', { ic: 'wt' }), SEP, I('P&roperties', { ic: 'info', sc: 'Alt+Enter' })];
   }
   function multiItems() {
     var q = QUICK;
     var a = [HDR('<b>4 items</b> selected', { plain: 1, n: '38 MB' }), I('&Open', { ic: 'open', def: 1, sc: 'Enter' }), SEP,
-      HDR('Tsubame', { logo: 1 }), I('Open in &other pane', { ic: 'otherpane' }), I('&Batch rename…', { ic: 'rename', sc: 'F2' }), I('Co&mpare', { ic: 'compare', off: 1 }), I('&Group into folder', { ic: 'newfolder', sc: 'Ctrl+Shift+N' }), I('Copy &paths', { ic: 'path' }), I('SHA-256 to clipboard', { ic: 'hash', cus: 1 }), SEP,
+      I('Open in &other pane', { ic: 'otherpane' }), I('&Batch rename…', { ic: 'rename', sc: 'F2' }), I('Co&mpare', { ic: 'compare', off: 1 }), I('&Group into folder', { ic: 'newfolder', sc: 'Ctrl+Shift+N' }), I('Copy &paths', { ic: 'path' }), I('SHA-256 to clipboard', { ic: 'hash', cus: 1 }), SEP,
       I('7-&Zip', { ic: 'z7', sub: [1] }), I('S&can with Microsoft Defender…', { ic: 'shield' }), I('Sh&are', { ic: 'sharec' }), I('Send t&o', { ic: 'sendto', sub: [1] }), SEP,
       I('Cu&t', { ic: 'cut', sc: 'Ctrl+X' }), I('&Copy', { ic: 'copy', sc: 'Ctrl+C' }), I('Create &shortcuts', { ic: 'shortcut' }), SEP,
       I('&Delete 4 items', { ic: 'trash', sc: 'Del', dng: 1 }), SEP, I('P&roperties', { ic: 'info', sc: 'Alt+Enter' })];
@@ -804,7 +804,7 @@ body:not(.only) .sec.hide{display:none}
   function driveItems() {
     return [HDR('<b>Dev (X:)</b>', { plain: 1, n: '1.1 TB free of 1.8 TB' }), I('&Open', { ic: 'open', def: 1, sc: 'Enter' }), I('Open in new &tab', { ic: 'newtab', sc: 'Ctrl+Enter' }), I('Open in &other pane', { ic: 'otherpane' }), SEP,
       I('Pin to &Quick access', { ic: 'pin' }), I('Add to &bookmarks', { ic: 'star' }), SEP,
-      HDR('Tsubame', { logo: 1 }), I('Open &terminal here', { ic: 'term', sc: 'Ctrl+Alt+T' }), I('Show &folder sizes', { ic: 'view' }), SEP,
+      I('Open &terminal here', { ic: 'term', sc: 'Ctrl+Alt+T' }), I('Show &folder sizes', { ic: 'view' }), SEP,
       I('S&can with Microsoft Defender…', { ic: 'shield' }), I('Turn on &BitLocker', { ic: 'bitl' }), SEP,
       I('&Format…', { ic: 'format' }), I('Check &disk…', { ic: 'drive' }), I('Disk Clea&nup', { ic: 'gear' }), SEP,
       I('&Copy', { ic: 'copy', sc: 'Ctrl+C' }), I('Create &shortcut', { ic: 'shortcut' }), I('Rena&me', { ic: 'rename', sc: 'F2' }), SEP, I('P&roperties', { ic: 'info', sc: 'Alt+Enter' })];
@@ -889,7 +889,7 @@ body:not(.only) .sec.hide{display:none}
     main.forEach(function (it) { if (it.id === '7z') it.subo = { w: 300 }; });
     var panel = '<div style="position:absolute;right:0;top:0;bottom:0;width:240px;background:var(--c-panel);border-left:1px solid var(--c-border);padding:18px 16px"><div class="lab"><b>Reading this menu</b></div><div class="lg" style="gap:12px;font-size:11px;line-height:1.5;color:var(--c-text-dim)">' +
       '<div><b style="color:var(--c-text)">Groups, top to bottom:</b> the verb, Tsubame, shell extensions, clipboard, destructive, Properties. Native order is kept inside a group.</div>' +
-      '<div><b style="color:var(--c-text)">Tsubame group:</b> header with the app mark. Entries you added carry the small accent dot.</div>' +
+      '<div><b style="color:var(--c-text)">Tsubame group:</b> no caption row. Entries you added carry the small accent dot.</div>' +
       '<div><b style="color:var(--c-text)">Colour icons</b> (7-Zip, Git, Defender, Share) are the bitmaps the extension supplies. Our own verbs use the mono glyphs.</div>' +
       '<div><b style="color:var(--c-text)">7-Zip</b> is hovered, its submenu is open to the right, parent row kept in <code>selected_inactive</code>.</div>' +
       '<div><b style="color:var(--c-text)">Paste</b> is disabled because the clipboard is empty.</div></div></div>';
@@ -901,7 +901,7 @@ body:not(.only) .sec.hide{display:none}
       col('<b>Open with</b>', menu(openWithSub(), { w: 236, flags: {} }), 'Colour icons for apps. “default” is plain shortcut text.') +
       col('<b>Send to</b>' + P('14 rows, still fits'), menu(sendToSub(), { w: 240 }), 'Long lists are normal here, see state 5 for what happens when a menu is taller than the screen.') +
       col('<b>Git</b>', menu(gitSub(), { w: 200 })) +
-      col('<b>Copy path as</b>' + P('Tsubame'), menu(copyPathSub(), { w: 250 })) + '</div></div>';
+      col('<b>Copy path as</b>' + P('App'), menu(copyPathSub(), { w: 250 })) + '</div></div>';
   }
 
   /* ================= 3 · kinds ================= */
@@ -1088,7 +1088,7 @@ body:not(.only) .sec.hide{display:none}
       var newOW = t >= 1 ? [I('Open &with', { ic: 'openwith', sub: [1], st: t === 1 ? 'arr' : '' }), I('&Edit', { ic: 'edit', st: t === 1 ? 'arr' : '' })] : [];
       a = a.concat(newOW);
       a.push(SEP);
-      a = a.concat([HDR('Tsubame', { logo: 1 }), I('&Preview', { ic: 'preview', sc: 'Space' }), I('Open in &other pane', { ic: 'otherpane' }), I('Open in VS Code', { ic: 'code', cus: 1 }), I('Upload to server', { ic: 'upload', cus: 1 })]);
+      a = a.concat([I('&Preview', { ic: 'preview', sc: 'Space' }), I('Open in &other pane', { ic: 'otherpane' }), I('Open in VS Code', { ic: 'code', cus: 1 }), I('Upload to server', { ic: 'upload', cus: 1 })]);
       var shell = [];
       if (t >= 2) shell.push(I('7-&Zip', { ic: 'z7', sub: [1], st: t === 2 ? 'arr' : '' }), I('&Git', { ic: 'git', sub: [1], st: t === 2 ? 'arr' : '' }));
       if (t === 2) shell.push(I('S&can with Microsoft Defender…', { ic: 'shield', st: 'arr' }), I('Sh&are', { ic: 'sharec', st: 'arr' }));
@@ -1144,7 +1144,7 @@ body:not(.only) .sec.hide{display:none}
       '<li><b>Looks like our other popups.</b> <span><code>popup</code> fill, 1 px <code>popup_border</code>, radius 8, padding 4, no shadow. Rows follow the density (22 / 26 / 30, text 12 / 13 / 14); rows grow with the font scale.</span></li>' +
       '<li><b>Hover = selected; keyboard focus = selected + focus ring; pressed = accent fill.</b> <span>Hover and popup are almost the same colour in dark, so hover uses <code>selected</code> like our existing menu.</span></li>' +
       '<li><b>Icons.</b> <span>Known verbs get Tsubame’s mono glyphs; unknown shell items show their own colour bitmap. The icon column is always reserved, so labels line up.</span></li>' +
-      '<li><b>Groups in the menu.</b> <span>Tsubame group has a header; Windows items stay in native order inside our groups. User-added entries carry an accent dot in the left gutter.</span></li>' +
+      '<li><b>Groups in the menu.</b> <span>Groups have no app-name captions; Windows items stay in native order inside our groups. User-added entries carry an accent dot in the left gutter.</span></li>' +
       '<li><b>Edit by right-clicking an entry,</b> not a separate mode. <span>Hidden items are not shown in the menu, only in Settings, with Undo in a strip.</span></li>' +
       '<li><b>Items are identified by verb + handler,</b> not label. <span>Rename and hide survive updates and language changes. New items show up visible, tagged New.</span></li>' +
       '<li><b>Nothing native is removed from Windows,</b> and the editor says so. <span>Hiding only affects our menu.</span></li>' +

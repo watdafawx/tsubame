@@ -50,6 +50,7 @@ mod clip;
 mod cols;
 mod custom_cmd;
 mod commands;
+mod ctxui;
 mod data;
 mod dnd;
 mod editing;
@@ -161,6 +162,8 @@ struct App {
     stress: Option<stress::Stress>,
     hang_bench: bool,
     watch_armed: bool,
+    /// the own-drawn menu's loading-line timer runs (only while it loads)
+    ctx_timer: bool,
     /// the blink timer exists
     caret_timer: bool,
     /// the blink stopped for lack of input (caret solid until the next key)
@@ -291,6 +294,7 @@ fn main() {
     let stress_mode = arg_value(&args, "--stress").map(|m| match m.as_str() {
         "thumbs" => stress::Mode::Thumbs,
         "clip" => stress::Mode::Clip,
+        "ctxmenu" => stress::Mode::CtxMenu,
         _ => stress::Mode::Menu,
     });
     let workers = arg_value(&args, "--workers").and_then(|v| v.parse().ok()).unwrap_or(shellui::ICON_WORKERS);
@@ -551,6 +555,7 @@ fn main() {
                 stress: stress_mode.map(stress::Stress::new),
                 hang_bench: flag("--hang"),
                 watch_armed: false,
+                ctx_timer: false,
                 caret_timer: false,
                 caret_idle: false,
                 last_input: Instant::now(),
@@ -621,6 +626,19 @@ fn arm_watch(hwnd: HWND, a: &mut App) {
     }
 }
 
+/// The own-drawn menu's loading line animates only while shell items are
+/// still coming (and until the 3 s failure switch); no menu, no timer.
+fn arm_ctx(hwnd: HWND, a: &mut App) {
+    let want = a.view.ctx.as_ref().is_some_and(|c| c.loading());
+    if want && !a.ctx_timer {
+        unsafe { SetTimer(Some(hwnd), ctxui::TIMER_ID, ctxui::TICK_MS, None) };
+        a.ctx_timer = true;
+    } else if !want && a.ctx_timer {
+        let _ = unsafe { KillTimer(Some(hwnd), ctxui::TIMER_ID) };
+        a.ctx_timer = false;
+    }
+}
+
 /// The file-operation poll timer exists only while an operation is running.
 fn arm_ops(hwnd: HWND, a: &mut App) {
     let busy = a.view.ops_busy();
@@ -682,6 +700,7 @@ fn after_paint(hwnd: HWND, a: &mut App) {
     a.shell.end_frame(&mut a.pool);
     arm_watch(hwnd, a);
     arm_ops(hwnd, a);
+    arm_ctx(hwnd, a);
     if a.view.want_drives && !PLACES_BUSY.load(Ordering::Acquire) {
         a.view.want_drives = false;
         spawn_places(hwnd);
@@ -1000,7 +1019,7 @@ unsafe fn on_stress_tick(hwnd: HWND) {
     let pt = window_center(hwnd);
     let r = with(|a| {
         let App { view, shell, pool, stress, .. } = a;
-        stress.as_mut().map(|s| s.step(view.tab(), shell, pool, pt))
+        stress.as_mut().map(|s| s.step(view, shell, pool, pt))
     })
     .flatten();
     match r {
@@ -1013,33 +1032,45 @@ unsafe fn on_stress_tick(hwnd: HWND) {
     }
 }
 
-/// Context menu for view row `row`, at client px (x, y).
-fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32) {
-    let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+/// Context menu for view row `row`, at client px (x, y); `keyboard`: opened
+/// by Shift+F10 / the Menu key.
+fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32, keyboard: bool) {
+    let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0 && !keyboard;
     let (sx, sy) = screen_pt(hwnd, x, y);
     with(|a| {
+        if a.view.tab().shown() == 0 {
+            let s = a.gfx.dpi / 96.0;
+            shellops::open_background_menu(a, a.view.tab().path.clone(), sx, sy, extended, Pt::new(x as f32 / s, y as f32 / s), keyboard);
+            return;
+        }
         let paths = a.view.menu_paths(row);
+        let t = a.view.tab();
+        let folders = t.store.view().iter().enumerate().filter(|(_, id)| t.sel.contains(**id) || t.store.at(row) == Some(**id)).filter_map(|(i, _)| t.entry_at(i)).filter(|(p, dir)| *dir && paths.contains(p)).map(|(p, _)| p).collect();
         if paths.is_empty() {
             return;
         }
-        shellops::open_item_menu(a, paths, sx, sy, extended);
+        let s = a.gfx.dpi / 96.0;
+        shellops::open_item_menu(a, paths, folders, sx, sy, extended, Pt::new(x as f32 / s, y as f32 / s), keyboard);
     });
     invalidate(hwnd);
 }
 
 /// Keyboard-invoked menu, at the cursor row.
 fn key_menu(hwnd: HWND) {
+    ctxui::note_input();
     let p = with(|a| {
         let s = a.gfx.dpi / 96.0;
+        let grid = a.view.mode.is_grid();
         let t = a.view.tab_mut();
-        let row = t.list.cursor;
+        let row = if grid { t.grid.cursor } else { t.list.cursor };
         if t.shown() > 0 && !t.store.at(row).is_some_and(|id| t.sel.contains(id)) {
             t.sel.single(&t.store, row);
         }
-        (row, (60.0 * s) as i32, (a.view.row_mid_y(row) * s) as i32)
+        let anchor = a.view.menu_anchor(row);
+        (row, (anchor.x * s) as i32, (anchor.y * s) as i32)
     });
     if let Some((row, x, y)) = p {
-        open_menu(hwnd, row, x, y);
+        open_menu(hwnd, row, x, y, true);
     }
 }
 
@@ -1056,8 +1087,11 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
         let s = a.gfx.dpi / 96.0;
         let ime = out.ime_caret.map(|r| ((r.x * s) as i32, (r.y * s) as i32, (r.h * s) as i32));
         let menu = a.view.menu_request.take().map(|(row, pt)| match pt {
-            Some(p) => (row, (p.x * s) as i32, (p.y * s) as i32),
-            None => (row, (60.0 * s) as i32, (a.view.row_mid_y(row) * s) as i32),
+            Some(p) => (row, (p.x * s) as i32, (p.y * s) as i32, false),
+            None => {
+                let anchor = a.view.menu_anchor(row);
+                (row, (anchor.x * s) as i32, (anchor.y * s) as i32, true)
+            }
         });
         sync_caret(hwnd, a, out.text_focus);
         let open = std::mem::take(&mut a.view.open_paths);
@@ -1076,10 +1110,11 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
     if let Some((x, y, h)) = ime {
         clip::place_ime(hwnd, x, y, h);
     }
-    if let Some((row, x, y)) = menu {
-        open_menu(hwnd, row, x, y);
+    if let Some((row, x, y, keyboard)) = menu {
+        open_menu(hwnd, row, x, y, keyboard);
     }
     shellops::after_frame(hwnd);
+    shellops::ctx_after_frame(hwnd);
     // a drag started on our rows: OLE's modal loop, outside the app borrow
     shellops::drag_out(hwnd);
     for p in open {
@@ -1170,7 +1205,19 @@ fn button_event(hwnd: HWND, msg: u32, lp: LPARAM) {
     let ev = match msg {
         WM_LBUTTONDOWN => down(Button::Left, false),
         WM_LBUTTONDBLCLK => down(Button::Left, true),
-        WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => down(Button::Right, false),
+        WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => {
+            // the own-drawn menu measures right-click -> first paint from here
+            ctxui::note_input();
+            // Let a new right-click outside the old menu reach the view in
+            // this same gesture, instead of popup dismissal eating it.
+            with(|a| {
+                if a.view.ctx.as_ref().is_some_and(|c| c.open && !c.state.levels.iter().any(|l| l.rect.contains_pt(pos))) {
+                    a.view.ctx = None;
+                    a.ui.close_popup(ctxui::ID_CTX.with(0));
+                }
+            });
+            down(Button::Right, false)
+        }
         WM_MBUTTONDOWN | WM_MBUTTONDBLCLK => down(Button::Middle, false),
         WM_LBUTTONUP => Event::MouseUp { pos, button: Button::Left, mods },
         WM_RBUTTONUP => Event::MouseUp { pos, button: Button::Right, mods },
@@ -1281,7 +1328,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     a.shell.refill(&mut a.pool);
                     let st = {
                         let App { view, shell, pool, stress, .. } = &mut *a;
-                        stress.as_mut().map(|s| s.step(view.tab(), shell, pool, pt))
+                        stress.as_mut().map(|s| s.step(view, shell, pool, pt))
                     };
                     arm_watch(hwnd, a);
                     (repaint, st)
@@ -1431,6 +1478,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let key = map_key(wp.0 as u16);
                 // bare Alt (menu activation) is ignored; every other Alt combo goes to the kit
                 if matches!(VIRTUAL_KEY(wp.0 as u16), VK_MENU | VK_LMENU | VK_RMENU) {
+                    invalidate(hwnd);
                     return LRESULT(0);
                 }
                 // file shortcuts of the list (copy, paste, delete, undo)
@@ -1474,6 +1522,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 on_gate(hwnd);
                 LRESULT(0)
             }
+            WM_TIMER if wp.0 == ctxui::TIMER_ID => {
+                // the loading line's next step; after_paint stops the timer
+                invalidate(hwnd);
+                LRESULT(0)
+            }
             WM_TIMER if wp.0 == CARET_TIMER => {
                 with(|a| {
                     if a.last_input.elapsed() >= CARET_IDLE {
@@ -1512,6 +1565,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_TIMER if wp.0 == WATCH_TIMER => {
                 let lost = with(|a| {
                     let lost = a.pool.check_hung();
+                    if let Some(c) = a.view.ctx.as_mut()
+                        && lost.contains(&c.ticket)
+                    {
+                        // the shell part hung: the failure row with Retry
+                        c.lost();
+                    }
                     if !lost.is_empty() {
                         a.shell.forget(&lost);
                         a.shell.menu_status = format!("watchdog: replaced {} hung worker(s), {} total", lost.len(), a.pool.stats().workers_replaced);

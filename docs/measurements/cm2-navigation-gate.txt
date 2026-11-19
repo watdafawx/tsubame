@@ -1,0 +1,17 @@
+start.private_bytes=85606400
+start.private_mb=81.64
+end.private_bytes=88547328
+end.private_mb=84.45
+idle.private_bytes=67321856
+idle.private_mb=64.20
+delta.private_bytes_from_idle=21225472
+delta.private_bytes=2940928
+delta.private_pct=3.44
+pass.private=1
+pass.handles=1
+pass.gdi=1
+pass.user=1
+pass.threads=1
+timeouts=0
+gate=PASS
+exit=0

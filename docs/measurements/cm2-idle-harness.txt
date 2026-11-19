@@ -1,0 +1,7 @@
+idle.seconds=10
+idle.cpu_ms_first=0
+idle.cpu_ms=93.8
+idle.threads=55
+idle.threads_warm=58
+idle.context_switches_per_s=-1
+idle.pid=7820

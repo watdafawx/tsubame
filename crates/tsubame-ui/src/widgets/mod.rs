@@ -3,6 +3,7 @@ pub mod controls;
 pub mod colheader;
 pub mod grid;
 pub mod list;
+pub mod menu;
 pub mod scrollbar;
 pub mod splitter;
 pub mod tabs;
