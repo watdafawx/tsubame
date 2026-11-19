@@ -104,6 +104,10 @@ Name: "{autodesktop}\Tsubame"; Filename: "{app}\tsubame.exe"; Tasks: desktopicon
 Filename: "{app}\tsubame.exe"; Description: "Start Tsubame"; Flags: nowait postinstall skipifsilent unchecked
 
 [UninstallRun]
+; Close a running Tsubame from THIS folder first (Inno's uninstaller does not close apps, so a running
+; tsubame.exe would stay locked and the folder would be left behind). Only the exe at {app}\tsubame.exe:
+; a portable copy running elsewhere is not touched. Asks the window to close, force-ends it after 5 s.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -WindowStyle Hidden -Command ""Get-Process tsubame -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{app}\tsubame.exe' } | ForEach-Object {{ [void]$_.CloseMainWindow(); if (-not $_.WaitForExit(5000)) {{ $_.Kill(); [void]$_.WaitForExit(5000) } }"""; Flags: runhidden waituntilterminated; RunOnceId: "CloseTsubame"
 ; Put File Explorer back BEFORE any file is deleted (docs\default-file-manager.md, "Uninstall"):
 ; removes Tsubame's folder verb from HKCU if the user switched it on, does nothing otherwise.
 ; Never run at install time: the installer itself registers nothing.
