@@ -473,3 +473,89 @@ four Windows High Contrast colour sets.
 Only unit-tested: snapshot building and request handling in the widget,
 the Navigate tree and runtime ids of the provider, the widget-to-UIA mapping.
 
+
+## CM11: owner of the 200-menu private-bytes growth (2026-11-19)
+
+Result: **the growth is one immortal thread per menu inside Microsoft's
+Work Folders context-menu handler** (`C:\Windows\System32\WorkfoldersShell.dll`,
+"Work Folders Context Menu Handler", CLSID `{E61BF828-5E63-4287-BEF1-60B1A4FDE0E3}`,
+registered at `HKLM\SOFTWARE\Classes\*\shellex\ContextMenuHandlers\WorkFolders`,
+apartment-threaded). Not our rows, caches, packaged scan or UIA.
+
+### How it was found
+
+Release build `efa7201`, rig, `--stress ctxmenu --dir <3 files>`, `TSUBAME_GPU_PARK=0`,
+`TSUBAME_MEMDIAG=1`, runs interleaved, n = 3 each (gate B, menu 10 -> 200):
+
+| Variant | Growth per run | Outside-heap allocs 10 -> 200 |
+|---|---|---|
+| default (lazy, packaged) | +6.5, +6.7, +7.1 % | 120 -> 308, 295, 311 |
+| `TSUBAME_CTX_PACKAGED=0` | +7.3, +6.5, +6.4 % | 119 -> 308, 294, 311 |
+| `TSUBAME_CTX_EAGER=1` | +7.2, +4.4, +6.6 % | 119 -> 299, 292, 298 |
+| native `--stress menu` (OS-only path) | +8.0, +8.4, +7.7 % | 104 -> 295, 296, 293 |
+
+Every variant, including the OS-only native menu, grows the same way: the
+cause is below our row/packaged/lazy code. Rust live heap 0.62 -> 0.69 MB, the
+process heap +0.4 MB. The growth is private memory **outside every heap**:
++190 allocations for 190 menus. The new `TSUBAME_MEMDIAG=1` tracker lists them
+(`memdiag.<label>.since10`): 191 new allocations, each 1024 KB reserved /
+16 KB committed, layout reserved-guard-committed = thread stacks, none freed.
+It also counts live threads by start address (`memdiag.<label>.thread`):
+
+| After menu | 10 | 100 | 200 |
+|---|---|---|---|
+| threads in process | 73 | 163 | 263 |
+| of them starting at `WorkfoldersShell.dll+0xfa30` | 10 | 100 | 200 |
+
+With `TSUBAME_STRESS_SETTLE_S=240` (stretches the settle) all 200 threads were
+still alive 240 s after the last menu: they never exit.
+
+Control: a per-user override on rig (`HKCU\Software\Classes\*\shellex\ContextMenuHandlers\WorkFolders`
+default = null CLSID, removed after each run; registry verified clean at the end),
+interleaved, n = 3:
+
+| | handler on | handler off |
+|---|---|---|
+| Growth menu 10 -> 200 | +5.5, +7.0, +7.3 % FAIL | +0.7, +1.0, +0.7 % PASS |
+| Threads menu 10 / 200 | 73 / 263 | 61 / 61, 63 / 63, 63 / 63 |
+
+1000 menus (`TSUBAME_STRESS_MENUS=1000`, n = 1 each): handler on, private
+73.2 / 75.2 / 99.9 MB at menu 10 / 100 / 1000 = +36.4 %, slope
+**+2.7 MB per 100 menus** (about 27 KB and one thread per menu), no plateau;
+handler off: 72.7 / 71.8 / 73.6 MB = +1.2 %, slope about +0.1 MB per 100 menus,
+plateaued. Handles, GDI and USER stay flat in both.
+
+So with the Work Folders handler out of the picture the 5 % gate passes with
+room; with it in, the gate fails by the thread stacks alone.
+
+### Fix status
+
+None in our code: nothing of ours holds these threads (they start in the
+extension, handles are flat, the native path leaks the same). The gate, its
+code and thresholds are unchanged. Disabling the handler system-wide or for the
+user (the control above) is not something the app should do to a user's shell.
+
+### Helper-process estimate (not built)
+
+A helper process that hosts the shell step (bind, `QueryContextMenu`, walk,
+`InvokeCommand`) would be recycled every N menus, ending all leaked threads
+with it. Estimate from the numbers above, not measured on a prototype:
+
+- Leak bounded to N x 27 KB (N = 100: 2.7 MB, in the helper, not the app).
+- Memory: shell-extension load for the first menu costs +9.7 MB private /
+  +29 MB working set (start -> menu 1); the app sheds that and the helper
+  carries it, plus an exe baseline of a few MB.
+- Latency: a cold first menu is 540-590 ms against 33 ms warm, so the helper
+  has to be pre-warmed (a standby helper started while idle) or each recycle
+  costs a visible first-menu hit. A named-pipe round trip for a menu's rows
+  (tens of rows, icons up to 256 x ~1 KB) should add well under 1 ms.
+- Cost: a second exe or mode, an IPC protocol for rows, icons and invoke, a
+  hung-helper watchdog (the pool watchdog already exists), and invoke
+  dialogs owned by a window of the app.
+
+Decision for the user: accept the failing gate as an OS defect (document and
+keep), or build the helper. The master will ask.
+
+Diagnostics added: `TSUBAME_MEMDIAG=1` now also reports allocations since menu 10
+and threads by start module (code runs only under the env var);
+`TSUBAME_STRESS_SETTLE_S=N` lengthens the stress settle (default 3 s).

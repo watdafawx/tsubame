@@ -177,6 +177,157 @@ fn mb(b: usize) -> f64 {
     b as f64 / 1048576.0
 }
 
+
+/// One private allocation outside every heap: reserved bytes, committed bytes,
+/// layout of its regions (R reserved, G guard, W committed read/write, o other).
+#[derive(Clone, Debug)]
+struct OutAlloc {
+    reserved: usize,
+    committed: usize,
+    layout: String,
+}
+
+fn outside_allocs() -> HashMap<usize, OutAlloc> {
+    let mut handles = vec![HANDLE::default(); 256];
+    let n = unsafe { GetProcessHeaps(&mut handles) } as usize;
+    handles.truncate(n.min(256));
+    let ph = unsafe { GetProcessHeap() }.unwrap_or_default();
+    let mut heap_bases = HashSet::new();
+    for h in &handles {
+        heap_stat(*h, *h == ph, &mut heap_bases);
+    }
+    let mut out: HashMap<usize, OutAlloc> = HashMap::new();
+    let mut a = 0usize;
+    loop {
+        let mut m = MEMORY_BASIC_INFORMATION::default();
+        if unsafe { VirtualQuery(Some(a as *const _), &mut m, size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+            break;
+        }
+        if m.Type == MEM_PRIVATE && m.State != MEM_FREE && !heap_bases.contains(&(m.AllocationBase as usize)) {
+            let e = out.entry(m.AllocationBase as usize).or_insert(OutAlloc { reserved: 0, committed: 0, layout: String::new() });
+            e.reserved += m.RegionSize;
+            let c = if m.State == MEM_COMMIT {
+                e.committed += m.RegionSize;
+                if m.Protect.0 & PAGE_GUARD.0 != 0 { 'G' } else if m.Protect.0 & PAGE_READWRITE.0 != 0 { 'W' } else { 'o' }
+            } else {
+                'R'
+            };
+            if e.layout.len() < 24 && !e.layout.ends_with(c) {
+                e.layout.push(c);
+            }
+        }
+        let next = (m.BaseAddress as usize).wrapping_add(m.RegionSize);
+        if next <= a {
+            break;
+        }
+        a = next;
+    }
+    out
+}
+
+
+/// Live threads of this process grouped by start address (module + offset),
+/// from `NtQueryInformationThread(ThreadQuerySetWin32StartAddress)`.
+fn thread_groups() -> (usize, Vec<(String, usize)>) {
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows::Win32::System::Threading::*;
+    use windows::core::w;
+    type NtQit = unsafe extern "system" fn(HANDLE, u32, *mut std::ffi::c_void, u32, *mut u32) -> i32;
+    let mut groups: HashMap<String, usize> = HashMap::new();
+    let mut total = 0;
+    unsafe {
+        let Ok(nt) = GetModuleHandleW(w!("ntdll.dll")) else { return (0, vec![]) };
+        let Some(f) = GetProcAddress(nt, windows::core::s!("NtQueryInformationThread")) else { return (0, vec![]) };
+        let f: NtQit = std::mem::transmute(f);
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) else { return (0, vec![]) };
+        let pid = GetCurrentProcessId();
+        let mut e = THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
+        let mut ok = Thread32First(snap, &mut e).is_ok();
+        while ok {
+            if e.th32OwnerProcessID == pid {
+                total += 1;
+                let key = match OpenThread(THREAD_QUERY_INFORMATION, false, e.th32ThreadID) {
+                    Ok(h) => {
+                        let mut addr: usize = 0;
+                        let r = f(h, 9, &mut addr as *mut usize as *mut _, size_of::<usize>() as u32, std::ptr::null_mut());
+                        let _ = windows::Win32::Foundation::CloseHandle(h);
+                        if r >= 0 && addr != 0 {
+                            let mut m = MEMORY_BASIC_INFORMATION::default();
+                            VirtualQuery(Some(addr as *const _), &mut m, size_of::<MEMORY_BASIC_INFORMATION>());
+                            format!("{}+{:#x}", module_name(m.AllocationBase as usize), addr - m.AllocationBase as usize)
+                        } else {
+                            format!("nt={r:#x}")
+                        }
+                    }
+                    Err(_) => "open-failed".to_string(),
+                };
+                *groups.entry(key).or_default() += 1;
+            }
+            ok = Thread32Next(snap, &mut e).is_ok();
+        }
+        let _ = windows::Win32::Foundation::CloseHandle(snap);
+    }
+    let mut v: Vec<_> = groups.into_iter().collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.1));
+    (total, v)
+}
+
+fn thread_report(label: &str) -> String {
+    let (n, v) = thread_groups();
+    let mut o = String::new();
+    let _ = writeln!(o, "memdiag.{label}.threads={n}");
+    for (k, c) in v.iter().take(12) {
+        let _ = writeln!(o, "memdiag.{label}.thread x{c} start {k}");
+    }
+    o
+}
+
+static MARK: std::sync::Mutex<Option<HashMap<usize, OutAlloc>>> = std::sync::Mutex::new(None);
+
+/// `TSUBAME_MEMDIAG=1`: the stress calls it at each sample. "after menu 10"
+/// remembers the outside-heap allocations; later samples list the ones made
+/// since (grouped by shape), to tell thread stacks from heap segments.
+pub fn track(label: &str) -> String {
+    if !enabled() {
+        return String::new();
+    }
+    if label == "after menu 10" {
+        *MARK.lock().unwrap() = Some(outside_allocs());
+        return thread_report(label);
+    }
+    let g = MARK.lock().unwrap();
+    let Some(old) = g.as_ref() else { return String::new() };
+    let now = outside_allocs();
+    let mut groups: std::collections::BTreeMap<(usize, usize, String), (usize, usize)> = Default::default();
+    let (mut n_new, mut b_new) = (0usize, 0usize);
+    for (b, a) in &now {
+        match old.get(b) {
+            None => {
+                n_new += 1;
+                b_new += a.committed;
+                let e = groups.entry((a.reserved, a.committed, a.layout.clone())).or_default();
+                e.0 += 1;
+                e.1 = e.1.max(*b);
+            }
+            Some(o) if a.committed > o.committed => {
+                b_new += a.committed - o.committed;
+                let e = groups.entry((usize::MAX, a.committed - o.committed, format!("grew:{}", a.layout))).or_default();
+                e.0 += 1;
+                e.1 = e.1.max(*b);
+            }
+            _ => {}
+        }
+    }
+    let gone = old.keys().filter(|b| !now.contains_key(b)).count();
+    let mut o = thread_report(label);
+    let _ = writeln!(o, "memdiag.{label}.since10: new_allocs={n_new} committed_delta_mb={:.2} freed_allocs={gone}", mb(b_new));
+    for ((res, com, lay), (cnt, base)) in groups.iter().rev().take(16) {
+        let _ = writeln!(o, "memdiag.{label}.since10: x{cnt} reserved={}K committed={}K layout={lay} e.g. {base:#x}", if *res == usize::MAX { 0 } else { res >> 10 }, com >> 10);
+    }
+    o
+}
+
 /// `memdiag.<label>.*` report lines.
 pub fn report(label: &str, s: &Snap, rust_live: Option<(usize, usize)>) -> String {
     let mut o = String::new();

@@ -7335,3 +7335,13 @@ the app's session, e.g. through the rig-windows PowerShell tool) and `TSUBAME_WA
 main window gets and every paint, with times, written when the window closes; one relaxed load per message when
 unset). The harness script `tools/bench-rig.ps1` is unchanged and still reports only CPU and the
 `Context Switches/sec` counter.
+
+## CM11 (2026-11-19): 200-menu growth owner
+
+Private-bytes growth menu 10 -> 200 (+5.5..+8.4 %, no plateau) is one leaked
+thread per menu in `WorkfoldersShell.dll` (Microsoft Work Folders context-menu
+handler): 200 threads at menu 200, alive 240 s later. Handler disabled for the
+user on rig: +0.7 / +1.0 / +0.7 % and a flat thread count; 1000 menus: +36.4 %
+(+2.7 MB per 100 menus) with it, +1.2 % without. Same growth on the native
+`--stress menu` path and with packaged off or eager on. No change in our code;
+details and the helper-process estimate in `docs/ctxmenu-validation.md`.

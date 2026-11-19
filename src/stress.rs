@@ -33,7 +33,11 @@ const MENUS: usize = 200;
 const THUMBS: usize = 500;
 const THUMB_PX: u32 = 512;
 const WARMUP: Duration = Duration::from_secs(3);
-const SETTLE: Duration = Duration::from_secs(3);
+/// Settle time before the end sample; `TSUBAME_STRESS_SETTLE_S` stretches it
+/// (to see whether a shell extension's threads ever exit).
+fn settle() -> Duration {
+    Duration::from_secs(std::env::var("TSUBAME_STRESS_SETTLE_S").ok().and_then(|s| s.parse().ok()).unwrap_or(3))
+}
 const IMAGE_EXT: [&str; 9] = ["jpg", "jpeg", "png", "bmp", "gif", "tif", "tiff", "webp", "heic"];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -149,6 +153,7 @@ impl Stress {
     fn snap(&mut self, label: &str) {
         self.c.push((label.to_string(), counters()));
         self.memdiag.push_str(&crate::memdiag::sample(label));
+        self.memdiag.push_str(&crate::memdiag::track(label));
     }
 
     /// The UI thread painted (ms): recorded while a menu is held open.
@@ -248,7 +253,7 @@ impl Stress {
                     view.ctx = None;
                     let done = i + 1;
                     if [1, 10, 100, self.menus].contains(&done) { self.snap(&format!("after menu {done}")); }
-                    self.state = if done == self.menus { State::Settle(Instant::now() + SETTLE) } else { State::CtxRun { i: done } };
+                    self.state = if done == self.menus { State::Settle(Instant::now() + settle()) } else { State::CtxRun { i: done } };
                 } else {
                     let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
                     let target = crate::ctxui::Target { paths: self.paths[..n].to_vec(), folder: view.tab().path.clone(), anchor: tsubame_ui::Pt::new(100.0, 100.0), screen: pt, ..Default::default() };
@@ -301,7 +306,7 @@ impl Stress {
                 if let Some((m, _)) = shell.last_menu.take() {
                     let held = self.hold.map(|(t, _)| t.elapsed().as_secs_f64()).unwrap_or(0.0);
                     self.log.push(format!("held menu: shown {} for {:.2} s; UI thread painted {} frames meanwhile: {}", m.shown, held, self.hold_paints.len(), stats_ms(&self.hold_paints)));
-                    self.state = State::Settle(Instant::now() + SETTLE);
+                    self.state = State::Settle(Instant::now() + settle());
                     return (false, false);
                 }
                 // keep the UI thread painting while the worker shows the menu
@@ -378,7 +383,7 @@ impl Stress {
                     self.snap(&format!("after menu {}", self.menus));
                     self.log.push(format!("{} menu + clipboard cycles in {:.1} s", self.menus, self.t0.elapsed().as_secs_f64()));
                     let _ = std::fs::remove_dir_all(&self.staging);
-                    self.state = State::Settle(Instant::now() + SETTLE);
+                    self.state = State::Settle(Instant::now() + settle());
                 }
                 (false, true)
             }
@@ -411,7 +416,7 @@ impl Stress {
                 if left == 0 {
                     self.log.push(format!("{} thumbnails in {:.1} s", self.paths.len(), self.t0.elapsed().as_secs_f64()));
                     self.snap("after all thumbnails (bitmaps dropped)");
-                    self.state = State::Settle(Instant::now() + SETTLE);
+                    self.state = State::Settle(Instant::now() + settle());
                 } else {
                     self.state = State::Thumbs { left };
                 }
