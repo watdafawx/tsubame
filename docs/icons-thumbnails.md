@@ -57,6 +57,17 @@ Thumbnails ask `IShellItemImageFactory` / `IThumbnailCache` for a bitmap sized
 to the cell: `min(box px rounded up to 16, size so the visible cells fit 85 %
 of the cache)`. The result is fitted inside that square (aspect kept).
 
+Every `GetImage` carries `SIIGBF_THUMBNAILONLY`: without it the shell answers a
+cache miss (`INCACHEONLY`) with the generic type icon *as a success*, so a file
+not yet in the system thumbnail cache showed an icon forever (rig, 16 fresh
+PNGs: 16 icons; with the flag 16 thumbnails). Steps on the worker: cache probe
+(`INCACHEONLY|THUMBNAILONLY|BIGGERSIZEOK`), then generate (`THUMBNAILONLY|BIGGERSIZEOK`),
+one immediate retry on `E_PENDING` / sharing violation. A real failure replies
+with no bitmap and the UI keeps the type icon. State machine: `shell/thumb.rs`.
+
+File dates are stored UTC and shown in local time with the DST rules of that
+date (`tsubame_win::tz`, rules cached per year, refreshed every 30 s).
+
 ## Caches (all bounded in bytes)
 
 All numbers live at the top of `src/shellui.rs`.

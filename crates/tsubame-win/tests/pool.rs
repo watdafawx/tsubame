@@ -76,6 +76,40 @@ fn icon_sizes_direct() {
     }
 }
 
+/// A new 64x64 BMP in the temp dir: never seen by the system thumbnail cache.
+fn fresh_bmp() -> std::path::PathBuf {
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (w, h) = (64u32, 64u32);
+    let data = w * h * 3;
+    let mut b = b"BM".to_vec();
+    b.extend((54 + data).to_le_bytes());
+    b.extend([0u8; 4]);
+    b.extend(54u32.to_le_bytes());
+    b.extend(40u32.to_le_bytes());
+    b.extend(w.to_le_bytes());
+    b.extend(h.to_le_bytes());
+    b.extend(1u16.to_le_bytes());
+    b.extend(24u16.to_le_bytes());
+    b.extend([0u8; 4]);
+    b.extend(data.to_le_bytes());
+    b.extend([0u8; 16]);
+    b.extend((0..w * h).flat_map(|i| [(n >> 8) as u8 ^ i as u8, (n >> 16) as u8, (i / w * 4) as u8]));
+    let p = std::env::temp_dir().join(format!("tsubame-pool-thumb-{n}.bmp"));
+    std::fs::write(&p, b).unwrap();
+    p
+}
+
+/// No thumbnail handler: no bitmap (the UI keeps the type icon), an error
+/// code, and no hang.
+#[test]
+fn thumbnail_of_a_file_without_handler_is_an_error_reply() {
+    let mut pool = Pool::new(1, 0, 0x8001);
+    let th = pool.submit(Request::Thumb { path: r"C:\Windows\explorer.exe".into(), size: 64, cache_only: false });
+    let replies = wait(&mut pool, 1, Duration::from_secs(10));
+    let Some(Payload::Thumb { bmp, error, .. }) = replies.iter().find(|r| r.id == th.id).map(|r| &r.payload) else { panic!("no reply") };
+    assert!(bmp.is_none() && error.is_some(), "{error:?}");
+}
+
 #[test]
 fn thumbnail_lane_is_independent_of_the_icon_lane() {
     // one icon worker stuck in a long job: a thumbnail still comes back,
@@ -84,12 +118,13 @@ fn thumbnail_lane_is_independent_of_the_icon_lane() {
     pool.submit(Request::Hang { ms: 1_500 });
     std::thread::sleep(Duration::from_millis(100));
     let t = Instant::now();
-    let th = pool.submit(Request::Thumb { path: r"C:\Windows\explorer.exe".into(), size: 64, cache_only: false });
+    let img = fresh_bmp();
+    let th = pool.submit(Request::Thumb { path: img.to_string_lossy().into_owned(), size: 64, cache_only: false });
     let replies = wait(&mut pool, 1, Duration::from_secs(10));
     assert!(replies.iter().any(|r| r.id == th.id), "thumbnail answered while the icon worker hangs");
     assert!(t.elapsed() < Duration::from_millis(1_200), "did not wait behind the hang: {:?}", t.elapsed());
-    let Some(Payload::Thumb { bmp, .. }) = replies.iter().find(|r| r.id == th.id).map(|r| &r.payload) else { panic!() };
-    let b = bmp.as_ref().expect("a bitmap for explorer.exe");
+    let Some(Payload::Thumb { bmp, error, .. }) = replies.iter().find(|r| r.id == th.id).map(|r| &r.payload) else { panic!() };
+    let b = bmp.as_ref().unwrap_or_else(|| panic!("a real thumbnail of a fresh image (not in the thumbnail cache): {error:?} {}", img.display()));
     assert!(b.w.max(b.h) <= 64, "cut to the size asked: {}x{}", b.w, b.h);
 }
 
