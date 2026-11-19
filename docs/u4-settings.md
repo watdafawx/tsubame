@@ -116,6 +116,22 @@ Settings > Context menu edits the own-drawn menu (`docs/ctxmenu.md`; mock state 
   the page opens). No grip: Windows' items keep their native order;
 - the preview of the U4 list and the "How the list is filled" note.
 
+Gap states (mocks approved 2026-11-20, `docs/ctxmenu-mock.md` "Gap states"):
+
+- Row "...": the last control of every row except separators, a Tab stop (Enter / Space / Shift+F10 open).
+  The popup is the kit's edit menu (`edit_only`), the same list as the menu-side Shift+F10 edit menu:
+  Hide/Show, Rename, Pin to top/Unpin, Move to group > (flyout: native place, groups, New group), Move up,
+  Move down; custom rows also Edit entry and Delete entry. Inapplicable rows are disabled with a one-line
+  note, never hidden (`src/rowmenu.rs`, pure model, unit tested). F2 / Delete / Alt+Up / Alt+Down work on the
+  focused "...". Delete entry shows an Undo line. On the menu side Del stays Hide and Delete entry has no key.
+- Refresh from last menu: second toolbar row between Import and Reset, acts on `ctxui::refresh_learned` for the
+  selected kind. States: idle ("Last menu: HH:MM, N items"), running (drawn only after 150 ms),
+  "N items updated", "Already up to date", disabled with a tooltip until a menu was shown.
+  `TSUBAME_REFRESH_DELAY_MS` (debug) delays the compare so the running state can be checked.
+- Pin cell (learned rows, between the source tag and "..."): invisible until hover or focus, accent when pinned,
+  Enter / Space toggles, writes `items.pin`. Pinned rows lead their group in native order with the grip
+  dimmed. Tsubame's own rows have no pin cell. The real menu draws no pin marker.
+
 The native popup (`TSUBAME_NATIVE_MENU=1`) still gets only what Tsubame adds: hidden built-ins are left
 out and enabled custom / imported entries are appended (`src/shellops.rs`).
 
@@ -203,10 +219,9 @@ nothing of U4 runs per frame in a list.
   packs, hover preview of a theme, Win+E takeover and the extra Explorer verb.
 - "Match Windows" colour mode reads the system theme once at startup/selection; it does not follow a
   live change.
-- Context menu editor: no row "..." menu (its contents are not in the mock), no "Several items" / "Drive"
-  kinds, no "Refresh from last menu" button (the logic exists, `ctxui::refresh_learned`; no approved place
-  for the button), no Pin to top control in Settings (the pin is set from the menu's edit menu and Reset
-  clears it), Nilesoft import without a selection screen (choose which entries to keep: not in the mock;
+- Context menu editor: no "Several items" / "Drive" kinds (no data behind them), "Edit entry" from the menu's
+  edit menu opens the form at the top of the page (no scroll-to hook), Nilesoft import without a selection
+  screen (choose which entries to keep: not in the mock;
   the logic exists, `nss::Import::choices` / `keep_only`) and placing the import in a named group (the
   mock says "Placed in the group Tools"; imports go to the end of the menu, tagged From Nilesoft).
 - The real menu composes user groups (a plain separator-delimited block, no header row, at the group's

@@ -587,3 +587,27 @@ Driven by keyboard only (Tab / Enter / Shift+F10); screenshots `docs/shots/ver-*
 | Ctrl+F in the editor focuses the search | pass |
 | Pin to top inside a user group, real menu via Shift+F10 | pass: the pinned item is first in the group block, the edit menu shows "Unpin" (`ver-pin-in-group.png`) |
 | Settings nav (Tab to an item, Enter / Space) | was a bug: focusable but Enter / Space did nothing. Fixed |
+
+## Gap states: row "..." menu, Refresh from last menu, Pin cell (rig, 2026-11-20)
+
+Built to the approved mocks (`mocks/shots/ctxgap-*`). Checked on rig (debug build, throwaway
+`TSUBAME_DATA_DIR`), screenshots `docs/shots/ctxmenu-d1-*.png`.
+
+| State | Result |
+|---|---|
+| Menu-side edit menu (Shift+F10) with Pin / Move to group / Move up/down | pass (`ctxmenu-d1-rowmenu-menu.png`) |
+| Settings row "..." popup on a custom row, Edit entry / Delete entry present | pass (`ctxmenu-d1-rowmenu-settings.png`) |
+| Settings row "..." popup on a learned, pinned row: Unpin, Move up/down disabled with the native-order note | pass (`ctxmenu-d1-rowmenu-learned-pinned.png`) |
+| Refresh idle ("Last menu: HH:MM, N items") | pass (`ctxmenu-d1-refresh-idle.png`) |
+| Refresh running (with `TSUBAME_REFRESH_DELAY_MS`) | pass (`ctxmenu-d1-refresh-running.png`) |
+| Refresh up to date | pass (`ctxmenu-d1-refresh-uptodate.png`) |
+| Pin cell: click pins, accent pin, row leads its group, grip dimmed, two pins keep native order, no pin cell on Tsubame rows | pass (`ctxmenu-d1-pin-settings.png`) |
+| Arrow keys move the focus in the "..." popup | pass |
+
+Not captured on rig: "N items updated" (needs a stale learned item; covered by unit tests), disabled Refresh
+(no menu yet), the Move to group flyout (kit tests `the_move_to_group_flyout_opens_with_right_and_picks_with_enter`).
+
+Menu-open cost: none. No code on the right-click path changed; the new code runs only on the Settings page and
+in the edit menu.
+
+Limit: Edit entry from the menu-side edit menu opens the Settings form at the top of the page (no scroll-to).

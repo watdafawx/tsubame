@@ -210,6 +210,15 @@ impl View {
         }
     }
 
+    /// "Edit entry…" from the own-drawn menu: like [`Self::open_menu_item`], with the
+    /// custom entry's form open.
+    pub fn open_menu_item_edit(&mut self, key: &str) {
+        self.open_settings(Some(Page::ContextMenu));
+        if let Some(st) = self.settings.as_deref_mut() {
+            st.menu.focus_edit(key);
+        }
+    }
+
     /// Draws the Settings pages in `area` and applies what they changed.
     pub(super) fn paint_settings(&mut self, ui: &mut Ui, g: &mut dyn Canvas, area: Rect) {
         if self.private_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {

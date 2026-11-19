@@ -223,6 +223,11 @@ in Settings, the row "..." menu's contents, how a user group is named in the
 menu (popups have no group captions, so the name is not drawn there), and any
 Pin / group state in the edit menu header.
 
+Built after the gap-state mocks were approved (2026-11-20): the row "..." menu, the "Refresh from last menu"
+button and the Pin cell in Settings (see `docs/u4-settings.md`, Context menu editor). Left: the kind switch's
+"Several items" / "Drive", the user group's name in the real menu, any Pin / group state in the edit menu
+header.
+
 ## Accessibility (CM10)
 
 The menu is painted inside the main window, so Windows sees one window. A

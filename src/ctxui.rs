@@ -14,11 +14,13 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 use tsubame_config::ContextMenu;
 use tsubame_config::menu::{self, MenuEntry, Target as Kind};
-use tsubame_ui::widgets::menu::{A11yReq, A11ySnap, EDIT_DOWN, EDIT_HIDE, EDIT_PIN, EDIT_RENAME, EDIT_SETTINGS, EDIT_UP, G_EYE_OFF, SubLoad, menu as draw_menu};
+use tsubame_ui::widgets::menu::{A11yReq, A11ySnap, EDIT_DELETE, EDIT_DOWN, EDIT_ENTRY, EDIT_GROUP, EDIT_GROUP_BASE, EDIT_GROUP_NATIVE, EDIT_GROUP_NEW, EDIT_HIDE, EDIT_PIN, EDIT_SETTINGS, EDIT_UP, SubLoad, menu as draw_menu};
 use tsubame_ui::{Canvas, Id, MenuRow, MenuSource, MenuState, MenuStyle, Pt, Rect, RowIcon, RowKind, Theme, Ui};
 use tsubame_win::shell::ctxmodel::{self, IconCache, ItemKind, ItemSource, LoadState, MenuBatch, MenuItem, MenuModel, Part, Route, SubLoads, SubState, flag};
 use tsubame_win::shell::{CtxHandle, CtxOpts, Pool, Request};
 use tsubame_win::uia;
+
+use crate::rowmenu;
 
 pub const ID_CTX: Id = Id::new("ctxmenu");
 /// The loading line's animation tick (only while a menu is loading).
@@ -110,6 +112,10 @@ pub struct CtxMenu {
     pub settings_key: Option<String>,
     /// the row the last Hide hid, (key, label) (Undo on the strip)
     undo: Option<(String, String)>,
+    /// the list as it was before the last Delete entry (Undo on the strip)
+    undo_entries: Option<Vec<MenuEntry>>,
+    /// "Edit entry…": Settings opens the entry's form, not only the row
+    pub settings_edit: bool,
     dual: bool,
     handle: Option<CtxHandle>,
     /// the pool job (the watchdog reports it when it hangs)
@@ -270,11 +276,33 @@ pub fn set_pin(m: &mut ContextMenu, key: &str, label: &str, pin: bool) -> bool {
 /// Windows' and the apps'), for "Refresh from last menu". UI thread only.
 static LAST_SHOWN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+/// The last complete menu: what it was for, when (local "14:32") and how many rows it drew.
+static LAST_MENU: std::sync::Mutex<Option<LastMenu>> = std::sync::Mutex::new(None);
+
+/// What "Refresh from last menu" compares with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LastMenu {
+    pub kind: Kind,
+    pub at: String,
+    pub items: usize,
+}
+
+/// The last complete menu this run showed, if any.
+pub fn last_menu() -> Option<LastMenu> {
+    LAST_MENU.lock().ok().and_then(|g| g.clone())
+}
+
+/// Local "HH:MM" now (the Settings readout of the last menu).
+fn clock_now() -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let t = unsafe { GetLocalTime() };
+    format!("{:02}:{:02}", t.wHour, t.wMinute)
+}
+
 /// "Refresh from last menu": forgets the learned items nobody edited that the
 /// last menu did not show ([`menu::refresh_learned`]). Returns how many went;
-/// 0 and no change when no menu was shown yet. Settings calls it once its
-/// button exists (not drawn yet: `docs/ctxmenu.md`, gaps list).
-#[allow(dead_code)]
+/// 0 and no change when no menu was shown yet (Settings' "Refresh from last
+/// menu" button calls it).
 pub fn refresh_learned(m: &mut ContextMenu) -> usize {
     let shown = LAST_SHOWN.lock().map(|g| g.clone()).unwrap_or_default();
     if shown.is_empty() { 0 } else { menu::refresh_learned(&mut m.items, &shown) }
@@ -305,6 +333,11 @@ fn move_neighbour(entries: &[MenuEntry], key: &str, up: bool, shown: &[&str]) ->
     let ok = |j: &usize| movable(&entries[*j]) && same_group(&entries[i], &entries[*j]) && shown.contains(&entries[*j].id.as_str());
     let j = if up { (0..i).rev().find(ok) } else { (i + 1..entries.len()).find(ok) }?;
     Some((i, j))
+}
+
+/// Can the entry `key` move one shown row up (or down)? (Settings' Move up / down state.)
+pub fn can_move(entries: &[MenuEntry], key: &str, up: bool, shown: &[&str]) -> bool {
+    move_neighbour(entries, key, up, shown).is_some()
 }
 
 /// Moves the entry `key` one shown row up or down. False: it cannot move.
@@ -340,6 +373,8 @@ impl CtxMenu {
             learned: false,
             settings_key: None,
             undo: None,
+            undo_entries: None,
+            settings_edit: false,
             dual,
             handle: None,
             ticket: 0,
@@ -425,10 +460,46 @@ impl CtxMenu {
                 self.settings_key = Some(key);
                 return;
             }
+            EDIT_ENTRY => {
+                self.settings_key = Some(key);
+                self.settings_edit = true;
+                return;
+            }
+            EDIT_DELETE => {
+                let before = self.menu.entries.clone();
+                let Some(i) = before.iter().position(|e| e.id == key && e.source.runs_program() || e.id == key && e.source == menu::Source::Custom) else { return };
+                if !menu::delete_entry(&mut self.menu.entries, i) {
+                    return;
+                }
+                self.undo = Some((key, label));
+                self.undo_entries = Some(before);
+            }
+            a if a == EDIT_GROUP_NEW || a == EDIT_GROUP_NATIVE || a >= EDIT_GROUP_BASE => {
+                let Some(f) = self.facts_at(path) else { return };
+                let Some(pick) = rowmenu::group_pick(&f, a) else { return };
+                let gid = match pick {
+                    rowmenu::GroupPick::Group(id) => id,
+                    rowmenu::GroupPick::Native => String::new(),
+                    rowmenu::GroupPick::New => menu::add_group(&mut self.menu.user_groups, &self.menu.groups, ""),
+                };
+                if !ctxmodel::is_item_key(&key) {
+                    return;
+                }
+                pref_mut(&mut self.menu, &key, &label);
+                if !menu::move_item_to_group(&mut self.menu.items, &self.menu.user_groups, &key, &gid) && a != EDIT_GROUP_NEW {
+                    return;
+                }
+            }
             _ => return,
         }
         self.edited = true;
         self.rebuild_own();
+    }
+
+    /// The edit-menu facts of the row at `path` (the row menu's model).
+    fn facts_at(&self, path: &[u64]) -> Option<rowmenu::Facts> {
+        let it = self.item(path)?;
+        Some(row_facts(&self.items, &self.menu, it, path))
     }
 
     /// An inline rename was kept (empty: the original label again).
@@ -445,6 +516,14 @@ impl CtxMenu {
 
     /// Undo on the strip: the row the last Hide hid shows again.
     pub fn undo_hide(&mut self) {
+        if let Some(list) = self.undo_entries.take() {
+            // Undo after Delete entry: the list as it was
+            self.undo = None;
+            self.menu.entries = list;
+            self.edited = true;
+            self.rebuild_own();
+            return;
+        }
         if let Some((key, label)) = self.undo.take() {
             set_hidden(&mut self.menu, &key, &label, false);
             self.edited = true;
@@ -533,8 +612,12 @@ impl CtxMenu {
                 }
                 if complete && self.model.error.is_none() {
                     let keys: Vec<String> = [&self.model.tsubame, &self.model.native, &self.model.packaged].into_iter().flat_map(|l| l.iter()).filter(|it| !it.is_separator() && !it.key.is_empty()).map(|it| it.key.clone()).collect();
+                    let n = keys.len();
                     if let Ok(mut g) = LAST_SHOWN.lock() {
                         *g = keys;
+                    }
+                    if let Ok(mut g) = LAST_MENU.lock() {
+                        *g = Some(LastMenu { kind: kind_of(&self.target).0, at: clock_now(), items: n });
                     }
                 }
                 if native && let Some(v) = self.pending_verb.take() {
@@ -958,9 +1041,6 @@ pub struct Rows<'a> {
     pub menu: Option<&'a ContextMenu>,
 }
 
-/// Note under the edit menu of a Windows or app item (mock 6a).
-pub const NATIVE_NOTE: &str = "A Windows item: hiding it only changes Tsubame\u{2019}s menu. Explorer is not touched.";
-
 /// Every lazy submenu's token in `items` (the filter searches them all).
 pub fn lazy_subs(items: &[MenuItem]) -> Vec<u32> {
     let mut v = Vec::new();
@@ -974,13 +1054,35 @@ pub fn lazy_subs(items: &[MenuItem]) -> Vec<u32> {
     v
 }
 
+/// The rows at `path` of `items` (row keys of the submenus from the top).
+fn level_of<'a>(items: &'a [MenuItem], path: &[u64]) -> Option<&'a [MenuItem]> {
+    let mut level = items;
+    for &k in path {
+        level = &level.iter().find(|it| it.kind == ItemKind::Submenu && item_key(it) == k)?.children;
+    }
+    Some(level)
+}
+
+/// The row menu's facts for the row `it` at `path` (`docs/ctxmenu.md`, the edit menu).
+pub fn row_facts(items: &[MenuItem], m: &ContextMenu, it: &MenuItem, path: &[u64]) -> rowmenu::Facts {
+    let nested = path.len() > 1;
+    let key = it.key.as_str();
+    if !ctxmodel::is_item_key(key) {
+        // a list row: Tsubame's own or a custom one. Move up / down pass the rows the menu draws
+        let level: Vec<&str> = path.split_last().and_then(|(_, up)| level_of(items, up)).map(|l| l.iter().map(|i| i.key.as_str()).collect()).unwrap_or_default();
+        let can = |up: bool| path.len() == 1 && move_neighbour(&m.entries, key, up, &level).is_some();
+        return match m.entries.iter().find(|e| e.id == key) {
+            Some(e) => rowmenu::Facts { name: it.label.clone(), nested, ..rowmenu::Facts::entry(e, can(true), can(false), true) },
+            None => rowmenu::Facts { ty: rowmenu::RowType::Own, name: it.label.clone(), hidden: false, pinned: false, nested, can_up: false, can_down: false, groups: Vec::new(), group: String::new(), menu_side: true },
+        };
+    }
+    let pref = menu::item(&m.items, key).cloned().unwrap_or_else(|| menu::ItemPref { key: key.to_string(), label: it.label.clone(), from: ctxmodel::from_of(key), ..Default::default() });
+    rowmenu::Facts { name: it.label.clone(), ..rowmenu::Facts::learned(&pref, &m.user_groups, nested, true) }
+}
+
 impl Rows<'_> {
     fn level(&self, path: &[u64]) -> Option<&[MenuItem]> {
-        let mut level = self.items;
-        for &k in path {
-            level = &level.iter().find(|it| it.kind == ItemKind::Submenu && item_key(it) == k)?.children;
-        }
-        Some(level)
+        level_of(self.items, path)
     }
 
     /// The item at `path` (row keys from the top).
@@ -1061,42 +1163,23 @@ impl MenuSource for Rows<'_> {
             _ => SubLoad::Ready,
         }
     }
-    /// CM8, mock 6a: the edit menu of the row at `path`.
+    /// CM8, mock `ctxgap-rowmenu` state C: the edit menu of the row at `path`
+    /// (the flyout of Move to group when `path` ends with `EDIT_GROUP`).
     fn edit_rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
-        let (Some(m), Some(it)) = (self.menu, self.item_at(path)) else { return };
+        let Some(m) = self.menu else { return };
+        let (flyout, path) = match path.split_last() {
+            Some((&EDIT_GROUP, up)) => (true, up),
+            _ => (false, path),
+        };
+        let Some(it) = self.item_at(path) else { return };
         if it.key.is_empty() || it.is_separator() {
             return;
         }
-        let tag = match it.source {
-            ItemSource::Native => match ctxmodel::from_of(&it.key) {
-                f if f == "Windows" => f,
-                // a package family: its name part (`Microsoft.WindowsTerminal`)
-                f => f.split('_').next().unwrap_or("").to_string(),
-            },
-            ItemSource::Tsubame => "Tsubame".to_string(),
-            ItemSource::User => m.entries.iter().find(|e| e.id == it.key).map_or("Custom", |e| e.source.label()).to_string(),
-        };
-        // only Tsubame's and the user's rows move; Windows' keep their order
-        let level: Vec<&str> = match path.split_last().and_then(|(_, up)| self.level(up)) {
-            Some(l) => l.iter().map(|i| i.key.as_str()).collect(),
-            None => Vec::new(),
-        };
-        let can = |up: bool| path.len() == 1 && move_neighbour(&m.entries, &it.key, up, &level).is_some();
-        let row = |key: u64, label: &str, glyph: char, sc: &str| MenuRow { icon: RowIcon::Glyph(glyph), shortcut: sc.to_string(), ..MenuRow::item(key, label) };
-        out.push(MenuRow { kind: RowKind::Header, shortcut: tag, ..MenuRow::item(0, &it.label) });
-        out.push(row(EDIT_HIDE, &format!("Hide \u{201c}{}\u{201d}", it.label), G_EYE_OFF, "Del"));
-        out.push(row(EDIT_RENAME, "Rename\u{2026}", '\u{E8AC}', "F2"));
-        out.push(MenuRow { disabled: !can(true), ..row(EDIT_UP, "Move up", '\u{E74A}', "Alt+\u{2191}") });
-        out.push(MenuRow { disabled: !can(false), ..row(EDIT_DOWN, "Move down", '\u{E74B}', "Alt+\u{2193}") });
-        // Pin to top: same row look as Move up / down; only for the rows Move
-        // cannot reorder (Windows', the apps' and app rows), top level
-        let pinned = menu::item(&m.items, &it.key).is_some_and(|p| p.pin);
-        let (pl, pg) = if pinned { ("Unpin", '\u{E77A}') } else { ("Pin to top", '\u{E718}') };
-        out.push(MenuRow { disabled: path.len() != 1 || !ctxmodel::is_item_key(&it.key), ..row(EDIT_PIN, pl, pg, "") });
-        out.push(MenuRow::separator());
-        out.push(row(EDIT_SETTINGS, "Edit in Settings\u{2026}", '\u{E713}', ""));
-        if it.source == ItemSource::Native {
-            out.push(MenuRow { kind: RowKind::Note, ..MenuRow::item(0, NATIVE_NOTE) });
+        let f = row_facts(self.items, m, it, path);
+        if flyout {
+            out.extend(rowmenu::group_rows(&f));
+        } else {
+            out.extend(rowmenu::rows(&f));
         }
     }
 }
@@ -1147,7 +1230,7 @@ mod tests {
     #[test]
     fn failed_pending_verb_finishes_and_stale_failure_does_not() {
         let mut c = CtxMenu {
-            generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), menu: ContextMenu::default(), edited: false, learned: false, tag_new: false, settings_key: None, undo: None, dual: false,
+            generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), menu: ContextMenu::default(), edited: false, learned: false, tag_new: false, settings_key: None, undo: None, undo_entries: None, settings_edit: false, dual: false,
             handle: None, ticket: 0, state: MenuState::default(), open: false,
             input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: Some("properties".into()), invoked: false, invoke_result: None,
@@ -1254,7 +1337,7 @@ mod tests {
         let mut model = MenuModel::new(2, ts, user);
         model.native = native;
         let mut c = CtxMenu {
-            generation: 2, target, model, menu, edited: false, learned: false, tag_new: false, settings_key: None, undo: None, dual: false,
+            generation: 2, target, model, menu, edited: false, learned: false, tag_new: false, settings_key: None, undo: None, undo_entries: None, settings_edit: false, dual: false,
             handle: None, ticket: 0, state: MenuState::default(), open: true,
             input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: None, invoked: false, invoke_result: None,
@@ -1331,7 +1414,7 @@ mod tests {
         let src = Rows { items: &c.items, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true, menu: Some(&c.menu) };
         let mut out = Vec::new();
         src.edit_rows(&[k], &mut out);
-        assert_eq!(out[5].label, "Unpin");
+        assert_eq!(out[3].label, "Unpin");
         c.edit(&[k], EDIT_PIN);
         refresh(&mut c);
         assert_eq!(nat(&c), ["Share", "7-Zip"]);
@@ -1381,6 +1464,7 @@ mod tests {
 
     #[test]
     fn edit_rows_follow_the_mock() {
+        use tsubame_ui::widgets::menu::EDIT_RENAME;
         let share = MenuItem { id: 9, key: "windows.verb:share".into(), ..MenuItem::command(ItemSource::Native, "Share", "") };
         let mut pk = MenuItem { id: 0xA000, key: "windows.pkg:Microsoft.WindowsTerminal_8wekyb3d8bbwe/{9f15}".into(), ..MenuItem::command(ItemSource::Native, "Open in Terminal", "") };
         pk.verb = Some("{9f15}".into());
@@ -1393,27 +1477,83 @@ mod tests {
             src.edit_rows(&[row_of(&c, label)], &mut out);
             out
         };
+        // a Windows row: Hide (Del), Rename (F2), Pin and Move to group enabled, Move up / down disabled, the reason note
         let r = rows("Share");
-        assert_eq!((r[0].kind, r[0].label.as_str(), r[0].shortcut.as_str()), (RowKind::Header, "Share", "Windows"));
-        assert_eq!(r[1].label, "Hide \u{201c}Share\u{201d}");
-        assert_eq!((r[1].key, r[1].shortcut.as_str()), (EDIT_HIDE, "Del"));
-        assert_eq!((r[2].key, r[2].shortcut.as_str()), (EDIT_RENAME, "F2"));
-        assert!(r[3].disabled && r[4].disabled, "Windows' items do not move");
-        assert_eq!((r[5].key, r[5].label.as_str(), r[5].disabled), (EDIT_PIN, "Pin to top", false));
-        assert_eq!(r[7].key, EDIT_SETTINGS);
-        assert_eq!((r[8].kind, r[8].label.as_str()), (RowKind::Note, NATIVE_NOTE));
-        assert_eq!(rows("Open in Terminal")[0].shortcut, "Microsoft.WindowsTerminal");
+        assert_eq!(r[0].label, "Hide \u{201c}Share\u{201d}");
+        assert_eq!((r[0].key, r[0].shortcut.as_str()), (EDIT_HIDE, "Del"));
+        assert_eq!((r[1].key, r[1].shortcut.as_str()), (EDIT_RENAME, "F2"));
+        assert_eq!((r[3].key, r[3].label.as_str(), r[3].disabled), (EDIT_PIN, "Pin to top", false));
+        assert!(r[4].key == EDIT_GROUP && r[4].submenu && !r[4].disabled);
+        assert!(r[5].disabled && r[6].disabled, "Windows' items do not move");
+        assert_eq!(r[8].key, EDIT_SETTINGS);
+        assert_eq!((r[9].kind, r[9].label.as_str()), (RowKind::Note, rowmenu::NOTE_LEARNED));
+        // a package item: same list
+        assert_eq!(rows("Open in Terminal").len(), r.len());
+        // a built-in: Pin and groups disabled (with the Tsubame note), Move up / down enabled
         let own = rows("Copy");
-        assert_eq!(own[0].shortcut, "Tsubame");
-        assert!(!own[3].disabled && !own[4].disabled, "a built-in moves");
-        assert!(own[5].key == EDIT_PIN && own[5].disabled, "list rows move instead of pinning");
-        assert!(own.iter().all(|r| r.kind != RowKind::Note));
-        assert!(rows("Open")[3].disabled, "the first row cannot move up");
+        assert!(!own[5].disabled && !own[6].disabled, "a built-in moves");
+        assert!(own[3].disabled && own[4].disabled, "list rows move instead of pinning");
+        assert_eq!((own[9].kind, own[9].label.as_str()), (RowKind::Note, rowmenu::NOTE_OWN));
+        assert!(rows("Open")[5].disabled, "the first row cannot move up");
+        // the flyout: Move to group lists the user groups, New group and the native place
+        let mut fly = Vec::new();
+        src.edit_rows(&[row_of(&c, "Share"), EDIT_GROUP], &mut fly);
+        assert!(fly.iter().any(|x| x.key == EDIT_GROUP_NEW) && fly.iter().any(|x| x.key == EDIT_GROUP_NATIVE && x.radio));
         // no menu settings: no edit menu
         let plain = Rows { menu: None, ..src };
         let mut out = Vec::new();
         plain.edit_rows(&[row_of(&c, "Share")], &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn move_to_group_from_the_menu_makes_groups_and_pins_nothing_else() {
+        let share = MenuItem { id: 9, key: "windows.verb:share".into(), ..MenuItem::command(ItemSource::Native, "Share", "") };
+        let mut c = test_menu(vec![share]);
+        let k = row_of(&c, "Share");
+        // New group: a group is made and the row is in it
+        c.edit(&[k], EDIT_GROUP_NEW);
+        assert!(c.edited && c.menu.user_groups.len() == 1);
+        let gid = c.menu.user_groups[0].id.clone();
+        assert_eq!(menu::item(&c.menu.items, "windows.verb:share").map(|p| p.group.clone()), Some(gid.clone()));
+        // the flyout now marks it; Native place sends the row home
+        let facts = c.facts_at(&[k]).unwrap();
+        assert_eq!(facts.group, gid);
+        c.edit(&[k], EDIT_GROUP_NATIVE);
+        assert!(menu::item(&c.menu.items, "windows.verb:share").is_some_and(|p| p.group.is_empty()));
+        // a list row cannot change group: nothing happens
+        c.edited = false;
+        let before = c.menu.clone();
+        c.edit(&[row_of(&c, "Copy")], EDIT_GROUP_BASE);
+        assert!(!c.edited && c.menu == before);
+    }
+
+    #[test]
+    fn delete_entry_removes_a_custom_row_and_undo_brings_it_back() {
+        let mut c = test_menu(vec![]);
+        let mut e = MenuEntry::custom("custom.1", "Open in VS Code", "code.exe", "");
+        e.show_for = menu::ShowFor { files: true, folders: true, background: false };
+        c.menu.entries.push(e);
+        c.rebuild_own();
+        refresh(&mut c);
+        let k = row_of(&c, "Open in VS Code");
+        // Edit entry opens Settings on the entry's form
+        c.edit(&[k], EDIT_ENTRY);
+        assert!(c.settings_edit && c.settings_key.as_deref() == Some("custom.1"));
+        c.settings_key = None;
+        c.settings_edit = false;
+        c.edit(&[k], EDIT_DELETE);
+        refresh(&mut c);
+        assert!(c.edited && !labels(&c.items).contains(&"Open in VS Code"));
+        assert!(c.menu.entries.iter().all(|e| e.id != "custom.1"));
+        c.undo_hide();
+        refresh(&mut c);
+        assert!(labels(&c.items).contains(&"Open in VS Code") && c.menu.entries.iter().any(|e| e.id == "custom.1"));
+        // Delete entry is only for custom rows: a built-in stays
+        c.edited = false;
+        let before = c.menu.clone();
+        c.edit(&[row_of(&c, "Copy")], EDIT_DELETE);
+        assert!(!c.edited && c.menu == before);
     }
 
     #[test]

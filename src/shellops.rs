@@ -674,6 +674,7 @@ fn ctx_save_edits(a: &mut App) {
     let Some(c) = a.view.ctx.as_mut() else { return };
     let (edited, learned) = (std::mem::take(&mut c.edited), std::mem::take(&mut c.learned));
     let focus = c.settings_key.take();
+    let edit_form = std::mem::take(&mut c.settings_edit);
     if edited || learned {
         let saved = &mut a.view.prefs.context_menu;
         if edited {
@@ -684,7 +685,11 @@ fn ctx_save_edits(a: &mut App) {
     }
     if let Some(key) = focus {
         a.view.ctx = None;
-        a.view.open_menu_item(&key);
+        if edit_form {
+            a.view.open_menu_item_edit(&key);
+        } else {
+            a.view.open_menu_item(&key);
+        }
     }
 }
 
