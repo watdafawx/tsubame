@@ -6,7 +6,7 @@
 //! Tsubame only appends the enabled custom entries to it (`shellops`).
 
 use super::lay::{Look, Pg, button, fit, wrap};
-use super::{C_MENU, Cx};
+use super::{C_MENU, Cx, nss_pick};
 use crate::keymap::KeyMap;
 use tsubame_config::menu::{self, EntryKind, MenuEntry, ShowFor, Source};
 use tsubame_config::nss;
@@ -51,7 +51,12 @@ pub struct State {
     /// index of the entry being dragged
     drag: Option<usize>,
     add: Option<Box<AddForm>>,
-    import: Option<Box<ImportForm>>,
+    /// the open file dialog (a worker thread)
+    picker: Option<nss_pick::Picker>,
+    /// a shell.nss found in a usual place (looked up once per visit)
+    detected: Option<Option<nss::Detected>>,
+    /// the last import's report (mock 6b state 3)
+    report: Option<nss::Report>,
     msg: Option<(String, bool)>,
     confirm_reset: bool,
     search: TextInput,
@@ -89,11 +94,6 @@ struct AddForm {
     cmd: TextInput,
     args: TextInput,
     ext: TextInput,
-    err: Option<String>,
-}
-
-struct ImportForm {
-    path: TextInput,
     err: Option<String>,
 }
 
@@ -429,14 +429,23 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     pg.y += t.height_button + 12.0;
     if add {
         st.add = if st.add.is_some() { None } else { Some(Box::default()) };
-        st.import = None;
         st.msg = None;
     }
-    if imp {
-        let default = std::env::var("ProgramFiles").map(|p| format!("{p}\\Nilesoft Shell\\shell.nss")).unwrap_or_default();
-        st.import = if st.import.is_some() { None } else { Some(Box::new(ImportForm { path: TextInput::new(if std::path::Path::new(&default).is_file() { &default } else { "" }), err: None })) };
+    if imp && st.picker.is_none() {
+        st.picker = Some(nss_pick::Picker::open());
         st.add = None;
         st.msg = None;
+    }
+    // the file dialog is open on its own thread: wait for it
+    if let Some(pk) = &st.picker {
+        match pk.poll() {
+            nss_pick::Poll::Open => pg.ui.request_repaint(),
+            nss_pick::Poll::Cancelled => st.picker = None,
+            nss_pick::Poll::Chosen(path) => {
+                st.picker = None;
+                modified |= run_import(st, &mut list, &path);
+            }
+        }
     }
     if newg {
         let m = &mut cx.prefs.context_menu;
@@ -513,42 +522,73 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             st.add = None;
         }
     }
-    // import form
-    if let Some(form) = st.import.as_mut() {
-        let r = Rect::new(pg.x, pg.y, pg.w, 100.0);
-        pg.g.round(r, t.radius_lg, t.panel);
-        pg.g.round_stroke(r, t.radius_lg, t.accent, 1.0);
-        let fw = (r.w - 32.0).min(620.0);
-        label_field(pg, ID_FORM.with(20), "shell.nss", &mut form.path, r.x + 16.0, r.y + 14.0, fw, "C:\\Program Files\\Nilesoft Shell\\shell.nss");
-        pg.g.text("Simple items, menus and separators are read; scripts and conditions are skipped and listed. The file is only read.", Rect::new(r.x + 16.0, r.y + 50.0, r.w - 32.0, 16.0), t.font_small(), t.text_dim);
-        let (go, rr) = button(pg.ui, pg.g, ID_FORM.with(21), r.x + 16.0, r.y + 62.0, "Import", Look::Primary, true, false);
-        let (cancel, _) = button(pg.ui, pg.g, ID_FORM.with(22), rr.r() + 8.0, r.y + 62.0, "Cancel", Look::Normal, true, false);
-        if let Some(e) = &form.err {
-            let shown = fit(pg.g, e, t.font_small(), r.w - 240.0);
-            pg.g.text(&shown, Rect::new(rr.r() + 100.0, r.y + 62.0, r.w - 240.0, t.height_button), t.font_small(), t.danger);
+    // Nilesoft import, mock 6b: 1 nothing found (the hint), 2 file detected, 3 imported (report)
+    if st.report.is_none() {
+        if st.detected.is_none() {
+            st.detected = Some(nss::detect(&list));
         }
-        pg.y += r.h + 12.0;
-        let mut done = cancel;
-        if go {
-            match read_nss(form.path.text.trim()) {
-                Ok(src) => {
-                    let imp = nss::import(&src, &list, "");
-                    let n = imp.imported;
-                    let skipped = imp.skipped.len();
-                    list.extend(imp.entries);
-                    modified |= n > 0;
-                    let mut msg = format!("Imported {n} {}.", if n == 1 { "entry" } else { "entries" });
-                    if skipped > 0 {
-                        msg.push_str(&format!(" Skipped {skipped}: {}", imp.skipped.iter().take(2).map(|s| format!("line {} ({})", s.line, s.reason)).collect::<Vec<_>>().join("; ")));
-                    }
-                    st.msg = Some((msg, false));
-                    done = true;
+        match st.detected.clone().flatten() {
+            None => {
+                pg.g.text("Import from Nilesoft Shell opens a file picker for shell.nss. The file is only read, never changed.", Rect::new(pg.x + 2.0, pg.y, pg.w, 16.0), t.font_small(), t.text_dim);
+                pg.y += 22.0;
+            }
+            Some(d) => {
+                let file = d.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "shell.nss".into());
+                let text = format!("Nilesoft Shell found in {}: {file}, {} {} ({} can be imported, {} {} skipped).", d.place, d.found, if d.found == 1 { "entry" } else { "entries" }, d.importable, d.skipped, if d.skipped == 1 { "is" } else { "are" });
+                let r = Rect::new(pg.x, pg.y, pg.w, 44.0);
+                pg.g.round(r, t.radius_md, t.panel);
+                pg.g.round_stroke(r, t.radius_md, t.accent, 1.0);
+                pg.g.text("\u{E946}", Rect::new(r.x + 14.0, r.y, 18.0, r.h), f(14.0).icon().c(), t.accent);
+                let (go, br) = button(pg.ui, pg.g, ID_TB.with(7), r.r() - 10.0, r.y + (r.h - t.height_button) / 2.0, "Review and import\u{2026}", Look::Primary, d.importable > 0, true);
+                let shown = fit(pg.g, &text, t.font_small(), (br.x - r.x - 56.0).max(40.0));
+                pg.g.text(&shown, Rect::new(r.x + 40.0, r.y, br.x - r.x - 48.0, r.h), t.font_small(), t.text);
+                pg.y += r.h + 10.0;
+                if go {
+                    modified |= run_import(st, &mut list, &d.path);
                 }
-                Err(e) => form.err = Some(e),
             }
         }
-        if done {
-            st.import = None;
+    }
+    if let Some(rep) = st.report.clone() {
+        let shown_skips = rep.skipped.len().min(6);
+        let extra = rep.skipped.len() - shown_skips;
+        let r = Rect::new(pg.x, pg.y, pg.w, 64.0 + shown_skips as f32 * 38.0 + if extra > 0 { 20.0 } else { 0.0 });
+        pg.g.round(r, t.radius_lg, t.panel);
+        pg.g.round_stroke(r, t.radius_lg, t.border, 1.0);
+        pg.g.text("\u{E73E}", Rect::new(r.x + 14.0, r.y + 10.0, 22.0, 22.0), f(18.0).icon().c(), t.accent);
+        let (undo, ur) = button(pg.ui, pg.g, ID_TB.with(8), r.r() - 12.0, r.y + 10.0, "Undo import", Look::Normal, true, true);
+        let (show, sr2) = button(pg.ui, pg.g, ID_TB.with(9), ur.x - 8.0, r.y + 10.0, "Show imported", Look::Normal, rep.imported > 0, true);
+        let head = format!("{}: {} imported, {} skipped", rep.file, rep.imported, rep.skipped.len());
+        let hw = (sr2.x - r.x - 56.0).max(40.0);
+        let hs = fit(pg.g, &head, t.font().b(), hw);
+        pg.g.text(&hs, Rect::new(r.x + 44.0, r.y + 8.0, hw, 20.0), t.font().b(), t.text);
+        let sub = fit(pg.g, "Added at the end of the menu, tagged \u{201C}From Nilesoft\u{201D}. The original file was not changed.", t.font_small(), hw);
+        pg.g.text(&sub, Rect::new(r.x + 44.0, r.y + 30.0, hw, 16.0), t.font_small(), t.text_dim);
+        let mut y = r.y + 58.0;
+        for s in rep.skipped.iter().take(shown_skips) {
+            pg.g.fill(Rect::new(r.x + 12.0, y - 2.0, r.w - 24.0, 1.0), t.border);
+            pg.g.text("\u{E7BA}", Rect::new(r.x + 14.0, y + 2.0, 18.0, 16.0), f(13.0).icon().c(), t.text_dim);
+            let w = r.w - 60.0;
+            let l1 = fit(pg.g, &format!("Line {}: {}", s.line, s.text), t.font_small(), w);
+            pg.g.text(&l1, Rect::new(r.x + 40.0, y, w, 16.0), t.font_small(), t.text);
+            let l2 = fit(pg.g, &s.reason, t.font_small(), w);
+            pg.g.text(&l2, Rect::new(r.x + 40.0, y + 17.0, w, 16.0), t.font_small(), t.text_dim);
+            y += 38.0;
+        }
+        if extra > 0 {
+            pg.g.text(&format!("and {extra} more skipped"), Rect::new(r.x + 40.0, y, r.w - 60.0, 16.0), t.font_small(), t.text_dim);
+        }
+        pg.y += r.h + 12.0;
+        if undo {
+            rep.undo(&mut list);
+            modified = true;
+            st.report = None;
+            st.detected = None;
+            st.msg = Some(("Import undone. Your menu is as it was.".into(), false));
+        } else if show {
+            st.chip = 0;
+            st.kind = None;
+            st.search.set_text("From Nilesoft");
         }
     }
     if let Some((m, bad)) = &st.msg {
@@ -1150,16 +1190,24 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
     pg.y = card.b() + 12.0;
 }
 
-fn read_nss(path: &str) -> Result<String, String> {
-    if path.is_empty() {
-        return Err("Type the path of a shell.nss file.".into());
+/// Reads `path` (never writes it), adds what Tsubame can run to `list` and keeps the report
+/// for the page. Returns whether `list` changed.
+fn run_import(st: &mut State, list: &mut Vec<MenuEntry>, path: &std::path::Path) -> bool {
+    match nss::read_file(path) {
+        Ok(src) => {
+            let imp = nss::import(&src, list, "");
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "shell.nss".into());
+            let changed = !imp.entries.is_empty();
+            st.report = Some(nss::Report::new(&file, &imp));
+            st.msg = if imp.imported == 0 { Some(("Nothing in that file can be imported. The report lists why.".into(), true)) } else { None };
+            list.extend(imp.entries);
+            changed
+        }
+        Err(e) => {
+            st.msg = Some((e, true));
+            false
+        }
     }
-    let p = std::path::Path::new(path.trim_matches('"'));
-    let meta = std::fs::metadata(p).map_err(|_| "That file does not exist.".to_string())?;
-    if meta.len() > 512 * 1024 {
-        return Err("That file is too big for a menu definition (over 512 KB).".into());
-    }
-    std::fs::read_to_string(p).map_err(|e| format!("Could not read it: {e}"))
 }
 
 #[cfg(test)]

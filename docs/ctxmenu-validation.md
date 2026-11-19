@@ -439,3 +439,15 @@ removed afterwards. Config: user group `g1` "Tools" at pos 1, learned item
 
 Only unit-tested: refresh from last menu (no button), Pin on packaged items,
 pin inside a user group, deleting a group with pinned items.
+
+## CM8-skip C: Nilesoft import states and file picker
+
+Unit-tested (`nss`): found / importable / skipped counts of a detected file, BOM
+stripped, the file's bytes unchanged after detect, choices and keep-only
+selection (submenus carry their children, stray separators dropped), report
+undo removes exactly the added ids.
+
+Not seen in the real app: the file dialog, the file-detected note and the
+report card were built and compile, but the GUI check did not happen (no free
+build slot for the whole session). The selection screen is not in the mock, so
+only its logic exists.

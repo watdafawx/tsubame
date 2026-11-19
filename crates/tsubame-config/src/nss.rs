@@ -36,6 +36,160 @@ pub struct Import {
     pub skipped: Vec<Skipped>,
 }
 
+impl Import {
+    /// What the user can choose between: each top-level item or submenu of the
+    /// import (a submenu stands for itself and its children), in menu order.
+    pub fn choices(&self) -> Vec<Choice> {
+        self.entries
+            .iter()
+            .filter(|e| !e.is_separator() && self.root_of(e) == e.id)
+            .map(|e| Choice {
+                id: e.id.clone(),
+                name: e.name.clone(),
+                submenu: e.is_submenu(),
+                children: if e.is_submenu() { self.entries.iter().filter(|c| c.parent == e.id && !c.is_separator()).count() } else { 0 },
+            })
+            .collect()
+    }
+
+    /// The id at the top of `e`'s parent chain inside this import (its own id
+    /// when it sits outside any imported submenu).
+    fn root_of(&self, e: &MenuEntry) -> String {
+        let mut cur = e;
+        while let Some(p) = self.entries.iter().find(|p| p.id == cur.parent) {
+            cur = p;
+        }
+        cur.id.clone()
+    }
+
+    /// The import reduced to the choices in `keep` (ids from [`Import::choices`]).
+    /// A kept submenu keeps its children; separators that end up first, last or
+    /// doubled in their level are dropped; `imported` is recounted. The skipped
+    /// lines stay as they are.
+    pub fn keep_only(&self, keep: &[String]) -> Import {
+        let mut tidy: Vec<MenuEntry> = Vec::new();
+        for e in &self.entries {
+            let root = self.root_of(e);
+            // a top-level separator is decided by its neighbours below
+            let take = if e.is_separator() && root == e.id { true } else { keep.contains(&root) };
+            if !take {
+                continue;
+            }
+            if e.is_separator() {
+                let prev = tidy.iter().rev().find(|p| p.parent == e.parent);
+                if prev.is_none_or(|p| p.is_separator()) {
+                    continue;
+                }
+            }
+            tidy.push(e.clone());
+        }
+        // a level never ends with a separator
+        let levels: Vec<String> = tidy.iter().map(|e| e.parent.clone()).collect();
+        for lv in levels {
+            while let Some(i) = tidy.iter().rposition(|e| e.parent == lv) {
+                if tidy[i].is_separator() {
+                    tidy.remove(i);
+                } else {
+                    break;
+                }
+            }
+        }
+        // a kept submenu whose children all went is not worth showing (cannot
+        // happen through `choices`, but keep the list consistent)
+        let imported = tidy.iter().filter(|e| !e.is_separator()).count();
+        Import { entries: tidy, imported, skipped: self.skipped.clone() }
+    }
+
+    /// Statements the file gave: imported plus skipped.
+    pub fn found(&self) -> usize {
+        self.imported + self.skipped.len()
+    }
+}
+
+/// One selectable unit of an import (see [`Import::choices`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub id: String,
+    pub name: String,
+    pub submenu: bool,
+    pub children: usize,
+}
+
+/// A `shell.nss` found in a usual place (mock 6b, state 2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Detected {
+    pub path: std::path::PathBuf,
+    /// "the Program Files folder"
+    pub place: String,
+    pub found: usize,
+    pub importable: usize,
+    pub skipped: usize,
+}
+
+/// Where Nilesoft Shell keeps its `shell.nss`, most likely first.
+pub fn usual_places() -> Vec<(std::path::PathBuf, String)> {
+    let mut v: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for (var, place) in [("ProgramFiles", "the Program Files folder"), ("ProgramW6432", "the Program Files folder"), ("APPDATA", "your AppData folder"), ("LOCALAPPDATA", "your AppData folder")] {
+        if let Ok(p) = std::env::var(var) {
+            let path = std::path::Path::new(&p).join("Nilesoft Shell").join("shell.nss");
+            if !v.iter().any(|(q, _)| *q == path) {
+                v.push((path, place.to_string()));
+            }
+        }
+    }
+    v
+}
+
+/// The first readable file among `places`, counted (the file is only read).
+pub fn detect_in(places: &[(std::path::PathBuf, String)], existing: &[MenuEntry]) -> Option<Detected> {
+    for (path, place) in places {
+        let Ok(src) = read_file(path) else { continue };
+        let imp = import(&src, existing, "");
+        return Some(Detected { path: path.clone(), place: place.clone(), found: imp.found(), importable: imp.imported, skipped: imp.skipped.len() });
+    }
+    None
+}
+
+/// [`detect_in`] over [`usual_places`].
+pub fn detect(existing: &[MenuEntry]) -> Option<Detected> {
+    detect_in(&usual_places(), existing)
+}
+
+/// Reads a `shell.nss` as text, or says why not (max 512 KB).
+pub fn read_file(path: &std::path::Path) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|_| "That file does not exist.".to_string())?;
+    if !meta.is_file() {
+        return Err("That is not a file.".into());
+    }
+    if meta.len() > 512 * 1024 {
+        return Err("That file is too big for a menu definition (over 512 KB).".into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Could not read it: {e}"))?;
+    Ok(String::from_utf8_lossy(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(&bytes)).into_owned())
+}
+
+/// What an import did, kept so the report can show it and Undo can reverse it
+/// (mock 6b, state 3).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Report {
+    pub file: String,
+    pub imported: usize,
+    /// ids of every entry added (separators included)
+    pub ids: Vec<String>,
+    pub skipped: Vec<Skipped>,
+}
+
+impl Report {
+    pub fn new(file: &str, imp: &Import) -> Report {
+        Report { file: file.to_string(), imported: imp.imported, ids: imp.entries.iter().map(|e| e.id.clone()).collect(), skipped: imp.skipped.clone() }
+    }
+
+    /// Takes the imported entries back out of `list`.
+    pub fn undo(&self, list: &mut Vec<MenuEntry>) {
+        list.retain(|e| !self.ids.contains(&e.id));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
     /// a bare word: identifiers, numbers, `$var`, `@sel.path`, `*`, `-`
@@ -782,6 +936,59 @@ shell
         for junk in ["", "}}}{{{", "item(", "item(title=", "menu(title='a'", "$x = {", "'unterminated", "/* open", "item(title='a' cmd=)"] {
             let _ = parse(junk);
         }
+    }
+
+    #[test]
+    fn choices_and_selection() {
+        let r = parse(SAMPLE);
+        let c = r.choices();
+        let names: Vec<&str> = c.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Tools", "Notepad here"]);
+        assert!(c[0].submenu && c[0].children == 3 && !c[1].submenu);
+        // only Notepad: the separator before it would be first, so it goes
+        let k = r.keep_only(&[c[1].id.clone()]);
+        assert_eq!((k.imported, k.entries.len()), (1, 1), "{:?}", k.entries);
+        assert_eq!(k.entries[0].name, "Notepad here");
+        assert_eq!(k.skipped.len(), r.skipped.len());
+        // only Tools: children come along, the inner separator stays
+        let k = r.keep_only(&[c[0].id.clone()]);
+        assert_eq!(k.imported, 4);
+        assert!(k.entries.iter().any(|e| e.is_separator()));
+        assert!(k.entries.iter().all(|e| e.name != "Notepad here"));
+        // all = same count; none = nothing
+        let all: Vec<String> = c.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(r.keep_only(&all).imported, r.imported);
+        assert!(r.keep_only(&[]).entries.is_empty());
+    }
+
+    #[test]
+    fn report_undo_removes_exactly_what_was_added() {
+        let r = parse(SAMPLE);
+        let report = Report::new("shell.nss", &r);
+        assert_eq!((report.imported, report.skipped.len()), (5, 5));
+        let mut list = vec![MenuEntry { id: "custom.1".into(), ..Default::default() }];
+        list.extend(r.entries.clone());
+        report.undo(&mut list);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "custom.1");
+    }
+
+    #[test]
+    fn detect_counts_and_never_writes() {
+        let dir = std::env::temp_dir().join(format!("tsubame-nss-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shell.nss");
+        std::fs::write(&file, SAMPLE).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        let d = detect_in(&[(dir.join("nope.nss"), "x".into()), (file.clone(), "the Program Files folder".into())], &[]).unwrap();
+        assert_eq!((d.found, d.importable, d.skipped), (10, 5, 5));
+        assert_eq!(d.path, file);
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        assert!(detect_in(&[(dir.join("none.nss"), "x".into())], &[]).is_none());
+        // a BOM is stripped
+        std::fs::write(&file, [&[0xEF, 0xBB, 0xBF][..], b"item(title='A' cmd='a.exe')"].concat()).unwrap();
+        assert_eq!(import(&read_file(&file).unwrap(), &[], "").imported, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
