@@ -26,6 +26,7 @@ pub use widgets::controls::{checkbox, keycap, keycaps_right, segmented, slider, 
 pub use widgets::colheader::{HeaderCol, HeaderResponse, column_header};
 pub use widgets::grid::{BAND_DEADZONE, BandCells, GridResponse, GridSource, GridState, grid, nav_target};
 pub use widgets::list::{ListResponse, ListSource, ListState, RowState, SelectBy, list};
+pub use widgets::menu::{MenuResponse, MenuRow, MenuSource, MenuState, MenuStyle, RowIcon, RowKind};
 pub use widgets::scrollbar::{ScrollMetrics, vscrollbar};
 pub use widgets::splitter::{Split, splitter};
 pub use widgets::tabs::{TabResponse, TabStrip, tab_strip};
