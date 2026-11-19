@@ -95,15 +95,15 @@ serial, up to 32 bytes/visible entry in the parallel sample sort (buckets plus
 the gathered bucket; ~32 MB at 1M, freed when the sort returns); merge
 temporarily retains old and new ID vectors. Peak memory exceeds resident figure.
 
-## FOX CCD1 measurements, 2026-11-17
+## Measurements, 2026-11-17 (dev machine)
 
-Release via `pwsh -NoProfile -File X:\Dev\tools\cargo-ccd1.ps1 run -p tsubame-core --release --example store_bench`.
-CCD1 cpus 16–31, game running, -j8. One run; load-sensitive, not median/p95.
+Release via `cargo run -p tsubame-core --release --example store_bench`.
+A game was running in the background. One run; load-sensitive, not median/p95.
 Fixture cycles 1024 short mixed hex/numeric names with 17 extensions in permuted
 arrival order, duplicate-heavy to exercise stable ties. Metadata permuted independently;
 1% folders. Build includes fixture/input construction and initial natural sort.
 Subsequent full sorts descend, folders-first off. This is a synthetic workload,
-not a replacement for S2's real unique-name directory fixture or rig gate runs.
+not a replacement for S2's real unique-name directory fixture or benchmark-machine gate runs.
 
 | Metric | 100k | 1M | Gate |
 |---|---:|---:|---|
@@ -121,6 +121,5 @@ not a replacement for S2's real unique-name directory fixture or rig gate runs.
 Seven unit tests pass: numeric/zero/case/Unicode ordering, prefix consistency,
 all-column/direction/folders merge vs full comparator, filtered streaming, filter/glob
 edges, selection across re-sort/filter and generation/validation. `cargo clippy
--p tsubame-core --all-targets -- -D warnings` passes through CCD1 wrapper.
-Rig comparison skipped. PLAN in this checkout has no P0 outcome block; S1/S2
-reports read directly. No GUI launched.
+-p tsubame-core --all-targets -- -D warnings` passes.
+Benchmark-machine comparison skipped; S1/S2 reports read directly. No GUI launched.

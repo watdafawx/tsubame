@@ -53,7 +53,7 @@ param(
     [string]$MinSupported = '0.0.1',
     [string]$Repo = 'watdafawx/tsubame',
     # cargo command. Default: env TSUBAME_CARGO, else "cargo". A .ps1 path is run with pwsh -File
-    # (e.g. X:\Dev\tools\cargo-ccd1.ps1 on the maintainer's PC).
+    # (a wrapper script around cargo).
     [string]$Cargo = $(if ($env:TSUBAME_CARGO) { $env:TSUBAME_CARGO } else { 'cargo' }),
     [string]$SignThumbprint = $env:SIGN_CERT_THUMBPRINT,
     [string]$TimestampUrl = 'http://timestamp.digicert.com',

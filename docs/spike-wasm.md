@@ -1,6 +1,6 @@
 # Spike S3: wasm plugin host (wasmtime component model)
 
-Measured 2026-11-17 on rig (Ryzen 9 5900X, Windows 11), release build with the root profile (opt 3, LTO, 1 CGU, strip, panic=abort), wasmtime **50.0.2**, rustc 1.99.1. Rig was running its Minecraft servers during every run (CPU load 15–26 % at the start of each pass); each number below was repeated in 2 to 3 separate passes and the passes agree to a few percent unless noted.
+Measured 2026-11-17 on the benchmark machine (Ryzen 9 5900X, Windows 11), release build with the root profile (opt 3, LTO, 1 CGU, strip, panic=abort), wasmtime **50.0.2**, rustc 1.99.1. The machine was running game servers during every run (CPU load 15–26 % at the start of each pass); each number below was repeated in 2 to 3 separate passes and the passes agree to a few percent unless noted.
 
 **Verdict: PASS.** Wasmtime is fine, provided the host ships *runtime-only* (no Cranelift) and plugins are precompiled at install time. The default full host is too big (9.3 MB); the runtime-only host is 0.86 MB.
 
@@ -20,15 +20,13 @@ The host never touches the main exe: it is a separate package target, and `tsuba
 
 Rebuild:
 ```
-cd plugins/sample-column && pwsh -NoProfile -File X:\Dev\tools\cargo-ccd1.ps1 build --release --target wasm32-wasip2   # needs: rustup target add wasm32-wasip2
-pwsh -NoProfile -Command "& X:\Dev\tools\push-to-rig.ps1 -Project <worktree> -BuildOnRig -Exe tsubame-plughost -CargoArgs '-p','tsubame-plughost' -Profile release -Extra plugins/sample-column/sample_column.wasm"
-# runtime-only host: add '--no-default-features' to -CargoArgs
-# on rig, in G:\rig-test\tsubame:
+cd plugins/sample-column && cargo build --release --target wasm32-wasip2   # needs: rustup target add wasm32-wasip2
+cargo build --release -p tsubame-plughost          # runtime-only host: add --no-default-features
+# on the benchmark machine, with plugins/sample-column/sample_column.wasm copied next to the host exe:
 tsubame-plughost.exe precompile plugins\sample-column\sample_column.wasm sample.cwasm
 tsubame-plughost.exe bench sample.cwasm --pre                     # in-process call timing
 plughost-bench.exe spawn|rtt|mem .\tsubame-plughost.exe sample.cwasm --pre
 ```
-(`-CargoArgs '-p','x'` only splits correctly when push-to-rig is called through `pwsh -Command`, not `pwsh -File`.)
 
 ## (a) Release exe size
 
@@ -65,7 +63,7 @@ Paths are about 73 bytes each (`C:\Users\...\folder_NNN\sub_NN\file_NNNNNN.ext`)
 | 100 | 23.4 µs | 23.8 µs | 12.3 µs | 12.5 µs |
 | 1 | 0.5 µs | 0.5 µs | 0.4 µs | 0.5 µs |
 
-The one pass with p95 4.2 ms / 2.2 ms at 10,000 paths coincided with rig load from Minecraft (max 4.7 ms). The other two passes are tight (p95 within 7 % of the median).
+The one pass with p95 4.2 ms / 2.2 ms at 10,000 paths coincided with load from the game servers on the machine (max 4.7 ms). The other two passes are tight (p95 within 7 % of the median).
 
 **End to end over stdin/stdout pipes** (what the app would actually see: request bytes written, host decodes, calls the guest, encodes, response read):
 

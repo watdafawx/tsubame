@@ -14,7 +14,7 @@ Task S1 of `PLAN.md` section 7. Question: does blink's renderer (`gfx.rs`, lifte
 
 ## Method
 
-- Rig (Ryzen 9 5900X, RTX 3080, one 4K display at 200%). Release profile (`lto`, `codegen-units=1`, `strip`, `panic=abort`), built on rig with `push-to-rig.ps1 -BuildOnRig -Profile release`. Window maximized: 3840x2019 px at 192 dpi.
+- Benchmark machine (Ryzen 9 5900X, RTX 3080, one 4K display at 200%). Release profile (`lto`, `codegen-units=1`, `strip`, `panic=abort`), built on the benchmark machine. Window maximized: 3840x2019 px at 192 dpi.
 - First paint: `GetProcessTimes` creation time to the end of the first completed `WM_PAINT`, both on the precise system FILETIME clock. This is the software stand-in frame, as in blink (the GPU target arrives later, see below).
 - Scroll paint: the bench waits for the GPU target, then scrolls for 5 s on a ~60 Hz timer, timing every `WM_PAINT` (begin to `EndDraw` inclusive; std `Instant`, which is QueryPerformanceCounter on Windows). Script: A 2 s steady fling (2,000 DIP/s, ~1.5 new rows/frame), B 2 s fast fling (20,000 DIP/s, ~15 new rows/frame), C 1 s one full page per frame (every string on screen is new: worst case). About 320 frames per run.
 - Private bytes: `GetProcessMemoryInfo` `PrivateUsage`. Exe size: file size of the stripped release exe.
@@ -47,7 +47,7 @@ First paint timeline: software target paints the first frame at ~65-72 ms; the G
 - The store itself costs **45.2 MB** for 1M rows (24 B records + names, 47.4 MB reserved) and builds in **~47 ms**. That fits the "1M entries in about 60 MB" rule in section 3.
 - A hardware render target costs about 45-50 MB of private commit over the software one (driver heaps), consistent with blink's own numbers (`gpu-render.md`: 83 MB GPU vs 60 MB software at 2214x1427). Render-target size matters too: 4K software first frame is 73 MB, windowed 36 MB.
 - Software (WARP) rendering reaches ~37 MB windowed but paints at p95 7.4 ms windowed / 18.5 ms at 4K, which fails the paint budget.
-- So with `ID2D1HwndRenderTarget` the two budgets conflict. Not solved here. Options for the master session: (a) relax the memory budget to a number measured with the GPU target (~90 MB windowed, ~110 MB at 4K) and keep the leak gate (return to within 5% of the start) as the real guard; (b) spike a DXGI flip-model swap chain + `ID2D1DeviceContext` with one shared D3D11 device (smaller driver footprint is plausible but unmeasured); (c) accept software below some window size. I recommend (a) now, (b) as a later spike.
+- So with `ID2D1HwndRenderTarget` the two budgets conflict. Not solved here. Options: (a) relax the memory budget to a number measured with the GPU target (~90 MB windowed, ~110 MB at 4K) and keep the leak gate (return to within 5% of the start) as the real guard; (b) spike a DXGI flip-model swap chain + `ID2D1DeviceContext` with one shared D3D11 device (smaller driver footprint is plausible but unmeasured); (c) accept software below some window size. I recommend (a) now, (b) as a later spike.
 
 ## Changes from blink's `gfx.rs`
 
@@ -60,11 +60,10 @@ First paint timeline: software target paints the first frame at ~65-72 ms; the G
 ## Surprises and notes
 
 - **f32 scroll offset is not enough.** 1M rows x 22 DIP = 22M, f32 is only whole-pixel exact to 16.7M. `View::scroll` is `f64`. `tsubame-ui` must do the same (or keep first-row index + sub-row offset).
-- Build time on rig, release: 19 s cold (windows crate + lto), 0.6-4 s incremental.
+- Build time on the benchmark machine, release: 19 s cold (windows crate + lto), 0.6-4 s incremental.
 - A default-sized `DrawTextLayout` per cell is cheap enough: ~45 rows x 4 columns at 4K paints in 2-3 ms total.
-- Benchmarks on rig shared slot 1 with another session's exes (`plughost-*`), so runs used `-Exe tsubame -Slot 2`. Always pass `-Exe` when several crates build in one repo.
-- Run-to-run noise: p95 varies about +-0.3 ms; first paint about +-6 ms; first paint also depends on what else rig is doing (one `--store` run showed 134 ms while rig was busy, 110 ms another time).
-- Interactive check on rig (screenshots, 4K): initial list, `End` (last row 1,000,000 sits exactly at the bottom, status bar "showing 999972-1000000"), wheel up, `PageUp`, scrollbar thumb drag to ~44% (rows ~444,870). All correct.
+- Run-to-run noise: p95 varies about +-0.3 ms; first paint about +-6 ms; first paint also depends on what else the machine is doing (one `--store` run showed 134 ms while it was busy, 110 ms another time).
+- Interactive check on the benchmark machine (screenshots, 4K): initial list, `End` (last row 1,000,000 sits exactly at the bottom, status bar "showing 999972-1000000"), wheel up, `PageUp`, scrollbar thumb drag to ~44% (rows ~444,870). All correct.
 
 ## Rendering API surface used (seeds the `Canvas` trait)
 

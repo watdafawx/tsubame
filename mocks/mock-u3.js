@@ -148,11 +148,11 @@
   }
 
   /* ---------- sidebar ---------- */
-  var PIN = [['star', 'tsubame'], ['star', 'blink'], ['star', 'Minecraft packs'], ['net', 'rig']];
+  var PIN = [['star', 'tsubame'], ['star', 'blink'], ['star', 'Game packs'], ['net', 'server']];
   var QUICK = [['home', 'Home'], ['desktop', 'Desktop'], ['download', 'Downloads'], ['docs', 'Documents'], ['pics', 'Pictures'], ['music', 'Music'], ['video', 'Videos']];
   var RECENT = [['Invoices', 'Documents'], ['docs', 'tsubame'], ['world-backup', 'packs'], ['Screenshots', 'Downloads']];
-  var DRIVES = [['Windows (C:)', '118 GB', 75], ['Dev (X:)', '1.1 TB', 70], ['Games (G:)', '41 GB', 97], ['Backup (E:)', '312 GB', 48]];
-  var NET = [['RIG', '\\\\192.168.50.3'], ['NAS', '\\\\192.168.50.2']];
+  var DRIVES = [['Windows (C:)', '118 GB', 75], ['Projects (D:)', '1.1 TB', 70], ['Games (G:)', '41 GB', 97], ['Backup (E:)', '312 GB', 48]];
+  var NET = [['SERVER', '\\\\192.168.1.3'], ['NAS', '\\\\192.168.1.2']];
 
   /*
     sidebar state s: {collapsed, w, closed:{recent,net}, cur:['quick',2], hover:['pin',1], drop:['pin',1], src:['pin',1],

@@ -148,7 +148,7 @@ Not done (not needed for this task): ignoring our own writes, watching the paren
 to catch a rename of a quiet folder without a focus check, a cap on how many
 events one window may hold (the 250 ms `max_delay` bounds it by throughput).
 
-## Numbers (FOX, CCD1, game running, -j8; debug tests, release bench)
+## Numbers (dev machine, game running in the background; debug tests, release bench)
 
 | Metric | Result |
 |---|---|

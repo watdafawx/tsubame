@@ -730,7 +730,7 @@ body:not(.only) .sec.hide{display:none}
   function gitSub() { return [I('Git &Commit…'), I('Git &Diff'), I('Git Show &Log'), I('Git &Blame'), SEP, I('Git &Revert…'), I('Git &Reset…')]; }
   function sendToSub() {
     return [I('&Bluetooth device', { ic: 'bt' }), I('&Compressed (zipped) folder', { ic: 'zipf' }), I('&Desktop (create shortcut)', { ic: 'desk' }), I('D&ocuments', { ic: 'folder' }), I('&Fax recipient', { ic: 'mail' }), I('&Mail recipient', { ic: 'mail' }), SEP,
-      I('Windows (C:)', { ic: 'drivec' }), I('Dev (X:)', { ic: 'drivec' }), I('Games (G:)', { ic: 'drivec' }), I('Share (nas) (Z:)', { ic: 'drivec' }), SEP, I('Downloads', { ic: 'folder' }), I('Pictures', { ic: 'folder' }), I('tsubame', { ic: 'folder' })];
+      I('Windows (C:)', { ic: 'drivec' }), I('Projects (D:)', { ic: 'drivec' }), I('Games (G:)', { ic: 'drivec' }), I('Share (nas) (Z:)', { ic: 'drivec' }), SEP, I('Downloads', { ic: 'folder' }), I('Pictures', { ic: 'folder' }), I('tsubame', { ic: 'folder' })];
   }
   function copyPathSub() { return [I('&Full path', { sc: 'Ctrl+Shift+C' }), I('File &name'), I('&Folder path'), I('Path as &URL (file:///)'), I('Path with &forward slashes')]; }
   function newSub() { return [I('&Folder', { ic: 'newfolder', sc: 'Ctrl+Shift+N' }), I('&Shortcut', { ic: 'shortcut' }), SEP, I('&Text document', { ic: 'note' }), I('&Markdown file', { ic: 'note' }), I('Compressed (zipped) &folder', { ic: 'zipf' })];
@@ -802,7 +802,7 @@ body:not(.only) .sec.hide{display:none}
     return a;
   }
   function driveItems() {
-    return [HDR('<b>Dev (X:)</b>', { plain: 1, n: '1.1 TB free of 1.8 TB' }), I('&Open', { ic: 'open', def: 1, sc: 'Enter' }), I('Open in new &tab', { ic: 'newtab', sc: 'Ctrl+Enter' }), I('Open in &other pane', { ic: 'otherpane' }), SEP,
+    return [HDR('<b>Projects (D:)</b>', { plain: 1, n: '1.1 TB free of 1.8 TB' }), I('&Open', { ic: 'open', def: 1, sc: 'Enter' }), I('Open in new &tab', { ic: 'newtab', sc: 'Ctrl+Enter' }), I('Open in &other pane', { ic: 'otherpane' }), SEP,
       I('Pin to &Quick access', { ic: 'pin' }), I('Add to &bookmarks', { ic: 'star' }), SEP,
       I('Open &terminal here', { ic: 'term', sc: 'Ctrl+Alt+T' }), I('Show &folder sizes', { ic: 'view' }), SEP,
       I('S&can with Microsoft Defender…', { ic: 'shield' }), I('Turn on &BitLocker', { ic: 'bitl' }), SEP,

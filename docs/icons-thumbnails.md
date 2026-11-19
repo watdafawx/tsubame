@@ -145,7 +145,7 @@ making one long frame.
 | `TSUBAME_ICON_PER_PATH=1` | env | per-path icons for every file (worst case) |
 | `TSUBAME_ICON_FACTORY=1` | env | IShellItemImageFactory for per-path icons |
 
-To measure: `tools/bench-rig.ps1 -BenchArgs '--view grid-small'` scrolls the grid
+To measure: run the app with `--bench --view grid-small`, which scrolls the grid
 instead of the list; the bench report has a `thumb cache:` line (entries, MB,
 evictions, device bitmaps, requested px, in flight / queued at the end).
 `--stress thumbs` hammers the thumbnail lane directly.

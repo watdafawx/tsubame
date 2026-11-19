@@ -118,7 +118,7 @@ the manifest signature against the key pinned in `keys.rs` with `tsubame-release
 
 Proves: the workflow YAML, the secret, the toolchain, the tests, the Inno Setup compile, the packaging and
 that the signed manifest verifies against the pinned public key.
-Does not prove: a silent install and uninstall of the installer (use the rig test below), Authenticode
+Does not prove: a silent install and uninstall of the installer (use the installer test below), Authenticode
 signing (no certificate yet), `gh release create` and the real Release page, or that the in-app updater
 accepts the result (see "The real thing"). The artifact is signed with the real key: do not upload it
 anywhere, and delete it (`gh run delete <run-id>`) when done.
@@ -126,8 +126,8 @@ anywhere, and delete it (`gh run delete <run-id>`) when done.
 
 ```powershell
 pwsh tools\release.ps1 -KeyFile $env:USERPROFILE\.tsubame\update-signing.key
-# FOX: go through the CCD1 wrapper
-$env:TSUBAME_CARGO = 'X:\Dev\tools\cargo-ccd1.ps1'
+# optional: run cargo through a wrapper script instead of plain cargo
+$env:TSUBAME_CARGO = '<path to a wrapper .ps1>'
 ```
 Output in `dist\<version>\`. Upload all files to a GitHub Release yourself. The installer needs Inno Setup 6
 (`winget install JRSoftware.InnoSetup`); without it the script warns and skips the installer.
@@ -150,22 +150,30 @@ unpinned key. Ends with `e2e: ALL CHECKS PASSED`. The "app" is a stand-in file, 
 Unit and integration tests (including a fake release over real WinHTTP and a watchdog test that starts a
 real process and rolls back when it exits early): `cargo test -p tsubame-update`.
 
-### Installer (run on rig, never on FOX)
+### Installer (run on a dedicated test machine, not on a daily-driver PC)
 
-The installer is a GUI program even when silent. Copy `installer\tsubame.iss` and a folder with the exes to
-rig (`G:\rig-test\<name>\src\installer`, `...\src\exes`), then on rig:
-```powershell
-pwsh G:\rig-test\<name>\release-installer-test.ps1 -Work G:\rig-test\<name> -Cleanup
-```
-It compiles the installer, installs silently into `<Work>\install`, checks the files and the HKCU
-Uninstall key, checks that no startup entry, shell key, scheduled task or service appeared, uninstalls
-silently and checks that everything is gone (and that user data in `%LOCALAPPDATA%\Tsubame` is untouched).
+The installer is a GUI program even when silent. Compile `installer\tsubame.iss` with Inno Setup 6
+(`ISCC.exe /DAppVersion=<v> /DNumericVersion=<v>.0 /DSourceDir=<folder with tsubame.exe and optionally
+tsubame-plughost.exe> /DOutDir=<out> installer\tsubame.iss`; stand-in exe files are fine), then check:
+
+1. Silent install (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR="<dir>"`), default components: only
+   `tsubame.exe` and the uninstaller in the folder (no plugin host, no `portable.txt`); one HKCU Uninstall
+   entry with name, version, location and uninstall string (nothing under HKLM); a Start menu shortcut
+   pointing at the installed exe; no desktop shortcut.
+2. A before/after diff of the Run keys, `HKCU\Software\Classes`, scheduled tasks and services is empty: no
+   startup entry, shell or file-association key, scheduled task or service appeared.
+3. Updater leftovers (`*.old`, `*.new`, `*.bad`) next to the exe are removed by the uninstaller; user data in
+   `%LOCALAPPDATA%\Tsubame` is untouched.
+4. Silent uninstall (`unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`): files, registry entry and
+   shortcuts are all gone, and registry, tasks, services and shortcuts match the pre-install snapshot.
+5. Repeat with `/COMPONENTS="main,plughost" /TASKS="desktopicon"`: the plugin host and a desktop shortcut
+   appear, and are removed again on uninstall.
 
 ### The real thing (after the first release)
 
-1. Install release N (installer or zip) on rig.
+1. Install release N (installer or zip) on the benchmark machine.
 2. Publish N+1 with the workflow.
-3. On rig run `tsubame-update check --force --install-dir <dir>`, then `download`, `apply`, `status`
+3. On the benchmark machine run `tsubame-update check --force --install-dir <dir>`, then `download`, `apply`, `status`
    (the real CLI talks to GitHub; the `--api-base` flag exists only in test builds).
 4. `tsubame-update rollback` and confirm the old file is back.
 

@@ -270,17 +270,17 @@ class `TsubameInstance.v1`.
    gives up after 500 ms), the mutex is unavailable, or `--new-window` was
    given, the launch starts normally without owning the instance.
 
-## Measured (D1, 2026-11-18, rig release unless stated)
+## Measured (D1, 2026-11-18, release on the benchmark machine unless stated)
 
 | Metric | Value |
 |---|---|
 | `config.toml` load | 0.075 ms per load (typical 604-byte file, 200 loads, test profile; release is faster). Total startup cost is a config load + a session load, both well under 0.2 ms |
 | Main exe, release, before / after D1 | 664 KB (680,000 B) / 1,083,904 B = 1.03 MB (+~404 KB, +59%; `toml` + `serde` + the new code). Budget < 6 MB |
-| Cold start to first painted frame (rig, release, 3 runs, 100k fixture, 4K) | 65.1 / 69.9 / 59.5 ms (median 65.1, budget < 100). These runs have no session file; a session load adds ~0.1 ms and only the active tab is listed |
+| Cold start to first painted frame (release, 3 runs, 100k fixture, 4K) | 65.1 / 69.9 / 59.5 ms (median 65.1, budget < 100). These runs have no session file; a session load adds ~0.1 ms and only the active tab is listed |
 | Scroll paint p95 (same runs) | 2.86 / 2.94 / 2.90 ms (budget < 5) |
 | Idle CPU, 10 s | 0 ms (the save timer exists only while a change waits out its 2 s window) |
 | Leak gate, small counts (`-Quick`: 300 navigations, 30 tabs) | PASS: private +1.21%, handles/GDI/USER/threads unchanged |
-| Second launch forwarding (release, rig) | kernel process lifetime `ExitTime - StartTime` = **17.25 ms**, no window, no second process; wrapper (PowerShell `Start-Process`) 92 ms |
+| Second launch forwarding (release) | kernel process lifetime `ExitTime - StartTime` = **17.25 ms**, no window, no second process; wrapper (PowerShell `Start-Process`) 92 ms |
 | Session restore after a forwarded launch | saved session had 2 tabs (`C:\Windows`, `C:\Windows\System32`), `active_tab = 1`, restored and closed with both tabs intact |
 | Three paths on the command line | 3 tabs saved in order; `--select C:\Windows\win.ini` saved `selected = ["win.ini"]` |
 | Portable mode | marker next to the exe wrote `<exe dir>\data\config.toml` and `session.toml` |
