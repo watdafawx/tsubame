@@ -97,6 +97,31 @@ CI does: check tag == version, `cargo test -p tsubame-update`, Inno Setup (prein
 `tools\release.ps1` (release build, zip, installer, manifest, signature, SHA256SUMS), uploads the files as a
 workflow artifact too, then `gh release create`.
 
+### Dry run (no tag)
+
+Rehearse the whole CI release on GitHub without a tag and without publishing anything:
+
+```powershell
+gh workflow run release.yml -f dry_run=true          # on the default branch (add --ref <branch> for another)
+gh run list --workflow release.yml --limit 1         # find the run id
+gh run watch <run-id>
+gh run download <run-id> -n release-<version>-dryrun -D dist\dryrun
+```
+
+The same thing is in the Actions tab: `release` > Run workflow. A manual run **never** creates a tag or a
+GitHub Release: the publish step only runs for a pushed `v*` tag, and `dry_run=false` is refused. The run
+skips the "tag must match" check (the version still comes from `Cargo.toml`), runs the same tests, Inno
+Setup install, `tools\release.ps1` with the real `UPDATE_SIGNING_KEY` secret (only in that one step's
+environment) and uploads the files as the artifact `release-<version>-dryrun` (kept 7 days). The last step
+writes every file's size and SHA-256 to the run summary, checks `SHA256SUMS` against the files and verifies
+the manifest signature against the key pinned in `keys.rs` with `tsubame-release verify`.
+
+Proves: the workflow YAML, the secret, the toolchain, the tests, the Inno Setup compile, the packaging and
+that the signed manifest verifies against the pinned public key.
+Does not prove: a silent install and uninstall of the installer (use the rig test below), Authenticode
+signing (no certificate yet), `gh release create` and the real Release page, or that the in-app updater
+accepts the result (see "The real thing"). The artifact is signed with the real key: do not upload it
+anywhere, and delete it (`gh run delete <run-id>`) when done.
 ### Building a release by hand (without CI)
 
 ```powershell
