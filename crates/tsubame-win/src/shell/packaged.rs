@@ -487,4 +487,36 @@ mod tests {
         assert_eq!(class_of(r"C:\").0, ItemClass::Drive);
         assert_eq!(class_of(r"Z:\no\such\file.TXT"), (ItemClass::File, "txt".into()));
     }
+
+    /// Manual probe: `TSUBAME_PKG_PROBE=<path> cargo test -p tsubame-win probe -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn probe() {
+        let path = std::env::var("TSUBAME_PKG_PROBE").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let (all, _) = handlers();
+        for h in all.iter() {
+            println!("handler {} {} {}", h.package, h.ty, h.clsid);
+        }
+        let class = class_of(&path);
+        let types = types_for(class.0, &class.1);
+        println!("class {class:?} types {types:?} applicable {:?}", applicable(&all, &[types.clone()], &[]));
+        let mut s = Session::new(std::slice::from_ref(&path), 32).expect("session");
+        for clsid in applicable(&all, &[types], &[]) {
+            let w = wide(&clsid);
+            let guid = unsafe { CLSIDFromString(PCWSTR(w.as_ptr())) };
+            let made: windows::core::Result<IExplorerCommand> = guid.and_then(|g| unsafe { CoCreateInstance(&g, None, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER) });
+            match made {
+                Err(e) => println!("{clsid}: create {:?}", e.code()),
+                Ok(c) => {
+                    let st = unsafe { c.GetState(&s.arr, true) };
+                    let t = unsafe { c.GetTitle(&s.arr) }.map(|p| unsafe { p.to_string() });
+                    println!("{clsid}: flags {:?} state {:?} title {:?}", unsafe { c.GetFlags() }, st, t);
+                }
+            }
+        }
+        println!("top {:?}", s.top(&[class_of(&path)], &[]).iter().map(|r| r.text.clone()).collect::<Vec<_>>());
+    }
 }

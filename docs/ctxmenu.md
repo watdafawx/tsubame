@@ -1,4 +1,4 @@
-# Own-drawn context menu (CM2–CM6)
+# Own-drawn context menu (CM2–CM9)
 
 `src/ctxui.rs` owns one generation, target, worker handle, model and widget state.
 `src/shellops.rs` opens it and dispatches picks after painting. The existing
@@ -37,6 +37,52 @@ An empty lazy submenu shows "Loading…". After 3 s without an answer, or when t
 worker was lost, it shows the failure row with Retry (a new generation). While
 the type-to-filter text is set, every lazy submenu is asked for, so its rows are
 searched as they arrive. `TSUBAME_CTX_EAGER=1` restores the CM2 eager walk.
+
+## Packaged Windows 11 commands (CM7)
+
+Windows 11 apps register context-menu commands (`IExplorerCommand`) in their
+package manifest (`windows.fileExplorerContextMenus`), not in the classic
+registry, so the classic `IContextMenu` does not list all of them ("Open in
+Terminal", "Open with Code", PowerToys). `shell::packaged` finds them:
+`HKCR\PackagedCom\Package` names the packages, each package's
+`AppxManifest.xml` (from the AppModel repository's `PackageRootFolder`, else
+`%ProgramW6432%\WindowsApps\<full name>`) maps item types (`*`, `.ext`,
+`Directory`, `Directory\Background`, `Drive`, `AllFilesystemObjects`) to
+CLSIDs. The scan is cached for 60 s (a cold scan took 167 ms on the test PC,
+warm 5–9 ms).
+
+The same STA worker that holds the classic menu runs it, after the classic
+top level is out, so it never delays those rows: it creates each applicable
+handler (`CoCreateInstance`, in-process or local server), drops hidden ones
+(`GetState`), and reads title, tooltip, icon and flags. Items merge in one
+menu after the classic rows and before the custom entries; there is no
+"Show more options" row. Command ids use `0xA000..=0xBFFF`, submenu tokens
+`0x1_0000..=0x1_FFFF` (lazy, `Part::Submenu` like CM6), so they never collide
+with classic ids. Invoke runs `IExplorerCommand::Invoke` on the worker with
+the host window in front. A command the classic menu already shows (same
+CLSID verb, or the same label, which covers the classic proxies Windows adds
+for some packaged commands) is left out. The CLSID keys the user's edits
+(`windows.verb:{clsid}`). The loading line stays until the packaged step
+is done; a handler that hangs there trips the same 4 s watchdog.
+
+## Tall menus: the icon row (CM9)
+
+When the top level does not fit the window's work area (bounds minus the
+8 DIP keep-out), Cut, Copy, Paste, Rename, Delete and Share fold into an
+icon-only row above the scroll area, like Windows 11 (`docs/ctxmenu-mock.md`
+question 3). It needs at least two foldable rows. Once folded, the menu stays
+folded while it is open (rows arriving later do not unfold it). If the rest is
+still too tall, the list scrolls under the row with the chevron strips.
+
+- Buttons are left-aligned, `row × 1.5` DIPs wide (narrower if the menu is
+  narrow), keep the row states (disabled, danger) and show a tooltip with the
+  label and shortcut on hover or keyboard focus.
+- Keys: Up from the first list row (or Down from the last) enters the row;
+  Left/Right move along it (wrapping); Down leaves to the first list row, Up to
+  the last; Home goes to the first button; Enter/Space run it. Alt+letter
+  accelerators include the folded rows.
+- While the type-to-filter text is set, the icon row is hidden and folded rows
+  match like any other row.
 
 ## Widget and input (CM4)
 
@@ -79,21 +125,19 @@ existing bounded cache. Only visible rows draw.
 - `TSUBAME_CTX_SUB_DELAY_MS=N`: worker delay before each lazy submenu (shows
   "Loading…"; >4000 trips the watchdog).
 - `TSUBAME_CTX_EAGER=1`: walk every submenu up front (CM2 behaviour, A/B runs).
+- `TSUBAME_CTX_PACKAGED=0`: leave the packaged commands out (A/B runs).
+- `TSUBAME_CTX_PKG_DELAY_MS=N`: worker delay before the packaged step (debug).
 - `--stress ctxmenu --dir DIR`: 200 real own-menu open/paint/close cycles,
   alternating one and three files; lazy runs also fill one submenu per menu.
   Writes `s4-stress-ctxmenu.txt` beside exe: cold/warm first paint, top level,
-  all items, lazy submenu latency, failures, process counters.
+  all items, lazy submenu latency, packaged worker time and row count, failures, process counters.
 - `--stress menu --dir DIR`: existing native comparison.
 - `TSUBAME_STRESS_MENUS=N`: cycle count, clamped to 200..10000.
 
 ## Later-card seams
 
-CM7: packaged discovery merges after classic shell rows, before custom entries;
-`Part::Submenu` tokens extend to packaged submenus.
 CM8: U4 entry identities/overrides and stable row keys support editing; right
 click on a row is never an invocation (reserved for editing).
-CM9: fold common actions into an icon row before the existing chevron scrolling
-and filter field (the field sits above the rows, outside the scroll viewport).
 CM10: UI Automation provider and high-contrast verification remain separate.
 
 The stress scenario is separate from navigation/tab leak-gate: shell extensions

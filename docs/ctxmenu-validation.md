@@ -1,4 +1,4 @@
-# Context menu verification (CM2–CM6)
+# Context menu verification (CM2–CM9)
 
 Implementation inherited the CM1 model/STA worker and the WIP menu widget,
 composition, right-click wiring and loading state. Completion repaired the
@@ -226,3 +226,72 @@ Copy name glyphs.
 
 Hover open/close timing and the safe triangle, wheel scrolling, the Retry row
 for a slow lazy submenu and the "No matching items" row are unit-tested only.
+
+## CM7 + CM9: packaged commands and the icon row
+
+Release build of commit `6f21146` (exe 2,974,208 B, SHA-256 prefix
+`3e488d995d203179`) on the remote test desktop (one 4K monitor at 200 %),
+`TSUBAME_GPU_PARK=0`, keyboard only, focused window checked before keys.
+Fixture: a folder with one subfolder and five `.txt` files.
+
+### Menu timing (`--stress ctxmenu`, 200 menus, same binary, runs interleaved)
+
+The test PC was also running game servers; the first pair of runs was noisy
+(CPU load up to 97 %), so the table uses the second, interleaved pair.
+
+| Metric | Packaged on (default) | `TSUBAME_CTX_PACKAGED=0` | CM6 reference |
+|---|---|---|---|
+| Warm first paint p50 / p95 | 1.52 / 1.97 ms | 1.51 / 2.00 ms | 1.46 / 1.83 ms |
+| Warm right-click to top-level items p50 / p95 | 38.38 / 44.78 ms | 37.96 / 44.38 ms | 35.81 / 41.69 ms |
+| Warm right-click to all items p50 / p95 | 48.69 / 56.80 ms | 37.96 / 44.38 ms | 35.81 / 41.69 ms |
+| Packaged step (worker) p50 / p95 | 10.81 / 13.15 ms | n/a | n/a |
+| Cold first paint / top level / all | 8.5 / 477.2 / 497.3 ms | 2.8 / 459.0 / 459.0 ms | 2.6 / 557.1 / 557.1 ms |
+| Failures | 0 | 0 | 0 |
+
+The top level is unchanged within noise (+0.4 ms p50 against the same binary
+with packaged commands off); the packaged step runs after it and adds about
+11 ms to "all items" (the loading line ends later). The first quiet run
+measured 36.02 / 40.61 ms top level with packaged commands on. The stress
+targets are the `.txt` files, whose packaged handlers on that PC are all
+hidden by `GetState` or already in the classic menu, so the stress menus had
+no packaged rows; the time is creating and asking those handlers.
+
+### Checked on the test desktop
+
+- Folder: "Open in Terminal" (with its icon) arrives as the last group after
+  the classic rows; picking it with the keyboard opened a Terminal tab in that
+  folder (`IExplorerCommand::Invoke`). On a later open the classic menu listed
+  its own "Open in Terminal" proxy, and the packaged copy was left out (no
+  duplicate). `.txt` file: "Edit in Notepad" shows once (classic proxy).
+- Window 450 DIPs tall, light and dark: the menu folds Cut, Copy, Paste
+  (disabled), Rename, Delete (danger colour) and Share (files) into the icon
+  row above the list; the list scrolls with chevron strips under it.
+- Up from the first row enters the icon row, Right moves along it; the
+  focused button shows a focus ring and a tooltip ("Copy  Ctrl+C").
+- Typing "ren" hides the icon row and filters the folded Rename as a normal
+  row ("1 match"); Esc clears, Esc closes.
+
+No screenshots were committed: every capture of the test desktop's menus
+shows third-party shell extensions installed there.
+
+### Tests
+
+New unit tests: manifest parsing (every extension block, any namespace
+prefix), handler applicability per item class and skip list, id and token
+ranges, merge order and dedupe (classic, packaged, custom; lazy packaged
+submenu; stale generation), fold decision, fold split and separator cleanup,
+icon-button layout and hit testing, keyboard moves between the row and the
+list, and a widget test (fold, keyboard, Alt accelerator, click, tooltip,
+chevron scroll after the fold). Two `#[ignore]` probes print the packaged
+handlers and the real worker batches for a path (`TSUBAME_PKG_PROBE`).
+
+### Not verified on the test desktop
+
+- 100 % display scale (the test desktop runs 200 %); the layout is in DIPs
+  and unit-tested.
+- Mouse clicks and hover tooltips on the icon row (mouse input does not reach
+  the remote desktop); covered by the widget test.
+- Packaged submenus (`ECF_HASSUBCOMMANDS`): no installed handler on the test
+  PC has one; covered by the model test only.
+- A hung packaged handler: it would trip the 4 s watchdog like a hung classic
+  handler: the shell rows go and the failure row with Retry shows (own rows stay).
