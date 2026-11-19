@@ -411,6 +411,8 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     if !st.opened {
         st.opened = true;
         st.levels = vec![Level { kb: st.keyboard, focus_first: st.keyboard, ..Default::default() }];
+        // a menu that replaced an open one starts clean (no stale submenus)
+        ui.close_popup(lid(0));
         ui.open_popup(lid(0));
     }
     if !ui.is_popup_open(lid(0)) {

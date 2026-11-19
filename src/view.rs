@@ -1155,6 +1155,9 @@ impl View {
         // the context menu is on top of everything
         if let Some(c) = self.ctx.as_mut() {
             c.paint(ui, g, Rect::new(0.0, 0.0, w, h));
+        } else {
+            // dropped by the app (picked, replaced, stress run): its popups go too
+            ui.close_popup(crate::ctxui::ID_CTX.with(0));
         }
         let target = self.side_target.take();
         self.finish_drag(ui, g, &t, target.as_ref());

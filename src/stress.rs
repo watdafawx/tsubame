@@ -12,9 +12,13 @@
 //!   clipboard read, all on the shell workers. Writes `s4-stress-clip.txt`.
 //! - thumbs: thumbnails for up to 500 image files of the folder, all queued
 //!   at once; cached vs generated counts and times.
+//! - ctxmenu: 200 own-drawn context menus (`ctxui`), alternating one and
+//!   three items: each one opens, paints until every shell item is in (or the
+//!   failure row shows) and is dropped. Open to first paint and to all items,
+//!   and the same counters as `menu`, to compare growth with the native path.
 
 use crate::shellui::{ShellUi, pcts};
-use crate::tab::Tab;
+use crate::view::View;
 use std::time::{Duration, Instant};
 use tsubame_win::procinfo::{Counters, counters};
 use tsubame_win::dnd::clipboard::{ClipJob, ClipReply};
@@ -36,12 +40,16 @@ pub enum Mode {
     Thumbs,
     /// menu + clipboard cycles (W1)
     Clip,
+    /// the own-drawn menu (CM2)
+    CtxMenu,
 }
 
 enum State {
     Wait(Instant),
     MenuRun { i: usize },
     MenuHold,
+    /// own-drawn menu `i`: opens it when none is up, else waits for its items
+    CtxRun { i: usize },
     /// cycle `i`: waiting for the menu (`clip: 0`) or for the two clipboard replies
     ClipRun { i: usize, clip: usize },
     Thumbs { left: usize },
@@ -78,12 +86,22 @@ pub struct Stress {
     staging: std::path::PathBuf,
     memdiag: String,
     menus: usize,
+    ctx_first_us: Vec<u64>,
+    ctx_all_us: Vec<u64>,
+    ctx_rows: Vec<u64>,
+    ctx_failed: usize,
+    ctx_at: Option<Instant>,
 }
 
 impl Stress {
     pub fn new(mode: Mode) -> Stress {
         Stress {
             mode,
+            ctx_first_us: Vec::new(),
+            ctx_all_us: Vec::new(),
+            ctx_rows: Vec::new(),
+            ctx_failed: 0,
+            ctx_at: None,
             memdiag: String::new(),
             menus: std::env::var("TSUBAME_STRESS_MENUS").ok().and_then(|s| s.parse().ok()).filter(|n| (200..=10000).contains(n)).unwrap_or(MENUS),
             state: State::Wait(Instant::now() + WARMUP),
