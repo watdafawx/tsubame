@@ -202,7 +202,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         .sum();
     let card = pg.card_h(total, t.height_key_row);
     let mut y = card.r.y;
-    let col_x = card.r.x + (card.r.w * 0.56).min(card.r.w - 330.0).max(card.r.x - card.r.x + 200.0);
+    let col_x = card.r.x + (card.r.w * 0.56).min(card.r.w - 330.0).max(200.0);
     let mut closed = false;
     let mut applied = false;
     for it in &items {

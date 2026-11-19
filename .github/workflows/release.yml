@@ -2,16 +2,28 @@ name: release
 
 # Push a tag like v0.1.0 (it must equal the version in Cargo.toml) and this builds the release,
 # signs the update manifest and publishes the GitHub Release. See docs/release.md.
+#
+# Dry run: start it by hand (Actions > release > Run workflow, or
+# `gh workflow run release.yml -f dry_run=true`). It builds, packages and signs exactly like a
+# tag release and keeps the files as a short-lived workflow artifact, but it NEVER creates a
+# tag or a GitHub Release: the publish step only runs for a tag push.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: build, sign and upload a workflow artifact only. Must stay true; a manual run never publishes (publishing is tag-push only)."
+        type: boolean
+        default: true
 
-# The release job needs to create the release and upload assets. Nothing else.
+# Only the publish step (tag push) writes to the repo; a dry run never reaches it.
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  # The event name keeps a manual dry run from queueing behind (or cancelling) a real tag release.
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -27,13 +39,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: A manual run is a dry run, always
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        shell: pwsh
+        run: |
+          throw 'manual runs never publish: leave dry_run on, or push a tag vX.Y.Z to release (docs/release.md)'
+
       - name: Tag must match the workspace version
         shell: pwsh
         run: |
           $toml = Get-Content -Raw Cargo.toml
           if ($toml -notmatch '(?ms)^\[workspace\.package\]\s*(?:[^\[]*?)^version\s*=\s*"(?<v>[^"]+)"') { throw 'no workspace version in Cargo.toml' }
           $want = "v$($Matches['v'])"
-          if ($env:GITHUB_REF_NAME -ne $want) { throw "tag $env:GITHUB_REF_NAME does not match Cargo.toml version ($want)" }
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            if ($env:GITHUB_REF_NAME -ne $want) { throw "tag $env:GITHUB_REF_NAME does not match Cargo.toml version ($want)" }
+          }
+          else { Write-Host "dry run on $env:GITHUB_REF_NAME: tag check skipped, would release $want" }
           "VERSION=$($Matches['v'])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Rust toolchain
@@ -77,12 +98,14 @@ jobs:
         # actions/upload-artifact v7.0.2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: release-${{ env.VERSION }}
+          name: release-${{ env.VERSION }}${{ github.event_name == 'workflow_dispatch' && '-dryrun' || '' }}
           path: dist/release/*
           if-no-files-found: error
-          retention-days: 30
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 7 || 30 }}
 
+      # Only a pushed tag publishes. A manual (dry run) event can never get here.
       - name: Publish the GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -90,3 +113,31 @@ jobs:
           $files = Get-ChildItem dist/release -File | ForEach-Object { $_.FullName }
           gh release create $env:GITHUB_REF_NAME @files --repo $env:GITHUB_REPOSITORY --title "Tsubame $env:VERSION" --generate-notes --verify-tag
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
+
+      # Dry run only: show what a release would contain and re-check it with the repo's own tool.
+      - name: Dry run summary
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE 'dist/release'
+          $lines = @("## Release dry run: $env:VERSION", '', 'Nothing was tagged or published. Files:', '', '| File | Bytes | SHA-256 |', '|---|---:|---|')
+          Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
+            $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            $lines += "| $($_.Name) | $($_.Length) | ``$h`` |"
+          }
+          # SHA256SUMS must agree with the files on disk.
+          $bad = @(); $sumsOk = $true
+          foreach ($l in (Get-Content (Join-Path $out 'SHA256SUMS'))) {
+            if ($l -notmatch '^(?<h>[0-9a-f]{64})  (?<f>.+)$') { $bad += "unparsable line: $l"; $sumsOk = $false; continue }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out $Matches['f'])).Hash.ToLowerInvariant()
+            if ($actual -ne $Matches['h']) { $bad += "SHA256SUMS mismatch: $($Matches['f'])"; $sumsOk = $false }
+          }
+          # Manifest signature against the key pinned in keys.rs (same tool the release script just used).
+          $tool = Join-Path $env:GITHUB_WORKSPACE 'target/release/tsubame-release.exe'
+          $verify = & $tool verify --manifest (Join-Path $out 'tsubame-update.json') --sig (Join-Path $out 'tsubame-update.json.sig') 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { $bad += "manifest signature check failed: $verify" }
+          $lines += ''
+          $lines += "Manifest signature: $($verify.Trim())"
+          $lines += "SHA256SUMS consistent with the files: $(if ($sumsOk) { 'yes' } else { 'NO' })"
+          $lines -join "`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($bad.Count -gt 0) { $bad | ForEach-Object { Write-Host "::error::$_" }; throw 'dry run verification failed' }
