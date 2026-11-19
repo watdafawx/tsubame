@@ -168,6 +168,9 @@ tsubame-plughost.exe> /DOutDir=<out> installer\tsubame.iss`; stand-in exe files 
    shortcuts are all gone, and registry, tasks, services and shortcuts match the pre-install snapshot.
 5. Repeat with `/COMPONENTS="main,plughost" /TASKS="desktopicon"`: the plugin host and a desktop shortcut
    appear, and are removed again on uninstall.
+6. Uninstall while Tsubame is running (start the installed `tsubame.exe`, optionally with a hand-made
+   `Directory\shell\Tsubame` verb, then silent-uninstall): the uninstaller closes that exe (and only the one in
+   the install folder), removes the verb, and the install folder is gone.
 
 ### The real thing (after the first release)
 
