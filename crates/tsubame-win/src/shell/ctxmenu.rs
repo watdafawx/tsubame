@@ -23,6 +23,7 @@
 //! Every GDI object made here is freed here.
 
 use super::ctxmodel::{IconCache, MenuBatch, Part, RawItem, build_native};
+use super::packaged;
 use super::menu::{self, CMIC_MASK_SHIFT_DOWN, CMIC_MASK_UNICODE, ID_FIRST, ID_LAST, Pidls};
 use crate::bitmap::Bitmap;
 use crate::wide;
@@ -65,11 +66,17 @@ pub struct CtxOpts {
     /// debug only: `Sleep(ms)` before filling a lazy submenu, without
     /// pumping (past the 4 s hang limit: a hung submenu handler)
     pub debug_sub_delay_ms: u32,
+    /// merge the Win11 packaged (`IExplorerCommand`) commands after the
+    /// classic top level (CM7)
+    pub packaged: bool,
+    /// debug only: `Sleep(ms)` before the packaged step (the loading line
+    /// stays after the classic rows are in)
+    pub debug_pkg_delay_ms: u32,
 }
 
 impl Default for CtxOpts {
     fn default() -> Self {
-        CtxOpts { background: false, extended: false, can_rename: true, submenus: true, icon_px: 16, linger: Duration::from_secs(600), debug_hang_ms: 0, debug_delay_ms: 0, debug_sub_delay_ms: 0 }
+        CtxOpts { background: false, extended: false, can_rename: true, submenus: true, icon_px: 16, linger: Duration::from_secs(600), debug_hang_ms: 0, debug_delay_ms: 0, debug_sub_delay_ms: 0, packaged: true, debug_pkg_delay_ms: 0 }
     }
 }
 
@@ -191,6 +198,33 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
             emit(batch(Part::Icons(icons.entries()), timing));
         }
     }
+    // CM7: the packaged (Win11) commands, after the classic rows are out so
+    // they never delay them; the loading line stays until they are in
+    let mut pkg = None;
+    if alive && opts.packaged {
+        if opts.debug_pkg_delay_ms > 0 {
+            unsafe { Sleep(opts.debug_pkg_delay_ms) };
+        }
+        let t = Instant::now();
+        if let Some(mut s) = packaged::Session::new(paths, opts.icon_px.clamp(8, 64)) {
+            let classes: Vec<(packaged::ItemClass, String)> = if opts.background { vec![(packaged::ItemClass::Background, String::new())] } else { paths.iter().map(|p| packaged::class_of(p)).collect() };
+            // a CLSID the classic menu already lists as a verb is not made again
+            let skip: Vec<String> = top.iter().filter_map(|r| r.verb.as_deref()).filter(|v| v.starts_with('{')).map(packaged::norm_clsid).collect();
+            let raw = s.top(&classes, &skip);
+            let us = t.elapsed().as_micros() as u64;
+            if !raw.is_empty() {
+                let before = icons.len();
+                let items = build_native(&raw, &mut icons);
+                alive = emit(batch(Part::Packaged(items), [bind_us, query_us, us]));
+                if alive && icons.len() != before {
+                    emit(batch(Part::Icons(icons.entries()), timing));
+                }
+            } else {
+                alive = emit(batch(Part::Packaged(Vec::new()), [bind_us, query_us, us]));
+            }
+            pkg = Some(s);
+        }
+    }
     if alive {
         // every row is in: the UI ends its loading line
         emit(batch(Part::Complete, timing));
@@ -220,7 +254,10 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
             match c {
                 CtxCmd::Close => break 'wait,
                 CtxCmd::Invoke { id, x, y, shift, ctrl, no_ui } => {
-                    let (verb, res) = invoke(&cm, host, ui, id, x, y, shift, ctrl, no_ui);
+                    let (verb, res) = match &pkg {
+                        Some(p) if packaged::is_id(id) => foreground_for(host, ui, || p.invoke(id)),
+                        _ => invoke(&cm, host, ui, id, x, y, shift, ctrl, no_ui),
+                    };
                     emit(batch(Part::Invoked { id, verb, result: res }, timing));
                     break 'wait;
                 }
@@ -234,7 +271,8 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
                         unsafe { Sleep(opts.debug_sub_delay_ms) };
                     }
                     let t = Instant::now();
-                    let items = ctx.expand(sub).map(|raw| {
+                    let raw = if packaged::is_sub(sub) { pkg.as_mut().and_then(|p| p.expand(sub)) } else { ctx.expand(sub) };
+                    let items = raw.map(|raw| {
                         // one level: nested submenus stay lazy, so no deeper icons
                         let any = raw.iter().any(|r| r.icon.is_some());
                         (build_native(&raw, &mut icons), any)
@@ -253,6 +291,7 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
             }
         }
     }
+    drop(pkg);
     menu::set_handlers(None);
     unsafe {
         let _ = DestroyMenu(hmenu);
@@ -382,17 +421,22 @@ fn invoke(cm: &IContextMenu, host: HWND, ui: HWND, id: u32, x: i32, y: i32, shif
         ptInvoke: POINT { x, y },
         ..Default::default()
     };
-    let res = unsafe {
-        // dialogs the verb opens (Properties, Open with) are owned by the
-        // host; it may take the foreground because the app has it
+    let res = foreground_for(host, ui, || unsafe { cm.InvokeCommand(&ici as *const _ as *const CMINVOKECOMMANDINFO) });
+    (verb, res.map_err(|e| format!("InvokeCommand {:?}", e.code())))
+}
+
+/// Runs an invoke with the host window in front: dialogs the verb opens
+/// (Properties, Open with) are owned by the host; it may take the
+/// foreground because the app has it. The app gets it back after.
+fn foreground_for<R>(host: HWND, ui: HWND, f: impl FnOnce() -> R) -> R {
+    unsafe {
         let _ = SetForegroundWindow(host);
-        let r = cm.InvokeCommand(&ici as *const _ as *const CMINVOKECOMMANDINFO);
+        let r = f();
         if GetForegroundWindow() == host && !ui.is_invalid() {
             let _ = SetForegroundWindow(ui);
         }
         r
-    };
-    (verb, res.map_err(|e| format!("InvokeCommand {:?}", e.code())))
+    }
 }
 
 fn command_string(cm: &IContextMenu, off: usize, kind: u32) -> Option<String> {

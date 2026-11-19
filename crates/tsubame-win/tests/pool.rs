@@ -172,3 +172,34 @@ fn own_drawn_menu_without_paths_fails_with_its_generation() {
     assert_eq!(b.generation, 9);
     assert!(matches!(&b.part, Part::Failed(e) if e == "no paths"), "{:?}", b.part);
 }
+
+/// Manual probe of the real worker path: prints every batch for
+/// `TSUBAME_PKG_PROBE` (`-- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn probe_ctx_batches() {
+    use tsubame_win::shell::ctxmodel::Part;
+    use tsubame_win::shell::{CtxHandle, CtxOpts};
+    let path = std::env::var("TSUBAME_PKG_PROBE").unwrap_or_else(|_| r"C:\Windows".into());
+    let mut pool = Pool::new(1, 0, 0x8001);
+    let h = CtxHandle::new();
+    let _t = pool.submit(Request::ctx(vec![path], 1, CtxOpts::default(), &h));
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(8) {
+        for r in pool.drain() {
+            if let Payload::Ctx(b) = &r.payload {
+                let show = |v: &[tsubame_win::shell::ctxmodel::MenuItem]| v.iter().map(|i| format!("{}[{:?}]", i.label, i.verb)).collect::<Vec<_>>();
+                match &b.part {
+                    Part::Native(v) => println!("native {:?} {:?}", b.timing, show(v)),
+                    Part::Packaged(v) => println!("packaged {:?} {:?}", b.timing, show(v)),
+                    Part::Complete => {
+                        println!("complete");
+                        return;
+                    }
+                    p => println!("other {}", format!("{p:?}").chars().take(120).collect::<String>()),
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

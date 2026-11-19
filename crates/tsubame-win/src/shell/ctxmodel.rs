@@ -454,11 +454,22 @@ fn clean_separators(items: &mut Vec<MenuItem>) {
 /// Tsubame row already covers, with the user's edits), then the user's
 /// entries. Groups are split by separators.
 pub fn compose(tsubame: &[MenuItem], native: &[MenuItem], user: &[MenuItem], entries: &[MenuEntry]) -> Vec<MenuItem> {
+    compose_all(tsubame, native, &[], user, entries)
+}
+
+/// [`compose`] with the packaged (Win11 `IExplorerCommand`) items (CM7) as
+/// their own group after the classic shell items and before the user's
+/// entries. Packaged items the classic menu already has (same verb, which
+/// for packaged items is the handler CLSID, or the same label) are dropped,
+/// so "Edit in Notepad" never shows twice. One menu, no "Show more options".
+pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuItem], user: &[MenuItem], entries: &[MenuEntry]) -> Vec<MenuItem> {
     let covered: Vec<&str> = tsubame.iter().filter_map(|t| BUILTIN_VERBS.iter().find(|(c, _)| *c == t.action).map(|(_, v)| *v)).collect();
     let mut nat: Vec<MenuItem> = native.iter().filter(|n| !n.verb.as_deref().is_some_and(|v| covered.contains(&v))).cloned().collect();
     apply_overrides(&mut nat, entries);
-    let mut out = Vec::with_capacity(tsubame.len() + nat.len() + user.len() + 2);
-    for group in [tsubame, &nat[..], user] {
+    let mut pkg = dedupe_packaged(packaged, native, tsubame);
+    apply_overrides(&mut pkg, entries);
+    let mut out = Vec::with_capacity(tsubame.len() + nat.len() + pkg.len() + user.len() + 3);
+    for group in [tsubame, &nat[..], &pkg[..], user] {
         if group.is_empty() {
             continue;
         }
@@ -468,6 +479,25 @@ pub fn compose(tsubame: &[MenuItem], native: &[MenuItem], user: &[MenuItem], ent
         out.extend(group.iter().cloned());
     }
     clean_separators(&mut out);
+    out
+}
+
+/// Packaged items minus the ones the classic menu (or a Tsubame row) already
+/// shows: same verb (case-insensitive, the CLSID with braces) or the same
+/// label (case-insensitive). Separators are cleaned.
+pub fn dedupe_packaged(packaged: &[MenuItem], native: &[MenuItem], tsubame: &[MenuItem]) -> Vec<MenuItem> {
+    let norm = |s: &str| s.trim().trim_matches(|c| c == '{' || c == '}').to_ascii_lowercase();
+    let verbs: Vec<String> = native.iter().filter_map(|n| n.verb.as_deref()).map(norm).collect();
+    let labels: Vec<String> = native.iter().chain(tsubame).filter(|n| !n.is_separator()).map(|n| n.label.to_lowercase()).collect();
+    let mut out: Vec<MenuItem> = packaged
+        .iter()
+        .filter(|p| p.is_separator() || (!p.verb.as_deref().is_some_and(|v| verbs.contains(&norm(v))) && !labels.contains(&p.label.to_lowercase())))
+        .cloned()
+        .collect();
+    clean_separators(&mut out);
+    while out.first().is_some_and(MenuItem::is_separator) {
+        out.remove(0);
+    }
     out
 }
 
@@ -484,6 +514,9 @@ pub fn native_entry(item: &MenuItem) -> MenuEntry {
 pub enum Part {
     /// the native top level (QueryContextMenu done, submenus walked)
     Native(Vec<MenuItem>),
+    /// the packaged (Win11 `IExplorerCommand`) items (CM7), sent after the
+    /// classic top level so they never delay it; submenus are lazy tokens
+    Packaged(Vec<MenuItem>),
     /// the children of the lazy submenu with worker token `sub` (CM6: asked
     /// for when the user opens it)
     Submenu { sub: u32, items: Vec<MenuItem> },
@@ -526,6 +559,10 @@ pub struct MenuModel {
     pub tsubame: Vec<MenuItem>,
     pub user: Vec<MenuItem>,
     pub native: Vec<MenuItem>,
+    /// packaged items (CM7), after the classic ones
+    pub packaged: Vec<MenuItem>,
+    /// worker time of the packaged step (scan, create, GetState), us
+    pub packaged_us: Option<u64>,
     pub state: LoadState,
     pub error: Option<String>,
     pub icons: IconCache,
@@ -535,7 +572,7 @@ pub struct MenuModel {
 
 impl MenuModel {
     pub fn new(generation: u64, tsubame: Vec<MenuItem>, user: Vec<MenuItem>) -> MenuModel {
-        MenuModel { generation, tsubame, user, native: Vec::new(), state: LoadState::Loading, error: None, icons: IconCache::new(ICON_CACHE_CAP), complete: false }
+        MenuModel { generation, tsubame, user, native: Vec::new(), packaged: Vec::new(), packaged_us: None, state: LoadState::Loading, error: None, icons: IconCache::new(ICON_CACHE_CAP), complete: false }
     }
 
     /// Takes a batch. Returns false (and changes nothing) for another
@@ -550,10 +587,14 @@ impl MenuModel {
                 self.state = LoadState::Ready;
             }
             Part::Submenu { sub, items } => {
-                if let Some(it) = find_sub_mut(&mut self.native, sub) {
+                if let Some(it) = find_sub_mut(&mut self.native, sub).or_else(|| find_sub_mut(&mut self.packaged, sub)) {
                     it.flags &= !flag::LAZY;
                     it.children = items;
                 }
+            }
+            Part::Packaged(items) => {
+                self.packaged = items;
+                self.packaged_us = Some(b.timing[2]);
             }
             Part::Icons(v) => {
                 for (k, bmp) in v {
@@ -578,7 +619,7 @@ impl MenuModel {
 
     /// The rows to draw now.
     pub fn rows(&self, entries: &[MenuEntry]) -> Vec<MenuItem> {
-        compose(&self.tsubame, &self.native, &self.user, entries)
+        compose_all(&self.tsubame, &self.native, &self.packaged, &self.user, entries)
     }
 }
 
@@ -1068,5 +1109,45 @@ mod tests {
         let native = build_native(&[verb(raw(9, "Copy as path"), "copyaspath"), raw(10, "7-Zip")], &mut IconCache::new(2));
         let l = labels(&compose(&ts, &native, &[], &entries));
         assert_eq!(l.iter().filter(|s| *s == "Copy as path").count(), 1, "{l:?}");
+    }
+
+    #[test]
+    fn packaged_items_merge_after_classic_and_before_user_without_duplicates() {
+        let mut icons = IconCache::new(4);
+        let ts = vec![MenuItem::command(ItemSource::Tsubame, "Open", "file.open")];
+        let native = build_native(&[raw(1, "Open &with"), verb(raw(2, "Edit in Notepad"), "{CA6CC9F1-867A-481E-951E-A28C5E4F01EA}"), raw(3, "Properties")], &mut icons);
+        let mut pkg_sub = verb(raw(0, "More tools"), "{bbbb}");
+        pkg_sub.submenu = Some(vec![]);
+        pkg_sub.sub = 0x1_0000;
+        let pkg = build_native(
+            &[verb(raw(0xA000, "Open in &Terminal"), "{9f156763-7844-4dc4-b2b1-901f640f5155}"), verb(raw(0xA001, "Edit in Notepad"), "{ca6cc9f1-867a-481e-951e-a28c5e4f01ea}"), verb(raw(0xA002, "open with"), "{dddd}"), sep(), pkg_sub],
+            &mut icons,
+        );
+        let user = vec![MenuItem::command(ItemSource::User, "My tool", "custom.1")];
+        let l = labels(&compose_all(&ts, &native, &pkg, &user, &[]));
+        assert_eq!(l, ["Open", "--", "Open with", "Edit in Notepad", "Properties", "--", "Open in Terminal", "--", "More tools", "--", "My tool"], "one menu: classic, packaged, user");
+        // ids route to the worker that holds the packaged command
+        let all = compose_all(&ts, &native, &pkg, &user, &[]);
+        let term = all.iter().find(|i| i.label == "Open in Terminal").unwrap();
+        assert_eq!(route(term), Route::Shell(0xA000));
+        assert_eq!(term.key, "windows.verb:{9f156763-7844-4dc4-b2b1-901f640f5155}", "the CLSID keys the user's edits");
+        assert_eq!(term.accel, Some('t'));
+        // hidden by the user like any native item
+        let hide = vec![MenuEntry { id: term.key.clone(), source: Source::Windows, hidden: true, ..Default::default() }];
+        assert!(!labels(&compose_all(&ts, &native, &pkg, &user, &hide)).contains(&"Open in Terminal".to_string()));
+        // no packaged items: no stray separator
+        assert_eq!(labels(&compose_all(&ts, &native, &[], &[], &[])), labels(&compose(&ts, &native, &[], &[])));
+        // a model: packaged batch after the top level, its lazy submenu fills
+        let mut m = MenuModel::new(5, ts.clone(), vec![]);
+        assert!(m.apply(MenuBatch { generation: 5, part: Part::Native(native.clone()), timing: [0; 3] }));
+        assert!(m.packaged_us.is_none());
+        assert!(!m.apply(MenuBatch { generation: 4, part: Part::Packaged(pkg.clone()), timing: [0; 3] }), "stale");
+        assert!(m.apply(MenuBatch { generation: 5, part: Part::Packaged(pkg), timing: [0, 0, 1234] }));
+        assert_eq!(m.packaged_us, Some(1234));
+        assert!(is_lazy(find_sub(&m.packaged, 0x1_0000).unwrap()));
+        m.apply(MenuBatch { generation: 5, part: Part::Submenu { sub: 0x1_0000, items: vec![MenuItem { id: 0xA003, ..MenuItem::command(ItemSource::Native, "Sub tool", "") }] }, timing: [0; 3] });
+        let rows = m.rows(&[]);
+        let more = rows.iter().find(|i| i.label == "More tools").unwrap();
+        assert!(!is_lazy(more) && more.children[0].label == "Sub tool");
     }
 }

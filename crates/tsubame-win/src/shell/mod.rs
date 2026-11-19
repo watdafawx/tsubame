@@ -25,6 +25,7 @@ pub mod ctxmenu;
 pub mod ctxmodel;
 mod icon;
 mod menu;
+pub mod packaged;
 mod thumb;
 
 pub use icon::IconSource;
