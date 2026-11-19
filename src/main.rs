@@ -1066,7 +1066,8 @@ fn key_menu(hwnd: HWND) {
         if t.shown() > 0 && !t.store.at(row).is_some_and(|id| t.sel.contains(id)) {
             t.sel.single(&t.store, row);
         }
-        (row, (60.0 * s) as i32, (a.view.row_mid_y(row) * s) as i32)
+        let anchor = a.view.menu_anchor(row);
+        (row, (anchor.x * s) as i32, (anchor.y * s) as i32)
     });
     if let Some((row, x, y)) = p {
         open_menu(hwnd, row, x, y, true);
@@ -1087,7 +1088,10 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
         let ime = out.ime_caret.map(|r| ((r.x * s) as i32, (r.y * s) as i32, (r.h * s) as i32));
         let menu = a.view.menu_request.take().map(|(row, pt)| match pt {
             Some(p) => (row, (p.x * s) as i32, (p.y * s) as i32, false),
-            None => (row, (60.0 * s) as i32, (a.view.row_mid_y(row) * s) as i32, true),
+            None => {
+                let anchor = a.view.menu_anchor(row);
+                (row, (anchor.x * s) as i32, (anchor.y * s) as i32, true)
+            }
         });
         sync_caret(hwnd, a, out.text_focus);
         let open = std::mem::take(&mut a.view.open_paths);

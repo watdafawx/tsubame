@@ -1063,6 +1063,12 @@ impl View {
         self.list_top + l.row_top(i) as f32 + l.row_h / 2.0
     }
 
+    /// Keyboard menus follow the focused pane/cell, including horizontal grids.
+    pub fn menu_anchor(&self, row: usize) -> Pt {
+        let dx = if self.mode.is_grid() { self.tab().grid.cell_origin(row).0 } else { 0.0 };
+        Pt::new(self.list_r.x + dx + 12.0, self.row_mid_y(row))
+    }
+
     /// Paths for a context menu on `row`: the selection if `row` is in it,
     /// else just `row` (at most 64).
     pub fn menu_paths(&self, row: usize) -> Vec<String> {
@@ -2395,12 +2401,14 @@ mod tests {
         r.right_click(l1.x + 40.0, l1.b() - 10.0);
         assert_eq!(r.v.active, 1);
         assert!(r.v.bg_menu.take().is_some());
+        assert!(l1.contains_pt(r.v.menu_anchor(0)), "keyboard anchor follows pane 1");
         assert!(r.v.menu_request.is_none());
         // a row of pane 0: the item menu for that row, pane 0 active again
         let (l0, _) = r.list_of(0);
         r.right_click(l0.x + 40.0, l0.y + rh * 1.5);
         assert_eq!(r.v.active, 0);
         assert_eq!(r.v.menu_request.take().map(|m| m.0), Some(1));
+        assert!(l0.contains_pt(r.v.menu_anchor(1)), "keyboard anchor follows pane 0");
         // the shell menu's Rename: inline rename of that row on the next frame
         r.v.rename_request = true;
         r.frame();
