@@ -7273,3 +7273,65 @@ miniz_oxide) costs about **+890 KB**, and that is the whole jump from ~1.75 MB t
 section's 1714 KB is in the same class as the 1742 KB row (a pre-U4 binary), as is the figure in
 `docs/u4-settings.md`. The 6 MB budget is met with ~3.2 MB to spare, so the PASS verdicts above
 stand; only the sizes were wrong.
+## Idle wake-ups - 2026-11-19, bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), branch `t3/idle-wakeup-counter-fix` on `12a04d3`
+
+Release builds via push-to-rig. Old: `12a04d3` (`tsubame.exe 2,887,680 B sha256 1d02e32cb153b991`). New: this branch
+(`tsubame.exe 2,900,480 B sha256 a39f06c023ddd134`). Launch as the harness does (`--dir <fixture>\100k`, maximized 4K),
+no input. Wake-ups = context switches of every thread of the process between two snapshots
+(`tools/idle-wakes.ps1`, NtQuerySystemInformation; nothing runs inside the process). CPU = process CPU time
+(15.6 ms ticks).
+
+What woke the idle process (old build, 3 windows of 10 s after a 5 s settle):
+
+| Thread | Wake-ups per 10 s |
+|---|---|
+| NVIDIA driver thread, start `nvwgf2umx.dll+0xece040` | 970, 969, 970 |
+| Tsubame main thread | 16, 8, 0 (startup tail) |
+| other | 2-5 |
+| **total** | **988, 982, 972** |
+
+The driver thread exists for as long as any hardware D3D11 device lives in the process. Not changed by:
+dropping `PREVENT_INTERNAL_THREADING_OPTIMIZATIONS`, `SINGLETHREADED`, `FLIP_SEQUENTIAL`, `Present(1)`,
+`SetMaximumFrameLatency(1)`, `IDXGIDevice3::Trim` after each frame, or an HWND render target instead of the flip
+chain (each ~485 wake-ups per 5 s). Claude and Docker Desktop (Chromium GPU process) show the same thread at
+~97/s. `TSUBAME_GPURENDER=0` (WARP only): 0 wake-ups after settling. Tsubame's own threads (shell pool, watcher,
+file-op queue, updater) never woke.
+
+Fix: after 10 s without a paint, the GPU target, device and D2D factory are dropped (`Gfx::park`, one-shot
+`PARK_TIMER`; off in bench/stress/leak-gate runs; `TSUBAME_GPU_PARK=<s>`, `0` = never). The driver unloads and
+its thread ends. Nothing is repainted: DWM keeps the last presented frame on screen (checked by screenshot). Input
+(key, button, wheel, real mouse move, resize) or a paint the system asks for starts the GPU device on its worker;
+frames until then use the software stand-in, as at open. A WARP repaint at park time was tried first and dropped:
+~330 ms of CPU at 4K.
+
+Interleaved A/B on the new exe (`TSUBAME_GPU_PARK=0` = old behaviour), wake-ups / CPU ms per 10 s window:
+
+| Run | 3-13 s | 13-23 s | 23-33 s | 33-43 s | Private |
+|---|---|---|---|---|---|
+| new, round 1 | 39 / 0 | 1 / 0 | 1 / 0 | 0 / 0 | 17.5 MB |
+| park off, round 1 | 972 / 31.2 | 980 / 31.2 | 971 / 31.2 | 972 / 31.2 | 66.0 MB |
+| new, round 2 | 32 / 31.2 | 1 / 0 | 1 / 0 | 2 / 0 | 17.6 MB |
+| park off, round 2 | 966 / 0 | 970 / 15.6 | 971 / 15.6 | 972 / 15.6 | 65.9 MB |
+| new, round 3 | 59 / 31.2 | 1 / 0 | 2 / 0 | 0 / 0 | 17.7 MB |
+| park off, round 3 | 1192 / 0 | 980 / 15.6 | 1367 / 62.5 | 997 / 15.6 | 67.4 MB |
+
+The 13-23 s window is the one the harness reports. The remaining 1-2 wake-ups are `ntdll` thread-pool workers
+(left from the startup WARP stand-in) timing out and exiting, plus one `crypt32` thread; a longer run read 1, 1,
+16, 0, 0, 0 (windows from 13 s on; one window lost to an unpark from desktop activity on the shared machine).
+Private bytes while parked drop from ~66 MB to ~18 MB (the leak gate and the memory rows run with parking off,
+so their numbers are unchanged).
+
+Cost, moved to the first input after an idle stretch (`TSUBAME_WAKE_LOG`, a posted key after the park):
+
+| | First frame after the key | GPU frame after the key | CPU for the wake |
+|---|---|---|---|
+| software stand-in (shipped) | ~13 ms (12.3 ms frame) | ~180 ms | 172, 188 ms |
+| skip frames until the GPU is ready (tried) | 162 ms | 162 ms | 156, 172 ms |
+
+Pinning `nvwgf2umx.dll` loaded did not make the device come back faster (220 ms).
+
+Diagnostics added: `tools/idle-wakes.ps1` (per-thread wake-ups, CPU, cycles, thread names, start module; run it in
+the app's session, e.g. through the rig-windows PowerShell tool) and `TSUBAME_WAKE_LOG=<file>` (every message the
+main window gets and every paint, with times, written when the window closes; one relaxed load per message when
+unset). The harness script `tools/bench-rig.ps1` is unchanged and still reports only CPU and the
+`Context Switches/sec` counter.
