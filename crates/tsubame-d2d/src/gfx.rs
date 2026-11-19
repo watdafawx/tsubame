@@ -92,7 +92,7 @@ pub struct Gfx {
     warming: bool,
 }
 
-/// Most layouts `Gfx::text` keeps. Blink used 4096 / 30 frames (a busy frame
+/// Most layouts `Gfx::text` keeps. The S1 prototype used 4096 / 30 frames (a busy frame
 /// draws ~400 strings); a scrolling list draws mostly new strings each frame, so
 /// that only held ~70 MB of dead layouts (spike S1, docs/spike-d2d.md).
 const LAYOUT_CAP: usize = 1024;

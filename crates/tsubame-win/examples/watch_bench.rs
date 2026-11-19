@@ -1,7 +1,7 @@
 //! Numbers for `docs/watcher.md`: single-event latency and applying a 10,000-change
 //! batch to a 100,000-entry store.
 //!
-//! `pwsh -NoProfile -File X:\Dev\tools\cargo-ccd1.ps1 run -p tsubame-win --release --example watch_bench`
+//! `cargo run -p tsubame-win --release --example watch_bench`
 
 use std::fs;
 use std::sync::Arc;

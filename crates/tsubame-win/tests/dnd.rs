@@ -1,7 +1,7 @@
 //! Headless OLE tests: our data object read back through `IDataObject`,
 //! the real clipboard round trip (OleSetClipboard/OleGetClipboard on this
 //! test's STA), virtual-file staging and shortcut creation. No window, no
-//! drag (DoDragDrop needs a mouse; that part is tested on rig).
+//! drag (DoDragDrop needs a mouse; that part is tested by hand on a test PC).
 //!
 //! The clipboard test replaces the user's clipboard for a moment; it puts
 //! back any text that was there.

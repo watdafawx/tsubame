@@ -1,4 +1,4 @@
-//! Measurement client for the spike (run on rig):
+//! Measurement client for the spike (run on a dedicated benchmark machine):
 //!
 //!   plughost-bench spawn <host.exe> <file> [--pre] [--runs N]   spawn -> ready, kill, respawn
 //!   plughost-bench rtt   <host.exe> <file> [--pre]               end-to-end batch round trip over pipes

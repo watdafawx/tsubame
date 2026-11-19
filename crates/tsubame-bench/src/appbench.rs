@@ -1,9 +1,9 @@
-//! `app`: turn one rig benchmark run's raw reports into a `docs/bench-log.md`
+//! `app`: turn one benchmark run's raw reports into a `docs/bench-log.md`
 //! section.
 //!
 //! The app reports are the ones `src/bench.rs`, `src/timing.rs` and
 //! `src/leak.rs` write next to the exe (`s1-bench.txt`, `u2-timing.txt`,
-//! `leak-gate.txt`); `tools/bench-rig.ps1` also writes `meta.txt` and
+//! `leak-gate.txt`); the benchmark harness also writes `meta.txt` and
 //! `idle.txt`. This module parses them, checks the numbers against the
 //! budgets in `docs/PLAN.md` section 2 and renders the markdown table. It is
 //! pure: no disk, no clock, no window, so the parsing and the threshold logic
@@ -49,20 +49,15 @@ pub const LEAK_FLOOR_BYTES: i64 = 2 << 20;
 pub const LOG_HEADER: &str = "\
 # Tsubame bench log
 
-One section per `tools/bench-rig.ps1` run on rig, newest last. Budgets and the
-leak gate are `docs/PLAN.md` section 2; the harness itself is described in
-`docs/bench.md`. Every number here comes from the release app on rig: real
-window, real enumerator, real shell icon workers. Warm filesystem cache unless
-the section says otherwise.
+One section per app benchmark run on the benchmark machine, newest last. Budgets
+and the leak gate are `docs/PLAN.md` section 2; the harness itself is described
+in `docs/bench.md`. Every number here comes from the release app: real window,
+real enumerator, real shell icon workers. Warm filesystem cache unless the
+section says otherwise.
 
-Rerun (from a worktree; needs the rig skill's ssh):
-
-```
-pwsh X:\\Dev\\tools\\bench-rig.ps1 -Project <worktree>
-```
-
-The script builds on rig with `push-to-rig.ps1`, generates the fixtures under
-`G:\\rig-bench\\tsubame-b1`, runs the benches and appends a section here.
+The harness builds the release app on a dedicated benchmark machine, generates
+the fixtures in a scratch directory there, runs the benches and appends a
+section here.
 ";
 
 // ---- key=value files -------------------------------------------------------
@@ -528,7 +523,7 @@ pub fn exe_size_tripwire(new_bytes: u64, prev_bytes: Option<u64>) -> Option<Stri
     }
     Some(format!(
         "WARNING: main exe {:.0} KB is {:+.1}% against the previous log row ({:.0} KB), more than the {EXE_SIZE_JUMP_PCT:.0}% tripwire; \
-         check that this run shipped this commit's binary (stale rig exe, another profile or a new dependency). The {BUDGET_EXE_MB:.0} MB budget row above is the verdict.",
+         check that this run shipped this commit's binary (a stale exe, another profile or a new dependency). The {BUDGET_EXE_MB:.0} MB budget row above is the verdict.",
         new_bytes as f64 / 1024.0,
         jump,
         prev as f64 / 1024.0
@@ -731,10 +726,10 @@ pub fn section_with(run: &Run, commit: &str, prev_exe_bytes: Option<u64>) -> Str
     let _ = writeln!(out, "## {date} {time} — {}, commit `{commit}`", run.meta("machine"));
     let _ = writeln!(out);
     let _ = writeln!(out, "- Mode: {} ({} cold-start runs, {} scroll runs)", run.meta("mode"), run.cold.len(), run.cold.len());
-    let _ = writeln!(out, "- Build: {} on rig, branch `{}`, commit `{commit}`{}", run.meta("build"), run.meta("branch"), if run.meta("dirty") == "1" { " (dirty worktree)" } else { "" });
-    // The binary behind every number below. A stale exe on a warm rig slot once
-    // produced a plausible but wrong "Main exe" row, so the section names the
-    // file it measured: size and SHA-256 of what push-to-rig shipped.
+    let _ = writeln!(out, "- Build: {} on the benchmark machine, branch `{}`, commit `{commit}`{}", run.meta("build"), run.meta("branch"), if run.meta("dirty") == "1" { " (dirty worktree)" } else { "" });
+    // The binary behind every number below. A stale exe on a warm benchmark
+    // slot once produced a plausible but wrong "Main exe" row, so the section
+    // names the file it measured: size and SHA-256 of what the harness shipped.
     let _ = writeln!(
         out,
         "- Exe: {exe_bytes} B ({:.0} KB), SHA-256 `{}`",
@@ -743,7 +738,9 @@ pub fn section_with(run: &Run, commit: &str, prev_exe_bytes: Option<u64>) -> Str
     );
     let _ = writeln!(out, "- Window: {}, paint path `{}`", run.timing.window, run.timing.paint_path);
     let _ = writeln!(out, "- Fixtures: `{}` (100,000 entries), `{}` ({} folders, mixed sizes)", run.meta("fixture_100k"), run.meta("gate_fixture"), gate.folders);
-    let _ = writeln!(out, "- Cache: {}; rig load: {}", run.meta("cache"), run.meta("rig_load"));
+    // The load state is still read from meta.txt's `rig_load` key: the harness
+    // has always written that spelling and older runs are not rewritten.
+    let _ = writeln!(out, "- Cache: {}; machine load: {}", run.meta("cache"), run.meta("rig_load"));
     let _ = writeln!(out, "- Cold-cache 100k open: {}", run.meta("cold"));
     if run.cold_timing.is_some() && run.cold_runs > 0 {
         let _ = writeln!(
@@ -1033,10 +1030,10 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 72.2
 private_bytes_first_paint: 96.8 MB
 all times in ms from the navigation event
-startup   entries  100000 (11.4 MB)  first_batch     8.81  first_frame    53.64  done    60.00  final_frame    65.05  worker    51.00   G:\\rig-bench\\x\\100k
-first     entries  100000 (11.4 MB)  first_batch     1.10  first_frame     2.34  done    61.00  final_frame    63.40  worker    55.00   G:\\rig-bench\\x\\100k
-repeat 1  entries  100000 (11.4 MB)  first_batch     1.00  first_frame     2.00  done    62.00  final_frame    62.33  worker    56.00   G:\\rig-bench\\x\\100k
-repeat 2  entries  100000 (11.4 MB)  first_batch     0.90  first_frame       -  done    63.00  final_frame       -  worker    57.00   G:\\rig-bench\\x\\100k
+startup   entries  100000 (11.4 MB)  first_batch     8.81  first_frame    53.64  done    60.00  final_frame    65.05  worker    51.00   C:\\bench\\x\\100k
+first     entries  100000 (11.4 MB)  first_batch     1.10  first_frame     2.34  done    61.00  final_frame    63.40  worker    55.00   C:\\bench\\x\\100k
+repeat 1  entries  100000 (11.4 MB)  first_batch     1.00  first_frame     2.00  done    62.00  final_frame    62.33  worker    56.00   C:\\bench\\x\\100k
+repeat 2  entries  100000 (11.4 MB)  first_batch     0.90  first_frame       -  done    63.00  final_frame       -  worker    57.00   C:\\bench\\x\\100k
 private_bytes_end: 149.6 MB
 ";
 
@@ -1063,10 +1060,10 @@ tsubame U2 timing (release)
 window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 80.1
 all times in ms from the navigation event
-startup   entries      20 (0.0 MB)  first_batch     0.40  first_frame    30.00  done     0.50  final_frame    30.00  worker     0.40   G:\\rig-bench\\x\\gate\\tiny\\0001
-first     entries    1000 (0.1 MB)  first_batch     0.80  first_frame     1.50  done     2.00  final_frame     2.10  worker     1.90   G:\\rig-bench\\x\\gate\\small\\0001
-repeat 1  entries      20 (0.0 MB)  first_batch     0.30  first_frame     0.90  done     0.40  final_frame     0.90  worker     0.30   G:\\rig-bench\\x\\gate\\tiny\\0001
-repeat 2  entries  100000 (11.4 MB)  first_batch     9.00  first_frame    21.50  done   140.00  final_frame   150.25  worker   130.00   G:\\rig-bench\\x\\100k
+startup   entries      20 (0.0 MB)  first_batch     0.40  first_frame    30.00  done     0.50  final_frame    30.00  worker     0.40   C:\\bench\\x\\gate\\tiny\\0001
+first     entries    1000 (0.1 MB)  first_batch     0.80  first_frame     1.50  done     2.00  final_frame     2.10  worker     1.90   C:\\bench\\x\\gate\\small\\0001
+repeat 1  entries      20 (0.0 MB)  first_batch     0.30  first_frame     0.90  done     0.40  final_frame     0.90  worker     0.30   C:\\bench\\x\\gate\\tiny\\0001
+repeat 2  entries  100000 (11.4 MB)  first_batch     9.00  first_frame    21.50  done   140.00  final_frame   150.25  worker   130.00   C:\\bench\\x\\100k
 private_bytes_end: 120.0 MB
 ";
 
@@ -1094,7 +1091,7 @@ build=release
 window_px=3840x2064
 window_dpi=192
 paint_path=hardware
-fixture=G:\\rig-bench\\tsubame-b1\\gate
+fixture=C:\\bench\\fixtures\\gate
 folders=200
 navigations=10000
 tabs=1000
@@ -1277,7 +1274,7 @@ exit=0
 
     #[test]
     fn section_has_the_table_the_gate_and_the_raw_blocks() {
-        let meta = parse_kv("stamp=2026-11-18T14:22:05\nmachine=rig\nbuild=release\nbranch=main\ncommit=abc1234\nmode=full\ncache=warm filesystem cache\ncold=not measured\nrig_load=idle\ndpi=192\nexe_bytes=601600\nexe_sha256=deadbeef00112233\nfixture_100k=G:\\rig-bench\\tsubame-b1\\100k\ngate_fixture=G:\\rig-bench\\tsubame-b1\\gate\n");
+        let meta = parse_kv("stamp=2026-11-18T14:22:05\nmachine=bench machine\nbuild=release\nbranch=main\ncommit=abc1234\nmode=full\ncache=warm filesystem cache\ncold=not measured\nrig_load=idle\ndpi=192\nexe_bytes=601600\nexe_sha256=deadbeef00112233\nfixture_100k=C:\\bench\\fixtures\\100k\ngate_fixture=C:\\bench\\fixtures\\gate\n");
         let run = Run {
             meta,
             idle: parse_kv("idle.seconds=10\nidle.cpu_ms=0\n"),
@@ -1292,7 +1289,7 @@ exit=0
             cold_runs: 0,
         };
         let s = section(&run, "abc1234");
-        assert!(s.starts_with("## 2026-11-18 14:22 — rig, commit `abc1234`"), "{s}");
+        assert!(s.starts_with("## 2026-11-18 14:22 — bench machine, commit `abc1234`"), "{s}");
         // the header names the exact binary, the summary has no tripwire without a baseline
         assert!(s.contains("- Exe: 601600 B (588 KB), SHA-256 `deadbeef00112233`"), "{s}");
         assert!(!s.contains("WARNING: main exe"), "{s}");

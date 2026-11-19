@@ -1,4 +1,4 @@
-//! `Canvas` backend (`impl tsubame_ui::Canvas for Gfx`): Direct2D/DirectWrite drawing, lifted from blink's gfx.rs.
+//! `Canvas` backend (`impl tsubame_ui::Canvas for Gfx`): Direct2D/DirectWrite drawing.
 
 mod gfx;
 pub use gfx::*;

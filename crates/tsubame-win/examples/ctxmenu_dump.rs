@@ -1,6 +1,6 @@
 //! CM1 spike harness: prints the shell context menu Tsubame would draw, with
 //! timings, per-handler costs, packaged (Win11) handlers, invoke results and a
-//! leak loop. RIG ONLY: it loads shell extensions, and `--native` and some
+//! leak loop. TEST MACHINE ONLY: it loads shell extensions, and `--native` and some
 //! invokes open windows. See `docs/ctxmenu-spike.md`.
 //!
 //! ```text
