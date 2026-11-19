@@ -694,9 +694,9 @@ impl Parser<'_> {
     }
 
     fn show_for(&self, props: &Props, scope: &Scope) -> ShowFor {
-        let mut show = scope.show.unwrap_or(ShowFor { files: true, folders: true, background: false });
+        let mut show = scope.show.unwrap_or(ShowFor::classic(true, true, false));
         if let Some(Val::Str(t) | Val::Word(t)) = props.get("type") {
-            let mut s = ShowFor { files: false, folders: false, background: false };
+            let mut s = ShowFor::classic(false, false, false);
             for part in t.split('|') {
                 match part.trim().trim_start_matches('!').to_ascii_lowercase().as_str() {
                     "file" => s.files = true,
@@ -711,7 +711,7 @@ impl Parser<'_> {
                 }
             }
             if s.files || s.folders || s.background {
-                show = s;
+                show = ShowFor::classic(s.files, s.folders, s.background);
             }
         }
         show
@@ -1154,7 +1154,7 @@ shell
         assert_eq!(list.len(), 1);
         assert!(users.is_empty() && items[0].group.is_empty());
         // an existing group stays on undo
-        users.push(menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 4 });
+        users.push(menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 4, ..Default::default() });
         let mut imp = parse(SAMPLE);
         let (created, last) = place_import(&mut imp, &Place::Group("g1".into()), &mut users, &[]);
         assert_eq!((created.clone(), last.as_str()), (None, "g1"));
@@ -1171,7 +1171,7 @@ shell
 
     #[test]
     fn the_default_place_is_a_new_nilesoft_group_then_the_last_one() {
-        let users = vec![menu::UserGroup { id: "g2".into(), name: "Tools".into(), pos: 4 }];
+        let users = vec![menu::UserGroup { id: "g2".into(), name: "Tools".into(), pos: 4, ..Default::default() }];
         assert_eq!(default_place("", &users), Place::NewGroup("Nilesoft".into()));
         assert_eq!(default_place("g2", &users), Place::Group("g2".into()));
         assert_eq!(default_place("g9", &users), Place::NewGroup("Nilesoft".into()), "the group is gone");

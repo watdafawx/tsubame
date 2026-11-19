@@ -1455,7 +1455,7 @@ names = ["a", "b"]
                 command: r"C:\Code\Code.exe".into(),
                 args: "--reuse-window \"{path}\"".into(),
                 extensions: vec!["rs".into(), "toml".into()],
-                show_for: ShowFor { files: true, folders: false, background: true },
+                show_for: ShowFor::classic(true, false, true),
                 parent: "custom.1".into(),
                 ..Default::default()
             },
@@ -1465,7 +1465,7 @@ names = ["a", "b"]
             menu::ItemPref { key: "windows.pkg:Microsoft.WindowsNotepad_8wekyb3d8bbwe/{ca6cc9f1-867a-481e-951e-a28c5e4f01ea}".into(), label: "Edit in Notepad".into(), from: "Microsoft.WindowsNotepad_8wekyb3d8bbwe".into(), name: "Notepad".into(), new: true, ..Default::default() },
         ];
         cfg.context_menu.groups = vec![menu::Group::Custom, menu::Group::Tsubame];
-        cfg.context_menu.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 2 }];
+        cfg.context_menu.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 2, show_name: true }];
         cfg.context_menu.items[0].group = "g1".into();
         let cf = ConfigFile::new(cfg.clone());
         cf.save(&p).unwrap();

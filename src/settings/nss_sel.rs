@@ -816,7 +816,7 @@ shell
 
     #[test]
     fn the_place_starts_as_a_new_nilesoft_group_then_the_last_used_one() {
-        let users = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 4 }];
+        let users = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 4, ..Default::default() }];
         let s = sel("", &users);
         assert_eq!((&s.at, s.name.text.as_str()), (&Where::New, "Nilesoft"));
         assert_eq!(s.place(), Place::NewGroup("Nilesoft".into()));

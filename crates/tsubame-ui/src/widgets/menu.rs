@@ -35,6 +35,9 @@ pub enum RowKind {
     Separator,
     /// "Some items could not load" + Retry (picking it sets `retry`)
     Status,
+    /// a user group's name above its block ("Name in menu"): a dim 11 px
+    /// text, not focusable, not in the UI Automation tree
+    Label,
     /// CM8 edit menu: the edited item's name, `shortcut` holds its source tag
     /// ("Windows"); not focusable
     Header,
@@ -99,7 +102,7 @@ impl MenuRow {
         match self.kind {
             RowKind::Item => !self.disabled,
             RowKind::Status | RowKind::Strip => true,
-            RowKind::Separator | RowKind::Header | RowKind::Note => false,
+            RowKind::Separator | RowKind::Header | RowKind::Note | RowKind::Label => false,
         }
     }
     /// The accelerator letter, lower-case.
@@ -539,6 +542,8 @@ pub struct Metrics {
     pub sc: f32,
     pub row: f32,
     pub sep: f32,
+    /// a [`RowKind::Label`] row (20 px at 100 %)
+    pub label: f32,
     /// menu padding inside the 1 px border
     pub pad: f32,
     pub font: Font,
@@ -567,6 +572,7 @@ impl Metrics {
             sc,
             row,
             sep: sep.round(),
+            label: (20.0 * sc).round(),
             pad: 4.0,
             font: f(t.font_size_sm),
             small: f(t.font_size_xs),
@@ -581,7 +587,11 @@ impl Metrics {
         }
     }
     fn row_h(&self, r: &MenuRow) -> f32 {
-        if r.kind == RowKind::Separator { self.sep } else { self.row }
+        match r.kind {
+            RowKind::Separator => self.sep,
+            RowKind::Label => self.label,
+            _ => self.row,
+        }
     }
     /// Border + padding on each side.
     fn inset(&self) -> f32 {
@@ -656,6 +666,7 @@ pub fn width(c: &mut dyn Canvas, rows: &[MenuRow], m: &Metrics) -> f32 {
                 }
                 sub |= r.submenu;
             }
+            RowKind::Label => lw = lw.max(c.measure(&r.label, m.small)),
             RowKind::Status => st = st.max(c.measure(&r.label, m.font) + m.gap + m.retry_w(c)),
             RowKind::Strip => st = st.max(strip_w(c, &r.label, m)),
             RowKind::Header => lw = lw.max(c.measure(&r.label, m.font.b()) + if r.shortcut.is_empty() { 0.0 } else { c.measure(&r.shortcut, m.small) + 3.0 * m.gap }),
@@ -1002,7 +1013,7 @@ fn activate(st: &MenuState, rows: &[MenuRow], found: &[Found], lv: usize, i: usi
     let r = rows.get(i)?;
     let filtered = lv == 0 && st.filtering();
     match r.kind {
-        RowKind::Separator | RowKind::Header | RowKind::Note => None,
+        RowKind::Separator | RowKind::Header | RowKind::Note | RowKind::Label => None,
         RowKind::Status => Some(Act::Retry),
         RowKind::Strip => Some(Act::Strip(st.strip_manage)),
         RowKind::Item if r.disabled => None,
@@ -1706,7 +1717,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 out.rows.push(row_of(row, *r, true, true, ""));
             }
             for (i, row) in rows.iter().enumerate() {
-                if matches!(row.kind, RowKind::Separator | RowKind::Header | RowKind::Note) {
+                if matches!(row.kind, RowKind::Separator | RowKind::Header | RowKind::Note | RowKind::Label) {
                     continue;
                 }
                 let r = Rect::new(vp.x, vp.y + ys[i] - scroll, vp.w, m.row_h(row));
@@ -1807,6 +1818,10 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             if row.kind == RowKind::Separator {
                 let y = (r.center().y).floor() + 0.5;
                 c.line(r.x + 6.0, y, r.r() - 6.0, y, t.border, 1.0);
+                continue;
+            }
+            if row.kind == RowKind::Label {
+                c.text(&row.label, Rect::new(r.x + m.label_x(), r.y, (r.w - m.label_x() - 8.0).max(0.0), r.h), m.small, t.text_dim);
                 continue;
             }
             // CM8: the row being renamed is a text field
