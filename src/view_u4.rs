@@ -17,7 +17,7 @@ use tsubame_ui::themes;
 pub(super) fn settings_tab_allows(cmd: u32) -> bool {
     matches!(
         cmd,
-        CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER
+        CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER
     ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
 }
 
@@ -136,6 +136,14 @@ impl View {
     pub(super) fn run_u4(&mut self, ui: &mut Ui, cmd: u32) -> bool {
         match cmd {
             CMD_PALETTE => self.toggle_palette(ui),
+            // Ctrl+F in Settings: the Context menu page's search (nothing on the other pages)
+            CMD_FIND if self.tab().settings => {
+                if let Some(st) = self.settings.as_deref_mut()
+                    && st.page == Page::ContextMenu
+                {
+                    st.menu.focus_search();
+                }
+            }
             CMD_SETTINGS => self.open_settings(None),
             CMD_SETTINGS_KEYS | CMD_SETTINGS_APPEARANCE | CMD_SETTINGS_MENU | CMD_SETTINGS_UPDATES | CMD_SETTINGS_DEFAULT_FM => self.open_settings(Page::from_command(cmd)),
             CMD_HIDDEN => {

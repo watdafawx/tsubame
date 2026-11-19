@@ -25,10 +25,22 @@ const ID_GROUP: Id = Id::new("menu-group");
 const ID_ITEM: Id = Id::new("menu-item");
 const ID_ITEM_EYE: Id = Id::new("menu-item-eye");
 const ID_ITEM_EDIT: Id = Id::new("menu-item-rename");
+const ID_KIND: Id = Id::new("menu-kind");
+const ID_GROW: Id = Id::new("menu-group-row");
+const ID_GDEL: Id = Id::new("menu-group-del");
+const ID_GEDIT: Id = Id::new("menu-group-rename");
+const ID_IGRIP: Id = Id::new("menu-item-grip");
+const ID_HDR: Id = Id::new("menu-item-hdr");
 
-/// The filter chips (mock 6b; "3rd party" needs a handler-to-program
-/// attribution classic items do not expose, so it is left out).
-const CHIPS: [&str; 4] = ["All", "Windows", "Tsubame", "Hidden"];
+/// The filter chips (mock 6b). "3rd party" = a packaged (Win11) item whose
+/// package family is not Microsoft's (`menu::is_third_party`): the classic menu
+/// exposes no owning program, so nothing else can be told apart.
+const CHIPS: [&str; 5] = ["All", "Windows", "3rd party", "Tsubame", "Hidden"];
+
+/// The kind switch (mock 6b): which right-click the list is shown for. The
+/// config has `show_for` flags per entry (file, folder, background); "Several
+/// items" and "Drive" have no data behind them, so they are not offered.
+const KINDS: [&str; 3] = ["File", "Folder", "Empty area"];
 
 #[derive(Default)]
 pub struct State {
@@ -45,8 +57,16 @@ pub struct State {
     search: TextInput,
     /// index into [`CHIPS`]
     chip: usize,
-    /// the group being dragged (index into the drawn order)
+    /// index into [`KINDS`]; none = every kind
+    kind: Option<usize>,
+    /// Ctrl+F: focus the search field on the next paint
+    want_search: bool,
+    /// the group being dragged (index into the drawn full order)
     gdrag: Option<usize>,
+    /// renaming a user group: (id, field)
+    gedit: Option<(String, TextInput)>,
+    /// the learned item being dragged (index into `context_menu.items`)
+    idrag: Option<usize>,
     /// renaming a learned item: (key, field)
     iedit: Option<(String, TextInput)>,
     /// the keys tagged New when the page was opened (shown this visit; the
@@ -54,6 +74,13 @@ pub struct State {
     new_shown: Option<Vec<String>>,
     /// `focus_item`: select this key and search for it
     focus: Option<String>,
+}
+
+impl State {
+    /// Ctrl+F on the page: the search field takes the focus.
+    pub fn focus_search(&mut self) {
+        self.want_search = true;
+    }
 }
 
 #[derive(Default)]
@@ -176,27 +203,35 @@ fn label_field(pg: &mut Pg, id: Id, label: &str, input: &mut TextInput, x: f32, 
 pub fn item_shown(p: &menu::ItemPref, q: &str, chip: usize) -> bool {
     let ours = p.key.starts_with("app:");
     let chip_ok = match chip {
-        1 => !ours,
-        2 => ours,
-        3 => p.hidden,
+        1 => !ours && !menu::is_third_party(p),
+        2 => menu::is_third_party(p),
+        3 => ours,
+        4 => p.hidden,
         _ => true,
     };
     chip_ok && (q.is_empty() || [&p.label, &p.name, &p.from].iter().any(|s| s.to_lowercase().contains(q)))
 }
 
 /// Does a list entry pass the search `q` (lower-case) and the chip?
-pub fn entry_shown(e: &MenuEntry, q: &str, chip: usize) -> bool {
+pub fn entry_shown(e: &MenuEntry, q: &str, chip: usize, kind: Option<usize>) -> bool {
     let chip_ok = match chip {
         1 => e.source == Source::Windows,
-        2 => e.source != Source::Windows,
-        3 => e.hidden,
+        2 => false,
+        3 => e.source != Source::Windows,
+        4 => e.hidden,
         _ => true,
     };
-    chip_ok && (q.is_empty() || (!e.is_separator() && e.name.to_lowercase().contains(q)))
+    let kind_ok = match kind {
+        Some(0) => e.show_for.files,
+        Some(1) => e.show_for.folders,
+        Some(2) => e.show_for.background,
+        _ => true,
+    };
+    chip_ok && kind_ok && (q.is_empty() || (!e.is_separator() && e.name.to_lowercase().contains(q)))
 }
 
-/// Which group a learned item is drawn in.
-fn group_of(p: &menu::ItemPref) -> menu::Group {
+/// Which built-in group a learned item belongs to by origin.
+fn origin_group(p: &menu::ItemPref) -> menu::Group {
     match p.from.as_str() {
         "Windows" => menu::Group::Windows,
         "Tsubame" => menu::Group::Tsubame,
@@ -204,15 +239,49 @@ fn group_of(p: &menu::ItemPref) -> menu::Group {
     }
 }
 
+/// The group a learned item is drawn in: its user group when that still
+/// exists, else the one it belongs to by origin.
+pub fn item_group(p: &menu::ItemPref, users: &[menu::UserGroup]) -> menu::GroupRef {
+    if !p.group.is_empty() && users.iter().any(|u| u.id == p.group) {
+        menu::GroupRef::User(p.group.clone())
+    } else {
+        menu::GroupRef::Builtin(origin_group(p))
+    }
+}
+
 /// Items in group `g` (the count on its header row).
-pub fn group_count(list: &[MenuEntry], items: &[menu::ItemPref], g: menu::Group) -> usize {
-    let entries = list.iter().filter(|e| e.parent.is_empty() && !e.is_separator() && !(e.source == Source::Windows && e.id == "windows.open-with"));
+pub fn group_count(list: &[MenuEntry], items: &[menu::ItemPref], users: &[menu::UserGroup], g: &menu::GroupRef) -> usize {
     let n = match g {
-        menu::Group::Tsubame => entries.filter(|e| !e.source.runs_program()).count(),
-        menu::Group::Custom => entries.filter(|e| e.source.runs_program()).count(),
-        _ => 0,
+        menu::GroupRef::Builtin(b) => {
+            let entries = list.iter().filter(|e| e.parent.is_empty() && !e.is_separator() && !(e.source == Source::Windows && e.id == "windows.open-with"));
+            match b {
+                menu::Group::Tsubame => entries.filter(|e| !e.source.runs_program()).count(),
+                menu::Group::Custom => entries.filter(|e| e.source.runs_program()).count(),
+                _ => 0,
+            }
+        }
+        menu::GroupRef::User(_) => 0,
     };
-    n + items.iter().filter(|p| group_of(p) == g).count()
+    n + items.iter().filter(|p| item_group(p, users) == *g).count()
+}
+
+/// Where dropping a learned item on a row of group `target` puts it: the user
+/// group's id, or empty (back to its origin) when `target` is the group it
+/// came from. `None` = not a place for it (another built-in group).
+pub fn drop_group(p: &menu::ItemPref, target: &menu::GroupRef) -> Option<String> {
+    match target {
+        menu::GroupRef::User(id) => Some(id.clone()),
+        menu::GroupRef::Builtin(b) => (*b == origin_group(p)).then(String::new),
+    }
+}
+
+/// What each chip counts (the small number on the chip).
+pub fn chip_counts(list: &[MenuEntry], items: &[menu::ItemPref], kind: Option<usize>) -> [usize; 5] {
+    let mut n = [0usize; 5];
+    for (c, slot) in n.iter_mut().enumerate() {
+        *slot = list.iter().filter(|e| !e.is_separator() && entry_shown(e, "", c, kind)).count() + items.iter().filter(|p| item_shown(p, "", c)).count();
+    }
+    n
 }
 
 /// Reset to defaults: the default list and group order, every learned item
@@ -220,26 +289,34 @@ pub fn group_count(list: &[MenuEntry], items: &[menu::ItemPref], g: menu::Group)
 pub fn reset_menu(m: &mut tsubame_config::ContextMenu) {
     m.entries.clear();
     m.groups.clear();
+    m.user_groups.clear();
     for p in &mut m.items {
         p.hidden = false;
         p.name.clear();
+        p.group.clear();
     }
 }
 
 /// Anything Reset to defaults would change.
 pub fn menu_changed(m: &tsubame_config::ContextMenu) -> bool {
-    !m.entries.is_empty() || !m.groups.is_empty() || m.items.iter().any(|p| p.hidden || !p.name.is_empty())
+    !m.entries.is_empty() || !m.groups.is_empty() || !m.user_groups.is_empty() || m.items.iter().any(|p| p.hidden || !p.name.is_empty() || !p.group.is_empty())
 }
 
-fn chip(pg: &mut Pg, id: Id, x: f32, y: f32, label: &str, on: bool) -> (bool, Rect) {
+fn chip(pg: &mut Pg, id: Id, x: f32, y: f32, label: &str, count: Option<usize>, on: bool) -> (bool, Rect) {
     let t = pg.t;
-    let w = pg.g.measure(label, t.font_small()) + 20.0;
+    let cs = count.map(|c| c.to_string()).unwrap_or_default();
+    let lw = pg.g.measure(label, t.font_small());
+    let cw = if cs.is_empty() { 0.0 } else { pg.g.measure(&cs, t.font_small()) + 8.0 };
+    let w = lw + cw + 20.0;
     let r = Rect::new(x, y, w, t.height_field - 4.0);
     let it = pg.ui.interact(id, r, Sense::click().cursor(Cursor::Hand));
     let fill = if on { t.selected } else if it.hovered { t.hover } else { t.field };
     pg.g.round(r, r.h / 2.0, fill);
     pg.g.round_stroke(r, r.h / 2.0, if on { t.accent } else { t.popup_border }, 1.0);
-    pg.g.text(label, r, t.font_small().c(), if on { t.accent } else { t.text });
+    pg.g.text(label, Rect::new(r.x + 10.0, r.y, lw + 2.0, r.h), t.font_small(), if on { t.accent } else { t.text });
+    if !cs.is_empty() {
+        pg.g.text(&cs, Rect::new(r.x + 10.0 + lw + 8.0, r.y, cw, r.h), t.font_small(), t.text_dim);
+    }
     (it.clicked == Some(Button::Left), r)
 }
 
@@ -289,18 +366,42 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         st.sel = Some(key);
     }
 
+    // kind switch: the list for one kind of right-click (click again = every kind)
+    let ty = pg.y;
+    let mut cxp = pg.x;
+    for (i, l) in KINDS.iter().enumerate() {
+        let (hit, r) = chip(pg, ID_KIND.with(i as u64), cxp, ty + 2.0, l, None, st.kind == Some(i));
+        if hit {
+            st.kind = if st.kind == Some(i) { None } else { Some(i) };
+        }
+        cxp = r.r() + 6.0;
+    }
+    let hint = if st.kind.is_some() { "Entries that show for this right-click. Items learned from Windows are the same for every kind." } else { "Pick a kind to see which entries show for it." };
+    pg.g.text(hint, Rect::new(cxp + 8.0, ty, (pg.x + pg.w - cxp - 8.0).max(0.0), t.height_field), t.font_small(), t.text_dim);
+    pg.y += t.height_field + 6.0;
+
     // search and chips
     let ty = pg.y;
     st.search.pad_left = 22.0;
     let sr = Rect::new(pg.x, ty, 300.0_f32.min(pg.w - 320.0).max(160.0), t.height_field);
+    if st.want_search {
+        st.want_search = false;
+        pg.ui.set_focus(Some(ID_SEARCH));
+        st.search.select_all();
+    }
     text_input(pg.ui, pg.g, ID_SEARCH, sr, &mut st.search, "Search items\u{2026}");
     pg.g.text("\u{E721}", Rect::new(sr.x + 6.0, sr.y, 16.0, sr.h), f(12.0).icon().c(), t.text_dim);
+    if st.search.text.is_empty() && !pg.ui.has_focus(ID_SEARCH) {
+        let kw = pg.g.measure("Ctrl+F", t.font_mono()) + 4.0;
+        pg.g.text("Ctrl+F", Rect::new(sr.r() - kw - 8.0, sr.y, kw, sr.h), t.font_mono(), t.text_disabled);
+    }
     if pg.ui.has_focus(ID_SEARCH) && pg.ui.window_focused() {
         pg.ui.mark_text_focus();
     }
+    let counts = chip_counts(&list, &cx.prefs.context_menu.items, st.kind);
     let mut cxp = sr.r() + 12.0;
     for (i, l) in CHIPS.iter().enumerate() {
-        let (hit, r) = chip(pg, ID_CHIP.with(i as u64), cxp, ty + 2.0, l, st.chip == i);
+        let (hit, r) = chip(pg, ID_CHIP.with(i as u64), cxp, ty + 2.0, l, Some(counts[i]), st.chip == i);
         if hit {
             st.chip = i;
         }
@@ -308,7 +409,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
     pg.y += t.height_field + 10.0;
     let q = st.search.text.trim().to_lowercase();
-    let filtered = !q.is_empty() || st.chip != 0;
+    let filtered = !q.is_empty() || st.chip != 0 || st.kind.is_some();
 
     // toolbar
     let ty = pg.y;
@@ -318,6 +419,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     let (sub, r) = button(pg.ui, pg.g, ID_TB.with(2), x, ty, "New submenu", Look::Normal, true, false);
     x = r.r() + 8.0;
     let (sep, r) = button(pg.ui, pg.g, ID_TB.with(3), x, ty, "Add separator", Look::Normal, true, false);
+    x = r.r() + 8.0;
+    let (newg, r) = button(pg.ui, pg.g, ID_TB.with(6), x, ty, "New group", Look::Normal, true, false);
     x = r.r() + 8.0;
     let (imp, _) = button(pg.ui, pg.g, ID_TB.with(4), x, ty, "Import from Nilesoft Shell\u{2026}", Look::Normal, true, false);
     let reset_label = if st.confirm_reset { "Click again to reset" } else { "Reset to defaults" };
@@ -333,6 +436,14 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         st.import = if st.import.is_some() { None } else { Some(Box::new(ImportForm { path: TextInput::new(if std::path::Path::new(&default).is_file() { &default } else { "" }), err: None })) };
         st.add = None;
         st.msg = None;
+    }
+    if newg {
+        let m = &mut cx.prefs.context_menu;
+        let id = menu::add_group(&mut m.user_groups, &m.groups, "");
+        st.gedit = Some((id, TextInput::new("New group")));
+        st.edit_fresh = true;
+        st.msg = None;
+        cx.changed |= C_MENU;
     }
     if sub {
         let id = menu::next_id(&list, "custom");
@@ -450,13 +561,17 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
 
     let rh = t.height_menu_edit_row;
 
-    // groups, top to bottom (the grip reorders them)
+    // groups, top to bottom (the grip reorders them; New group adds one)
     pg.section("Groups (menu order, top to bottom)");
-    let order = menu::group_order(&cx.prefs.context_menu.groups);
+    let order = menu::full_order(&cx.prefs.context_menu.groups, &cx.prefs.context_menu.user_groups);
     let gcard = Rect::new(pg.x, pg.y, pg.w, order.len() as f32 * rh + 2.0);
     pg.g.round(gcard, t.radius_lg, t.panel);
     pg.g.round_stroke(gcard, t.radius_lg, t.border, 1.0);
     let mut gpress = None;
+    let mut gdelete: Option<String> = None;
+    let mut gstart: Option<String> = None;
+    let mut gcommit: Option<(String, String)> = None;
+    let mut gcancel = false;
     for (k, g) in order.iter().enumerate() {
         let r = Rect::new(gcard.x + 1.0, gcard.y + 1.0 + k as f32 * rh, gcard.w - 2.0, rh);
         if k > 0 {
@@ -465,6 +580,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         if st.gdrag == Some(k) {
             pg.g.fill(r, t.selected);
         }
+        let uid = if let menu::GroupRef::User(id) = g { Some(id.clone()) } else { None };
+        let row = pg.ui.interact(ID_GROW.with(k as u64), r, Sense::click().cursor(Cursor::Arrow));
         let gr = Rect::new(r.x + 6.0, r.y, 18.0, r.h);
         let gi = pg.ui.interact(ID_GROUP.with(k as u64), gr, Sense::click().cursor(Cursor::Hand));
         for (dx, dy) in [(0.0, -4.0), (4.0, -4.0), (0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (4.0, 4.0)] {
@@ -473,12 +590,51 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         if gi.pressed.is_some() {
             gpress = Some(k);
         }
-        let name = g.label();
-        let nw = pg.g.measure(name, t.font_md().b());
-        pg.g.text(name, Rect::new(gr.r() + 6.0, r.y, nw + 4.0, r.h), t.font_md().b(), t.text);
-        let n = group_count(&list, &cx.prefs.context_menu.items, *g);
-        pg.g.text(&format!("{n} item{}", if n == 1 { "" } else { "s" }), Rect::new(gr.r() + nw + 16.0, r.y, 120.0, r.h), t.font_small(), t.text_dim);
-        tag(pg, r.r() - 10.0, r.y + 5.0, r.h - 10.0, "Group", false, false);
+        let name: String = match g {
+            menu::GroupRef::Builtin(b) => b.label().to_string(),
+            menu::GroupRef::User(id) => cx.prefs.context_menu.user_groups.iter().find(|u| u.id == *id).map(|u| u.name.clone()).unwrap_or_default(),
+        };
+        let mut rx = r.r() - 10.0;
+        // user groups: a x to delete (their items go back to where they came from)
+        if let Some(id) = &uid {
+            let dr = Rect::new(rx - 22.0, r.y + 3.0, 22.0, r.h - 6.0);
+            let di = pg.ui.interact(ID_GDEL.with(k as u64), dr, Sense::click().cursor(Cursor::Hand));
+            if di.hovered {
+                pg.g.round(dr, t.radius_sm, t.hover);
+            }
+            pg.g.text("\u{E711}", dr, f(11.0).icon().c(), if di.hovered { t.danger } else { t.text_dim });
+            if di.clicked == Some(Button::Left) {
+                gdelete = Some(id.clone());
+            }
+            rx -= 30.0;
+        }
+        tag(pg, rx, r.y + 5.0, r.h - 10.0, if uid.is_some() { "Your group" } else { "Group" }, uid.is_some(), false);
+        let editing = uid.as_ref().is_some_and(|id| st.gedit.as_ref().is_some_and(|(e, _)| e == id));
+        if editing {
+            let nr = Rect::new(gr.r() + 6.0, r.y + 2.0, 220.0, r.h - 4.0);
+            let fresh = st.edit_fresh;
+            let (id, input) = st.gedit.as_mut().unwrap();
+            if fresh {
+                st.edit_fresh = false;
+                pg.ui.set_focus(Some(ID_GEDIT));
+                input.select_all();
+            }
+            let resp = text_input(pg.ui, pg.g, ID_GEDIT, nr, input, "Group name");
+            pg.ui.mark_text_focus();
+            if resp.submitted || (!resp.cancelled && !pg.ui.has_focus(ID_GEDIT) && pg.ui.active().is_none() && !fresh && pg.ui.frame() > 2) {
+                gcommit = Some((id.clone(), input.text.trim().to_string()));
+            } else if resp.cancelled {
+                gcancel = true;
+            }
+        } else {
+            let nw = pg.g.measure(&name, t.font_md().b());
+            pg.g.text(&name, Rect::new(gr.r() + 6.0, r.y, nw + 4.0, r.h), t.font_md().b(), t.text);
+            let n = group_count(&list, &cx.prefs.context_menu.items, &cx.prefs.context_menu.user_groups, g);
+            pg.g.text(&format!("{n} item{}", if n == 1 { "" } else { "s" }), Rect::new(gr.r() + nw + 16.0, r.y, 120.0, r.h), t.font_small(), t.text_dim);
+            if row.pressed.is_some_and(|p| p.double) {
+                gstart = uid.clone();
+            }
+        }
     }
     if let Some(k) = gpress {
         st.gdrag = Some(k);
@@ -495,17 +651,46 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             let at = if to > from { to - 1 } else { to };
             o.insert(at.min(o.len()), g);
             if o != order {
-                cx.prefs.context_menu.groups = if o == menu::Group::ALL { Vec::new() } else { o };
+                let m = &mut cx.prefs.context_menu;
+                menu::set_full_order(&mut m.groups, &mut m.user_groups, &o);
                 cx.changed |= C_MENU;
             }
         }
         pg.ui.request_repaint();
     }
+    if let Some(id) = gstart {
+        if let Some(u) = cx.prefs.context_menu.user_groups.iter().find(|u| u.id == id) {
+            st.gedit = Some((id, TextInput::new(&u.name)));
+            st.edit_fresh = true;
+        }
+    }
+    if let Some((id, text)) = gcommit.take() {
+        // an empty name keeps the old one
+        if let Some(u) = cx.prefs.context_menu.user_groups.iter_mut().find(|u| u.id == id) {
+            if !text.is_empty() && u.name != text {
+                u.name = text;
+                cx.changed |= C_MENU;
+            }
+        }
+        st.gedit = None;
+    }
+    if gcancel {
+        st.gedit = None;
+    }
+    if let Some(id) = gdelete {
+        let m = &mut cx.prefs.context_menu;
+        if menu::delete_group(&mut m.user_groups, &mut m.items, &id) {
+            cx.changed |= C_MENU;
+        }
+        if st.gedit.as_ref().is_some_and(|(e, _)| *e == id) {
+            st.gedit = None;
+        }
+    }
     pg.y = gcard.b() + 12.0;
 
     // Tsubame's and the custom entries (the list; the grip reorders them)
     pg.section("Tsubame and custom entries");
-    let shown: Vec<usize> = (0..list.len()).filter(|&i| !filtered || entry_shown(&list[i], &q, st.chip)).collect();
+    let shown: Vec<usize> = (0..list.len()).filter(|&i| !filtered || entry_shown(&list[i], &q, st.chip, st.kind)).collect();
     let show_preview = pg.w >= 720.0;
     let list_w = if show_preview { pg.w - 258.0 } else { pg.w };
     let top = pg.y;
@@ -759,7 +944,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
 
     // items learned from real menus: Windows', the apps' and Tsubame's own rows
     pg.section("Windows, installed apps and other menu items");
-    paint_items(pg, st, cx, &q, filtered);
+    paint_items(pg, st, cx, &q, !q.is_empty() || st.chip != 0);
 
     let note = "How the list is filled. Items are learned from real right-clicks: right-click a file once and the entries of every installed shell extension show up here. Each item is remembered by its verb and its handler, not by its label, so a hidden item stays hidden when the program updates or is translated. The eye hides an item, double-clicking a name renames it (an empty name restores the original), and the \u{00d7} on a custom row deletes it.";
     pg.note("\u{E946}", note, false);
@@ -772,30 +957,66 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
 }
 
-/// The `[[context_menu.items]]` card: eye, name (double-click renames, "—
-/// was" shows the original), where it comes from, New. Native order: no grip.
+/// The `[[context_menu.items]]` card: grip (moves the item between groups; the
+/// native order inside a group stays), eye, name (double-click renames, "—
+/// was" shows the original), where it comes from, New.
 fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool) {
     let t = pg.t;
     let rh = t.height_menu_edit_row;
-    let order = menu::group_order(&cx.prefs.context_menu.groups);
+    let order = menu::full_order(&cx.prefs.context_menu.groups, &cx.prefs.context_menu.user_groups);
+    let users = cx.prefs.context_menu.user_groups.clone();
     let mut shown: Vec<usize> = (0..cx.prefs.context_menu.items.len()).filter(|&i| !filtered || item_shown(&cx.prefs.context_menu.items[i], q, st.chip)).collect();
     // grouped like the menu (stable inside a group: first seen first)
-    shown.sort_by_key(|&i| order.iter().position(|g| *g == group_of(&cx.prefs.context_menu.items[i])).unwrap_or(9));
-    let card = Rect::new(pg.x, pg.y, pg.w, shown.len().max(1) as f32 * rh + 2.0);
+    shown.sort_by_key(|&i| {
+        let g = item_group(&cx.prefs.context_menu.items[i], &users);
+        order.iter().position(|x| *x == g).unwrap_or(usize::MAX)
+    });
+    // rows: a header per group (unfiltered: the user's groups always, a built-in one when it has items), then its items
+    let mut rows: Vec<(Option<usize>, menu::GroupRef)> = Vec::new();
+    for g in &order {
+        let mine: Vec<usize> = shown.iter().copied().filter(|&i| item_group(&cx.prefs.context_menu.items[i], &users) == *g).collect();
+        let user = matches!(g, menu::GroupRef::User(_));
+        if !filtered && (user || !mine.is_empty()) {
+            rows.push((None, g.clone()));
+        }
+        rows.extend(mine.into_iter().map(|i| (Some(i), g.clone())));
+    }
+    let card = Rect::new(pg.x, pg.y, pg.w, rows.len().max(1) as f32 * rh + 2.0);
     pg.g.round(card, t.radius_lg, t.panel);
     pg.g.round_stroke(card, t.radius_lg, t.border, 1.0);
-    if shown.is_empty() {
+    if rows.is_empty() {
         let msg = if cx.prefs.context_menu.items.is_empty() { "Nothing learned yet: right-click a file once." } else { "Nothing matches." };
         pg.g.text(msg, Rect::new(card.x + 16.0, card.y + 1.0, card.w - 32.0, rh), t.font_small(), t.text_dim);
     }
     let new_keys = st.new_shown.clone().unwrap_or_default();
     let mut toggle = None;
     let mut start = None;
+    let mut grip = None;
     let mut commit: Option<(String, String)> = None;
     let mut cancel = false;
-    for (k, &i) in shown.iter().enumerate() {
-        let p = &cx.prefs.context_menu.items[i];
+    for (k, (row, grp)) in rows.iter().enumerate() {
         let r = Rect::new(card.x + 1.0, card.y + 1.0 + k as f32 * rh, card.w - 2.0, rh);
+        let Some(i) = *row else {
+            // group header
+            if !pg.visible(r) {
+                continue;
+            }
+            if k > 0 {
+                pg.g.fill(Rect::new(r.x, r.y, r.w, 1.0), t.border);
+            }
+            pg.g.fill(Rect::new(r.x, r.y + 1.0, r.w, r.h - 1.0), t.hover);
+            pg.ui.interact(ID_HDR.with(k as u64), r, Sense::hover());
+            let name: String = match grp {
+                menu::GroupRef::Builtin(b) => b.label().to_string(),
+                menu::GroupRef::User(id) => users.iter().find(|u| u.id == *id).map(|u| u.name.clone()).unwrap_or_default(),
+            };
+            let nw = pg.g.measure(&name, t.font_md().b());
+            pg.g.text(&name, Rect::new(r.x + 14.0, r.y, nw + 4.0, r.h), t.font_md().b(), t.text);
+            let n = group_count(&[], &cx.prefs.context_menu.items, &users, grp);
+            pg.g.text(&format!("{n} item{}", if n == 1 { "" } else { "s" }), Rect::new(r.x + 14.0 + nw + 12.0, r.y, 120.0, r.h), t.font_small(), t.text_dim);
+            continue;
+        };
+        let p = &cx.prefs.context_menu.items[i];
         if !pg.visible(r) {
             continue;
         }
@@ -808,7 +1029,15 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
         if k > 0 {
             pg.g.fill(Rect::new(r.x, r.y, r.w, 1.0), t.border);
         }
-        let er = Rect::new(r.x + 8.0, r.y + 3.0, 22.0, r.h - 6.0);
+        let gr = Rect::new(r.x + 6.0, r.y, 18.0, r.h);
+        let gi = pg.ui.interact(ID_IGRIP.with(i as u64), gr, Sense::click().cursor(Cursor::Hand));
+        for (dx, dy) in [(0.0, -4.0), (4.0, -4.0), (0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (4.0, 4.0)] {
+            pg.g.circle(gr.x + 7.0 + dx, r.y + r.h / 2.0 + dy, 1.0, if gi.hovered { t.text } else { t.text_disabled });
+        }
+        if gi.pressed.is_some() {
+            grip = Some(i);
+        }
+        let er = Rect::new(gr.r() + 4.0, r.y + 3.0, 22.0, r.h - 6.0);
         let ei = pg.ui.interact(ID_ITEM_EYE.with(i as u64), er, Sense::click().cursor(Cursor::Hand));
         if ei.hovered {
             pg.g.round(er, t.radius_sm, t.hover);
@@ -861,6 +1090,37 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
         if it.pressed.is_some_and(|pr| pr.double) {
             start = Some(i);
         }
+    }
+    // drag an item onto a group (its header or any of its rows)
+    if let Some(i) = grip {
+        st.idrag = Some(i);
+        st.sel = Some(cx.prefs.context_menu.items[i].key.clone());
+    }
+    if let Some(from) = st.idrag.filter(|&f| f < cx.prefs.context_menu.items.len()) {
+        let rel = (pg.ui.mouse().y - card.y - 1.0) / rh;
+        let target = (rel >= 0.0 && (rel as usize) < rows.len()).then(|| rows[rel as usize].1.clone());
+        let ok = target.as_ref().and_then(|g| drop_group(&cx.prefs.context_menu.items[from], g));
+        if let (Some(g), Some(_)) = (&target, &ok) {
+            // the whole group lights up
+            for (k, (_, rg)) in rows.iter().enumerate() {
+                if rg == g {
+                    pg.g.round_stroke(Rect::new(card.x + 2.0, card.y + 1.0 + k as f32 * rh, card.w - 4.0, rh), t.radius_sm, t.accent, 1.0);
+                }
+            }
+        }
+        if pg.ui.active().is_none() {
+            st.idrag = None;
+            if let Some(gid) = ok {
+                let key = cx.prefs.context_menu.items[from].key.clone();
+                let m = &mut cx.prefs.context_menu;
+                if menu::move_item_to_group(&mut m.items, &m.user_groups, &key, &gid) {
+                    cx.changed |= C_MENU;
+                }
+            }
+        }
+        pg.ui.request_repaint();
+    } else {
+        st.idrag = None;
     }
     let items = &mut cx.prefs.context_menu.items;
     if let Some(i) = toggle {
@@ -946,14 +1206,48 @@ mod tests {
         let mut hidden = pref("app:x.copy-name", "Copy name", "Tsubame");
         hidden.hidden = true;
         let term = menu::ItemPref { name: "Terminal".into(), ..pref("windows.pkg:Microsoft.WindowsTerminal_8wekyb3d8bbwe/{x}", "Open in Terminal", "Microsoft.WindowsTerminal_8wekyb3d8bbwe") };
-        assert!(item_shown(&share, "", 0) && item_shown(&share, "sha", 1) && !item_shown(&share, "", 2));
-        assert!(item_shown(&hidden, "", 2) && item_shown(&hidden, "", 3) && !item_shown(&share, "", 3));
+        assert!(item_shown(&share, "", 0) && item_shown(&share, "sha", 1) && !item_shown(&share, "", 3));
+        assert!(item_shown(&hidden, "", 3) && item_shown(&hidden, "", 4) && !item_shown(&share, "", 4));
         assert!(item_shown(&term, "terminal", 0) && item_shown(&term, "windowsterminal", 1), "name, label and source are searched");
+        assert!(!item_shown(&term, "", 2), "a Microsoft package is not 3rd party");
+        let seven = pref("windows.pkg:Igor.7zip_abc/{x}", "7-Zip", "Igor.7zip_abc");
+        assert!(item_shown(&seven, "", 2) && !item_shown(&seven, "", 1) && !item_shown(&seven, "", 3));
         let copy = MenuEntry::builtin("builtin.copy", "Copy", "file.copy");
         let more = default_more();
-        assert!(entry_shown(&copy, "co", 2) && !entry_shown(&copy, "co", 1) && !entry_shown(&copy, "", 3));
-        assert!(entry_shown(&more, "", 1));
-        assert!(!entry_shown(&MenuEntry::separator("sep.1"), "co", 0), "a search hides separators");
+        assert!(entry_shown(&copy, "co", 3, None) && !entry_shown(&copy, "co", 1, None) && !entry_shown(&copy, "", 4, None));
+        assert!(entry_shown(&more, "", 1, None) && !entry_shown(&more, "", 2, None));
+        assert!(!entry_shown(&MenuEntry::separator("sep.1"), "co", 0, None), "a search hides separators");
+    }
+
+    #[test]
+    fn the_kind_switch_follows_show_for() {
+        let mut e = MenuEntry::custom("custom.1", "VS Code", "code.exe", "");
+        e.show_for = ShowFor { files: true, folders: false, background: true };
+        assert!(entry_shown(&e, "", 0, Some(0)) && !entry_shown(&e, "", 0, Some(1)) && entry_shown(&e, "", 0, Some(2)) && entry_shown(&e, "", 0, None));
+    }
+
+    #[test]
+    fn chip_counts_add_entries_and_items() {
+        let list = menu::default_entries();
+        let items = vec![pref("windows.verb:share", "Share", "Windows"), pref("windows.pkg:A.B_1/{x}", "A", "A.B_1"), pref("app:x.copy-name", "Copy name", "Tsubame")];
+        let c = chip_counts(&list, &items, None);
+        let real = list.iter().filter(|e| !e.is_separator()).count();
+        assert_eq!(c[0], real + 3);
+        assert_eq!(c[2], 1);
+        assert_eq!(c[4], list.iter().filter(|e| e.hidden && !e.is_separator()).count());
+    }
+
+    #[test]
+    fn dropping_an_item_on_a_group() {
+        let mut share = pref("windows.verb:share", "Share", "Windows");
+        assert_eq!(drop_group(&share, &menu::GroupRef::User("g1".into())), Some("g1".to_string()));
+        assert_eq!(drop_group(&share, &menu::GroupRef::Builtin(menu::Group::Windows)), Some(String::new()), "home group = back");
+        assert_eq!(drop_group(&share, &menu::GroupRef::Builtin(menu::Group::Apps)), None);
+        let users = vec![menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 0 }];
+        share.group = "g1".into();
+        assert_eq!(item_group(&share, &users), menu::GroupRef::User("g1".into()));
+        share.group = "gone".into();
+        assert_eq!(item_group(&share, &users), menu::GroupRef::Builtin(menu::Group::Windows), "a deleted group falls back");
     }
 
     fn default_more() -> MenuEntry {
@@ -968,8 +1262,11 @@ mod tests {
         m.groups = vec![menu::Group::Custom];
         m.entries = menu::default_entries();
         assert!(menu_changed(&m));
+        m.user_groups.push(menu::UserGroup { id: "g1".into(), name: "T".into(), pos: 0 });
+        m.items[0].group = "g1".into();
+        assert!(menu_changed(&m));
         reset_menu(&mut m);
-        assert!(!menu_changed(&m));
+        assert!(!menu_changed(&m) && m.items[0].group.is_empty());
         assert_eq!(m.items.len(), 1);
         assert!(!m.items[0].hidden && m.items[0].name.is_empty());
     }
@@ -979,11 +1276,12 @@ mod tests {
         let mut list = menu::default_entries();
         list.push(MenuEntry::custom("custom.1", "VS Code", "code.exe", ""));
         let items = vec![pref("windows.verb:share", "Share", "Windows"), pref("windows.pkg:A_1/{x}", "A", "A_1"), pref("app:x.copy-name", "Copy name", "Tsubame")];
-        assert_eq!(group_count(&list, &items, menu::Group::Custom), 1);
-        assert_eq!(group_count(&list, &items, menu::Group::Windows), 1);
-        assert_eq!(group_count(&list, &items, menu::Group::Apps), 1);
+        let b = |g| menu::GroupRef::Builtin(g);
+        assert_eq!(group_count(&list, &items, &[], &b(menu::Group::Custom)), 1);
+        assert_eq!(group_count(&list, &items, &[], &b(menu::Group::Windows)), 1);
+        assert_eq!(group_count(&list, &items, &[], &b(menu::Group::Apps)), 1);
         // built-ins + the classic-menu row + Copy name (Open with is filled by Windows)
-        assert_eq!(group_count(&list, &items, menu::Group::Tsubame), list.iter().filter(|e| !e.is_separator() && e.id != "windows.open-with" && !e.source.runs_program()).count() + 1);
+        assert_eq!(group_count(&list, &items, &[], &b(menu::Group::Tsubame)), list.iter().filter(|e| !e.is_separator() && e.id != "windows.open-with" && !e.source.runs_program()).count() + 1);
     }
 
     #[test]

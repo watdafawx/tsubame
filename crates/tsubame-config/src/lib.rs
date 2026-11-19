@@ -349,6 +349,8 @@ pub struct ContextMenu {
     pub items: Vec<menu::ItemPref>,
     /// group order, top to bottom; missing groups follow in the default order
     pub groups: Vec<menu::Group>,
+    /// `[[context_menu.user_groups]]`: groups the user made (an old file has none)
+    pub user_groups: Vec<menu::UserGroup>,
 }
 
 /// A rectangle in virtual-screen pixels (a monitor's work area).
@@ -1459,6 +1461,8 @@ names = ["a", "b"]
             menu::ItemPref { key: "windows.pkg:Microsoft.WindowsNotepad_8wekyb3d8bbwe/{ca6cc9f1-867a-481e-951e-a28c5e4f01ea}".into(), label: "Edit in Notepad".into(), from: "Microsoft.WindowsNotepad_8wekyb3d8bbwe".into(), name: "Notepad".into(), new: true, ..Default::default() },
         ];
         cfg.context_menu.groups = vec![menu::Group::Custom, menu::Group::Tsubame];
+        cfg.context_menu.user_groups = vec![menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 2 }];
+        cfg.context_menu.items[0].group = "g1".into();
         let cf = ConfigFile::new(cfg.clone());
         cf.save(&p).unwrap();
         let text = fs::read_to_string(&p).unwrap();
@@ -1516,6 +1520,44 @@ future_field = 3
         assert_eq!(m.items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["windows.verb:share", "app:file.copy-name"]);
         assert!(m.items[0].hidden && m.items[1].name == "Name only");
         assert_eq!(m.groups, [menu::Group::Custom, menu::Group::Windows]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_bad_user_group_is_dropped_alone_and_old_files_still_load() {
+        let d = temp_dir("menu-ugroups");
+        let p = d.join("config.toml");
+        fs::write(&p, "version = 1
+[[context_menu.user_groups]]
+id = \"g1\"
+name = \"Tools\"
+pos = 1
+[[context_menu.user_groups]]
+id = \"g2\"
+name = \"Broken\"
+pos = \"top\"
+[[context_menu.items]]
+key = \"windows.verb:share\"
+group = \"g1\"
+[[context_menu.items]]
+key = \"windows.verb:print\"
+group = 7
+").unwrap();
+        let l = ConfigFile::load(&p);
+        let m = &l.value.config.context_menu;
+        assert_eq!(m.user_groups.len(), 1);
+        assert_eq!(m.user_groups[0].name, "Tools");
+        assert_eq!(m.items.len(), 1);
+        assert_eq!(m.items[0].group, "g1");
+        // an old file (no user_groups, no group) loads as before
+        fs::write(&p, "version = 1
+[[context_menu.items]]
+key = \"windows.verb:share\"
+hidden = true
+").unwrap();
+        let l = ConfigFile::load(&p);
+        assert_eq!(l.status, LoadStatus::Loaded);
+        assert!(l.value.config.context_menu.user_groups.is_empty() && l.value.config.context_menu.items[0].group.is_empty());
         let _ = fs::remove_dir_all(&d);
     }
 
