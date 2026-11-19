@@ -227,7 +227,7 @@ pub fn entry_shown(e: &MenuEntry, q: &str, chip: usize, kind: Option<usize>) -> 
         Some(2) => e.show_for.background,
         _ => true,
     };
-    chip_ok && kind_ok && (q.is_empty() || (!e.is_separator() && e.name.to_lowercase().contains(q)))
+    chip_ok && kind_ok && (q.is_empty() || (!e.is_separator() && (e.name.to_lowercase().contains(q) || e.source.label().to_lowercase().contains(q))))
 }
 
 /// Which built-in group a learned item belongs to by origin.
@@ -1266,6 +1266,9 @@ mod tests {
         assert!(entry_shown(&copy, "co", 3, None) && !entry_shown(&copy, "co", 1, None) && !entry_shown(&copy, "", 4, None));
         assert!(entry_shown(&more, "", 1, None) && !entry_shown(&more, "", 2, None));
         assert!(!entry_shown(&MenuEntry::separator("sep.1"), "co", 0, None), "a search hides separators");
+        let mut nss = MenuEntry::custom("nss.1", "Ver Calc", "calc.exe", "");
+        nss.source = Source::Nilesoft;
+        assert!(entry_shown(&nss, "from nilesoft", 0, None), "the source tag is searched (Show imported)");
     }
 
     #[test]

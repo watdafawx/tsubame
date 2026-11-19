@@ -570,3 +570,20 @@ keep), or build the helper. The master will ask.
 Diagnostics added: `TSUBAME_MEMDIAG=1` now also reports allocations since menu 10
 and threads by start module (code runs only under the env var);
 `TSUBAME_STRESS_SETTLE_S=N` lengthens the stress settle (default 3 s).
+
+## Keyboard-only UI check of the editor states (rig)
+
+Driven by keyboard only (Tab / Enter / Shift+F10); screenshots `docs/shots/ver-*.png`.
+
+| State | Result |
+|---|---|
+| Nilesoft file dialog (`*.nss` filter, name prefilled `shell.nss`) | pass (`ver-nss-dialog.png`) |
+| "Found shell.nss" note (11 entries, 0 importable: button disabled) | pass (`ver-nss-detected.png`) |
+| Import report (6 imported, 3 skipped, one reason per line) | pass (`ver-nss-report.png`) |
+| Undo import | pass (list back to 11, "Import undone" line) |
+| Show imported | was a bug: the search matched names only, so "From Nilesoft" found nothing. Fixed: the search also matches the source tag |
+| New group + inline rename | pass (name field opens selected) |
+| Rename an existing group, drag a group, delete a group (x) | mouse only (no focus stop, no key) |
+| Ctrl+F in the editor focuses the search | pass |
+| Pin to top inside a user group, real menu via Shift+F10 | pass: the pinned item is first in the group block, the edit menu shows "Unpin" (`ver-pin-in-group.png`) |
+| Settings nav (Tab to an item, Enter / Space) | was a bug: focusable but Enter / Space did nothing. Fixed |
