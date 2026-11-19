@@ -307,6 +307,9 @@ pub struct View {
     pub keymap: crate::keymap::KeyMap,
     /// the command palette, built when it opens and dropped when it closes
     palette: Option<Box<crate::palette::Palette>>,
+    /// the own-drawn context menu (open, or waiting for its shell invoke);
+    /// main opens it and runs its picks (`shellops::ctx_after_frame`)
+    pub ctx: Option<Box<crate::ctxui::CtxMenu>>,
     /// command ids run from the palette, most recent first
     recents: Vec<u32>,
     /// the Settings tab's pages, built when the tab opens and dropped when it closes
@@ -394,6 +397,7 @@ impl View {
             theme_id: tsubame_ui::themes::tsubame(dark).id.to_string(),
             keymap: crate::keymap::KeyMap::defaults(),
             palette: None,
+            ctx: None,
             recents: Vec::new(),
             settings: None,
             env: crate::settings::Env::default(),
@@ -873,7 +877,7 @@ impl View {
         self.with_pane(slot, |v| v.go(path));
     }
 
-    fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
+    pub(crate) fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
         if self.tab().settings && !u4::settings_tab_allows(cmd) {
             return;
         }
@@ -1148,6 +1152,10 @@ impl View {
         self.side_act(ui, oa);
         self.paint_batch_preview(g, &t, (w, h));
         self.paint_palette(ui, g, (w, h));
+        // the context menu is on top of everything
+        if let Some(c) = self.ctx.as_mut() {
+            c.paint(ui, g, Rect::new(0.0, 0.0, w, h));
+        }
         let target = self.side_target.take();
         self.finish_drag(ui, g, &t, target.as_ref());
         self.sole_hist = [self.sole_hist[1], self.sole_row()];

@@ -628,14 +628,41 @@ fn opts_for(background: bool, paths: &[String]) -> (MenuOpts, Vec<Option<Extra>>
     (MenuOpts { background, extras, intercept: INTERCEPT.iter().map(|s| s.to_string()).collect() }, acts)
 }
 
-/// The item menu for `paths` (screen px), with our entries.
-pub fn open_item_menu(a: &mut App, paths: Vec<String>, sx: i32, sy: i32, extended: bool) {
+/// The item menu for `paths`: own-drawn at client DIP `anchor` (screen px
+/// `sx, sy` for the shell), or the native popup with `TSUBAME_NATIVE_MENU=1`.
+pub fn open_item_menu(a: &mut App, paths: Vec<String>, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
     let folder = a.view.tab().path.clone();
+    if crate::ctxui::own_enabled() {
+        open_own(a, crate::ctxui::Target { paths, folder, background: false, extended, anchor, keyboard, screen: (sx, sy) });
+        return;
+    }
+    native_item_menu(a, paths, folder, sx, sy, extended);
+}
+
+fn native_item_menu(a: &mut App, paths: Vec<String>, folder: String, sx: i32, sy: i32, extended: bool) {
     let (opts, extras) = opts_for(false, &paths);
     a.shell.open_menu(&mut a.pool, paths.clone(), sx, sy, extended, None, opts);
     if let Some(id) = a.shell.menu_pending {
         a.ops.menu = Some(MenuCtx { id, paths, folder, background: false, extras });
     }
+}
+
+fn native_bg_menu(a: &mut App, folder: String, sx: i32, sy: i32, extended: bool) {
+    let (opts, extras) = opts_for(true, std::slice::from_ref(&folder));
+    a.shell.open_menu(&mut a.pool, vec![folder.clone()], sx, sy, extended, None, opts);
+    if let Some(id) = a.shell.menu_pending {
+        a.ops.menu = Some(MenuCtx { id, paths: vec![folder.clone()], folder, background: true, extras });
+    }
+}
+
+/// Opens the own-drawn menu (a newer one replaces an older one: dropping
+/// its handle closes it on its worker, its late batches are dropped).
+fn open_own(a: &mut App, t: crate::ctxui::Target) {
+    let entries = MENU.read().map(|m| m.clone()).unwrap_or_default();
+    let icon_px = ((16.0 * a.view.dpi / 96.0 * (a.ui.theme.font_size_sm / 12.0).max(1.0)).round() as u32).clamp(16, 64);
+    let dual = a.view.dual();
+    let paste_ok = crate::ctxui::clipboard_has_files();
+    a.view.ctx = Some(Box::new(crate::ctxui::CtxMenu::open(t, entries, dual, paste_ok, icon_px, &mut a.pool)));
 }
 
 /// After a frame: a right click on empty space opens the folder's menu.
@@ -645,19 +672,100 @@ pub fn after_frame(hwnd: HWND) {
         let pt = a.view.bg_menu.take()?;
         let folder = active_folder(a)?;
         let s = a.gfx.dpi / 96.0;
-        Some((folder, (pt.x * s) as i32, (pt.y * s) as i32))
+        Some((folder, pt, (pt.x * s) as i32, (pt.y * s) as i32))
     })
     .flatten();
-    let Some((folder, x, y)) = want else { return };
+    let Some((folder, pt, x, y)) = want else { return };
     let (sx, sy) = crate::screen_pt(hwnd, x, y);
     with(|a| {
-        let (opts, extras) = opts_for(true, std::slice::from_ref(&folder));
-        a.shell.open_menu(&mut a.pool, vec![folder.clone()], sx, sy, extended, None, opts);
-        if let Some(id) = a.shell.menu_pending {
-            a.ops.menu = Some(MenuCtx { id, paths: vec![folder.clone()], folder, background: true, extras });
+        if crate::ctxui::own_enabled() {
+            let t = crate::ctxui::Target { paths: vec![folder.clone()], folder, background: true, extended, anchor: pt, keyboard: false, screen: (sx, sy) };
+            open_own(a, t);
+        } else {
+            native_bg_menu(a, folder, sx, sy, extended);
         }
     });
     invalidate(hwnd);
+}
+
+/// After a frame: runs the own-drawn menu's pick or Retry, and drops a menu
+/// that is done.
+pub fn ctx_after_frame(hwnd: HWND) {
+    let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+    let ran = with(|a| {
+        let c = a.view.ctx.as_mut()?;
+        if std::mem::take(&mut c.retry) {
+            c.retry_now(&mut a.pool);
+        }
+        let pick = c.picked.take();
+        let t = c.target.clone();
+        let entries = c.entries.clone();
+        match pick {
+            Some(crate::ctxui::Pick::Shell(id)) => c.invoke(id, shift, ctrl),
+            Some(crate::ctxui::Pick::App(act)) if act == "file.properties" => c.invoke_verb("properties"),
+            Some(crate::ctxui::Pick::App(act)) => run_own(a, &act, &t, &entries, shift),
+            Some(crate::ctxui::Pick::Classic) => {
+                a.view.ctx = None;
+                if t.background {
+                    native_bg_menu(a, t.folder, t.screen.0, t.screen.1, t.extended);
+                } else {
+                    native_item_menu(a, t.paths, t.folder, t.screen.0, t.screen.1, t.extended);
+                }
+            }
+            None => {}
+        }
+        if a.view.ctx.as_ref().is_some_and(|c| c.finished()) {
+            a.view.ctx = None;
+        }
+        Some(())
+    })
+    .flatten();
+    if ran.is_some() {
+        invalidate(hwnd);
+    }
+}
+
+/// An app action picked in the own-drawn menu.
+fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_config::MenuEntry], shift: bool) {
+    let paths = if t.background { Vec::new() } else { t.paths.clone() };
+    let one_dir = (paths.len() == 1 && Path::new(&paths[0]).is_dir()).then(|| paths[0].clone());
+    match act {
+        "file.open" => match &one_dir {
+            Some(d) => a.view.go(d),
+            None => {
+                for p in &paths {
+                    if Path::new(p).is_dir() { a.view.open_in_new_tab(p) } else { a.view.open_paths.push(p.clone()) }
+                }
+            }
+        },
+        "tab.open-selected" => {
+            for p in paths.iter().filter(|p| Path::new(p).is_dir()) {
+                a.view.open_in_new_tab(p);
+            }
+        }
+        "x.other-pane" => {
+            if let Some(d) = &one_dir {
+                a.view.open_in_other_pane(d);
+            }
+        }
+        "file.cut" | "file.copy" => copy_files(a, paths, act == "file.cut"),
+        "file.paste" => paste(a, one_dir.unwrap_or_else(|| t.folder.clone())),
+        "file.copy-path" => copy_text(a, path_text(if t.background { &t.paths } else { &paths }), "path"),
+        "x.copy-name" => copy_text(a, paths.iter().map(|p| name_of(p)).collect::<Vec<_>>().join("\r\n"), "name"),
+        "file.rename" => a.view.rename_request = true,
+        "file.delete" => start_delete(a, paths, shift),
+        "x.new-folder" => new_item(a, false),
+        "x.new-file" => new_item(a, true),
+        "x.terminal" => open_terminal(one_dir.unwrap_or_else(|| t.folder.clone())),
+        "x.refresh" => a.view.run_command(&mut a.ui, crate::commands::CMD_REFRESH),
+        id => {
+            if let Some(e) = entries.iter().find(|e| e.id == id) {
+                let ctx = MenuCtx { id: 0, paths: t.paths.clone(), folder: t.folder.clone(), background: t.background, extras: Vec::new() };
+                run_custom(a, e, &ctx);
+            }
+        }
+    }
 }
 
 fn on_menu(a: &mut App, m: &MenuResult, ctx: MenuCtx) {
@@ -715,6 +823,19 @@ pub fn on_reply(a: &mut App, r: Reply) -> Option<Reply> {
                 on_menu(a, m, ctx);
             }
             Some(r)
+        }
+        // own-drawn menu batches: this menu's generation only (stale ones drop)
+        Payload::Ctx(b) => {
+            if let Some(c) = a.view.ctx.as_mut() {
+                c.apply(b);
+                if let Some(Err(e)) = c.invoke_result.take() {
+                    status(a, format!("The command failed: {e}"));
+                }
+                if a.view.ctx.as_ref().is_some_and(|c| c.finished()) {
+                    a.view.ctx = None;
+                }
+            }
+            None
         }
         _ => Some(r),
     }

@@ -578,6 +578,10 @@ impl IconCache {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+    /// Like `get`, without touching the LRU order (painting reads every frame).
+    pub fn peek(&self, k: u64) -> Option<&Arc<Bitmap>> {
+        self.map.get(&k)
+    }
     pub fn get(&mut self, k: u64) -> Option<Arc<Bitmap>> {
         let v = self.map.get(&k)?.clone();
         self.touch(k);
