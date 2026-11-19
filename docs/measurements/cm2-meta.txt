@@ -1,0 +1,11 @@
+exe_commit=fa31fd5
+exe_bytes=2859008
+exe_sha256=3c4e28e615f680217bb0330ab085534da7b9c27f3210b988144d78f967b095ed
+profile=release
+menu_cycles=200
+navigation_gate_runs=1
+navigation_count=10000
+tab_cycles=1000
+startup_runs=10
+workspace_tests_passed_excluding_clipboard=637
+clipboard_round_trip=known_flaky_failed_latest_full_runs

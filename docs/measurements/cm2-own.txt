@@ -1,0 +1,20 @@
+tsubame S4 stress: own-drawn context menu
+build: release
+items: 3
+
+counters start (before the first menu): private 61.3 MB, working set 55.5 MB, handles 529, gdi 45, user 21
+counters after menu 1: private 71.6 MB, working set 89.1 MB, handles 1071, gdi 85, user 39
+counters after menu 10: private 71.0 MB, working set 87.6 MB, handles 1037, gdi 83, user 34
+counters after menu 100: private 73.0 MB, working set 88.5 MB, handles 1042, gdi 83, user 35
+counters after menu 200: private 75.8 MB, working set 89.7 MB, handles 1029, gdi 83, user 34
+counters end (after settle): private 74.3 MB, working set 88.5 MB, handles 918, gdi 47, user 34
+private bytes end vs start: +21.2% (+13.0 MB); end vs after first item: +3.8% (+2.7 MB)
+handles end-start +389, gdi end-start +2, user end-start +13; vs after first item: handles -153, gdi -38, user -5
+leak gate A (private bytes end vs start, growth <= 5%): +21.2% FAIL
+leak gate B (menu 10 -> 200, 190 cycles, growth <= 5%): private +6.8%, handles -0.8% (-8), gdi +0, user +0 FAIL
+leak gate: FAIL
+own first paint: n=200 p50=1.29 p95=1.71 max=2.31 ms
+own all items: n=200 p50=162.21 p95=200.98 max=615.08 ms
+own warm first paint: n=199 p50=1.29 p95=1.71 max=1.89 ms
+own warm all items: n=199 p50=162.21 p95=200.98 max=215.25 ms
+own cold first/all us: Some(2315)/Some(615077); failed: 0

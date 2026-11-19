@@ -1,0 +1,23 @@
+tsubame S4 stress: context menu
+build: release
+items: 3
+
+200 menus in 11.3 s
+held menu: shown true for 2.06 s; UI thread painted 134 frames meanwhile: n=134 p50=0.82 p95=1.05 max=1.39 ms
+counters start (before the first menu): private 62.1 MB, working set 55.5 MB, handles 529, gdi 45, user 21
+counters after menu 1 (shell extensions loaded): private 69.8 MB, working set 83.2 MB, handles 911, gdi 67, user 47
+counters after menu 10: private 68.3 MB, working set 81.1 MB, handles 896, gdi 48, user 53
+counters after menu 100: private 71.4 MB, working set 82.6 MB, handles 900, gdi 48, user 53
+counters after menu 200: private 74.0 MB, working set 83.9 MB, handles 913, gdi 53, user 55
+counters end (after settle): private 73.8 MB, working set 85.4 MB, handles 951, gdi 48, user 48
+private bytes end vs start: +18.8% (+11.7 MB); end vs after first item: +5.7% (+4.0 MB)
+handles end-start +422, gdi end-start +3, user end-start +27; vs after first item: handles +40, gdi -19, user +1
+leak gate A (private bytes end vs start, growth <= 5%): +18.8% FAIL
+leak gate B (menu 10 -> 200, 190 cycles, growth <= 5%): private +8.3%, handles +1.9% (+17), gdi +5, user +2 FAIL
+leak gate: FAIL
+menu on screen (job start to first WM_ENTERIDLE): n=200 p50=33.59 p95=39.78 max=508.98 ms
+menu bind (parse + bind + GetUIObjectOf): n=200 p50=2.00 p95=2.43 max=20.69 ms
+menu QueryContextMenu: n=200 p50=27.30 p95=32.41 max=482.06 ms
+menu round trip (UI submit to reply applied): n=200 p50=53.47 p95=60.90 max=537.71 ms
+first menu on screen (cold): 509.0 ms
+menus never shown: 0
