@@ -55,7 +55,7 @@ Measured on a release build (`lto`, `strip`), 2,859,008 B, on a desktop with a 1
 | Open a 100,000-entry folder: complete and sorted | < 200 ms median | 51.18 ms median, 99.10 ms p95 (n=9) | within budget |
 | Same folder, cold file cache: first rows / complete and sorted | < 30 ms / < 200 ms median | 13.73 ms / 168.98 ms median; p95 14.73 ms / 221.55 ms (n=3) | within budget on the median; p95 of "complete" is over 200 ms. Measured on an earlier build (commit `cb13120`), not re-measured since |
 | Scroll paint p95, details view, 4K | < 5 ms (median of 10 runs) | 2.90 ms median; the worst run's p95 was 4.53 ms | within budget |
-| Idle CPU over a 10 s window | 0 wake-ups; < 50 ms CPU | 93.8 ms in the harness window | **over budget**, see below |
+| Idle CPU over a 10 s window | 0 wake-ups; < 50 ms CPU | 0 ms CPU in every window 13-43 s after launch (n=3 runs x 3 windows); 0 wake-ups once Windows' thread pool has retired its idle workers, 1-2 per window before that | within budget on CPU; wake-ups see below |
 | Private memory, one tab, small folder, 4K | < 110 MB | 64.2 MB | within budget |
 | Private memory after a 5 s scroll of the 100,000-entry folder | < 110 MB | 82.2 MB median, 85.1 MB max | within budget |
 | Leak gate: 10,000 navigations + 1,000 tabs | private memory within 5% | 81.64 to 84.45 MB (+2.81 MB, +3.4%); handles, GDI, USER objects and threads within their limits | within budget (one run on this build) |
@@ -63,7 +63,7 @@ Measured on a release build (`lto`, `strip`), 2,859,008 B, on a desktop with a 1
 
 Caveats, so the table is not read more kindly than it deserves:
 
-- **Idle CPU is not a clean pass.** The harness read 93.8 ms once. A separate run with background updates and config writes switched off read 0, 15.6 and 15.6 ms over three 10-second windows. CPU time on the test machine is counted in 15.6 ms ticks, and wake-ups themselves were not counted, so "zero wake-ups" is not proven.
+- **Idle wake-ups are now counted, per thread** (`tools/idle-wakes.ps1`). Before the fix the idle process woke ~970 times per 10 s: the NVIDIA driver (`nvwgf2umx.dll`) runs a thread that wakes ~100 times a second for as long as a GPU device exists in the process, whatever the device flags or swap chain (Chromium apps show the same thread). Tsubame's own threads were already silent. The app now lets the GPU device go after 10 s without a paint (the window keeps its last frame) and makes it again on the next input. After that, the only wake-ups are Windows thread-pool workers exiting, 1-2 per 10 s window for the first ~40 s, then none. The cost moves to the first input after an idle stretch: one ~13 ms software frame, then the GPU is back ~160-180 ms later (~170 ms of CPU on a worker). Details in `docs/bench-log.md`.
 - The leak gate passed three times on an earlier build (worst run +2.8%). On the latest build it ran once, so run-to-run spread is not verified. Run-to-run spread is about as large as the 5% limit: an early build read +10.3% on one of three runs, and the gate fails on the worst run.
 - The cold-cache run empties the Windows working set and then starts the app, so it also pays the app's own cold start. It is not a reboot.
 - Scroll timing needs a quiet machine. On a loaded one, an earlier build read anywhere from 4.7 to 7.5 ms at different times, so compare builds interleaved in the same session, not across days. A text-clipping fix took the median p95 from 6.18 ms to 2.70 ms in such an interleaved run.

@@ -90,6 +90,8 @@ pub struct Gfx {
     gpu_failed: Option<std::time::Instant>,
     /// the target is a software stand-in until `warm` has a GPU device
     warming: bool,
+    /// the GPU device was let go while idle: no target until `unpark` (see `park`)
+    parked: bool,
 }
 
 /// Most layouts `Gfx::text` keeps. The S1 prototype used 4096 / 30 frames (a busy frame
@@ -336,6 +338,7 @@ impl Gfx {
                 on_gpu: false,
                 gpu_failed: None,
                 warming: false,
+                parked: false,
             })
         }
     }
@@ -564,9 +567,50 @@ impl Gfx {
     pub fn release(&mut self) {
         self.drop_target();
         self.warming = false;
+        self.parked = false;
         warm::reset();
         self.formats.clear();
         self.fresh_factory();
+    }
+
+    /// The current target is a hardware (GPU) one, not a stand-in.
+    pub fn on_gpu(&self) -> bool {
+        self.on_gpu && !self.warming
+    }
+
+    /// The GPU device was let go (see `park`).
+    pub fn parked(&self) -> bool {
+        self.parked
+    }
+
+    /// Input arrived (or a paint was asked for): start making the GPU device
+    /// on its worker. Frames until it is made use a software stand-in, as at
+    /// open; the worker repaints the window when the device is ready.
+    pub fn unpark(&mut self) {
+        if std::mem::take(&mut self.parked) {
+            warm::start(self.hwnd.0 as isize);
+        }
+    }
+
+    /// Lets the GPU device go while the window is idle. The NVIDIA user-mode
+    /// driver (nvwgf2umx.dll) runs a thread that wakes ~100 times a second for
+    /// as long as a hardware D3D11 device exists in the process, whatever its
+    /// flags or target (flip-model or HWND; Chromium apps show the same
+    /// thread); with no device the driver unloads and the thread is gone.
+    /// Nothing is repainted: DWM keeps showing the last presented frame. A
+    /// wake costs ~160-190 ms of CPU on the worker (the driver loads again),
+    /// with a ~13 ms software frame up meanwhile. False (nothing done) when
+    /// the target is not a GPU one.
+    pub fn park(&mut self) -> bool {
+        if !self.on_gpu() {
+            return false;
+        }
+        self.drop_target();
+        // the factory caches its device too: only a fresh one lets the driver go
+        self.fresh_factory();
+        warm::reset();
+        self.parked = true;
+        true
     }
 
     /// The factory caches its D3D device; only a fresh factory lets it go.
@@ -724,6 +768,8 @@ impl Canvas for Gfx {
         self.text_ms = 0.0;
         self.image_ms = 0.0;
         self.bitmaps_made = 0;
+        // a paint while parked: the GPU warms behind a software stand-in
+        self.unpark();
         if self.ensure_target().is_err() {
             return false;
         }

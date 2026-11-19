@@ -79,6 +79,7 @@ mod tabs;
 mod timing;
 mod updates;
 mod view;
+mod wakelog;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -120,6 +121,10 @@ const CARET_TIMER: usize = 4;
 const SAVE_TIMER: usize = 6;
 /// File-operation events: polled only while an operation runs.
 const OPS_TIMER: usize = 8;
+/// One-shot: lets the GPU device go once the window has not painted for
+/// `gpu_park_after()` (`Gfx::park`: the NVIDIA driver wakes ~100/s while a
+/// device exists). Armed only while a GPU target exists.
+const PARK_TIMER: usize = 9;
 const OPS_MS: u32 = 60;
 const CARET_MS: u32 = 530;
 /// The blink stops (caret solid) after this long without input.
@@ -164,6 +169,8 @@ struct App {
     watch_armed: bool,
     /// the own-drawn menu's loading-line timer runs (only while it loads)
     ctx_timer: bool,
+    /// the GPU park timer is armed
+    park_timer: bool,
     /// the blink timer exists
     caret_timer: bool,
     /// the blink stopped for lack of input (caret solid until the next key)
@@ -278,6 +285,7 @@ fn window_state(hwnd: HWND) -> tsubame_config::WindowState {
 }
 
 fn main() {
+    wakelog::init();
     let args: Vec<String> = std::env::args().collect();
     let cwd = std::env::current_dir().unwrap_or_default();
     let cli = cli::Cli::parse(&args, &cwd);
@@ -562,6 +570,7 @@ fn main() {
                 hang_bench: flag("--hang"),
                 watch_armed: false,
                 ctx_timer: false,
+                park_timer: false,
                 caret_timer: false,
                 caret_idle: false,
                 last_input: Instant::now(),
@@ -571,18 +580,24 @@ fn main() {
         });
         with(|a| shellops::attach(a, hwnd, drop_target));
 
-        // bench and timing runs measure at full screen (4K on rig); a restored
+        // bench and timing runs measure at full screen (4K on the benchmark machine); a restored
         // maximized window comes back maximized
         let maximize = ((bench_mode || timing_mode || gate_mode) && !flag("--windowed")) || (geom.is_some_and(|g| g.maximized) && !flag("--windowed"));
         let _ = ShowWindow(hwnd, if maximize { SW_SHOWMAXIMIZED } else { SW_SHOW });
 
         // Idle = blocked here. Timers only while a bench/stress run, the
-        // hung-worker watchdog (pool busy) or a focused text field's caret needs them.
+        // hung-worker watchdog (pool busy) or a focused text field's caret needs them,
+        // plus one park timer per stretch of GPU painting (gpu_park_after).
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if msg.hwnd.is_invalid() {
+                // a thread message (no window procedure sees it)
+                wakelog::note(msg.message | 0x8000_0000, msg.wParam.0);
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        wakelog::write();
         // drop D2D/D3D objects now, while the process is fully alive (a
         // thread-local destructor run inside ExitProcess crashes in D3D teardown)
         let taken = APP.with(|a| a.try_borrow_mut().ok().and_then(|mut a| a.take()));
@@ -644,6 +659,48 @@ fn arm_ctx(hwnd: HWND, a: &mut App) {
         let _ = unsafe { KillTimer(Some(hwnd), ctxui::TIMER_ID) };
         a.ctx_timer = false;
     }
+}
+
+/// How long the window must go without a paint before the GPU device is let
+/// go. `TSUBAME_GPU_PARK=<seconds>` changes it, `0` keeps the device. Off in
+/// bench, stress and leak-gate runs, which measure the GPU path.
+fn gpu_park_after(a: &App) -> Option<Duration> {
+    static S: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let s = *S.get_or_init(|| std::env::var("TSUBAME_GPU_PARK").ok().and_then(|v| v.parse().ok()).unwrap_or(10));
+    (s > 0 && a.bench.is_none() && a.stress.is_none() && a.gate.is_none()).then(|| Duration::from_secs(s))
+}
+
+/// Arms the park timer once a GPU target is painting. It is not re-armed
+/// per paint: when it fires early (a paint since), it waits out the rest.
+fn arm_park(hwnd: HWND, a: &mut App) {
+    if a.park_timer || !a.gfx.on_gpu() {
+        return;
+    }
+    if let Some(d) = gpu_park_after(a) {
+        unsafe { SetTimer(Some(hwnd), PARK_TIMER, d.as_millis() as u32, None) };
+        a.park_timer = true;
+    }
+}
+
+/// The park timer fired: park the GPU when nothing painted for the whole
+/// period, otherwise wait the rest of it. No repaint: DWM keeps showing the
+/// last presented frame after the swap chain is gone (a software repaint of a
+/// 4K window cost ~330 ms of CPU on WARP's threads); a paint the system asks
+/// for later is drawn on a software target.
+fn on_park_timer(hwnd: HWND) {
+    with(|a| {
+        let _ = unsafe { KillTimer(Some(hwnd), PARK_TIMER) };
+        a.park_timer = false;
+        let Some(d) = gpu_park_after(a) else { return };
+        let since = a.last_paint.elapsed();
+        if since < d {
+            let left = (d - since).as_millis().max(1) as u32;
+            unsafe { SetTimer(Some(hwnd), PARK_TIMER, left, None) };
+            a.park_timer = true;
+            return;
+        }
+        a.gfx.park();
+    });
 }
 
 /// The file-operation poll timer exists only while an operation is running.
@@ -708,6 +765,7 @@ fn after_paint(hwnd: HWND, a: &mut App) {
     arm_watch(hwnd, a);
     arm_ops(hwnd, a);
     arm_ctx(hwnd, a);
+    arm_park(hwnd, a);
     if a.view.want_drives && !PLACES_BUSY.load(Ordering::Acquire) {
         a.view.want_drives = false;
         spawn_places(hwnd);
@@ -833,6 +891,9 @@ unsafe fn on_paint(hwnd: HWND) {
         invalidate(hwnd);
     }
     let Some((total_ms, end_ms, path, out, final_frame)) = info else { return };
+    if out.is_some() && wakelog::on() {
+        wakelog::paint(path == "hardware", total_ms, with(|a| a.gfx.create_ms).unwrap_or(0.0));
+    }
     if let Some(out) = out {
         after_frame(hwnd, out);
     }
@@ -1271,6 +1332,18 @@ fn hit_test(hwnd: HWND, lp: LPARAM) -> LRESULT {
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    wakelog::note(msg, wp.0);
+    // input (not a repaint the system asked for) warms a parked GPU again; a
+    // WM_MOUSEMOVE at the old position is the system's (a window above went away)
+    static LAST_MOVE: AtomicIsize = AtomicIsize::new(-1);
+    let moved = msg == WM_MOUSEMOVE && LAST_MOVE.swap(lp.0, Ordering::Relaxed) != lp.0;
+    if moved || matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_MOUSEWHEEL | WM_MOUSEHWHEEL | WM_KEYDOWN | WM_SYSKEYDOWN | WM_SIZE) {
+        with(|a| {
+            if a.gfx.parked() {
+                a.gfx.unpark();
+            }
+        });
+    }
     unsafe {
         match msg {
             WM_PAINT => {
@@ -1570,6 +1643,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 // file-op events: progress, conflicts (a dialog), results
                 shellops::on_ops_timer(hwnd);
                 with(|a| arm_ops(hwnd, a));
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == PARK_TIMER => {
+                on_park_timer(hwnd);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == SAVE_TIMER => {
