@@ -746,7 +746,9 @@ fn paint_row(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow,
         right -= aw + m.gap;
     }
     if !row.shortcut.is_empty() {
-        let sw = c.measure(&row.shortcut, m.small);
+        // The backend quantizes layout widths to quarter DIPs. Leave a DIP
+        // of slack so rounding cannot ellipsize a precisely measured chord.
+        let sw = c.measure(&row.shortcut, m.small).ceil() + 1.0;
         let col = if s.pressed { t.on_accent } else if row.disabled { t.text_disabled } else { t.text_dim };
         c.text(&row.shortcut, Rect::new(right - sw, r.y, sw, r.h), m.small, col);
         right -= sw + 2.0 * m.gap;
