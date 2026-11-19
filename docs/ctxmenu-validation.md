@@ -583,7 +583,7 @@ Driven by keyboard only (Tab / Enter / Shift+F10); screenshots `docs/shots/ver-*
 | Undo import | pass (list back to 11, "Import undone" line) |
 | Show imported | was a bug: the search matched names only, so "From Nilesoft" found nothing. Fixed: the search also matches the source tag |
 | New group + inline rename | pass (name field opens selected) |
-| Rename an existing group, drag a group, delete a group (x) | mouse only (no focus stop, no key) |
+| Rename an existing group, drag a group, delete a group (x) | was mouse only. Now each group header is a Tab stop: F2 / Enter rename, Delete deletes (items freed), Alt+Up / Alt+Down move it; the focus ring follows the row (`ctxmenu-group-key-rename.png`, `-move.png`, `-delete.png`) |
 | Ctrl+F in the editor focuses the search | pass |
 | Pin to top inside a user group, real menu via Shift+F10 | pass: the pinned item is first in the group block, the edit menu shows "Unpin" (`ver-pin-in-group.png`) |
 | Settings nav (Tab to an item, Enter / Space) | was a bug: focusable but Enter / Space did nothing. Fixed |

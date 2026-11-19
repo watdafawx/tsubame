@@ -105,7 +105,9 @@ Settings > Context menu edits the own-drawn menu (`docs/ctxmenu.md`; mock state 
   chips All / Windows / 3rd party / Tsubame / Hidden with counts ("3rd party" = a packaged item whose
   package family is not Microsoft's); Ctrl+F focuses the search;
 - Groups: Tsubame, Windows, Installed apps, Custom and the user's own (New group; double-click renames, x
-  deletes and frees its items), with a grip to reorder (`context_menu.groups`, `context_menu.user_groups`);
+  deletes and frees its items). Every header is a Tab stop: F2 / Enter rename, Delete deletes (own groups),
+  Alt+Up / Alt+Down move it (any group; the kit's `Ui::claimed` keeps Alt+Up from also running "Up one
+  folder"). With a grip to reorder (`context_menu.groups`, `context_menu.user_groups`);
   the grip on a learned item drags it into a group (`items.group`);
 - the U4 list (Tsubame's built-ins and the custom / imported entries): grip (off while filtered), eye,
   double-click rename ("— was …" for a renamed built-in), source tag, × on custom rows;
