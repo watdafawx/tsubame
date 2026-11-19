@@ -203,7 +203,7 @@ impl Stress {
             }
             State::CtxRun { i } => {
                 if let Some(c) = view.ctx.as_ref() {
-                    if c.first_paint.is_none() || (!c.model.complete && self.ctx_at.is_some_and(|t| t.elapsed() < Duration::from_secs(6))) {
+                    if c.first_paint.is_none() || (c.all_items.is_none() && c.model.error.is_none() && self.ctx_at.is_some_and(|t| t.elapsed() < Duration::from_secs(6))) {
                         return (false, false);
                     }
                     if let Some(t) = c.first_paint { self.ctx_first_us.push(t.as_micros() as u64); }

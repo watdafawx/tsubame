@@ -8,7 +8,7 @@
 //!
 //! Hooks for later cards (see the doc): accelerators and type-to-filter get
 //! the `Char` events the menu swallows now (CM4), submenus open on hover at
-//! once (`MenuStyle::hover_delay`, CM4 safe triangle), the wheel is
+//! once (CM4 will add hover delay and safe triangle), the wheel is
 //! swallowed (CM4), a submenu with no rows yet shows "Loading…" (CM6 fills
 //! it lazily).
 
@@ -96,6 +96,8 @@ pub trait MenuSource {
 /// Per-frame inputs that are not rows.
 #[derive(Clone, Copy, Debug)]
 pub struct MenuStyle {
+    /// Alt is held (access keys themselves remain CM4).
+    pub alt: bool,
     /// where the menu may go (the window's client area)
     pub bounds: Rect,
     /// the loading line's phase (0..1) while shell rows are still coming;
@@ -614,7 +616,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 ring: kb_ring && lvl.focus == Some(row.key),
                 pressed: it.active && row.kind == RowKind::Item && !row.disabled,
                 open: lvl.open == Some(row.key),
-                underline: st.keyboard,
+                underline: st.keyboard || style.alt,
             };
             if row.submenu && state.open && st.levels.len() > lv + 1 {
                 st.levels[lv + 1].parent_row = r;
@@ -920,7 +922,7 @@ mod tests {
             self.ui.begin_frame((800.0, 600.0));
             // like the app: the menu sets it again while it is drawn
             self.ui.capture_keys = false;
-            let style = MenuStyle { bounds: Rect::new(0.0, 0.0, 800.0, 600.0), loading: None };
+            let style = MenuStyle { bounds: Rect::new(0.0, 0.0, 800.0, 600.0), loading: None, alt: false };
             let r = menu(&mut self.ui, &mut self.c, ID, &mut self.st, &self.src, &style);
             self.ui.end_frame();
             self.c.end();

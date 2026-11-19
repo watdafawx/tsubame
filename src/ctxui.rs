@@ -312,7 +312,8 @@ impl CtxMenu {
         }
         let loading = self.loading();
         let phase = loading.then(|| (self.asked_at.elapsed().as_millis() % SPIN_MS) as f32 / SPIN_MS as f32);
-        let style = MenuStyle { bounds, loading: phase };
+        let alt = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x12) } < 0;
+        let style = MenuStyle { bounds, loading: phase, alt };
         let src = Rows { items: &self.items, icons: &self.model.icons, failed: self.shown() == LoadState::Failed, paste_ok: self.paste_ok };
         let r = menu(ui, g, ID_CTX, &mut self.state, &src, &style);
         if self.first_paint.is_none() {

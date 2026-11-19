@@ -1460,6 +1460,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let key = map_key(wp.0 as u16);
                 // bare Alt (menu activation) is ignored; every other Alt combo goes to the kit
                 if matches!(VIRTUAL_KEY(wp.0 as u16), VK_MENU | VK_LMENU | VK_RMENU) {
+                    invalidate(hwnd);
                     return LRESULT(0);
                 }
                 // file shortcuts of the list (copy, paste, delete, undo)
