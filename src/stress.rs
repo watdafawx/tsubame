@@ -14,7 +14,9 @@
 //!   at once; cached vs generated counts and times.
 //! - ctxmenu: 200 own-drawn context menus (`ctxui`), alternating one and
 //!   three items: each one opens, paints until every shell item is in (or the
-//!   failure row shows) and is dropped. Open to first paint and to all items,
+//!   failure row shows) and is dropped. Open to first paint, to the shell's top
+//!   level and to all items (lazy, CM6: the top level and the first lazy
+//!   submenu, opened like a hover would; `TSUBAME_CTX_EAGER=1`: the whole tree),
 //!   and the same counters as `menu`, to compare growth with the native path.
 
 use crate::shellui::{ShellUi, pcts};
@@ -87,10 +89,15 @@ pub struct Stress {
     memdiag: String,
     menus: usize,
     ctx_first_us: Vec<u64>,
+    ctx_top_us: Vec<u64>,
     ctx_all_us: Vec<u64>,
     ctx_rows: Vec<u64>,
     ctx_failed: usize,
     ctx_at: Option<Instant>,
+    /// lazy submenus filled (CM6: one per menu, like a hover) and their
+    /// request-to-answer times
+    ctx_sub_us: Vec<u64>,
+    ctx_sub_asked: bool,
 }
 
 impl Stress {
@@ -98,10 +105,13 @@ impl Stress {
         Stress {
             mode,
             ctx_first_us: Vec::new(),
+            ctx_top_us: Vec::new(),
             ctx_all_us: Vec::new(),
             ctx_rows: Vec::new(),
             ctx_failed: 0,
             ctx_at: None,
+            ctx_sub_us: Vec::new(),
+            ctx_sub_asked: false,
             memdiag: String::new(),
             menus: std::env::var("TSUBAME_STRESS_MENUS").ok().and_then(|s| s.parse().ok()).filter(|n| (200..=10000).contains(n)).unwrap_or(MENUS),
             state: State::Wait(Instant::now() + WARMUP),
@@ -202,11 +212,30 @@ impl Stress {
                 (false, false)
             }
             State::CtxRun { i } => {
-                if let Some(c) = view.ctx.as_ref() {
-                    if c.first_paint.is_none() || (c.all_items.is_none() && c.model.error.is_none() && self.ctx_at.is_some_and(|t| t.elapsed() < Duration::from_secs(6))) {
+                if let Some(c) = view.ctx.as_mut() {
+                    let in_time = self.ctx_at.is_some_and(|t| t.elapsed() < Duration::from_secs(6));
+                    if c.first_paint.is_none() || (c.all_items.is_none() && c.model.error.is_none() && in_time) {
                         return (false, false);
                     }
+                    // the lazy path: fill one submenu, as a hover would
+                    if c.all_items.is_some() && in_time {
+                        if !self.ctx_sub_asked {
+                            self.ctx_sub_asked = true;
+                            if c.expand_first() {
+                                return (false, true);
+                            }
+                        } else if c.sub_pending() {
+                            return (false, true);
+                        }
+                    }
+                    if self.ctx_sub_asked
+                        && let Some(t) = c.sub_latency
+                    {
+                        self.ctx_sub_us.push(t.as_micros() as u64);
+                    }
+                    self.ctx_sub_asked = false;
                     if let Some(t) = c.first_paint { self.ctx_first_us.push(t.as_micros() as u64); }
+                    if let Some(t) = c.top_items { self.ctx_top_us.push(t.as_micros() as u64); }
                     if let Some(t) = c.all_items { self.ctx_all_us.push(t.as_micros() as u64); } else { self.ctx_failed += 1; }
                     self.ctx_rows.push(c.model.native.len() as u64);
                     view.ctx = None;
@@ -455,10 +484,13 @@ impl Stress {
         match self.mode {
             Mode::CtxMenu => {
                 line(format!("own first paint: {}", pcts(&self.ctx_first_us)));
+                line(format!("own top level: {}", pcts(&self.ctx_top_us)));
                 line(format!("own all items: {}", pcts(&self.ctx_all_us)));
                 line(format!("own warm first paint: {}", pcts(self.ctx_first_us.get(1..).unwrap_or_default())));
+                line(format!("own warm top level: {}", pcts(self.ctx_top_us.get(1..).unwrap_or_default())));
                 line(format!("own warm all items: {}", pcts(self.ctx_all_us.get(1..).unwrap_or_default())));
-                line(format!("own cold first/all us: {:?}/{:?}; failed: {}", self.ctx_first_us.first(), self.ctx_all_us.first(), self.ctx_failed));
+                line(format!("own lazy submenu (request to answer, {} filled): {}", self.ctx_sub_us.len(), pcts(&self.ctx_sub_us)));
+                line(format!("own cold first/top/all us: {:?}/{:?}/{:?}; failed: {}", self.ctx_first_us.first(), self.ctx_top_us.first(), self.ctx_all_us.first(), self.ctx_failed));
             }
             Mode::Menu | Mode::Clip => {
                 if self.mode == Mode::Clip {

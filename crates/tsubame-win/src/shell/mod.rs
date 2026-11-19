@@ -433,7 +433,16 @@ fn worker(idx: usize, lane: u8, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sende
                     }
                     true
                 };
-                let waiting = || st.kind.store(K_MENU, Relaxed);
+                // true: built, waits for the user (not a hang); false: back to
+                // shell work that can hang (a lazy submenu), clock restarts
+                let waiting = |idle: bool| {
+                    if idle {
+                        st.kind.store(K_MENU, Relaxed);
+                    } else {
+                        st.busy_since.store(sh.now_ms(), Release);
+                        st.kind.store(K_CTX, Relaxed);
+                    }
+                };
                 let payload = run(job.req, host, HWND(sh.hwnd as *mut _), &emit, &waiting);
                 let work_us = t.elapsed().as_micros() as u64;
                 st.busy_since.store(0, Release);
@@ -464,7 +473,7 @@ fn worker(idx: usize, lane: u8, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sende
     }
 }
 
-fn run(req: Request, host: Option<HWND>, ui: HWND, emit: &dyn Fn(Payload) -> bool, waiting: &dyn Fn()) -> Payload {
+fn run(req: Request, host: Option<HWND>, ui: HWND, emit: &dyn Fn(Payload) -> bool, waiting: &dyn Fn(bool)) -> Payload {
     match req {
         Request::Icon { src, size } => Payload::Icon(icon::get(&src, size)),
         Request::Thumb { path, size, cache_only } => thumb::get(&path, size, cache_only),

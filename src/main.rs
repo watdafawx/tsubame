@@ -626,10 +626,11 @@ fn arm_watch(hwnd: HWND, a: &mut App) {
     }
 }
 
-/// The own-drawn menu's loading line animates only while shell items are
-/// still coming (and until the 3 s failure switch); no menu, no timer.
+/// The own-drawn menu ticks only while shell items or a submenu are still
+/// coming (until the 3 s failure switch) or a hover delay runs; an idle menu
+/// and no menu: no timer.
 fn arm_ctx(hwnd: HWND, a: &mut App) {
-    let want = a.view.ctx.as_ref().is_some_and(|c| c.loading());
+    let want = a.view.ctx.as_ref().is_some_and(|c| c.ticking());
     if want && !a.ctx_timer {
         unsafe { SetTimer(Some(hwnd), ctxui::TIMER_ID, ctxui::TICK_MS, None) };
         a.ctx_timer = true;
@@ -1489,9 +1490,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_KEYUP | WM_SYSKEYUP => {
+                // the own menu underlines accelerators while Alt is held:
+                // releasing it repaints
+                if matches!(VIRTUAL_KEY(wp.0 as u16), VK_MENU | VK_LMENU | VK_RMENU) {
+                    invalidate(hwnd);
+                }
                 push(hwnd, Event::KeyUp { key: map_key(wp.0 as u16), mods: mods() });
                 LRESULT(0)
             }
+            // Alt+letter while the own menu is open is its accelerator (it
+            // came as WM_SYSKEYDOWN); DefWindowProc would only beep
+            WM_SYSCHAR if with(|a| a.view.ctx.as_ref().is_some_and(|c| c.open)).unwrap_or(false) => LRESULT(0),
             // text as characters (injected VK_PACKET input and every layout
             // arrive here); a surrogate pair comes as two messages
             WM_CHAR => {

@@ -6,17 +6,27 @@
 //! the menu is open. Rows are identified by a key, not an index: focus and
 //! the open submenu stay on the same row when rows are inserted.
 //!
-//! Hooks for later cards (see the doc): accelerators and type-to-filter get
-//! the `Char` events the menu swallows now (CM4), submenus open on hover at
-//! once (CM4 will add hover delay and safe triangle), the wheel is
-//! swallowed (CM4), a submenu with no rows yet shows "Loading…" (CM6 fills
-//! it lazily).
+//! Input (CM4): typed text filters the menu (an inline field at the top,
+//! submenu children searched too), Alt + letter runs accelerators, the wheel
+//! and PageUp/PageDown scroll tall menus, submenus open after [`OPEN_MS`] of
+//! hover and close [`CLOSE_MS`] after the pointer left them, unless it is
+//! heading for the open submenu (the safe triangle). Timing is pure: the app
+//! passes the clock in [`MenuStyle::now_ms`] and runs a tick only while
+//! [`MenuState::deadline`] is set. A submenu whose rows are not in yet shows
+//! "Loading…" (CM6 fills it lazily, [`MenuSource::sub_state`]).
 
 use crate::canvas::{Canvas, Font, f};
 use crate::geom::{Pt, Rect};
 use crate::input::{Button, Event, Key};
 use crate::theme::Theme;
 use crate::ui::{Id, Sense, Ui};
+
+/// Hover time before a submenu opens (the mock's state 5c).
+pub const OPEN_MS: u64 = 150;
+/// Time an open submenu stays after the pointer moved to another row.
+pub const CLOSE_MS: u64 = 250;
+/// How deep the filter searches submenus (the shell model's depth cap).
+const FILTER_DEPTH: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RowKind {
@@ -81,6 +91,24 @@ impl MenuRow {
             RowKind::Separator => false,
         }
     }
+    /// The accelerator letter, lower-case.
+    pub fn accel_char(&self) -> Option<char> {
+        let a = self.accel?;
+        let c = self.label.get(a..)?.chars().next()?;
+        c.to_lowercase().next()
+    }
+}
+
+/// What an empty submenu shows (CM6: its rows are fetched when it opens).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SubLoad {
+    /// the rows are in; no rows means an empty submenu
+    #[default]
+    Ready,
+    /// "Loading…"
+    Loading,
+    /// the rows did not come: a failure row with Retry
+    Failed,
 }
 
 /// Where the rows come from.
@@ -90,18 +118,141 @@ pub trait MenuSource {
     fn rows(&self, path: &[u64], out: &mut Vec<MenuRow>);
     /// Pixels of an image icon: (w, h, premultiplied BGRA).
     fn icon(&self, key: u64) -> Option<(u32, u32, &[u32])>;
+    /// The state of the submenu at `path` while it has no rows.
+    fn sub_state(&self, _path: &[u64]) -> SubLoad {
+        SubLoad::Ready
+    }
 }
 
 /// Per-frame inputs that are not rows.
 #[derive(Clone, Copy, Debug)]
 pub struct MenuStyle {
-    /// Alt is held (access keys themselves remain CM4).
+    /// Alt is held: accelerators are underlined
     pub alt: bool,
     /// where the menu may go (the window's client area)
     pub bounds: Rect,
     /// the loading line's phase (0..1) while shell rows are still coming;
     /// None: no line
     pub loading: Option<f32>,
+    /// a monotonic clock in ms (submenu hover timing)
+    pub now_ms: u64,
+}
+
+/// Submenu hover timing of one level, a state machine over a clock.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubTimer {
+    /// a submenu row is hovered: (its key, when it opens)
+    pub open_at: Option<(u64, u64)>,
+    /// the open child closes then (the pointer went to another row)
+    pub close_at: Option<u64>,
+}
+
+/// One frame's pointer facts for [`SubTimer::step`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HoverIn {
+    pub now: u64,
+    /// the pointer moved since the last frame
+    pub moved: bool,
+    /// last frame's pointer (the safe triangle's apex)
+    pub prev: Option<Pt>,
+    pub pointer: Option<Pt>,
+    /// the focusable row under the pointer: (key, opens a submenu)
+    pub hovered: Option<(u64, bool)>,
+    /// the row whose submenu is open
+    pub open: Option<u64>,
+    /// the open submenu's rect
+    pub child: Option<Rect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoverAct {
+    /// open this row's submenu (closing another one)
+    Open(u64),
+    /// close the open submenu
+    Close,
+}
+
+/// Inside the triangle from `apex` to the near corners of `sub` (with a few
+/// DIPs of slack above and below): the pointer is heading for the submenu.
+pub fn in_safe_triangle(apex: Pt, p: Pt, sub: Rect) -> bool {
+    const SLACK: f32 = 4.0;
+    if sub.w <= 0.0 || sub.h <= 0.0 {
+        return false;
+    }
+    let nx = if sub.x >= apex.x { sub.x } else { sub.r() };
+    let (b, c) = (Pt::new(nx, sub.y - SLACK), Pt::new(nx, sub.b() + SLACK));
+    let cross = |o: Pt, a: Pt, q: Pt| (a.x - o.x) * (q.y - o.y) - (a.y - o.y) * (q.x - o.x);
+    let (d1, d2, d3) = (cross(apex, b, p), cross(b, c, p), cross(c, apex, p));
+    let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(neg && pos)
+}
+
+impl SubTimer {
+    /// Feeds one frame. Returns what to do now, and whether the pointer is
+    /// heading for the open submenu (hover must not move the focus then).
+    pub fn step(&mut self, i: &HoverIn) -> (Option<HoverAct>, bool) {
+        let in_child = matches!((i.pointer, i.child), (Some(p), Some(c)) if c.contains_pt(p));
+        if in_child {
+            *self = SubTimer::default();
+            return (None, false);
+        }
+        let over_open = i.open.is_some() && i.hovered.map(|h| h.0) == i.open;
+        let aiming = !over_open && i.moved && matches!((i.open, i.prev, i.pointer, i.child), (Some(_), Some(a), Some(p), Some(c)) if in_safe_triangle(a, p, c));
+        if aiming {
+            // keep the submenu while the pointer travels; a pause on the
+            // way lets the row under it win after CLOSE_MS
+            self.open_at = None;
+            self.close_at = Some(i.now + CLOSE_MS);
+            return (None, true);
+        }
+        match i.hovered {
+            _ if over_open => *self = SubTimer::default(),
+            Some((k, true)) => {
+                if self.open_at.map(|o| o.0) != Some(k) {
+                    self.open_at = Some((k, i.now + OPEN_MS));
+                }
+                if i.open.is_some() && self.close_at.is_none() {
+                    self.close_at = Some(i.now + CLOSE_MS);
+                }
+            }
+            Some((_, false)) => {
+                self.open_at = None;
+                if i.open.is_some() && self.close_at.is_none() {
+                    self.close_at = Some(i.now + CLOSE_MS);
+                }
+            }
+            // outside every row (another level, outside the menu, or a
+            // stationary pointer under keyboard focus): nothing changes
+            None => {
+                if i.moved || i.pointer.is_none() {
+                    *self = SubTimer::default();
+                }
+            }
+        }
+        if let Some((k, at)) = self.open_at
+            && i.now >= at
+        {
+            *self = SubTimer::default();
+            return (Some(HoverAct::Open(k)), false);
+        }
+        if let Some(at) = self.close_at
+            && i.now >= at
+            && i.open.is_some()
+        {
+            self.close_at = None;
+            return (Some(HoverAct::Close), false);
+        }
+        (None, false)
+    }
+
+    /// When the next frame is needed (the app's tick).
+    pub fn deadline(&self) -> Option<u64> {
+        match (self.open_at.map(|o| o.1), self.close_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// One open level.
@@ -119,6 +270,7 @@ pub struct Level {
     pub open: Option<u64>,
     /// the parent row's rect (submenus are placed against it)
     pub parent_row: Rect,
+    pub timer: SubTimer,
     reveal: bool,
     focus_first: bool,
     strip: f32,
@@ -133,13 +285,44 @@ pub struct MenuState {
     /// underlined and the first row has the focus
     pub keyboard: bool,
     pub levels: Vec<Level>,
+    /// the type-to-filter text (empty: no filter)
+    pub filter: String,
     opened: bool,
     pointer: Option<Pt>,
+    /// width when the filter started (the menu does not shrink while typing)
+    filter_w: f32,
+    /// the filter text changed: focus the first match
+    filter_reset: bool,
 }
 
 impl MenuState {
     pub fn new(anchor: Pt, keyboard: bool) -> MenuState {
-        MenuState { anchor, keyboard, levels: Vec::new(), opened: false, pointer: None }
+        MenuState { anchor, keyboard, ..Default::default() }
+    }
+
+    /// When the menu needs its next frame without input (a submenu hover
+    /// delay). None: no timer.
+    pub fn deadline(&self) -> Option<u64> {
+        self.levels.iter().filter_map(|l| l.timer.deadline()).min()
+    }
+
+    /// Submenu paths whose rows are wanted now: the open ones and the one the
+    /// pointer is about to open (CM6 fetches them).
+    pub fn wanted(&self) -> Vec<Vec<u64>> {
+        let path = |lv: usize| -> Vec<u64> { self.levels.get(1..=lv).map(|l| l.iter().map(|l| l.key).collect()).unwrap_or_default() };
+        let mut v: Vec<Vec<u64>> = (1..self.levels.len()).map(path).collect();
+        for (lv, l) in self.levels.iter().enumerate() {
+            if let Some((k, _)) = l.timer.open_at {
+                let mut p = path(lv);
+                p.push(k);
+                v.push(p);
+            }
+        }
+        v
+    }
+
+    pub fn filtering(&self) -> bool {
+        !self.filter.is_empty()
     }
 }
 
@@ -220,15 +403,31 @@ impl Metrics {
     fn retry_w(&self, c: &mut dyn Canvas) -> f32 {
         c.measure(RETRY, self.small) + 14.0 * self.sc
     }
+    /// The filter field's height (the mock: a row + 4) and the gap below it.
+    fn field_h(&self) -> f32 {
+        self.row + 4.0
+    }
+    fn header(&self) -> f32 {
+        self.field_h() + self.pad
+    }
 }
 
 const RETRY: &str = "Retry";
 const LOADING: &str = "Loading\u{2026}";
+const EMPTY: &str = "(Empty)";
+const SUB_FAILED: &str = "Could not load";
+const NO_MATCH: &str = "No matching items";
+const PARENT_SEP: &str = " \u{203A} ";
 const G_CHECK: char = '\u{E73E}';
 const G_ARROW: char = '\u{E76C}';
 const G_UP: char = '\u{E70E}';
 const G_DOWN: char = '\u{E70D}';
 const G_WARN: char = '\u{E7BA}';
+const G_SEARCH: char = '\u{E721}';
+/// Keys of rows the widget makes itself.
+const KEY_LOADING: u64 = 0x10ad_0001;
+const KEY_SUB_FAILED: u64 = 0x10ad_0002;
+const KEY_NO_MATCH: u64 = 0x10ad_0003;
 
 /// Y offset of each row from the content top; returns the content height.
 pub fn layout(rows: &[MenuRow], m: &Metrics, out: &mut Vec<f32>) -> f32 {
@@ -315,6 +514,11 @@ pub fn clamp_scroll(scroll: f32, content: f32, view: f32) -> f32 {
     scroll.clamp(0.0, (content - view).max(0.0))
 }
 
+/// The scroll after `dy` wheel notches (+1 = up), `step` DIPs per notch.
+pub fn wheel_scroll(scroll: f32, dy: f32, step: f32, content: f32, view: f32) -> f32 {
+    clamp_scroll(scroll - dy * step, content, view)
+}
+
 /// The scroll that shows the row at `y..y+h` in a `view` tall window.
 pub fn scroll_to_show(scroll: f32, y: f32, h: f32, view: f32) -> f32 {
     if y < scroll {
@@ -346,22 +550,138 @@ pub fn edge_focus(rows: &[MenuRow], first: bool) -> Option<usize> {
     if first { rows.iter().position(MenuRow::focusable) } else { rows.iter().rposition(MenuRow::focusable) }
 }
 
+/// PageDown / PageUp: `page` rows on (no wrap), then the nearest focusable
+/// row not past that point; the last (first) one when the page runs out.
+pub fn page_focus(rows: &[MenuRow], from: Option<usize>, page: usize, down: bool) -> Option<usize> {
+    let n = rows.len();
+    if n == 0 {
+        return None;
+    }
+    let page = page.max(1);
+    let Some(c) = from else { return edge_focus(rows, down) };
+    let ok = |i: &usize| rows[*i].focusable();
+    if down {
+        let t = c.saturating_add(page).min(n - 1);
+        (c + 1..=t).rev().find(ok).or_else(|| (t + 1..n).find(ok)).or(Some(c))
+    } else {
+        let t = c.saturating_sub(page);
+        (t..c).find(ok).or_else(|| (0..t).rev().find(ok)).or(Some(c))
+    }
+}
+
+/// Alt + `ch`: the row with that accelerator. One match: (it, run it);
+/// several: (the next one after `from`, cycling, only focus it).
+pub fn accel_target(rows: &[MenuRow], from: Option<usize>, ch: char) -> Option<(usize, bool)> {
+    let ch = ch.to_lowercase().next()?;
+    let hits: Vec<usize> = rows.iter().enumerate().filter(|(_, r)| r.kind == RowKind::Item && r.focusable() && r.accel_char() == Some(ch)).map(|(i, _)| i).collect();
+    match hits.len() {
+        0 => None,
+        1 => Some((hits[0], true)),
+        _ => Some((hits.iter().copied().find(|&i| from.is_none_or(|c| i > c)).unwrap_or(hits[0]), false)),
+    }
+}
+
+/// Case-insensitive substring: the byte range of the first match.
+pub fn find_ci(label: &str, q: &str) -> Option<(usize, usize)> {
+    let low = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let qc: Vec<char> = q.chars().map(low).collect();
+    let lc: Vec<(usize, char)> = label.char_indices().map(|(i, c)| (i, low(c))).collect();
+    if qc.is_empty() || qc.len() > lc.len() {
+        return None;
+    }
+    (0..=lc.len() - qc.len()).find(|&s| (0..qc.len()).all(|k| lc[s + k].1 == qc[k])).map(|s| (lc[s].0, lc.get(s + qc.len()).map_or(label.len(), |x| x.0)))
+}
+
+/// A row of the filtered list: where it lives and how it is marked.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Found {
+    /// row keys from the top level to it
+    pub path: Vec<u64>,
+    /// its parents' labels ("Send to"), empty at the top level
+    pub prefix: String,
+    /// the matched bytes of the label
+    pub hl: Option<(usize, usize)>,
+}
+
+fn path_key(path: &[u64]) -> u64 {
+    if let [k] = path {
+        return *k;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for k in path {
+        h = (h ^ k).wrapping_mul(0x100_0000_01b3);
+    }
+    h | 1
+}
+
+/// The rows matching `q`, the top level and every submenu that has rows
+/// (depth first, as the menu reads), with their paths. Separators, failure
+/// rows and empty submenus drop out.
+pub fn filter_rows(src: &dyn MenuSource, q: &str, rows: &mut Vec<MenuRow>, found: &mut Vec<Found>) {
+    fn walk(src: &dyn MenuSource, q: &str, path: &mut Vec<u64>, prefix: &str, rows: &mut Vec<MenuRow>, found: &mut Vec<Found>) {
+        let mut level = Vec::new();
+        src.rows(path, &mut level);
+        for r in level {
+            if r.kind != RowKind::Item {
+                continue;
+            }
+            path.push(r.key);
+            if let Some(hl) = find_ci(&r.label, q) {
+                rows.push(MenuRow { key: path_key(path), ..r.clone() });
+                found.push(Found { path: path.clone(), prefix: prefix.to_string(), hl: Some(hl) });
+            }
+            if r.submenu && path.len() < FILTER_DEPTH {
+                let pre = if prefix.is_empty() { r.label.clone() } else { format!("{prefix}{PARENT_SEP}{}", r.label) };
+                walk(src, q, path, &pre, rows, found);
+            }
+            path.pop();
+        }
+    }
+    rows.clear();
+    found.clear();
+    walk(src, q, &mut Vec::new(), "", rows, found);
+}
+
 // ---- the widget ----------------------------------------------------------
 
 enum Act {
     Pick(Vec<u64>),
     Retry,
     Open(usize, u64, bool),
+    /// a submenu row of the filtered list: leave the filter, open it
+    OpenPath(Vec<u64>),
+}
+
+fn path_to(st: &MenuState, lv: usize) -> Vec<u64> {
+    st.levels[1..=lv].iter().map(|l| l.key).collect()
 }
 
 fn rows_at(src: &dyn MenuSource, st: &MenuState, lv: usize, out: &mut Vec<MenuRow>) {
-    let path: Vec<u64> = st.levels[1..=lv].iter().map(|l| l.key).collect();
+    let path = path_to(st, lv);
     out.clear();
     src.rows(&path, out);
     if lv > 0 && out.is_empty() {
-        // CM6: a lazy submenu that has not been filled yet
-        out.push(MenuRow { disabled: true, ..MenuRow::item(0, LOADING) });
+        out.push(match src.sub_state(&path) {
+            SubLoad::Loading => MenuRow { disabled: true, ..MenuRow::item(KEY_LOADING, LOADING) },
+            SubLoad::Failed => MenuRow::status(KEY_SUB_FAILED, SUB_FAILED),
+            SubLoad::Ready => MenuRow { disabled: true, ..MenuRow::item(KEY_LOADING, EMPTY) },
+        });
     }
+}
+
+/// The rows level `lv` shows: the filtered list at the top while filtering
+/// (`found` parallel to it), else the level's own rows.
+fn level_rows(src: &dyn MenuSource, st: &MenuState, lv: usize, rows: &mut Vec<MenuRow>, found: &mut Vec<Found>) {
+    if lv == 0 && st.filtering() {
+        filter_rows(src, &st.filter, rows, found);
+        if rows.is_empty() {
+            rows.push(MenuRow { disabled: true, icon: RowIcon::Glyph(G_SEARCH), ..MenuRow::item(KEY_NO_MATCH, NO_MATCH) });
+            found.push(Found::default());
+        }
+        return;
+    }
+    found.clear();
+    rows_at(src, st, lv, rows);
 }
 
 fn index_of(rows: &[MenuRow], key: Option<u64>) -> Option<usize> {
@@ -369,15 +689,26 @@ fn index_of(rows: &[MenuRow], key: Option<u64>) -> Option<usize> {
 }
 
 /// What activating row `i` of level `lv` does.
-fn activate(st: &MenuState, rows: &[MenuRow], lv: usize, i: usize, kb: bool) -> Option<Act> {
+fn activate(st: &MenuState, rows: &[MenuRow], found: &[Found], lv: usize, i: usize, kb: bool) -> Option<Act> {
     let r = rows.get(i)?;
+    let filtered = lv == 0 && st.filtering();
     match r.kind {
         RowKind::Separator => None,
         RowKind::Status => Some(Act::Retry),
         RowKind::Item if r.disabled => None,
+        RowKind::Item if filtered => {
+            let p = found.get(i)?.path.clone();
+            if p.is_empty() {
+                None
+            } else if r.submenu {
+                Some(Act::OpenPath(p))
+            } else {
+                Some(Act::Pick(p))
+            }
+        }
         RowKind::Item if r.submenu => Some(Act::Open(lv, r.key, kb)),
         RowKind::Item => {
-            let mut path: Vec<u64> = st.levels[1..=lv].iter().map(|l| l.key).collect();
+            let mut path = path_to(st, lv);
             path.push(r.key);
             Some(Act::Pick(path))
         }
@@ -390,9 +721,11 @@ fn close_above(ui: &mut Ui, id: Id, st: &mut MenuState, lv: usize) {
         st.levels.truncate(lv + 1);
     }
     st.levels[lv].open = None;
+    st.levels[lv].timer = SubTimer::default();
 }
 
 fn open_child(ui: &mut Ui, id: Id, st: &mut MenuState, lv: usize, key: u64, kb: bool) {
+    st.levels[lv].timer = SubTimer::default();
     if st.levels[lv].open == Some(key) && st.levels.len() > lv + 1 {
         if kb {
             st.levels[lv + 1].focus_first = true;
@@ -404,6 +737,41 @@ fn open_child(ui: &mut Ui, id: Id, st: &mut MenuState, lv: usize, key: u64, kb: 
     st.levels[lv].open = Some(key);
     st.levels.push(Level { key, kb, focus_first: kb, ..Default::default() });
     ui.open_popup(id.with(lv as u64 + 1));
+}
+
+/// Leaves the filter and opens the submenus down to `path` (its last key is
+/// a submenu row), keyboard style: its first row gets the focus.
+fn open_path(ui: &mut Ui, id: Id, st: &mut MenuState, path: &[u64]) {
+    st.filter.clear();
+    st.levels[0].scroll = 0.0;
+    close_above(ui, id, st, 0);
+    for (d, &k) in path.iter().enumerate() {
+        let l = &mut st.levels[d];
+        l.focus = Some(k);
+        l.kb = true;
+        l.reveal = true;
+        l.focus_first = false;
+        open_child(ui, id, st, d, k, true);
+    }
+}
+
+fn set_filter(ui: &mut Ui, id: Id, st: &mut MenuState, f: impl FnOnce(&mut String)) {
+    if !st.filtering() {
+        // the filter lives in the top popup: submenus close
+        close_above(ui, id, st, 0);
+        st.filter_w = st.levels[0].rect.w;
+    }
+    f(&mut st.filter);
+    st.filter_reset = true;
+    st.levels[0].scroll = 0.0;
+    st.levels[0].kb = true;
+    ui.request_repaint();
+}
+
+/// Rows a page of level `lv` holds (from its last rect).
+fn page_rows(st: &MenuState, lv: usize, m: &Metrics) -> usize {
+    let h = st.levels[lv].rect.h - 2.0 * m.inset() - 2.0 * st.levels[lv].strip;
+    if h <= 0.0 { usize::MAX } else { ((h / m.row).floor() as usize).max(1) }
 }
 
 /// The menu, drawn on top of everything (call it after all other widgets).
@@ -426,51 +794,87 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     // a click on a lower level closed the ones above it
     while st.levels.len() > 1 && !ui.is_popup_open(lid(st.levels.len() - 1)) {
         st.levels.pop();
-        st.levels.last_mut().unwrap().open = None;
+        let l = st.levels.last_mut().unwrap();
+        l.open = None;
+        l.timer = SubTimer::default();
     }
     ui.capture_keys = true;
     ui.set_focus(Some(lid(0)));
     let t = ui.theme;
     let pointer = ui.mouse_in().then(|| ui.mouse());
-    let moved = st.pointer != pointer;
+    let prev = st.pointer;
+    let moved = prev != pointer;
     st.pointer = pointer;
     let m = Metrics::new(&t);
+    let now = style.now_ms;
     let mut rows: Vec<MenuRow> = Vec::new();
+    let mut found: Vec<Found> = Vec::new();
 
     // keys go to the deepest level
     for (qi, ev) in ui.key_input(lid(0)) {
         ui.consume(qi);
-        // CM4: Char events feed accelerators and type-to-filter
-        let Event::KeyDown { key, .. } = ev else { continue };
         let lv = st.levels.len() - 1;
-        rows_at(src, st, lv, &mut rows);
+        let filtering = st.filtering();
+        let key = match ev {
+            // typed text filters (Space only once a filter is going)
+            Event::Char(ch) if !ch.is_control() && (ch != ' ' || filtering) => {
+                set_filter(ui, id, st, |s| s.push(ch));
+                continue;
+            }
+            Event::KeyDown { key, mods, .. } => (key, mods),
+            _ => continue,
+        };
+        level_rows(src, st, lv, &mut rows, &mut found);
         let cur = index_of(&rows, st.levels[lv].focus);
         let mut act = None;
         let mut to = None;
         match key {
-            Key::Down => to = next_focus(&rows, cur, true),
-            Key::Up => to = next_focus(&rows, cur, false),
-            Key::Home | Key::PageUp => to = edge_focus(&rows, true),
-            Key::End | Key::PageDown => to = edge_focus(&rows, false),
-            Key::Right => {
+            (Key::Char(ch), mods) if mods.alt && !mods.ctrl => {
+                if let Some((i, run)) = accel_target(&rows, cur, ch) {
+                    to = Some(i);
+                    if run {
+                        act = activate(st, &rows, &found, lv, i, true);
+                    }
+                }
+            }
+            (Key::Backspace, _) if filtering => set_filter(ui, id, st, |s| {
+                s.pop();
+            }),
+            (Key::Escape, _) if filtering => {
+                // first Esc: the whole menu again, focus kept if the row is
+                // a top-level one
+                st.filter.clear();
+                st.levels[0].scroll = 0.0;
+                st.levels[0].reveal = true;
+                ui.request_repaint();
+            }
+            (Key::Down, _) => to = next_focus(&rows, cur, true),
+            (Key::Up, _) => to = next_focus(&rows, cur, false),
+            (Key::Home, _) => to = edge_focus(&rows, true),
+            (Key::End, _) => to = edge_focus(&rows, false),
+            (Key::PageDown, _) => to = page_focus(&rows, cur, page_rows(st, lv, &m), true),
+            (Key::PageUp, _) => to = page_focus(&rows, cur, page_rows(st, lv, &m), false),
+            (Key::Right, _) => {
                 if let Some(i) = cur
                     && rows[i].submenu
                     && !rows[i].disabled
                 {
-                    act = Some(Act::Open(lv, rows[i].key, true));
+                    act = activate(st, &rows, &found, lv, i, true);
                 }
             }
-            Key::Left | Key::Escape if lv > 0 => {
+            (Key::Left | Key::Escape, _) if lv > 0 => {
                 close_above(ui, id, st, lv - 1);
                 st.levels[lv - 1].kb = true;
                 st.levels[lv - 1].reveal = true;
+                ui.request_repaint();
             }
-            Key::Escape => {
+            (Key::Escape, _) => {
                 ui.close_all_popups();
                 resp.closed = true;
                 return resp;
             }
-            Key::Enter | Key::Space => act = cur.and_then(|i| activate(st, &rows, lv, i, true)),
+            (Key::Enter, _) => act = cur.and_then(|i| activate(st, &rows, &found, lv, i, true)),
+            (Key::Space, _) if !filtering => act = cur.and_then(|i| activate(st, &rows, &found, lv, i, true)),
             _ => {}
         }
         if let Some(i) = to {
@@ -489,6 +893,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             }
             Some(Act::Retry) => resp.retry = true,
             Some(Act::Open(lv, k, kb)) => open_child(ui, id, st, lv, k, kb),
+            Some(Act::OpenPath(p)) => open_path(ui, id, st, &p),
             None => {}
         }
     }
@@ -496,7 +901,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     let mut ys = Vec::new();
     let mut lv = 0;
     while lv < st.levels.len() {
-        rows_at(src, st, lv, &mut rows);
+        level_rows(src, st, lv, &mut rows, &mut found);
         // the parent row went away (rows were replaced): close from here
         if lv > 0 {
             let mut up = Vec::new();
@@ -506,26 +911,48 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 break;
             }
         }
+        let filtering = lv == 0 && st.filtering();
+        if filtering {
+            // typing focuses the first match; rows arriving later never
+            // move the focus
+            let keep = !std::mem::take(&mut st.filter_reset) && index_of(&rows, st.levels[0].focus).is_some();
+            if !keep {
+                st.levels[0].focus = edge_focus(&rows, true).map(|i| rows[i].key);
+                st.levels[0].reveal = true;
+            }
+        }
         let content = layout(&rows, &m, &mut ys);
-        let w = width(c, &rows, &m);
-        let full_h = content + 2.0 * m.inset();
+        let hdr = if filtering { m.header() } else { 0.0 };
+        let w = if filtering { filtered_width(c, &rows, &found, &m).max(st.filter_w).min(m.max_w) } else { width(c, &rows, &m) };
+        let full_h = content + hdr + 2.0 * m.inset();
         let last = st.levels[lv].rect;
-        let frozen = lv == 0 && last.w > 0.0 && ui.mouse_in() && last.contains_pt(ui.mouse());
+        let frozen = lv == 0 && last.w > 0.0 && ((ui.mouse_in() && last.contains_pt(ui.mouse())) || st.filtering());
         let rect = if lv > 0 {
             place_sub(st.levels[lv].parent_row, w, full_h, style.bounds, m.keep)
         } else if frozen {
-            // rows arriving while the pointer is in the menu never move the
-            // rows under it: keep the top, grow down, scroll past the edge
+            // rows arriving while the pointer is in the menu (or the filter
+            // shrinking it) never move the rows under it: keep the top, grow
+            // down, scroll past the edge
             let b = style.bounds.b() - m.keep;
             let x = last.x.min((style.bounds.r() - m.keep - w).max(style.bounds.x + m.keep));
-            Rect::new(x, last.y, w, full_h.min((b - last.y).max(m.row + 2.0 * m.inset())))
+            Rect::new(x, last.y, w, full_h.min((b - last.y).max(m.row + hdr + 2.0 * m.inset())))
         } else {
             place(st.anchor, w, full_h, style.bounds, m.keep)
         };
         st.levels[lv].rect = rect;
-        if focus_first_pending(st, lv) {
-            st.levels[lv].focus = edge_focus(&rows, true).map(|i| rows[i].key);
+        // keyboard-opened submenus focus their first row once it is there
+        // (a lazy one shows "Loading…" first)
+        if st.levels[lv].focus_first
+            && let Some(i) = edge_focus(&rows, true)
+        {
+            st.levels[lv].focus_first = false;
+            st.levels[lv].focus = Some(rows[i].key);
             st.levels[lv].reveal = true;
+        }
+        // the keyboard's row went away (a submenu that failed to load): the
+        // keyboard lands on the first row left
+        if st.levels[lv].kb && st.levels[lv].focus.is_some() && index_of(&rows, st.levels[lv].focus).is_none() {
+            st.levels[lv].focus = edge_focus(&rows, true).map(|i| rows[i].key);
         }
         if !ui.popup_begin_r(c, lid(lv), rect, m.radius) {
             lv += 1;
@@ -533,24 +960,35 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         }
         let scrolling = full_h > rect.h + 0.5;
         let strip = if scrolling { m.strip } else { 0.0 };
-        let vp = Rect::new(rect.x + m.inset(), rect.y + m.inset() + strip, rect.w - 2.0 * m.inset(), (rect.h - 2.0 * m.inset() - 2.0 * strip).max(0.0));
-        // keep the keyboard focus visible
+        let top = rect.y + m.inset() + hdr;
+        let vp = Rect::new(rect.x + m.inset(), top + strip, rect.w - 2.0 * m.inset(), (rect.h - 2.0 * m.inset() - hdr - 2.0 * strip).max(0.0));
+        if filtering {
+            let n = found.iter().filter(|f| !f.path.is_empty()).count();
+            paint_field(c, &t, &m, Rect::new(rect.x + m.inset(), rect.y + m.inset(), rect.w - 2.0 * m.inset(), m.field_h()), &st.filter, n);
+        }
+        // the wheel over the menu scrolls it (and never reaches the list)
+        let wheel = ui.interact(lid(lv).child("wheel"), rect, Sense::hover().wheel()).wheel.1;
         let mut scroll = st.levels[lv].scroll;
         if frozen {
             // Adding chevrons must not shift an existing row under the pointer.
             scroll += strip - st.levels[lv].strip;
         }
         st.levels[lv].strip = strip;
+        // keep the keyboard focus visible
         if st.levels[lv].reveal {
             st.levels[lv].reveal = false;
             if let Some(i) = index_of(&rows, st.levels[lv].focus) {
                 scroll = scroll_to_show(scroll, ys[i], m.row_h(&rows[i]), vp.h);
             }
         }
+        if wheel != 0.0 && scrolling {
+            scroll = wheel_scroll(scroll, wheel, 3.0 * m.row, content, vp.h);
+            ui.request_repaint();
+        }
         scroll = clamp_scroll(scroll, content, vp.h);
         if scrolling {
             let step = 3.0 * m.row;
-            let up = Rect::new(vp.x, rect.y + m.inset(), vp.w, strip);
+            let up = Rect::new(vp.x, top, vp.w, strip);
             let down = Rect::new(vp.x, vp.b(), vp.w, strip);
             for (r, dir, glyph, id2) in [(up, -1.0, G_UP, "up"), (down, 1.0, G_DOWN, "down")] {
                 let it = ui.interact(lid(lv).child(id2), r, Sense::click());
@@ -576,9 +1014,40 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         {
             paint_loading(c, &t, rect, m.radius, ph);
         }
-        c.clip(vp);
+
+        // hover: the row under the pointer (not under a deeper level)
+        let over_deeper = pointer.is_some_and(|p| st.levels[lv + 1..].iter().any(|l| l.rect.contains_pt(p)));
+        let under = pointer.filter(|p| !over_deeper && vp.contains_pt(*p)).and_then(|p| (0..rows.len()).find(|&i| rows[i].kind != RowKind::Separator && p.y >= vp.y + ys[i] - scroll && p.y < vp.y + ys[i] - scroll + m.row_h(&rows[i])));
+        // a stationary pointer cannot take the keyboard's focus
+        let fresh = moved || !st.levels[lv].kb;
+        let hovered = under.filter(|&i| fresh && rows[i].focusable()).map(|i| (rows[i].key, rows[i].submenu && !rows[i].disabled && !filtering));
+        let child = st.levels.get(lv + 1).map(|l| l.rect);
+        let open = st.levels[lv].open;
+        let (hact, aiming) = st.levels[lv].timer.step(&HoverIn { now, moved, prev, pointer, hovered, open, child });
         let mut act = None;
+        if let Some((k, _)) = hovered
+            && !aiming
+        {
+            let l = &mut st.levels[lv];
+            if l.focus != Some(k) || l.kb {
+                l.focus = Some(k);
+                l.kb = false;
+                ui.request_repaint();
+            }
+            st.levels[lv + 1..].iter_mut().for_each(|l| l.kb = false);
+        }
+        match hact {
+            Some(HoverAct::Open(k)) => act = Some(Act::Open(lv, k, false)),
+            Some(HoverAct::Close) => {
+                close_above(ui, id, st, lv);
+                ui.request_repaint();
+            }
+            None => {}
+        }
+
+        c.clip(vp);
         let kb_ring = st.levels[lv].kb;
+        let underline = (st.keyboard && !st.filtering()) || style.alt;
         for (i, row) in rows.iter().enumerate() {
             let r = Rect::new(vp.x, vp.y + ys[i] - scroll, vp.w, m.row_h(row));
             if r.b() <= vp.y || r.y >= vp.b() {
@@ -590,35 +1059,21 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 continue;
             }
             let it = ui.interact(lid(lv).with(row.key ^ 0x5eed), r.intersect(&vp), Sense::click());
-            let lvl = &st.levels[lv];
-            if it.hovered && row.focusable() && (moved || !lvl.kb) && (lvl.focus != Some(row.key) || lvl.kb) {
-                let l = &mut st.levels[lv];
-                l.focus = Some(row.key);
-                l.kb = false;
-                ui.request_repaint();
-            }
-            if it.hovered && row.focusable() && (moved || !st.levels[lv].kb) {
-                // CM4: hover delay and safe triangle go here
-                if row.submenu {
-                    if st.levels[lv].open != Some(row.key) {
-                        act = Some(Act::Open(lv, row.key, false));
-                    }
-                } else if st.levels[lv].open.is_some() {
-                    close_above(ui, id, st, lv);
-                }
-                st.levels[lv + 1..].iter_mut().for_each(|l| l.kb = false);
-            }
-            // Right-click is reserved for CM8 editing, never invocation.
+            // a click opens a submenu at once; right-click is reserved for
+            // CM8 editing, never invocation
             if it.clicked == Some(Button::Left) {
-                act = activate(st, &rows, lv, i, false).or(act);
+                act = activate(st, &rows, &found, lv, i, false).or(act);
             }
             let lvl = &st.levels[lv];
+            let fd = found.get(i);
             let state = RowPaint {
                 focused: lvl.focus == Some(row.key) && row.focusable(),
                 ring: kb_ring && lvl.focus == Some(row.key),
                 pressed: it.active && row.kind == RowKind::Item && !row.disabled,
                 open: lvl.open == Some(row.key),
-                underline: st.keyboard || style.alt,
+                underline,
+                prefix: fd.map(|f| f.prefix.as_str()).filter(|p| !p.is_empty()),
+                hl: fd.and_then(|f| f.hl),
             };
             if row.submenu && state.open && st.levels.len() > lv + 1 {
                 st.levels[lv + 1].parent_row = r;
@@ -643,6 +1098,11 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 }
                 ui.request_repaint();
             }
+            Some(Act::OpenPath(p)) => {
+                open_path(ui, id, st, &p);
+                ui.request_repaint();
+                break;
+            }
             None => {}
         }
         lv += 1;
@@ -650,8 +1110,42 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     resp
 }
 
-fn focus_first_pending(st: &mut MenuState, lv: usize) -> bool {
-    std::mem::take(&mut st.levels[lv].focus_first)
+/// Width of the filtered list: parents' labels count too.
+fn filtered_width(c: &mut dyn Canvas, rows: &[MenuRow], found: &[Found], m: &Metrics) -> f32 {
+    let shown: Vec<MenuRow> = rows
+        .iter()
+        .zip(found)
+        .map(|(r, f)| if f.prefix.is_empty() { r.clone() } else { MenuRow { label: format!("{}{PARENT_SEP}{}", f.prefix, r.label), ..r.clone() } })
+        .collect();
+    width(c, &shown, m)
+}
+
+/// The inline filter field (the mock's state 5d): search glyph, the text
+/// with a steady caret (no blink timer), the match count and an Esc cap.
+fn paint_field(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, text: &str, n: usize) {
+    c.round(r, m.row_radius, t.field);
+    c.round_stroke(r, m.row_radius, t.focus, 1.0);
+    let mid = r.center().y;
+    let gs = (14.0 * m.sc).round();
+    c.text(&G_SEARCH.to_string(), Rect::new(r.x + 6.0, mid - gs / 2.0, gs, gs), f(gs * 0.9).icon().c(), t.text_dim);
+    let mut right = r.r() - 6.0;
+    let cap = "Esc";
+    let cw = c.measure(cap, m.small).ceil() + 10.0 * m.sc;
+    let ch = (16.0 * m.sc).round();
+    let cr = Rect::new(right - cw, mid - ch / 2.0, cw, ch);
+    c.round_stroke(cr, t.radius_sm, t.popup_border, 1.0);
+    c.text(cap, cr, m.small.c(), t.text_dim);
+    right = cr.x - m.gap;
+    let count = if n == 1 { "1 match".to_string() } else { format!("{n} matches") };
+    let nw = c.measure(&count, m.small).ceil() + 1.0;
+    c.text(&count, Rect::new(right - nw, r.y, nw, r.h), m.small, t.text_dim);
+    right -= nw + m.gap;
+    let tx = r.x + 6.0 + gs + 6.0;
+    let tr = Rect::new(tx, r.y, (right - tx).max(0.0), r.h);
+    c.text(text, tr, m.font, t.text);
+    let cx = (tx + c.measure(text, m.font)).min(tr.r()).round() + 0.5;
+    let half = (m.font.size() * 0.6).round();
+    c.line(cx, mid - half, cx, mid + half, t.text, 1.0);
 }
 
 fn paint_loading(c: &mut dyn Canvas, t: &Theme, rect: Rect, radius: f32, phase: f32) {
@@ -668,12 +1162,16 @@ fn paint_loading(c: &mut dyn Canvas, t: &Theme, rect: Rect, radius: f32, phase: 
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct RowPaint {
+struct RowPaint<'a> {
     focused: bool,
     ring: bool,
     pressed: bool,
     open: bool,
     underline: bool,
+    /// filtered list: the parents' labels, dim before the label
+    prefix: Option<&'a str>,
+    /// filtered list: the matched bytes of the label
+    hl: Option<(usize, usize)>,
 }
 
 fn paint_row(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow, s: RowPaint, src: &dyn MenuSource) {
@@ -750,10 +1248,25 @@ fn paint_row(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow,
         right -= sw + 2.0 * m.gap;
     }
     let font = if row.default { m.font.b() } else { m.font };
-    let lx = r.x + m.label_x();
+    let mut lx = r.x + m.label_x();
+    if let Some(pre) = s.prefix {
+        let pre = format!("{pre}{PARENT_SEP}");
+        let pw = c.measure(&pre, m.font);
+        c.text(&pre, Rect::new(lx, r.y, (right - lx).max(0.0), r.h), m.font, if s.pressed { t.on_accent } else { t.text_dim });
+        lx += pw;
+    }
     let lr = Rect::new(lx, r.y, (right - lx).max(0.0), r.h);
+    if let Some((a, b)) = s.hl
+        && b <= row.label.len()
+        && row.label.is_char_boundary(a)
+        && row.label.is_char_boundary(b)
+    {
+        let (xa, xb) = (c.caret_x(&row.label, font, a), c.caret_x(&row.label, font, b));
+        let hr = Rect::new(lx + xa, r.y + 3.0, (xb - xa).min(lr.r() - lx - xa).max(0.0), r.h - 6.0);
+        c.round_a(hr, 2.0, t.highlight, 0.55);
+    }
     c.text(&row.label, lr, font, fg);
-    // CM4: also while Alt is held
+    // only while Alt is held or after a keyboard open (CM4)
     if s.underline
         && let Some(a) = row.accel
         && a < row.label.len()
@@ -888,24 +1401,33 @@ mod tests {
     struct Src {
         top: Vec<MenuRow>,
         sub: Vec<MenuRow>,
+        /// rows of [9, 93] ("Send to › More")
+        deep: Vec<MenuRow>,
+        sub_state: SubLoad,
     }
     impl MenuSource for Src {
         fn rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
             match path {
                 [] => out.extend(self.top.iter().cloned()),
                 [9] => out.extend(self.sub.iter().cloned()),
+                [9, 93] => out.extend(self.deep.iter().cloned()),
                 _ => {}
             }
         }
         fn icon(&self, _: u64) -> Option<(u32, u32, &[u32])> {
             None
         }
+        fn sub_state(&self, _: &[u64]) -> SubLoad {
+            self.sub_state
+        }
     }
 
     fn src() -> Src {
         Src {
-            top: vec![MenuRow { default: true, accel: Some(0), ..MenuRow::item(1, "Open") }, MenuRow::separator(), MenuRow::item(2, "Copy"), MenuRow { submenu: true, ..MenuRow::item(9, "Send to") }, MenuRow { disabled: true, ..MenuRow::item(3, "Paste") }],
+            top: vec![MenuRow { default: true, accel: Some(0), ..MenuRow::item(1, "Open") }, MenuRow::separator(), MenuRow { accel: Some(0), ..MenuRow::item(2, "Copy") }, MenuRow { submenu: true, accel: Some(0), ..MenuRow::item(9, "Send to") }, MenuRow { disabled: true, ..MenuRow::item(3, "Paste") }],
             sub: vec![MenuRow::item(91, "Desktop"), MenuRow::item(92, "Mail")],
+            deep: Vec::new(),
+            sub_state: SubLoad::Ready,
         }
     }
 
@@ -914,11 +1436,13 @@ mod tests {
         c: TestCanvas,
         st: MenuState,
         src: Src,
+        now: u64,
+        alt: bool,
     }
     const ID: Id = Id::new("test.menu");
     impl H {
         fn new(at: Pt, keyboard: bool) -> H {
-            H { ui: Ui::default(), c: TestCanvas::new(800.0, 600.0), st: MenuState::new(at, keyboard), src: src() }
+            H { ui: Ui::default(), c: TestCanvas::new(800.0, 600.0), st: MenuState::new(at, keyboard), src: src(), now: 1000, alt: false }
         }
         fn frame(&mut self) -> MenuResponse {
             self.c.clear();
@@ -926,7 +1450,7 @@ mod tests {
             self.ui.begin_frame((800.0, 600.0));
             // like the app: the menu sets it again while it is drawn
             self.ui.capture_keys = false;
-            let style = MenuStyle { bounds: Rect::new(0.0, 0.0, 800.0, 600.0), loading: None, alt: false };
+            let style = MenuStyle { bounds: Rect::new(0.0, 0.0, 800.0, 600.0), loading: None, alt: self.alt, now_ms: self.now };
             let r = menu(&mut self.ui, &mut self.c, ID, &mut self.st, &self.src, &style);
             self.ui.end_frame();
             self.c.end();
@@ -934,6 +1458,25 @@ mod tests {
         }
         fn key(&mut self, k: Key) -> MenuResponse {
             self.ui.push(Event::KeyDown { key: k, mods: Mods::NONE, repeat: false });
+            self.frame()
+        }
+        fn alt_key(&mut self, ch: char) -> MenuResponse {
+            self.ui.push(Event::KeyDown { key: Key::Char(ch.to_ascii_uppercase()), mods: Mods { alt: true, ..Mods::NONE }, repeat: false });
+            self.frame()
+        }
+        fn typed(&mut self, s: &str) -> MenuResponse {
+            for ch in s.chars() {
+                self.ui.push(Event::Char(ch));
+            }
+            self.frame()
+        }
+        fn hover(&mut self, p: Pt) -> MenuResponse {
+            self.ui.push(Event::MouseMove { pos: p });
+            self.frame()
+        }
+        /// Advances the clock and runs a frame (the app's tick).
+        fn wait(&mut self, ms: u64) -> MenuResponse {
+            self.now += ms;
             self.frame()
         }
         fn row_rect(&self, lv: usize, i: usize) -> Rect {
@@ -1004,12 +1547,15 @@ mod tests {
         assert_eq!(h.st.levels[0].focus, Some(9), "End skips the disabled last row");
         h.key(Key::Right);
         assert_eq!(h.st.levels.len(), 2);
-        h.ui.push(Event::Char('x'));
-        h.frame();
-        assert!(h.ui.leftover().is_empty(), "typed chars stay in the menu");
         h.key(Key::Escape);
         assert_eq!(h.st.levels.len(), 1);
         assert!(h.ui.is_popup_open(ID.with(0)));
+        h.ui.push(Event::Char('x'));
+        h.frame();
+        assert!(h.ui.leftover().is_empty(), "typed chars stay in the menu");
+        assert_eq!(h.st.filter, "x");
+        h.key(Key::Escape);
+        assert!(h.st.filter.is_empty() && h.ui.is_popup_open(ID.with(0)), "first Esc clears the filter");
         let r = h.key(Key::Escape);
         assert!(r.closed && r.picked.is_none());
         assert!(h.ui.leftover().is_empty());
@@ -1024,7 +1570,11 @@ mod tests {
         h.ui.push(Event::MouseMove { pos: send.center() });
         h.frame();
         h.frame();
+        assert_eq!(h.st.levels.len(), 1, "not before 150 ms");
+        assert_eq!(h.st.deadline(), Some(h.now + OPEN_MS));
+        h.wait(OPEN_MS);
         assert_eq!(h.st.levels.len(), 2, "hover opens the submenu");
+        assert_eq!(h.st.deadline(), None);
         let paste = h.row_rect(0, 4);
         let r = h.click(paste.center());
         assert!(r.picked.is_none() && !r.closed, "a disabled row does nothing");
@@ -1085,6 +1635,7 @@ mod tests {
         let mut h = H::new(Pt::new(100.0, 100.0), true);
         h.src.top.push(MenuRow::status(77, "Some items could not load"));
         h.src.sub.clear();
+        h.src.sub_state = SubLoad::Loading;
         h.frame();
         assert!(h.c.has_text("Retry"));
         h.key(Key::Up);
@@ -1093,5 +1644,368 @@ mod tests {
         h.key(Key::Up);
         h.key(Key::Right);
         assert!(h.c.has_text(LOADING), "an empty submenu shows Loading…");
+        assert_eq!(h.st.levels[1].focus, None, "nothing to focus yet");
+        // the children arrive: the keyboard-opened submenu focuses the first
+        h.src.sub = vec![MenuRow::item(91, "Desktop")];
+        h.src.sub_state = SubLoad::Ready;
+        h.frame();
+        assert_eq!(h.st.levels[1].focus, Some(91));
+        // failed: a Retry row; empty: "(Empty)"
+        h.src.sub.clear();
+        h.src.sub_state = SubLoad::Failed;
+        h.frame();
+        assert!(h.c.has_text(SUB_FAILED));
+        let r = h.key(Key::Enter);
+        assert!(r.retry, "Retry on the submenu failure row");
+        h.src.sub_state = SubLoad::Ready;
+        h.frame();
+        assert!(h.c.has_text(EMPTY));
+    }
+
+    // ---- CM4: pure parts
+
+    fn rows4() -> Vec<MenuRow> {
+        vec![
+            MenuRow { accel: Some(0), ..MenuRow::item(1, "Open") },
+            MenuRow { accel: Some(5), ..MenuRow::item(2, "Open with") },
+            MenuRow::separator(),
+            MenuRow { accel: Some(0), disabled: true, ..MenuRow::item(3, "Cut") },
+            MenuRow { accel: Some(0), ..MenuRow::item(4, "Copy") },
+            MenuRow::item(5, "No accel"),
+            MenuRow { accel: Some(0), ..MenuRow::item(6, "Open in new tab") },
+        ]
+    }
+
+    #[test]
+    fn find_ci_is_case_insensitive_and_returns_byte_ranges() {
+        assert_eq!(find_ci("Open with", "WITH"), Some((5, 9)));
+        assert_eq!(find_ci("Copy", "co"), Some((0, 2)));
+        assert_eq!(find_ci("Copy", "y"), Some((3, 4)));
+        assert_eq!(find_ci("Copy", "copy!"), None);
+        assert_eq!(find_ci("Copy", ""), None);
+        assert_eq!(find_ci("Résumé", "SUM"), Some((3, 6)));
+        assert_eq!(find_ci("Größe", "ö"), Some((2, 4)));
+    }
+
+    #[test]
+    fn accel_runs_a_single_match_and_cycles_shared_letters() {
+        let rows = rows4();
+        assert_eq!(accel_target(&rows, None, 'C'), Some((4, true)), "disabled Cut is skipped: Copy runs");
+        assert_eq!(accel_target(&rows, None, 'w'), Some((1, true)));
+        // three rows start with O ('o' of "Open with" is index 0 but its accel is 'w')
+        assert_eq!(accel_target(&rows, None, 'o'), Some((0, false)));
+        assert_eq!(accel_target(&rows, Some(0), 'o'), Some((6, false)));
+        assert_eq!(accel_target(&rows, Some(6), 'o'), Some((0, false)), "wraps");
+        assert_eq!(accel_target(&rows, None, 'n'), None, "rows without an accelerator are ignored");
+    }
+
+    #[test]
+    fn page_focus_moves_by_a_page_and_stops_at_the_ends() {
+        let rows = rows4();
+        assert_eq!(page_focus(&rows, None, 3, true), Some(0));
+        assert_eq!(page_focus(&rows, Some(0), 3, true), Some(1), "rows 2 and 3 are not focusable");
+        assert_eq!(page_focus(&rows, Some(1), 3, true), Some(4));
+        assert_eq!(page_focus(&rows, Some(4), 10, true), Some(6), "no wrap");
+        assert_eq!(page_focus(&rows, Some(6), 10, true), Some(6));
+        assert_eq!(page_focus(&rows, Some(6), 3, false), Some(4));
+        assert_eq!(page_focus(&rows, Some(4), 2, false), Some(1));
+        assert_eq!(page_focus(&rows, Some(1), 10, false), Some(0));
+    }
+
+    #[test]
+    fn wheel_scroll_steps_and_clamps() {
+        assert_eq!(wheel_scroll(0.0, -1.0, 66.0, 1000.0, 300.0), 66.0, "a notch down");
+        assert_eq!(wheel_scroll(66.0, 2.0, 66.0, 1000.0, 300.0), 0.0, "clamped at the top");
+        assert_eq!(wheel_scroll(650.0, -1.0, 66.0, 1000.0, 300.0), 700.0, "clamped at the end");
+        assert_eq!(wheel_scroll(0.0, -1.0, 66.0, 200.0, 300.0), 0.0, "short menus do not scroll");
+    }
+
+    #[test]
+    fn safe_triangle_covers_the_way_to_the_submenu() {
+        let sub = Rect::new(300.0, 100.0, 200.0, 300.0);
+        let apex = Pt::new(250.0, 200.0);
+        assert!(in_safe_triangle(apex, Pt::new(280.0, 150.0), sub), "heading up-right");
+        assert!(in_safe_triangle(apex, Pt::new(299.0, 390.0), sub), "heading down-right");
+        assert!(!in_safe_triangle(apex, Pt::new(250.0, 230.0), sub), "straight down");
+        assert!(!in_safe_triangle(apex, Pt::new(240.0, 200.0), sub), "moving away");
+        // a submenu flipped to the left
+        let left = Rect::new(0.0, 100.0, 200.0, 300.0);
+        assert!(in_safe_triangle(apex, Pt::new(220.0, 180.0), left));
+        assert!(!in_safe_triangle(apex, Pt::new(260.0, 200.0), left));
+    }
+
+    fn hin(now: u64, hovered: Option<(u64, bool)>, open: Option<u64>) -> HoverIn {
+        HoverIn { now, moved: true, prev: None, pointer: Some(Pt::new(10.0, 10.0)), hovered, open, child: None }
+    }
+
+    #[test]
+    fn sub_timer_opens_after_150_and_closes_after_250() {
+        let mut t = SubTimer::default();
+        assert_eq!(t.step(&hin(0, Some((9, true)), None)), (None, false));
+        assert_eq!(t.deadline(), Some(OPEN_MS));
+        let mut still = hin(149, Some((9, true)), None);
+        still.moved = false;
+        assert_eq!(t.step(&still).0, None);
+        still.now = 150;
+        assert_eq!(t.step(&still).0, Some(HoverAct::Open(9)));
+        assert_eq!(t.deadline(), None, "no timer once it is open");
+        // onto a plain row: closes 250 ms later
+        assert_eq!(t.step(&hin(200, Some((2, false)), Some(9))).0, None);
+        assert_eq!(t.deadline(), Some(450));
+        assert_eq!(t.step(&hin(449, Some((2, false)), Some(9))).0, None);
+        assert_eq!(t.step(&hin(450, Some((2, false)), Some(9))).0, Some(HoverAct::Close));
+        // back over the open row: nothing pending
+        let mut t = SubTimer::default();
+        t.step(&hin(0, Some((2, false)), Some(9)));
+        t.step(&hin(10, Some((9, true)), Some(9)));
+        assert_eq!(t.deadline(), None);
+        // another submenu row: it replaces the open one at 150 ms
+        let mut t = SubTimer::default();
+        t.step(&hin(0, Some((8, true)), Some(9)));
+        assert_eq!(t.step(&hin(150, Some((8, true)), Some(9))).0, Some(HoverAct::Open(8)));
+        // pointer inside the open child: both timers stop
+        let mut t = SubTimer::default();
+        t.step(&hin(0, Some((2, false)), Some(9)));
+        let mut inside = hin(100, None, Some(9));
+        inside.child = Some(Rect::new(0.0, 0.0, 50.0, 50.0));
+        t.step(&inside);
+        assert_eq!(t.deadline(), None);
+    }
+
+    #[test]
+    fn sub_timer_keeps_the_submenu_while_aiming_at_it() {
+        let mut t = SubTimer::default();
+        let i = HoverIn { now: 0, moved: true, prev: Some(Pt::new(250.0, 200.0)), pointer: Some(Pt::new(270.0, 190.0)), hovered: Some((2, false)), open: Some(9), child: Some(Rect::new(300.0, 100.0, 200.0, 300.0)) };
+        assert_eq!(t.step(&i), (None, true), "aiming: focus stays");
+        assert_eq!(t.deadline(), Some(CLOSE_MS));
+        // a pause on the way: the row under the pointer wins after 250 ms
+        let mut rest = i;
+        rest.moved = false;
+        rest.now = CLOSE_MS;
+        assert_eq!(t.step(&rest), (Some(HoverAct::Close), false));
+    }
+
+    #[test]
+    fn filter_rows_search_submenus_with_a_parent_prefix() {
+        let mut s = src();
+        s.sub.push(MenuRow { submenu: true, ..MenuRow::item(93, "More") });
+        s.deep = vec![MenuRow::item(931, "Copy as path")];
+        let (mut rows, mut found) = (Vec::new(), Vec::new());
+        filter_rows(&s, "co", &mut rows, &mut found);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["Copy", "Copy as path"]);
+        assert_eq!(found[0].path, [2]);
+        assert_eq!(found[0].prefix, "");
+        assert_eq!(found[1].path, [9, 93, 931]);
+        assert_eq!(found[1].prefix, "Send to \u{203A} More");
+        assert_eq!(found[1].hl, Some((0, 2)));
+        assert_eq!(rows[0].key, 2, "top-level rows keep their key");
+        assert_ne!(rows[1].key, 931);
+        filter_rows(&s, "-", &mut rows, &mut found);
+        assert!(rows.is_empty(), "separators never match");
+    }
+
+    // ---- CM4: the widget
+
+    fn underlines(h: &H) -> usize {
+        let t = Theme::dark();
+        h.c.ops.iter().filter(|o| matches!(o, crate::testcanvas::Op::Line(.., col, _) if *col != t.border)).count()
+    }
+
+    #[test]
+    fn underlines_only_with_alt_or_a_keyboard_open() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        assert_eq!(underlines(&h), 0, "mouse open: no underlines");
+        h.key(Key::Down);
+        assert_eq!(underlines(&h), 0, "arrow keys after a mouse open do not show them");
+        h.alt = true;
+        h.frame();
+        assert_eq!(underlines(&h), 3, "Alt held");
+        h.alt = false;
+        h.frame();
+        assert_eq!(underlines(&h), 0, "Alt released");
+        let mut k = H::new(Pt::new(100.0, 100.0), true);
+        k.frame();
+        assert_eq!(underlines(&k), 3, "keyboard open");
+        k.typed("o");
+        assert!(!k.c.ops.iter().any(|o| matches!(o, crate::testcanvas::Op::Line(x0, _, x1, _, _, _) if (x1 - x0) > 1.0)), "no underlines while filtering");
+    }
+
+    #[test]
+    fn alt_letter_runs_or_opens_and_unknown_letters_do_nothing() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        assert_eq!(h.alt_key('c').picked, Some(vec![2]));
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        let r = h.alt_key('s');
+        assert!(r.picked.is_none());
+        assert_eq!(h.st.levels.len(), 2, "Alt+S opens Send to");
+        h.frame();
+        assert_eq!(h.st.levels[1].focus, Some(91), "and focuses its first row");
+        let r = h.alt_key('z');
+        assert!(r.picked.is_none() && !r.closed);
+        assert!(h.st.filter.is_empty(), "Alt+letter never types into the filter");
+    }
+
+    #[test]
+    fn typing_filters_highlights_and_enter_runs_the_first_match() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        h.typed("se");
+        assert_eq!(h.st.filter, "se");
+        assert!(h.c.has_text("Send to") && !h.c.has_text("Open") && !h.c.has_text("Copy"));
+        assert!(h.c.has_text("1 match") && h.c.has_text("Esc"));
+        let hl = Theme::dark().highlight;
+        assert!(h.c.ops.iter().any(|o| matches!(o, crate::testcanvas::Op::Round(_, _, col, a) if *col == hl && *a < 1.0)), "match highlighted");
+        // "o": Open, Copy, Send to, Desktop (Send to › ) — separators gone
+        h.key(Key::Backspace);
+        h.key(Key::Backspace);
+        h.typed("o");
+        assert!(h.c.has_text("Open") && h.c.has_text("Copy") && h.c.has_text("Desktop"));
+        assert!(h.c.has_text("Send to \u{203A} "), "dim parent prefix");
+        assert_eq!(h.st.levels[0].focus, Some(1), "first match focused");
+        h.key(Key::Down);
+        h.key(Key::Down);
+        h.key(Key::Down);
+        let r = h.key(Key::Enter);
+        assert_eq!(r.picked, Some(vec![9, 91]), "a submenu child runs from the filter");
+    }
+
+    #[test]
+    fn space_runs_only_without_a_filter_and_no_match_says_so() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.frame();
+        h.typed("op");
+        h.typed(" ");
+        assert_eq!(h.st.filter, "op ");
+        h.typed("zz");
+        assert!(h.c.has_text(NO_MATCH));
+        assert!(h.key(Key::Enter).picked.is_none());
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.frame();
+        h.typed(" ");
+        assert!(h.st.filter.is_empty(), "a leading space does not start a filter");
+    }
+
+    #[test]
+    fn filter_keeps_the_focus_while_rows_arrive() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        h.typed("o");
+        h.key(Key::Down);
+        let f = h.st.levels[0].focus;
+        h.src.top.insert(0, MenuRow::item(500, "Shell: Open in Terminal"));
+        h.frame();
+        assert_eq!(h.st.levels[0].focus, f, "no focus jump as rows arrive");
+        h.typed("p");
+        assert_eq!(h.st.levels[0].focus, Some(500), "typing focuses the first match again");
+    }
+
+    #[test]
+    fn filter_enter_on_a_submenu_opens_it_and_left_returns() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        h.typed("send");
+        h.key(Key::Enter);
+        assert!(h.st.filter.is_empty());
+        assert_eq!(h.st.levels.len(), 2);
+        h.frame();
+        assert_eq!(h.st.levels[1].focus, Some(91));
+        h.key(Key::Left);
+        assert_eq!(h.st.levels.len(), 1);
+        assert_eq!(h.st.levels[0].focus, Some(9));
+    }
+
+    #[test]
+    fn click_on_a_submenu_row_opens_it_at_once() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        let send = h.row_rect(0, 3).center();
+        h.ui.push(Event::MouseMove { pos: send });
+        h.frame();
+        h.ui.push(Event::MouseDown { pos: send, button: Button::Left, mods: Mods::NONE, double: false });
+        h.frame();
+        h.ui.push(Event::MouseUp { pos: send, button: Button::Left, mods: Mods::NONE });
+        h.frame();
+        assert_eq!(h.st.levels.len(), 2, "no 150 ms wait on a click");
+    }
+
+    #[test]
+    fn hover_close_waits_250_ms_and_idle_has_no_deadline() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        assert_eq!(h.st.deadline(), None, "an idle menu runs no timer");
+        h.hover(h.row_rect(0, 3).center());
+        h.wait(OPEN_MS);
+        assert_eq!(h.st.levels.len(), 2);
+        // straight up to Copy: away from the submenu
+        h.hover(h.row_rect(0, 2).center());
+        assert_eq!(h.st.levels.len(), 2, "still open");
+        h.wait(CLOSE_MS - 1);
+        assert_eq!(h.st.levels.len(), 2);
+        h.wait(1);
+        assert_eq!(h.st.levels.len(), 1, "closed after 250 ms");
+        assert_eq!(h.st.deadline(), None);
+        assert_eq!(h.st.levels[0].focus, Some(2));
+    }
+
+    #[test]
+    fn wanted_lists_open_and_pending_submenus() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        assert!(h.st.wanted().is_empty());
+        h.hover(h.row_rect(0, 3).center());
+        assert_eq!(h.st.wanted(), [vec![9]], "asked while the hover delay runs");
+        h.wait(OPEN_MS);
+        assert_eq!(h.st.wanted(), [vec![9]]);
+    }
+
+    #[test]
+    fn wheel_scrolls_a_tall_menu_and_page_keys_move() {
+        let mut h = H::new(Pt::new(100.0, 10.0), true);
+        h.src.top = (0..60).map(|k| MenuRow::item(1000 + k, "Row")).collect();
+        h.frame();
+        h.frame();
+        let r = h.st.levels[0].rect;
+        let p = r.center();
+        h.hover(p);
+        h.ui.push(Event::Wheel { pos: p, dx: 0.0, dy: -1.0, mods: Mods::NONE });
+        h.frame();
+        assert_eq!(h.st.levels[0].scroll, 3.0 * m().row, "one notch: three rows");
+        h.ui.push(Event::MouseLeave);
+        h.frame();
+        h.key(Key::Home);
+        assert_eq!(h.st.levels[0].focus, Some(1000));
+        assert_eq!(h.st.levels[0].scroll, 0.0);
+        h.key(Key::PageDown);
+        let f = h.st.levels[0].focus.unwrap();
+        assert!(f > 1005, "PageDown moves a page: {f}");
+        h.key(Key::PageUp);
+        assert_eq!(h.st.levels[0].focus, Some(1000));
+        h.key(Key::End);
+        assert_eq!(h.st.levels[0].focus, Some(1059));
+    }
+
+    #[test]
+    fn esc_closes_one_level_at_a_time_from_a_deep_submenu() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.src.sub.push(MenuRow { submenu: true, ..MenuRow::item(93, "More") });
+        h.src.deep = vec![MenuRow::item(931, "Deep")];
+        h.frame();
+        h.key(Key::End);
+        h.key(Key::Right);
+        h.key(Key::End);
+        h.key(Key::Right);
+        assert_eq!(h.st.levels.len(), 3);
+        h.frame();
+        assert_eq!(h.st.levels[2].focus, Some(931));
+        h.key(Key::Escape);
+        assert_eq!(h.st.levels.len(), 2);
+        assert_eq!(h.st.levels[1].focus, Some(93));
+        h.key(Key::Escape);
+        assert_eq!(h.st.levels.len(), 1);
+        assert!(h.key(Key::Escape).closed);
     }
 }

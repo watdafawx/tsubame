@@ -78,11 +78,14 @@ pub struct MenuItem {
     pub action: String,
     /// the key the user's edits are stored under ([`native_key`])
     pub key: String,
+    /// a native submenu's token on the worker that holds the menu (0: none);
+    /// a lazy submenu is filled by asking for it (`CtxCmd::Expand`)
+    pub sub: u32,
 }
 
 impl MenuItem {
     pub fn separator(source: ItemSource) -> MenuItem {
-        MenuItem { id: 0, kind: ItemKind::Separator, source, label: String::new(), accel: None, shortcut: String::new(), verb: None, help: None, flags: 0, icon: None, children: Vec::new(), action: String::new(), key: String::new() }
+        MenuItem { id: 0, kind: ItemKind::Separator, source, label: String::new(), accel: None, shortcut: String::new(), verb: None, help: None, flags: 0, icon: None, children: Vec::new(), action: String::new(), key: String::new(), sub: 0 }
     }
     pub fn command(source: ItemSource, label: &str, action: &str) -> MenuItem {
         let (label, accel, shortcut) = parse_label(label);
@@ -123,6 +126,8 @@ pub struct RawItem {
     pub icon_callback: bool,
     /// the converted item bitmap (16 px)
     pub icon: Option<Arc<Bitmap>>,
+    /// the worker's token for a submenu left unwalked (lazy); 0: none
+    pub sub: u32,
 }
 
 /// `"&Open with\tCtrl+O"` -> (`"Open with"`, `Some('o')`, `"Ctrl+O"`).
@@ -218,7 +223,7 @@ fn build_level(raw: &[RawItem], icons: &mut IconCache, depth: usize, budget: &mu
         };
         let icon = r.icon.as_ref().map(|b| icons.put(b.clone()));
         let key = native_key(verb.as_deref(), &label);
-        out.push(MenuItem { id: if kind == ItemKind::Command { r.id } else { 0 }, kind, source: ItemSource::Native, label, accel, shortcut, verb, help: r.help.clone(), flags, icon, children, action: String::new(), key });
+        out.push(MenuItem { id: if kind == ItemKind::Command { r.id } else { 0 }, kind, source: ItemSource::Native, label, accel, shortcut, verb, help: r.help.clone(), flags, icon, children, action: String::new(), key, sub: if kind == ItemKind::Submenu { r.sub } else { 0 } });
     }
     while out.last().is_some_and(MenuItem::is_separator) {
         out.pop();
@@ -233,10 +238,95 @@ pub fn at_path<'a>(items: &'a [MenuItem], path: &[usize]) -> Option<&'a MenuItem
     if rest.is_empty() { Some(it) } else { at_path(&it.children, rest) }
 }
 
-fn at_path_mut<'a>(items: &'a mut [MenuItem], path: &[usize]) -> Option<&'a mut MenuItem> {
-    let (&first, rest) = path.split_first()?;
-    let it = items.get_mut(first)?;
-    if rest.is_empty() { Some(it) } else { at_path_mut(&mut it.children, rest) }
+/// The submenu with worker token `sub` (searched depth first).
+pub fn find_sub(items: &[MenuItem], sub: u32) -> Option<&MenuItem> {
+    if sub == 0 {
+        return None;
+    }
+    items.iter().find_map(|it| if it.kind == ItemKind::Submenu && it.sub == sub { Some(it) } else { find_sub(&it.children, sub) })
+}
+
+fn find_sub_mut(items: &mut [MenuItem], sub: u32) -> Option<&mut MenuItem> {
+    if sub == 0 {
+        return None;
+    }
+    for it in items.iter_mut() {
+        if it.kind == ItemKind::Submenu && it.sub == sub {
+            return Some(it);
+        }
+        if let Some(f) = find_sub_mut(&mut it.children, sub) {
+            return Some(f);
+        }
+    }
+    None
+}
+
+/// A lazy submenu that still has to be asked for.
+pub fn is_lazy(it: &MenuItem) -> bool {
+    it.kind == ItemKind::Submenu && it.flags & flag::LAZY != 0 && it.sub != 0
+}
+
+// ---- lazy submenus (CM6) ---------------------------------------------------
+
+/// What a lazy submenu shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubState {
+    /// not asked for yet
+    Idle,
+    /// asked, "Loading…" row
+    Loading,
+    /// no answer after [`SLOW_MS`] (a hung handler): the failure row with Retry
+    Slow,
+}
+
+/// The UI's lazy-submenu requests of one menu generation: each token is
+/// asked for once; an answer clears it. Pure (a fake clock in `now_ms`).
+#[derive(Clone, Debug, Default)]
+pub struct SubLoads {
+    asked: Vec<(u32, u64)>,
+    done: Vec<u32>,
+}
+
+impl SubLoads {
+    /// True when `sub` has to be asked for now (first time).
+    pub fn want(&mut self, sub: u32, now_ms: u64) -> bool {
+        if sub == 0 || self.done.contains(&sub) || self.asked.iter().any(|a| a.0 == sub) {
+            return false;
+        }
+        self.asked.push((sub, now_ms));
+        true
+    }
+    /// The answer for `sub` came (stale generations never reach here).
+    pub fn done(&mut self, sub: u32) -> Option<u64> {
+        let i = self.asked.iter().position(|a| a.0 == sub);
+        let at = i.map(|i| self.asked.swap_remove(i).1);
+        if !self.done.contains(&sub) {
+            self.done.push(sub);
+        }
+        at
+    }
+    pub fn state(&self, sub: u32, now_ms: u64) -> SubState {
+        match self.asked.iter().find(|a| a.0 == sub) {
+            None => SubState::Idle,
+            Some(&(_, at)) if now_ms.saturating_sub(at) >= SLOW_MS => SubState::Slow,
+            Some(_) => SubState::Loading,
+        }
+    }
+    /// Requests without an answer (the menu's tick runs while there are some,
+    /// so the watchdog and the slow switch get their frames).
+    pub fn pending(&self) -> bool {
+        !self.asked.is_empty()
+    }
+    /// A request is younger than [`SLOW_MS`]: frames are still needed to
+    /// turn it into the failure row. Once every one is slow, no tick.
+    pub fn loading(&self, now_ms: u64) -> bool {
+        self.asked.iter().any(|a| now_ms.saturating_sub(a.1) < SLOW_MS)
+    }
+    /// A new generation: nothing asked yet.
+    pub fn clear(&mut self) {
+        self.asked.clear();
+        self.done.clear();
+    }
 }
 
 // ---- routing ------------------------------------------------------------
@@ -394,16 +484,19 @@ pub fn native_entry(item: &MenuItem) -> MenuEntry {
 pub enum Part {
     /// the native top level (QueryContextMenu done, submenus walked)
     Native(Vec<MenuItem>),
-    /// a lazily filled submenu at `path` of the native items, filled later
-    Submenu { path: Vec<usize>, items: Vec<MenuItem> },
+    /// the children of the lazy submenu with worker token `sub` (CM6: asked
+    /// for when the user opens it)
+    Submenu { sub: u32, items: Vec<MenuItem> },
     /// icons for keys already sent
     Icons(Vec<(u64, Arc<Bitmap>)>),
     /// building failed (or the worker gave up: the UI shows Retry)
     Failed(String),
     /// result of an invoke
     Invoked { id: u32, verb: Option<String>, result: Result<(), String> },
-    /// the whole tree is walked (submenus settled, icons sent): the loading
-    /// line goes. The worker now waits for a pick.
+    /// every item sent up front is in (lazy, CM6: the top level, submenus come
+    /// as [`Part::Submenu`] when asked; eager: the whole tree, submenus
+    /// settled), icons sent: the loading line goes. The worker now waits for
+    /// a pick or a submenu request.
     Complete,
     /// the worker released the menu (after an invoke, a close or a timeout)
     Closed,
@@ -436,7 +529,7 @@ pub struct MenuModel {
     pub state: LoadState,
     pub error: Option<String>,
     pub icons: IconCache,
-    /// [`Part::Complete`] arrived: every shell item is in
+    /// [`Part::Complete`] arrived: every shell item sent up front is in
     pub complete: bool,
 }
 
@@ -456,8 +549,8 @@ impl MenuModel {
                 self.native = items;
                 self.state = LoadState::Ready;
             }
-            Part::Submenu { path, items } => {
-                if let Some(it) = at_path_mut(&mut self.native, &path) {
+            Part::Submenu { sub, items } => {
+                if let Some(it) = find_sub_mut(&mut self.native, sub) {
                     it.flags &= !flag::LAZY;
                     it.children = items;
                 }
@@ -843,20 +936,51 @@ mod tests {
         assert_eq!(m.state, LoadState::Loading);
         assert_eq!(labels(&m.rows(&[])), ["Copy path"], "own items at t = 0");
         let mut icons = IconCache::new(4);
-        let native = build_native(&[raw(1, "7-Zip"), RawItem { text: "Open with".into(), submenu: Some(vec![]), ..Default::default() }], &mut icons);
+        let native = build_native(&[raw(1, "7-Zip"), RawItem { text: "Open with".into(), submenu: Some(vec![]), sub: 3, ..Default::default() }], &mut icons);
         assert!(!m.apply(MenuBatch { generation: 6, part: Part::Native(native.clone()), timing: [0; 3] }), "stale");
         assert!(m.native.is_empty());
         assert!(m.apply(MenuBatch { generation: 7, part: Part::Native(native), timing: [0; 3] }));
         assert_eq!(m.state, LoadState::Ready);
-        assert!(m.native[1].flags & flag::LAZY != 0);
-        let kids = build_native(&[raw(30, "Notepad")], &mut icons);
-        assert!(m.apply(MenuBatch { generation: 7, part: Part::Submenu { path: vec![1], items: kids }, timing: [0; 3] }));
+        assert!(m.native[1].flags & flag::LAZY != 0 && is_lazy(&m.native[1]) && m.native[1].sub == 3);
+        assert!(!is_lazy(&m.native[0]));
+        let kids = build_native(&[raw(30, "Notepad"), RawItem { text: "Deeper".into(), submenu: Some(vec![]), sub: 4, ..Default::default() }], &mut icons);
+        // an unknown token changes nothing
+        assert!(m.apply(MenuBatch { generation: 7, part: Part::Submenu { sub: 99, items: kids.clone() }, timing: [0; 3] }));
+        assert!(is_lazy(&m.native[1]));
+        assert!(m.apply(MenuBatch { generation: 7, part: Part::Submenu { sub: 3, items: kids }, timing: [0; 3] }));
+        assert!(!is_lazy(&m.native[1]));
+        assert_eq!(find_sub(&m.native, 4).unwrap().label, "Deeper", "nested lazy submenus keep their token");
+        assert!(find_sub(&m.native, 0).is_none());
         assert_eq!(m.native[1].flags & flag::LAZY, 0);
         assert_eq!(at_path(&m.native, &[1, 0]).unwrap().label, "Notepad");
         assert!(m.apply(MenuBatch { generation: 7, part: Part::Failed("timeout".into()), timing: [0; 3] }));
         assert_eq!(m.state, LoadState::Failed);
         assert!(m.apply(MenuBatch { generation: 7, part: Part::Icons(vec![(1, px(1)), (2, px(2))]), timing: [0; 3] }));
         assert_eq!(m.icons.len(), 2);
+    }
+
+    #[test]
+    fn lazy_submenus_are_asked_once_and_go_slow_after_3_s() {
+        let mut l = SubLoads::default();
+        assert_eq!(l.state(5, 0), SubState::Idle);
+        assert!(!l.want(0, 0), "token 0 is never asked for");
+        assert!(l.want(5, 100));
+        assert!(!l.want(5, 120), "asked once");
+        assert!(l.pending());
+        assert_eq!(l.state(5, 100 + SLOW_MS - 1), SubState::Loading);
+        assert_eq!(l.state(5, 100 + SLOW_MS), SubState::Slow);
+        assert!(l.loading(100 + SLOW_MS - 1), "the tick runs until it is slow");
+        assert!(!l.loading(100 + SLOW_MS));
+        assert_eq!(l.done(5), Some(100), "answer: request time for the latency");
+        assert!(!l.pending());
+        assert_eq!(l.state(5, 9_999), SubState::Idle);
+        assert!(!l.want(5, 10_000), "answered: not asked again");
+        // an answer nobody asked for (eager walk) is just recorded
+        assert_eq!(l.done(6), None);
+        assert!(!l.want(6, 0));
+        // Retry: a new generation asks again
+        l.clear();
+        assert!(l.want(5, 20_000));
     }
 
     #[test]
