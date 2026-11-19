@@ -170,6 +170,56 @@ fn up_to_date_returns_none() {
     assert!(fx.updater("0.3.0").check(false).unwrap().is_none(), "never offers a downgrade");
 }
 
+/// Release-prep proof of the 0.0.1 -> 0.0.2 step, signed with the public DEV test key only (the
+/// real release key pinned in keys.rs is never involved): a correctly signed higher version is
+/// offered and applied, a bad signature is refused before anything is written, and a lower
+/// version is never offered and cannot be applied.
+#[test]
+fn n_to_n_plus_one_dev_key_accepts_newer_refuses_bad_signature_and_downgrade() {
+    // 1. correctly signed 0.0.2 over an installed 0.0.1: offered, staged, applied
+    let fx = Fx::new();
+    fx.publish("0.0.2", b"NEW-EXE-0.0.2", "0.0.1");
+    let up = fx.updater("0.0.1");
+    let rel = up.check(false).unwrap().expect("a correctly signed higher version is offered");
+    assert_eq!((rel.version.to_string().as_str(), rel.in_place_ok), ("0.0.2", true));
+    let staged = up.download(&rel, &mut no_progress).unwrap();
+    let applied = up.apply(&staged).unwrap();
+    assert_eq!((applied.version.as_str(), applied.previous_version.as_str()), ("0.0.2", "0.0.1"));
+    assert_eq!(fx.exe(), b"NEW-EXE-0.0.2");
+    assert_eq!(std::fs::read(fx.app.join("tsubame.exe.old")).unwrap(), b"OLD-EXE");
+
+    // 2. the same 0.0.2 manifest signed by a key that is not pinned: refused, nothing written
+    let fx = Fx::new();
+    let other = ed25519_compact::KeyPair::from_seed(ed25519_compact::Seed::new([11u8; 32]));
+    fx.publish_signed("0.0.2", b"NEW-EXE-0.0.2", "0.0.1", &other);
+    let err = fx.updater("0.0.1").check(false).unwrap_err();
+    assert!(matches!(err, Error::BadSignature(_)), "{err}");
+    assert_eq!(fx.exe(), b"OLD-EXE");
+
+    // 3. manifest edited after signing with the DEV key: refused, nothing written
+    let fx = Fx::new();
+    fx.publish("0.0.2", b"NEW-EXE-0.0.2", "0.0.1");
+    let mp = fx.rel.join(manifest::MANIFEST_FILE);
+    let text = std::fs::read_to_string(&mp).unwrap();
+    let edited = text.replace("\"min_supported_version\": \"0.0.1\"", "\"min_supported_version\": \"0.0.0\"");
+    assert_ne!(edited, text, "the test must actually change the signed bytes");
+    std::fs::write(&mp, edited).unwrap();
+    let err = fx.updater("0.0.1").check(false).unwrap_err();
+    assert!(matches!(err, Error::BadSignature(_)), "{err}");
+    assert_eq!(fx.exe(), b"OLD-EXE");
+
+    // 4. lower version: never offered to a newer install, and a staged one cannot be applied
+    let fx = Fx::new();
+    fx.publish("0.0.1", b"OLDER-EXE-0.0.1", "0.0.1");
+    assert!(fx.updater("0.0.2").check(false).unwrap().is_none(), "a downgrade is never offered");
+    let fx = Fx::new();
+    fx.publish("0.0.2", b"NEW-EXE-0.0.2", "0.0.1");
+    let up = fx.updater("0.0.1");
+    let staged = up.download(&up.check(false).unwrap().unwrap(), &mut no_progress).unwrap();
+    assert!(matches!(fx.updater("0.0.2").apply(&staged), Err(Error::NotNewer)));
+    assert_eq!(fx.exe(), b"OLD-EXE");
+}
+
 #[test]
 fn no_release_published_is_not_an_error() {
     let fx = Fx::new(); // empty release dir: /latest is 404
