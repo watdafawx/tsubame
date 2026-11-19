@@ -117,6 +117,8 @@ struct Item {
 }
 
 pub struct Sidebar {
+    /// A drive's shell menu, consumed after painting (client DIPs).
+    pub shell_menu: Option<(String, Pt)>,
     pub drives: Vec<Drive>,
     pub places: Vec<Place>,
     pub pinned: Vec<Pinned>,
@@ -149,6 +151,7 @@ pub struct Sidebar {
 impl Default for Sidebar {
     fn default() -> Self {
         Sidebar {
+            shell_menu: None,
             drives: Vec::new(),
             places: Vec::new(),
             pinned: Vec::new(),
@@ -746,6 +749,8 @@ impl Sidebar {
         }
         if it.clicked == Some(Button::Middle) {
             act = Some(Act::NewTab(path));
+        } else if it.clicked == Some(Button::Right) && matches!(kind, Kind::Drive(_)) {
+            self.shell_menu = Some((path, it.click_pos));
         }
         act
     }

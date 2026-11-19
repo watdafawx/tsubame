@@ -678,6 +678,14 @@ pub fn open_background_menu(a: &mut App, folder: String, sx: i32, sy: i32, exten
 
 pub fn after_frame(hwnd: HWND) {
     let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    let drive = with(|a| a.view.side.shell_menu.take()).flatten();
+    if let Some((path, anchor)) = drive {
+        let s = with(|a| a.gfx.dpi / 96.0).unwrap_or(1.0);
+        let (sx, sy) = crate::screen_pt(hwnd, (anchor.x * s) as i32, (anchor.y * s) as i32);
+        with(|a| open_item_menu(a, vec![path.clone()], vec![path], sx, sy, extended, anchor, false));
+        invalidate(hwnd);
+        return;
+    }
     let want = with(|a| {
         let pt = a.view.bg_menu.take()?;
         let folder = active_folder(a)?;
@@ -741,6 +749,10 @@ pub fn ctx_after_frame(hwnd: HWND) {
 /// An app action picked in the own-drawn menu.
 fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_config::MenuEntry], shift: bool) {
     let paths = if t.background { Vec::new() } else { t.paths.clone() };
+    if matches!(act, "file.cut" | "file.delete" | "file.rename") && paths.iter().any(|p| crate::ctxui::is_root(p)) {
+        status(a, "Drive roots cannot be cut, renamed or deleted");
+        return;
+    }
     let one_dir = (paths.len() == 1 && t.folders.contains(&paths[0])).then(|| paths[0].clone());
     match act {
         "file.open" => match &one_dir {

@@ -132,6 +132,12 @@ pub fn kind_of(target: &Target) -> (Kind, String) {
     (Kind::File, std::path::Path::new(first).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default())
 }
 
+/// Lexical only; no filesystem query even for disconnected shares.
+pub fn is_root(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    p.has_root() && p.parent().is_none()
+}
+
 /// App rows that are not in the U4 list.
 pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
     let c = |l: &str, a: &str| MenuItem::command(ItemSource::Tsubame, l, a);
@@ -176,7 +182,12 @@ impl CtxMenu {
     /// Builds the menu (own rows now) and asks a worker for the shell's.
     pub fn open(target: Target, entries: Vec<MenuEntry>, dual: bool, paste_ok: bool, icon_px: u32, pool: &mut Pool) -> CtxMenu {
         let (kind, ext) = kind_of(&target);
-        let tsubame = tsubame_rows(&entries, kind, &ext, target.paths.len(), dual);
+        let mut tsubame = tsubame_rows(&entries, kind, &ext, target.paths.len(), dual);
+        if target.paths.iter().any(|p| is_root(p)) && !target.background {
+            for row in &mut tsubame {
+                if matches!(row.action.as_str(), "file.cut" | "file.delete" | "file.rename") { row.flags |= flag::DISABLED; }
+            }
+        }
         let user = ctxmodel::own_items(&entries, kind, &ext).1;
         let generation = next_gen();
         let state = MenuState::new(target.anchor, target.keyboard);
@@ -537,6 +548,8 @@ mod tests {
 
     #[test]
     fn target_kind_uses_enumerated_metadata() {
+        assert!(is_root(r"C:\"));
+        assert!(!is_root(r"C:\folder"));
         let mut t = Target { paths: vec![r"\\server\share\folder".into()], folders: vec![r"\\server\share\folder".into()], ..Default::default() };
         assert_eq!(kind_of(&t), (Kind::Folder, String::new()));
         t.folders.clear();
