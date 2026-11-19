@@ -61,8 +61,9 @@ menu after the classic rows and before the custom entries; there is no
 with classic ids. Invoke runs `IExplorerCommand::Invoke` on the worker with
 the host window in front. A command the classic menu already shows (same
 CLSID verb, or the same label, which covers the classic proxies Windows adds
-for some packaged commands) is left out. The CLSID keys the user's edits
-(`windows.verb:{clsid}`). The loading line stays until the packaged step
+for some packaged commands) is left out. The package family and the CLSID
+key the user's edits (`windows.pkg:<family>/{clsid}`, CM8; CM7's
+`windows.verb:{clsid}` still applies). The loading line stays until the packaged step
 is done; a handler that hangs there trips the same 4 s watchdog.
 
 ## Tall menus: the icon row (CM9)
@@ -84,6 +85,54 @@ still too tall, the list scrolls under the row with the chevron strips.
 - While the type-to-filter text is set, the icon row is hidden and folded rows
   match like any other row.
 
+## Editing the menu (CM8)
+
+There is no edit mode: right-clicking a row inside the open menu opens that
+row's **edit menu** next to it (mock state 6a), and the row gets a dashed
+accent outline. A right click is never an invocation. Keyboard: the Menu key
+or Shift+F10 on the focused row (also an icon-row button) opens it; it is not
+offered while the type-to-filter text is set.
+
+- Rows: a header (the row's label and where it comes from: Windows, Tsubame,
+  Custom, From Nilesoft or the app's package name), Hide "…" (Del), Rename…
+  (F2), Move up (Alt+↑), Move down (Alt+↓), Edit in Settings…, and for
+  Windows' and the apps' items the note "A Windows item: hiding it only
+  changes Tsubame's menu. Explorer is not touched."
+- Keys in the edit menu: Up/Down/Home/End move, Enter/Space run, Del hides,
+  F2 renames, Alt+↑/↓ move the row, Esc or Left closes only the edit menu.
+  Moves keep the edit menu open on the moved row.
+- Hide: the row leaves the menu at once and a strip at the bottom offers
+  Undo and Manage (Left/Right pick, Enter runs; Manage opens Settings on that
+  item). The strip goes with the menu. Hidden rows are never listed in the
+  menu, only in Settings.
+- Rename: the row turns into a text field in place. Enter keeps, Esc
+  cancels, a click elsewhere keeps, an empty name restores the original. Shell
+  items keep their command; only the label is ours.
+- Move up / down work on Tsubame's own rows and the user's entries (the U4
+  list order). Windows' and the apps' items keep their native order inside
+  their group; their Move rows are disabled. Whole groups are reordered in
+  Settings.
+- A click that closes the edit menu runs nothing.
+
+Identity. Every row has a stable key, not its label: `windows.verb:<verb>`
+for a classic item with a canonical verb, `windows.label:<label>` when the
+handler gives none, `windows.pkg:<package family>/{clsid}` for a packaged item,
+`app:<action>` for Tsubame rows outside the list (Copy name, Open terminal
+here, …) and the U4 ids (`builtin.copy`, `custom.3`) for the list. Row keys of
+keyed rows skip the label, so a renamed row keeps focus. Limitation: a classic
+`IContextMenu` exposes no handler CLSID per item, so classic items are keyed
+by verb and, without a verb, by label (a translated label without a verb is a
+new item).
+
+Edits land in the menu's copy of `[context_menu]` and the app writes them
+with the usual debounced atomic save (`docs/config.md`): built-ins and
+custom entries in `entries`, everything else in `[[context_menu.items]]`
+(`hidden`, `name`). They apply in `compose_all` (the model compose step), so
+the worker and the top-level timing are untouched: no reorder, only a
+retain and a relabel per level. Items the menu shows are remembered in
+`items` so Settings can list them (new ones are tagged New; the first menu
+after an upgrade tags nothing), and the config is written only when one is new.
+Nothing is removed from Windows.
 ## Widget and input (CM4)
 
 The widget uses popup-layer hit testing, theme tokens, density/font metrics,
@@ -136,8 +185,6 @@ existing bounded cache. Only visible rows draw.
 
 ## Later-card seams
 
-CM8: U4 entry identities/overrides and stable row keys support editing; right
-click on a row is never an invocation (reserved for editing).
 CM10: UI Automation provider and high-contrast verification remain separate.
 
 The stress scenario is separate from navigation/tab leak-gate: shell extensions

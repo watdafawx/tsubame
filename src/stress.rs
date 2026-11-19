@@ -253,7 +253,7 @@ impl Stress {
                     let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
                     let target = crate::ctxui::Target { paths: self.paths[..n].to_vec(), folder: view.tab().path.clone(), anchor: tsubame_ui::Pt::new(100.0, 100.0), screen: pt, ..Default::default() };
                     crate::ctxui::note_input();
-                    view.ctx = Some(Box::new(crate::ctxui::CtxMenu::open(target, tsubame_config::menu::default_entries(), view.dual(), false, 32, pool)));
+                    view.ctx = Some(Box::new(crate::ctxui::CtxMenu::open(target, tsubame_config::ContextMenu { entries: tsubame_config::menu::default_entries(), ..Default::default() }, view.dual(), false, 32, pool)));
                     self.ctx_at = Some(Instant::now());
                 }
                 (false, true)

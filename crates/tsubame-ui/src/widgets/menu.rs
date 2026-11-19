@@ -17,7 +17,7 @@
 
 use crate::canvas::{Canvas, Font, f};
 use crate::geom::{Pt, Rect};
-use crate::input::{Button, Event, Key};
+use crate::input::{Button, Event, Key, Mods};
 use crate::theme::Theme;
 use crate::ui::{Id, Sense, Ui};
 
@@ -35,6 +35,14 @@ pub enum RowKind {
     Separator,
     /// "Some items could not load" + Retry (picking it sets `retry`)
     Status,
+    /// CM8 edit menu: the edited item's name, `shortcut` holds its source tag
+    /// ("Windows"); not focusable
+    Header,
+    /// CM8 edit menu: a dim note, wrapped over as many lines as it needs
+    Note,
+    /// CM8: the strip after Hide ("Hid "Share"" | Undo | Manage); the widget
+    /// adds it itself
+    Strip,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -90,8 +98,8 @@ impl MenuRow {
     pub fn focusable(&self) -> bool {
         match self.kind {
             RowKind::Item => !self.disabled,
-            RowKind::Status => true,
-            RowKind::Separator => false,
+            RowKind::Status | RowKind::Strip => true,
+            RowKind::Separator | RowKind::Header | RowKind::Note => false,
         }
     }
     /// The accelerator letter, lower-case.
@@ -125,6 +133,54 @@ pub trait MenuSource {
     fn sub_state(&self, _path: &[u64]) -> SubLoad {
         SubLoad::Ready
     }
+    /// CM8: the edit menu of the row at `path` (right click on it, or the
+    /// Menu key / Shift+F10 while it has the focus). Rows with the `EDIT_*`
+    /// keys get their keys (Del, F2, Alt+Up / Down) and behaviour; others are
+    /// reported in [`MenuResponse::edit`]. No rows: the row is not editable.
+    fn edit_rows(&self, _path: &[u64], _out: &mut Vec<MenuRow>) {}
+}
+
+/// Edit-menu row keys the widget knows (CM8). `EDIT_HIDE` shows the Undo
+/// strip, `EDIT_RENAME` turns the row into a text field, `EDIT_UP` /
+/// `EDIT_DOWN` keep the edit menu open (the row moves under it),
+/// `EDIT_SETTINGS` closes the menu. Every one is reported in
+/// [`MenuResponse::edit`] except `EDIT_RENAME` (see [`MenuResponse::renamed`]).
+pub const EDIT_HIDE: u64 = 0xed17_0001;
+pub const EDIT_RENAME: u64 = 0xed17_0002;
+pub const EDIT_UP: u64 = 0xed17_0003;
+pub const EDIT_DOWN: u64 = 0xed17_0004;
+pub const EDIT_SETTINGS: u64 = 0xed17_0005;
+/// The Undo strip's row key.
+pub const KEY_STRIP: u64 = 0xed17_00ff;
+/// The edit menu's popup id is `id.with(EDIT_POPUP)` (above every level).
+const EDIT_POPUP: u64 = 0xed17;
+const RENAME_ID: u64 = 0xed18;
+const UNDO: &str = "Undo";
+const MANAGE: &str = "Manage";
+pub const G_EYE_OFF: char = '\u{ED1A}';
+
+/// The open edit menu (CM8).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditMenu {
+    /// the level of the edited row and its path (row keys from the top)
+    pub lv: usize,
+    pub path: Vec<u64>,
+    pub focus: Option<u64>,
+    pub kb: bool,
+    /// the edited row's rect (the popup is placed against it, like a submenu)
+    pub row: Rect,
+    pub rect: Rect,
+}
+
+/// The inline rename of a row (CM8).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Rename {
+    pub lv: usize,
+    pub path: Vec<u64>,
+    pub input: crate::widgets::text_input::TextInput,
+    /// the name shown when the rename started
+    pub orig: String,
+    fresh: bool,
 }
 
 /// Per-frame inputs that are not rows.
@@ -301,11 +357,27 @@ pub struct MenuState {
     filter_w: f32,
     /// the filter text changed: focus the first match
     filter_reset: bool,
+    /// CM8: the open edit menu
+    pub edit: Option<EditMenu>,
+    /// CM8: the row being renamed in place
+    pub rename: Option<Rename>,
+    /// CM8: the name of the item just hidden (the Undo strip shows)
+    pub strip: Option<String>,
+    /// the strip's keyboard part: false Undo, true Manage
+    strip_manage: bool,
+    /// the edit menu closed on a press in the menu: that click must not
+    /// run the row under it
+    eat_click: bool,
 }
 
 impl MenuState {
     pub fn new(anchor: Pt, keyboard: bool) -> MenuState {
         MenuState { anchor, keyboard, ..Default::default() }
+    }
+
+    /// An edit menu or an inline rename is open (CM8).
+    pub fn editing(&self) -> bool {
+        self.edit.is_some() || self.rename.is_some()
     }
 
     /// When the menu needs its next frame without input (a submenu hover
@@ -343,6 +415,16 @@ pub struct MenuResponse {
     pub closed: bool,
     /// Retry on the failure row
     pub retry: bool,
+    /// CM8: an edit-menu row was run on the row at this path: (path, the
+    /// edit row's key, `EDIT_*` or the app's own)
+    pub edit: Option<(Vec<u64>, u64)>,
+    /// CM8: an inline rename was kept (Enter): (path, the new name, trimmed;
+    /// empty = back to the original name)
+    pub renamed: Option<(Vec<u64>, String)>,
+    /// CM8: Undo on the strip after Hide
+    pub undo: bool,
+    /// CM8: Manage on the strip (the menu closes; the app opens Settings)
+    pub manage: bool,
 }
 
 // ---- metrics -------------------------------------------------------------
@@ -472,6 +554,10 @@ pub fn width(c: &mut dyn Canvas, rows: &[MenuRow], m: &Metrics) -> f32 {
                 sub |= r.submenu;
             }
             RowKind::Status => st = st.max(c.measure(&r.label, m.font) + m.gap + m.retry_w(c)),
+            RowKind::Strip => st = st.max(strip_w(c, &r.label, m)),
+            RowKind::Header => lw = lw.max(c.measure(&r.label, m.font.b()) + if r.shortcut.is_empty() { 0.0 } else { c.measure(&r.shortcut, m.small) + 3.0 * m.gap }),
+            // notes wrap to the width the other rows give
+            RowKind::Note => {}
         }
     }
     let mut w = m.label_x() + lw.max(st) + 8.0;
@@ -482,6 +568,30 @@ pub fn width(c: &mut dyn Canvas, rows: &[MenuRow], m: &Metrics) -> f32 {
         w += m.gap + m.arrow_w();
     }
     (w + 2.0 * m.inset()).clamp(m.min_w, m.max_w)
+}
+
+/// The Undo strip's label + its two text buttons (CM8).
+fn strip_w(c: &mut dyn Canvas, label: &str, m: &Metrics) -> f32 {
+    c.measure(label, m.font) + 2.0 * m.gap + c.measure(UNDO, m.font) + c.measure(MANAGE, m.font) + 4.0 * m.gap
+}
+
+/// Greedy word wrap of `s` into lines no wider than `w` (CM8 notes).
+pub fn wrap_text(c: &mut dyn Canvas, s: &str, font: Font, w: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        let cand = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if line.is_empty() || c.measure(&cand, font) <= w {
+            line = cand;
+        } else {
+            out.push(std::mem::take(&mut line));
+            line = word.to_string();
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
 }
 
 /// The top level's rect: at `anchor`, flipped left / up when it would come
@@ -736,6 +846,10 @@ enum Act {
     Open(usize, u64, bool),
     /// a submenu row of the filtered list: leave the filter, open it
     OpenPath(Vec<u64>),
+    /// CM8: open the edit menu of row (level, key), from the keyboard
+    Edit(usize, u64, bool),
+    /// CM8: the strip's Undo (false) or Manage (true)
+    Strip(bool),
 }
 
 fn path_to(st: &MenuState, lv: usize) -> Vec<u64> {
@@ -768,6 +882,12 @@ fn level_rows(src: &dyn MenuSource, st: &MenuState, lv: usize, rows: &mut Vec<Me
     }
     found.clear();
     rows_at(src, st, lv, rows);
+    if lv == 0
+        && let Some(name) = &st.strip
+    {
+        rows.push(MenuRow::separator());
+        rows.push(MenuRow { kind: RowKind::Strip, icon: RowIcon::Glyph(G_EYE_OFF), ..MenuRow::item(KEY_STRIP, &format!("Hid \u{201c}{name}\u{201d}")) });
+    }
 }
 
 fn index_of(rows: &[MenuRow], key: Option<u64>) -> Option<usize> {
@@ -779,8 +899,9 @@ fn activate(st: &MenuState, rows: &[MenuRow], found: &[Found], lv: usize, i: usi
     let r = rows.get(i)?;
     let filtered = lv == 0 && st.filtering();
     match r.kind {
-        RowKind::Separator => None,
+        RowKind::Separator | RowKind::Header | RowKind::Note => None,
         RowKind::Status => Some(Act::Retry),
+        RowKind::Strip => Some(Act::Strip(st.strip_manage)),
         RowKind::Item if r.disabled => None,
         RowKind::Item if filtered => {
             let p = found.get(i)?.path.clone();
@@ -841,6 +962,155 @@ fn open_path(ui: &mut Ui, id: Id, st: &mut MenuState, path: &[u64]) {
     }
 }
 
+// ---- editing (CM8) ---------------------------------------------------------
+
+fn edit_id(id: Id) -> Id {
+    id.with(EDIT_POPUP)
+}
+
+/// Opens the edit menu of row `key` at level `lv`. False: the row has no
+/// edit menu (the app gave no rows).
+fn open_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, lv: usize, key: u64, kb: bool, row: Option<Rect>) -> bool {
+    let mut path = path_to(st, lv);
+    path.push(key);
+    let mut er = Vec::new();
+    src.edit_rows(&path, &mut er);
+    if er.is_empty() {
+        return false;
+    }
+    let row = row.or_else(|| st.edit.as_ref().filter(|e| e.lv == lv && e.path == path).map(|e| e.row)).unwrap_or_default();
+    close_above(ui, id, st, lv);
+    let eid = edit_id(id);
+    if ui.is_popup_open(eid) {
+        ui.close_popup(eid);
+    }
+    st.rename = None;
+    let l = &mut st.levels[lv];
+    l.focus = Some(key);
+    l.kb = kb;
+    st.edit = Some(EditMenu { lv, path, focus: if kb { edge_focus(&er, true).map(|i| er[i].key) } else { None }, kb, row, rect: Rect::ZERO });
+    ui.open_popup(eid);
+    ui.request_repaint();
+    true
+}
+
+fn close_edit(ui: &mut Ui, id: Id, st: &mut MenuState) {
+    if st.edit.take().is_some() {
+        ui.close_popup(edit_id(id));
+    }
+}
+
+/// Runs edit row `k` of the open edit menu. True: the menu closed.
+fn run_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, k: u64, resp: &mut MenuResponse) -> bool {
+    let Some(e) = st.edit.clone() else { return false };
+    let mut er = Vec::new();
+    src.edit_rows(&e.path, &mut er);
+    if !er.iter().any(|r| r.key == k && r.focusable()) {
+        return false;
+    }
+    let mut rows = Vec::new();
+    rows_at(src, st, e.lv, &mut rows);
+    let key = e.path.last().copied().unwrap_or(0);
+    let label = rows.iter().find(|r| r.key == key).map(|r| r.label.clone()).unwrap_or_default();
+    ui.request_repaint();
+    match k {
+        EDIT_RENAME => {
+            close_edit(ui, id, st);
+            let mut input = crate::widgets::text_input::TextInput::new(&label);
+            input.select_all();
+            st.rename = Some(Rename { lv: e.lv, path: e.path, input, orig: label, fresh: true });
+        }
+        // the row moves under the open edit menu
+        EDIT_UP | EDIT_DOWN => resp.edit = Some((e.path, k)),
+        EDIT_SETTINGS => {
+            st.edit = None;
+            ui.close_all_popups();
+            resp.edit = Some((e.path, k));
+            resp.closed = true;
+            return true;
+        }
+        EDIT_HIDE => {
+            // the keyboard moves on to a neighbour of the row that goes
+            if let Some(i) = rows.iter().position(|r| r.key == key) {
+                let next = (i + 1..rows.len()).chain((0..i).rev()).find(|&j| rows[j].kind == RowKind::Item && rows[j].focusable());
+                st.levels[e.lv].focus = next.map(|j| rows[j].key);
+            }
+            close_edit(ui, id, st);
+            st.strip = Some(label);
+            st.strip_manage = false;
+            resp.edit = Some((e.path, k));
+        }
+        _ => {
+            close_edit(ui, id, st);
+            resp.edit = Some((e.path, k));
+        }
+    }
+    false
+}
+
+/// A key while the edit menu is open (it takes every key). True: the menu
+/// closed.
+fn edit_key(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, key: Key, mods: Mods, resp: &mut MenuResponse) -> bool {
+    let Some(e) = st.edit.clone() else { return false };
+    let mut er = Vec::new();
+    src.edit_rows(&e.path, &mut er);
+    let cur = index_of(&er, e.focus);
+    let mut to = None;
+    let mut run = None;
+    match key {
+        Key::Up if mods.alt => run = Some(EDIT_UP),
+        Key::Down if mods.alt => run = Some(EDIT_DOWN),
+        Key::Down => to = next_focus(&er, cur, true),
+        Key::Up => to = next_focus(&er, cur, false),
+        Key::Home => to = edge_focus(&er, true),
+        Key::End => to = edge_focus(&er, false),
+        Key::Enter | Key::Space => run = cur.map(|i| er[i].key),
+        Key::Delete if mods.none() => run = Some(EDIT_HIDE),
+        Key::F(2) if mods.none() => run = Some(EDIT_RENAME),
+        Key::Escape | Key::Left => {
+            close_edit(ui, id, st);
+            st.levels[e.lv].kb = true;
+            ui.request_repaint();
+        }
+        _ => {}
+    }
+    if let Some(i) = to
+        && let Some(ed) = st.edit.as_mut()
+    {
+        ed.focus = Some(er[i].key);
+        ed.kb = true;
+        ui.request_repaint();
+    }
+    match run {
+        Some(k) => run_edit(ui, id, st, src, k, resp),
+        None => false,
+    }
+}
+
+/// Undo (false) or Manage (true) on the strip. True: the menu closed.
+fn strip_act(ui: &mut Ui, st: &mut MenuState, manage: bool, resp: &mut MenuResponse) -> bool {
+    st.strip = None;
+    st.strip_manage = false;
+    ui.request_repaint();
+    if manage {
+        ui.close_all_popups();
+        resp.manage = true;
+        resp.closed = true;
+        return true;
+    }
+    resp.undo = true;
+    false
+}
+
+/// The strip's Undo and Manage text buttons inside row `r`.
+fn strip_parts(c: &mut dyn Canvas, r: Rect, m: &Metrics) -> (Rect, Rect) {
+    let mw = c.measure(MANAGE, m.font).ceil() + m.gap;
+    let uw = c.measure(UNDO, m.font).ceil() + m.gap;
+    let manage = Rect::new(r.r() - 4.0 - mw, r.y + 2.0, mw, r.h - 4.0);
+    let undo = Rect::new(manage.x - 2.0 * m.gap - uw, r.y + 2.0, uw, r.h - 4.0);
+    (undo, manage)
+}
+
 fn set_filter(ui: &mut Ui, id: Id, st: &mut MenuState, f: impl FnOnce(&mut String)) {
     if !st.filtering() {
         // the filter lives in the top popup: submenus close
@@ -884,8 +1154,21 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         l.open = None;
         l.timer = SubTimer::default();
     }
+    // CM8: a press elsewhere in the menu closed the edit menu: that click
+    // only dismisses it
+    if st.edit.is_some() && !ui.is_popup_open(edit_id(id)) {
+        st.edit = None;
+        st.eat_click = true;
+    }
+    if st.edit.as_ref().is_some_and(|e| e.lv >= st.levels.len()) {
+        close_edit(ui, id, st);
+    }
+    if st.rename.as_ref().is_some_and(|r| r.lv >= st.levels.len()) {
+        st.rename = None;
+    }
     ui.capture_keys = true;
-    ui.set_focus(Some(lid(0)));
+    // an inline rename has the keys (its text field), else the menu
+    ui.set_focus(Some(if st.rename.is_some() { id.with(RENAME_ID) } else { lid(0) }));
     let t = ui.theme;
     let pointer = ui.mouse_in().then(|| ui.mouse());
     let prev = st.pointer;
@@ -899,6 +1182,15 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     // keys go to the deepest level
     for (qi, ev) in ui.key_input(lid(0)) {
         ui.consume(qi);
+        // CM8: the edit menu takes every key while it is open
+        if st.edit.is_some() {
+            if let Event::KeyDown { key, mods, .. } = ev
+                && edit_key(ui, id, st, src, key, mods, &mut resp)
+            {
+                return resp;
+            }
+            continue;
+        }
         let lv = st.levels.len() - 1;
         let filtering = st.filtering();
         let key = match ev {
@@ -918,6 +1210,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         }
         let cur = index_of(&rows, st.levels[lv].focus);
         let qcur = index_of(&quick, st.levels[lv].focus);
+        let edit_target = cur.filter(|&i| rows[i].kind == RowKind::Item).map(|i| rows[i].key).or(qcur.map(|i| quick[i].key));
         let mut act = None;
         let mut to = None;
         let mut to_key = None;
@@ -948,6 +1241,14 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 st.filter.clear();
                 st.levels[0].scroll = 0.0;
                 st.levels[0].reveal = true;
+                ui.request_repaint();
+            }
+            // CM8: the edit menu of the focused row (Shift+F10, the Menu key)
+            (Key::F(10), m) if m == Mods::SHIFT && !filtering => act = edit_target.map(|k| Act::Edit(lv, k, true)),
+            (Key::Other(0x5D), _) if !filtering => act = edit_target.map(|k| Act::Edit(lv, k, true)),
+            // the strip's two buttons
+            (Key::Left | Key::Right, _) if cur.is_some_and(|i| rows[i].kind == RowKind::Strip) => {
+                st.strip_manage = !st.strip_manage;
                 ui.request_repaint();
             }
             (Key::Down, _) => to = next_focus(&rows, cur, true),
@@ -1000,6 +1301,14 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             Some(Act::Retry) => resp.retry = true,
             Some(Act::Open(lv, k, kb)) => open_child(ui, id, st, lv, k, kb),
             Some(Act::OpenPath(p)) => open_path(ui, id, st, &p),
+            Some(Act::Edit(l, k, kb)) => {
+                open_edit(ui, id, st, src, l, k, kb, None);
+            }
+            Some(Act::Strip(manage)) => {
+                if strip_act(ui, st, manage, &mut resp) {
+                    return resp;
+                }
+            }
             None => {}
         }
     }
@@ -1018,6 +1327,10 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             }
         }
         let filtering = lv == 0 && st.filtering();
+        // CM8: the renamed row went away (rows were replaced)
+        if st.rename.as_ref().is_some_and(|rn| rn.lv == lv && !rows.iter().any(|r| rn.path.last() == Some(&r.key))) {
+            st.rename = None;
+        }
         if filtering {
             // typing focuses the first match; rows arriving later never
             // move the focus
@@ -1149,7 +1462,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         }
 
         // hover: the row under the pointer (not under a deeper level)
-        let over_deeper = pointer.is_some_and(|p| st.levels[lv + 1..].iter().any(|l| l.rect.contains_pt(p)));
+        let over_deeper = pointer.is_some_and(|p| st.levels[lv + 1..].iter().any(|l| l.rect.contains_pt(p)) || st.edit.as_ref().is_some_and(|e| e.rect.contains_pt(p)));
         let under = pointer.filter(|p| !over_deeper && vp.contains_pt(*p)).and_then(|p| (0..rows.len()).find(|&i| rows[i].kind != RowKind::Separator && p.y >= vp.y + ys[i] - scroll && p.y < vp.y + ys[i] - scroll + m.row_h(&rows[i])));
         // a stationary pointer cannot take the keyboard's focus
         let fresh = moved || !st.levels[lv].kb;
@@ -1157,6 +1470,9 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         // the icon row (CM9): its buttons are rows that never open submenus
         let qunder = pointer.filter(|_| !over_deeper).and_then(|p| quick_hit(&qrects, p));
         let hovered = hovered.or_else(|| qunder.filter(|&i| fresh && quick[i].focusable()).map(|i| (quick[i].key, false)));
+        // CM8: while a row is edited the pointer moves no focus and opens
+        // no submenu
+        let hovered = if st.editing() { None } else { hovered };
         let child = st.levels.get(lv + 1).map(|l| l.rect);
         let open = st.levels[lv].open;
         let (hact, aiming) = st.levels[lv].timer.step(&HoverIn { now, moved, prev, pointer, hovered, open, child });
@@ -1183,15 +1499,36 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
 
         let kb_ring = st.levels[lv].kb;
         let mut tip: Option<(Rect, String)> = None;
+        // CM8: the row a right click asked to edit, and its rect
+        let mut edit_at: Option<Rect> = None;
+        let mut rename_done: Option<bool> = None;
+        let edited = st.edit.as_ref().filter(|e| e.lv == lv).and_then(|e| e.path.last().copied());
         for (i, (row, r)) in quick.iter().zip(qrects.iter()).enumerate() {
             let it = ui.interact(lid(lv).with(row.key ^ 0x9a1c), *r, Sense::click());
+            if it.pressed.is_some() && st.rename.is_some() {
+                rename_done = Some(true);
+                st.eat_click = true;
+            }
             if it.clicked == Some(Button::Left) {
-                act = activate(st, &quick, &[], lv, i, false).or(act);
+                if !std::mem::take(&mut st.eat_click) {
+                    act = activate(st, &quick, &[], lv, i, false).or(act);
+                }
+            } else if it.clicked == Some(Button::Right) && !st.filtering() {
+                act = Some(Act::Edit(lv, row.key, false));
+                edit_at = Some(*r);
+            }
+            if edited == Some(row.key)
+                && let Some(e) = st.edit.as_mut()
+            {
+                e.row = *r;
             }
             let lvl = &st.levels[lv];
             let focused = lvl.focus == Some(row.key) && row.focusable();
             let state = RowPaint { focused, ring: kb_ring && focused, pressed: it.active && !row.disabled, ..Default::default() };
             paint_quick(c, &t, &m, *r, row, state, src);
+            if edited == Some(row.key) {
+                dashed_rect(c, r.inset(1.0, 1.0), t.accent);
+            }
             // icon-only: the label (and its keys) as a tooltip
             if focused || it.hovered {
                 let text = if row.shortcut.is_empty() { row.label.clone() } else { format!("{}  {}", row.label, row.shortcut) };
@@ -1210,11 +1547,54 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 c.line(r.x + 6.0, y, r.r() - 6.0, y, t.border, 1.0);
                 continue;
             }
+            // CM8: the row being renamed is a text field
+            if st.rename.as_ref().is_some_and(|rn| rn.lv == lv && rn.path.last() == Some(&row.key)) {
+                let rid = id.with(RENAME_ID);
+                let rn = st.rename.as_mut().unwrap();
+                if std::mem::take(&mut rn.fresh) {
+                    ui.set_focus(Some(rid));
+                }
+                c.round(r, m.row_radius, t.selected);
+                let fr = Rect::new(r.x + m.label_x() - 7.0, r.y + 1.0, (r.w - m.label_x() + 3.0).max(40.0), r.h - 2.0);
+                let tr = crate::widgets::text_input::text_input(ui, c, rid, fr, &mut rn.input, &rn.orig);
+                ui.mark_text_focus();
+                if tr.submitted {
+                    rename_done = Some(true);
+                } else if tr.cancelled {
+                    rename_done = Some(false);
+                }
+                // keys the field does not use stay in the menu
+                for (qi, _) in ui.key_input(rid) {
+                    ui.consume(qi);
+                }
+                continue;
+            }
             let it = ui.interact(lid(lv).with(row.key ^ 0x5eed), r.intersect(&vp), Sense::click());
-            // a click opens a submenu at once; right-click is reserved for
-            // CM8 editing, never invocation
+            // a press elsewhere keeps the rename (Explorer's rule) and is
+            // eaten
+            if it.pressed.is_some() && st.rename.is_some() {
+                rename_done = Some(true);
+                st.eat_click = true;
+            }
+            // a click opens a submenu at once; right-click opens the CM8
+            // edit menu, never invokes
             if it.clicked == Some(Button::Left) {
-                act = activate(st, &rows, &found, lv, i, false).or(act);
+                if std::mem::take(&mut st.eat_click) {
+                    // it only closed the edit menu / ended a rename
+                } else if row.kind == RowKind::Strip {
+                    let (_, mg) = strip_parts(c, r, &m);
+                    act = Some(Act::Strip(mg.contains_pt(it.click_pos)));
+                } else {
+                    act = activate(st, &rows, &found, lv, i, false).or(act);
+                }
+            } else if it.clicked == Some(Button::Right) && !filtering && row.kind == RowKind::Item {
+                act = Some(Act::Edit(lv, row.key, false));
+                edit_at = Some(r);
+            }
+            if edited == Some(row.key)
+                && let Some(e) = st.edit.as_mut()
+            {
+                e.row = r;
             }
             let lvl = &st.levels[lv];
             let fd = found.get(i);
@@ -1230,12 +1610,36 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             if row.submenu && state.open && st.levels.len() > lv + 1 {
                 st.levels[lv + 1].parent_row = r;
             }
-            paint_row(c, &t, &m, r, row, state, src);
+            if row.kind == RowKind::Strip {
+                paint_strip(c, &t, &m, r, row, state, st.strip_manage);
+            } else {
+                paint_row(c, &t, &m, r, row, state, src);
+            }
+            if edited == Some(row.key) {
+                dashed_rect(c, r.inset(0.5, 0.5), t.accent);
+            }
         }
         c.unclip();
         ui.popup_end(c);
         if let Some((b, text)) = tip {
             paint_tip(c, &t, &m, b, &text, rect, style.bounds);
+        }
+        if let Some(keep) = rename_done
+            && let Some(rn) = st.rename.take()
+        {
+            if keep {
+                resp.renamed = Some((rn.path.clone(), rn.input.text.trim().to_string()));
+            }
+            if let Some(l) = st.levels.get_mut(rn.lv) {
+                l.focus = rn.path.last().copied();
+                l.kb = true;
+            }
+            ui.set_focus(Some(lid(0)));
+            ui.request_repaint();
+        }
+        if st.eat_click && ui.active().is_none() {
+            // the press that closed the edit menu landed on no row
+            st.eat_click = false;
         }
         match act {
             Some(Act::Pick(p)) => {
@@ -1258,11 +1662,150 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 ui.request_repaint();
                 break;
             }
+            Some(Act::Edit(l, k, kb)) => {
+                if open_edit(ui, id, st, src, l, k, kb, edit_at) {
+                    // the edit menu goes above every level: deeper ones closed
+                    break;
+                }
+            }
+            Some(Act::Strip(manage)) => {
+                if strip_act(ui, st, manage, &mut resp) {
+                    return resp;
+                }
+            }
             None => {}
         }
         lv += 1;
     }
+    if st.edit.is_some() && paint_edit(ui, c, id, st, src, style, &m, moved, &mut resp) {
+        return resp;
+    }
     resp
+}
+
+/// The edit menu (CM8, the mock's state 6a): placed against the edited row
+/// like a submenu. True: the menu closed.
+#[allow(clippy::too_many_arguments)]
+fn paint_edit(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &dyn MenuSource, style: &MenuStyle, m: &Metrics, moved: bool, resp: &mut MenuResponse) -> bool {
+    let t = ui.theme;
+    let Some(e) = st.edit.clone() else { return false };
+    let mut er = Vec::new();
+    src.edit_rows(&e.path, &mut er);
+    let mut rows = Vec::new();
+    rows_at(src, st, e.lv, &mut rows);
+    // the edited row went away (rows replaced, a submenu closed)
+    if er.is_empty() || !rows.iter().any(|r| e.path.last() == Some(&r.key)) {
+        close_edit(ui, id, st);
+        return false;
+    }
+    let w = width(c, &er, m);
+    let text_w = w - 2.0 * m.inset() - 16.0;
+    let line_h = (m.small.size() * 1.4).round();
+    let notes: Vec<Vec<String>> = er.iter().map(|r| if r.kind == RowKind::Note { wrap_text(c, &r.label, m.small, text_w) } else { Vec::new() }).collect();
+    let hs: Vec<f32> = er.iter().zip(&notes).map(|(r, n)| if r.kind == RowKind::Note { n.len() as f32 * line_h + 10.0 } else { m.row_h(r) }).collect();
+    let full_h = hs.iter().sum::<f32>() + 2.0 * m.inset();
+    let rect = place_sub(e.row, w, full_h, style.bounds, m.keep);
+    if let Some(ed) = st.edit.as_mut() {
+        ed.rect = rect;
+    }
+    let eid = edit_id(id);
+    if !ui.popup_begin_r(c, eid, rect, m.radius) {
+        return false;
+    }
+    let (x, rw) = (rect.x + m.inset(), rect.w - 2.0 * m.inset());
+    let mut y = rect.y + m.inset();
+    let mut run = None;
+    for (i, row) in er.iter().enumerate() {
+        let r = Rect::new(x, y, rw, hs[i]);
+        y += hs[i];
+        match row.kind {
+            RowKind::Separator => {
+                let ly = r.center().y.floor() + 0.5;
+                c.line(r.x + 6.0, ly, r.r() - 6.0, ly, t.border, 1.0);
+            }
+            RowKind::Header => {
+                let mut right = r.r() - 8.0;
+                if !row.shortcut.is_empty() {
+                    let tw = c.measure(&row.shortcut, m.small).ceil() + 12.0 * m.sc;
+                    let th = (16.0 * m.sc).round();
+                    let tr = Rect::new(right - tw, r.center().y - th / 2.0, tw, th);
+                    c.round_stroke(tr, t.radius_sm, t.popup_border, 1.0);
+                    c.text(&row.shortcut, tr, m.small.c(), t.text_dim);
+                    right = tr.x - m.gap;
+                }
+                c.text(&row.label, Rect::new(r.x + 8.0, r.y, (right - r.x - 8.0).max(0.0), r.h), m.font.b(), t.text);
+            }
+            RowKind::Note => {
+                for (k, l) in notes[i].iter().enumerate() {
+                    c.text(l, Rect::new(r.x + 8.0, r.y + 5.0 + k as f32 * line_h, text_w, line_h), m.small, t.text_dim);
+                }
+            }
+            _ => {
+                let it = ui.interact(eid.with(row.key), r, Sense::click());
+                if it.hovered && row.focusable() && (moved || !e.kb)
+                    && let Some(ed) = st.edit.as_mut()
+                    && ed.focus != Some(row.key)
+                {
+                    ed.focus = Some(row.key);
+                    ed.kb = false;
+                    ui.request_repaint();
+                }
+                if it.clicked == Some(Button::Left) && row.focusable() {
+                    run = Some(row.key);
+                }
+                let ed = st.edit.as_ref();
+                let focused = ed.is_some_and(|ed| ed.focus == Some(row.key)) && row.focusable();
+                let state = RowPaint { focused, ring: focused && ed.is_some_and(|ed| ed.kb), pressed: it.active && !row.disabled, ..Default::default() };
+                paint_row(c, &t, m, r, row, state, src);
+            }
+        }
+    }
+    ui.popup_end(c);
+    match run {
+        Some(k) => run_edit(ui, id, st, src, k, resp),
+        None => false,
+    }
+}
+
+/// The Undo strip (CM8, after Hide): eye-off glyph, "Hid "Share"", then the
+/// accent Undo and the plain Manage text buttons on the right.
+fn paint_strip(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow, s: RowPaint, manage_focus: bool) {
+    let mid = r.center().y;
+    let ir = Rect::new(r.x + 6.0, mid - m.icon / 2.0, m.icon, m.icon);
+    c.text(&G_EYE_OFF.to_string(), ir, f(m.icon * 0.875).icon().c(), t.text_dim);
+    let (undo, manage) = strip_parts(c, r, m);
+    let lx = r.x + m.label_x();
+    c.text(&row.label, Rect::new(lx, r.y, (undo.x - m.gap - lx).max(0.0), r.h), m.font, t.text_dim);
+    for (b, label, is_manage) in [(undo, UNDO, false), (manage, MANAGE, true)] {
+        if s.focused && manage_focus == is_manage {
+            c.round(b, t.radius_sm, t.selected);
+            if s.ring {
+                c.round_stroke(b, t.radius_sm, t.focus, t.layout_focus_ring_width.max(1.0));
+            }
+        }
+        c.text(label, b, if is_manage { m.font.c() } else { m.font.b().c() }, if is_manage { t.text } else { t.accent });
+    }
+    let sx = (manage.x - m.gap).round() + 0.5;
+    c.line(sx, mid - m.row * 0.25, sx, mid + m.row * 0.25, t.border, 1.0);
+}
+
+/// A 1 px dashed outline (the edited row, CM8).
+fn dashed_rect(c: &mut dyn Canvas, r: Rect, col: crate::geom::Color) {
+    let (dash, gap) = (4.0, 3.0);
+    let mut seg = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        let len = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+        let (dx, dy) = ((x1 - x0) / len.max(1.0), (y1 - y0) / len.max(1.0));
+        let mut d = 0.0;
+        while d < len {
+            let e = (d + dash).min(len);
+            c.line(x0 + dx * d, y0 + dy * d, x0 + dx * e, y0 + dy * e, col, 1.0);
+            d += dash + gap;
+        }
+    };
+    seg(r.x, r.y, r.r(), r.y);
+    seg(r.r(), r.y, r.r(), r.b());
+    seg(r.r(), r.b(), r.x, r.b());
+    seg(r.x, r.b(), r.x, r.y);
 }
 
 /// Width of the filtered list: parents' labels count too.
@@ -1637,6 +2180,21 @@ mod tests {
         fn sub_state(&self, _: &[u64]) -> SubLoad {
             self.sub_state
         }
+        fn edit_rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
+            // Open and Copy are editable, the rest not
+            if matches!(path, [1] | [2]) {
+                out.extend([
+                    MenuRow { kind: RowKind::Header, shortcut: "Windows".into(), ..MenuRow::item(0, "Copy") },
+                    MenuRow { shortcut: "Del".into(), ..MenuRow::item(EDIT_HIDE, "Hide") },
+                    MenuRow { shortcut: "F2".into(), ..MenuRow::item(EDIT_RENAME, "Rename\u{2026}") },
+                    MenuRow { disabled: path == [2], ..MenuRow::item(EDIT_UP, "Move up") },
+                    MenuRow::item(EDIT_DOWN, "Move down"),
+                    MenuRow::separator(),
+                    MenuRow::item(EDIT_SETTINGS, "Edit in Settings\u{2026}"),
+                    MenuRow { kind: RowKind::Note, ..MenuRow::item(0, "A Windows item: hiding it only changes Tsubame's menu. Explorer is not touched.") },
+                ]);
+            }
+        }
     }
 
     fn src() -> Src {
@@ -1817,6 +2375,196 @@ mod tests {
         h.frame();
         h.ui.push(Event::MouseUp { pos, button: Button::Right, mods: Mods::NONE });
         assert!(h.frame().picked.is_none());
+    }
+
+    impl H {
+        fn rclick(&mut self, p: Pt) -> MenuResponse {
+            self.ui.push(Event::MouseMove { pos: p });
+            self.frame();
+            self.ui.push(Event::MouseDown { pos: p, button: Button::Right, mods: Mods::NONE, double: false });
+            self.frame();
+            self.ui.push(Event::MouseUp { pos: p, button: Button::Right, mods: Mods::NONE });
+            self.frame()
+        }
+        fn key_m(&mut self, k: Key, mods: Mods) -> MenuResponse {
+            self.ui.push(Event::KeyDown { key: k, mods, repeat: false });
+            self.frame()
+        }
+        /// The edit menu's row `key`: its rect (as drawn last frame).
+        fn edit_row(&mut self, key: u64) -> Rect {
+            let e = self.st.edit.clone().expect("edit menu open");
+            let m = m();
+            let mut er = Vec::new();
+            self.src.edit_rows(&e.path, &mut er);
+            let mut y = e.rect.y + m.inset();
+            for r in &er {
+                let h = if r.kind == RowKind::Note { 0.0 } else { m.row_h(r) };
+                if r.key == key && r.kind == RowKind::Item {
+                    return Rect::new(e.rect.x + m.inset(), y, e.rect.w - 2.0 * m.inset(), h);
+                }
+                y += h;
+            }
+            panic!("no edit row {key:x}");
+        }
+    }
+
+    #[test]
+    fn right_click_opens_the_edit_menu_next_to_the_row_and_hide_shows_the_strip() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        let copy = h.row_rect(0, 2);
+        let r = h.rclick(copy.center());
+        assert!(r.picked.is_none() && r.edit.is_none() && !r.closed);
+        let e = h.st.edit.clone().expect("edit menu");
+        assert_eq!(e.path, vec![2]);
+        assert_eq!(h.st.levels[0].focus, Some(2));
+        assert!(h.ui.is_popup_open(ID.with(EDIT_POPUP)));
+        assert!(e.rect.x >= copy.r(), "placed right of the row like a submenu: {:?} {copy:?}", e.rect);
+        assert!(h.c.has_text("Hide") && h.c.has_text("Windows") && h.c.has_text("Edit in Settings\u{2026}"));
+        // the note wraps inside the popup
+        assert!(h.c.has_text("A Windows item: hiding it only"), "note line 1");
+        // a right click on a row without edit rows opens nothing
+        let send = h.row_rect(0, 3);
+        h.rclick(send.center());
+        assert!(h.st.edit.is_none(), "Send to has no edit menu");
+        h.rclick(copy.center());
+        // Hide by click
+        let hide = h.edit_row(EDIT_HIDE);
+        let r = h.click(hide.center());
+        assert_eq!(r.edit, Some((vec![2], EDIT_HIDE)));
+        assert!(!r.closed && h.st.edit.is_none() && !h.ui.is_popup_open(ID.with(EDIT_POPUP)));
+        assert_eq!(h.st.strip.as_deref(), Some("Copy"));
+        h.frame();
+        assert!(h.c.has_text("Hid \u{201c}Copy\u{201d}") && h.c.has_text("Undo") && h.c.has_text("Manage"));
+        // Undo by keyboard: End lands on the strip, Enter runs Undo
+        h.key(Key::End);
+        assert_eq!(h.st.levels[0].focus, Some(KEY_STRIP));
+        let r = h.key(Key::Enter);
+        assert!(r.undo && !r.closed && r.picked.is_none());
+        assert!(h.st.strip.is_none());
+    }
+
+    #[test]
+    fn strip_manage_closes_the_menu() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.frame();
+        h.st.strip = Some("Share".into());
+        h.frame();
+        h.key(Key::End);
+        h.key(Key::Right);
+        let r = h.key(Key::Enter);
+        assert!(r.manage && r.closed && !r.undo);
+        // and by mouse
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.st.strip = Some("Share".into());
+        h.frame();
+        let rows = { let mut v = Vec::new(); level_rows(&h.src, &h.st, 0, &mut v, &mut Vec::new()); v };
+        let i = rows.iter().position(|r| r.kind == RowKind::Strip).unwrap();
+        let sr = { let m = m(); let mut ys = Vec::new(); layout(&rows, &m, &mut ys); let r = h.st.levels[0].rect; Rect::new(r.x + m.inset(), r.y + m.inset() + ys[i], r.w - 2.0 * m.inset(), m.row) };
+        let (undo, _) = strip_parts(&mut h.c, sr, &m());
+        let r = h.click(undo.center());
+        assert!(r.undo && !r.closed);
+    }
+
+    #[test]
+    fn keyboard_edit_menu_runs_del_f2_and_alt_arrows_and_esc_closes_only_it() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.frame();
+        assert_eq!(h.st.levels[0].focus, Some(1));
+        h.key_m(Key::F(10), Mods::SHIFT);
+        let e = h.st.edit.clone().expect("Shift+F10 opens the edit menu");
+        assert_eq!(e.path, vec![1]);
+        assert_eq!(e.focus, Some(EDIT_HIDE), "keyboard: first edit row focused");
+        // typed letters do not filter while it is open
+        h.typed("x");
+        assert!(h.st.filter.is_empty());
+        // Esc closes the edit menu, not the menu
+        let r = h.key(Key::Escape);
+        assert!(!r.closed && h.st.edit.is_none() && h.ui.is_popup_open(ID.with(0)));
+        // the Menu key does the same
+        h.key(Key::Other(0x5D));
+        assert!(h.st.edit.is_some());
+        // Alt+Down moves the row; the edit menu stays
+        let r = h.key_m(Key::Down, Mods { alt: true, ..Mods::NONE });
+        assert_eq!(r.edit, Some((vec![1], EDIT_DOWN)));
+        assert!(h.st.edit.is_some());
+        // Down / Enter: Rename (row 2 of the edit menu)
+        h.key(Key::Down);
+        assert_eq!(h.st.edit.as_ref().unwrap().focus, Some(EDIT_RENAME));
+        h.key(Key::Enter);
+        assert!(h.st.edit.is_none());
+        let rn = h.st.rename.clone().expect("inline rename");
+        assert_eq!((rn.orig.as_str(), rn.input.selected()), ("Open", "Open"));
+        h.frame();
+        // the field has the keys: typing replaces the selected name
+        h.typed("Launch");
+        assert_eq!(h.st.rename.as_ref().unwrap().input.text, "Launch");
+        assert!(h.st.filter.is_empty(), "typing in the field does not filter");
+        let r = h.key(Key::Enter);
+        assert_eq!(r.renamed, Some((vec![1], "Launch".to_string())));
+        assert!(h.st.rename.is_none() && !r.closed);
+        assert_eq!(h.st.levels[0].focus, Some(1));
+        // F2 inside the edit menu, then Esc cancels the rename
+        h.key_m(Key::F(10), Mods::SHIFT);
+        h.key(Key::F(2));
+        assert!(h.st.rename.is_some());
+        h.frame();
+        let r = h.key(Key::Escape);
+        assert!(r.renamed.is_none() && h.st.rename.is_none() && !r.closed && h.ui.is_popup_open(ID.with(0)));
+        // Del hides; the keyboard moves on to the next row
+        h.key_m(Key::F(10), Mods::SHIFT);
+        let r = h.key(Key::Delete);
+        assert_eq!(r.edit, Some((vec![1], EDIT_HIDE)));
+        assert_eq!(h.st.levels[0].focus, Some(2));
+        // a row without edit rows: Shift+F10 does nothing
+        h.key(Key::Down);
+        assert_eq!(h.st.levels[0].focus, Some(9));
+        h.key_m(Key::F(10), Mods::SHIFT);
+        assert!(h.st.edit.is_none());
+    }
+
+    #[test]
+    fn edit_in_settings_closes_and_a_click_that_closes_the_edit_menu_runs_nothing() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        let open = h.row_rect(0, 0);
+        h.rclick(open.center());
+        assert!(h.st.edit.is_some());
+        // a left click on another row only dismisses the edit menu
+        let copy = h.row_rect(0, 2);
+        let r = h.click(copy.center());
+        assert!(r.picked.is_none() && !r.closed, "{r:?}");
+        assert!(h.st.edit.is_none());
+        // the next click runs it
+        let r = h.click(copy.center());
+        assert_eq!(r.picked, Some(vec![2]));
+        // Edit in Settings closes the whole menu
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        let open = h.row_rect(0, 0);
+        h.rclick(open.center());
+        let s = h.edit_row(EDIT_SETTINGS);
+        let r = h.click(s.center());
+        assert_eq!(r.edit, Some((vec![1], EDIT_SETTINGS)));
+        assert!(r.closed && h.ui.popups_open() == 0);
+    }
+
+    #[test]
+    fn a_disabled_edit_row_does_nothing_and_rename_by_click_then_empty_restores() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        let copy = h.row_rect(0, 2);
+        h.rclick(copy.center());
+        let up = h.edit_row(EDIT_UP);
+        let r = h.click(up.center());
+        assert!(r.edit.is_none() && h.st.edit.is_some(), "Move up is disabled for Copy");
+        let rn = h.edit_row(EDIT_RENAME);
+        h.click(rn.center());
+        assert!(h.st.rename.is_some());
+        h.frame();
+        h.key(Key::Backspace);
+        let r = h.key(Key::Enter);
+        assert_eq!(r.renamed, Some((vec![2], String::new())), "empty: back to the original name");
     }
 
     #[test]

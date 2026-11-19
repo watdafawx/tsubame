@@ -17,7 +17,8 @@
 use crate::bitmap::Bitmap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tsubame_config::menu::{EntryKind, MenuEntry, Source};
+use tsubame_config::ContextMenu;
+use tsubame_config::menu::{self, EntryKind, Group, MenuEntry, Source};
 
 /// Item state bits (`MenuItem::flags`).
 pub mod flag {
@@ -128,6 +129,9 @@ pub struct RawItem {
     pub icon: Option<Arc<Bitmap>>,
     /// the worker's token for a submenu left unwalked (lazy); 0: none
     pub sub: u32,
+    /// packaged (CM7) items: the package family of the handler; the key
+    /// becomes `windows.pkg:<family>/<verb>`
+    pub package: Option<String>,
 }
 
 /// `"&Open with\tCtrl+O"` -> (`"Open with"`, `Some('o')`, `"Ctrl+O"`).
@@ -222,7 +226,10 @@ fn build_level(raw: &[RawItem], icons: &mut IconCache, depth: usize, budget: &mu
             None => (ItemKind::Command, Vec::new()),
         };
         let icon = r.icon.as_ref().map(|b| icons.put(b.clone()));
-        let key = native_key(verb.as_deref(), &label);
+        let key = match (&r.package, &verb) {
+            (Some(fam), Some(v)) if !fam.is_empty() => format!("windows.pkg:{fam}/{v}"),
+            _ => native_key(verb.as_deref(), &label),
+        };
         out.push(MenuItem { id: if kind == ItemKind::Command { r.id } else { 0 }, kind, source: ItemSource::Native, label, accel, shortcut, verb, help: r.help.clone(), flags, icon, children, action: String::new(), key, sub: if kind == ItemKind::Submenu { r.sub } else { 0 } });
     }
     while out.last().is_some_and(MenuItem::is_separator) {
@@ -404,34 +411,53 @@ pub fn own_items(entries: &[MenuEntry], target: tsubame_config::menu::Target, ex
     (tsubame, user)
 }
 
-/// Applies the user's edits to native items, recursively: an entry of source
-/// `Windows` whose id is the item's [`native_key`] hides it (`hidden`),
-/// renames it (`name`, when not empty) and orders it: items that have an
-/// entry are put in the list's order inside the slots they occupy, items
-/// without one keep their place. Separators left dangling are cleaned.
-pub fn apply_overrides(items: &mut Vec<MenuItem>, entries: &[MenuEntry]) {
-    let find = |key: &str| entries.iter().position(|e| e.source == Source::Windows && !key.is_empty() && e.id.eq_ignore_ascii_case(key));
-    items.retain(|it| find(&it.key).is_none_or(|i| !entries[i].hidden));
-    let mut slots = Vec::new();
-    for (pos, it) in items.iter_mut().enumerate() {
-        if let Some(i) = find(&it.key) {
-            let name = entries[i].name.trim();
-            if !name.is_empty() && !name.eq_ignore_ascii_case(&it.label) {
-                let (l, a, _) = parse_label(name);
-                it.label = l;
-                it.accel = a.or(it.accel);
-            }
-            slots.push((pos, i));
+/// The key a packaged item had before CM8 (`windows.verb:{clsid}`), so edits
+/// saved then still apply: `windows.pkg:<family>/{clsid}` -> that.
+pub fn legacy_key(key: &str) -> Option<String> {
+    let rest = key.get(..12).filter(|p| p.eq_ignore_ascii_case("windows.pkg:")).map(|_| &key[12..])?;
+    rest.rsplit_once('/').map(|(_, clsid)| format!("windows.verb:{clsid}"))
+}
+
+/// The user's edit of the row keyed `key`: (hidden, new name). From
+/// `[[context_menu.items]]` first, then a `Source::Windows` entry of the
+/// U4 list (how native edits were saved before CM8; read only).
+pub fn edit_of<'a>(menu: &'a ContextMenu, key: &str) -> (bool, &'a str) {
+    if key.is_empty() {
+        return (false, "");
+    }
+    let legacy = legacy_key(key);
+    let keys = std::iter::once(key).chain(legacy.as_deref());
+    for k in keys {
+        if let Some(p) = menu::item(&menu.items, k) {
+            return (p.hidden, p.name.trim());
         }
-        if !it.children.is_empty() {
-            apply_overrides(&mut it.children, entries);
+        if let Some(e) = menu.entries.iter().find(|e| e.source == Source::Windows && e.id.eq_ignore_ascii_case(k)) {
+            return (e.hidden, e.name.trim());
         }
     }
-    let mut order: Vec<usize> = slots.iter().map(|s| s.1).collect();
-    order.sort_unstable();
-    let picked: Vec<MenuItem> = order.iter().map(|&ei| items[slots.iter().find(|s| s.1 == ei).unwrap().0].clone()).collect();
-    for ((pos, _), it) in slots.iter().zip(picked) {
-        items[*pos] = it;
+    (false, "")
+}
+
+/// Applies the user's edits to items, recursively: an item whose key has an
+/// edit ([`edit_of`]) is hidden or renamed. The order never changes: Windows
+/// items keep their native order inside their group. Separators left
+/// dangling are cleaned.
+pub fn apply_overrides(items: &mut Vec<MenuItem>, menu: &ContextMenu) {
+    let legacy = |e: &MenuEntry| e.source == Source::Windows && (e.hidden || !e.name.trim().is_empty()) && e.id.contains(':');
+    if !menu.items.iter().any(|p| p.hidden || !p.name.trim().is_empty()) && !menu.entries.iter().any(legacy) {
+        return;
+    }
+    items.retain(|it| !edit_of(menu, &it.key).0);
+    for it in items.iter_mut() {
+        let name = edit_of(menu, &it.key).1;
+        if !name.is_empty() && !name.eq_ignore_ascii_case(&it.label) {
+            let (l, a, _) = parse_label(name);
+            it.label = l;
+            it.accel = a.or(it.accel);
+        }
+        if !it.children.is_empty() {
+            apply_overrides(&mut it.children, menu);
+        }
     }
     clean_separators(items);
 }
@@ -453,8 +479,8 @@ fn clean_separators(items: &mut Vec<MenuItem>) {
 /// The menu as drawn: Tsubame's group, the native items (minus verbs a
 /// Tsubame row already covers, with the user's edits), then the user's
 /// entries. Groups are split by separators.
-pub fn compose(tsubame: &[MenuItem], native: &[MenuItem], user: &[MenuItem], entries: &[MenuEntry]) -> Vec<MenuItem> {
-    compose_all(tsubame, native, &[], user, entries)
+pub fn compose(tsubame: &[MenuItem], native: &[MenuItem], user: &[MenuItem], menu: &ContextMenu) -> Vec<MenuItem> {
+    compose_all(tsubame, native, &[], user, menu)
 }
 
 /// [`compose`] with the packaged (Win11 `IExplorerCommand`) items (CM7) as
@@ -462,14 +488,23 @@ pub fn compose(tsubame: &[MenuItem], native: &[MenuItem], user: &[MenuItem], ent
 /// entries. Packaged items the classic menu already has (same verb, which
 /// for packaged items is the handler CLSID, or the same label) are dropped,
 /// so "Edit in Notepad" never shows twice. One menu, no "Show more options".
-pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuItem], user: &[MenuItem], entries: &[MenuEntry]) -> Vec<MenuItem> {
+pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuItem], user: &[MenuItem], menu: &ContextMenu) -> Vec<MenuItem> {
     let covered: Vec<&str> = tsubame.iter().filter_map(|t| BUILTIN_VERBS.iter().find(|(c, _)| *c == t.action).map(|(_, v)| *v)).collect();
     let mut nat: Vec<MenuItem> = native.iter().filter(|n| !n.verb.as_deref().is_some_and(|v| covered.contains(&v))).cloned().collect();
-    apply_overrides(&mut nat, entries);
+    apply_overrides(&mut nat, menu);
     let mut pkg = dedupe_packaged(packaged, native, tsubame);
-    apply_overrides(&mut pkg, entries);
-    let mut out = Vec::with_capacity(tsubame.len() + nat.len() + pkg.len() + user.len() + 3);
-    for group in [tsubame, &nat[..], &pkg[..], user] {
+    apply_overrides(&mut pkg, menu);
+    // Tsubame's own rows outside the list (`app:` keys) can be hidden too
+    let mut own = tsubame.to_vec();
+    apply_overrides(&mut own, menu);
+    let mut out = Vec::with_capacity(own.len() + nat.len() + pkg.len() + user.len() + 3);
+    for g in menu::group_order(&menu.groups) {
+        let group: &[MenuItem] = match g {
+            Group::Tsubame => &own,
+            Group::Windows => &nat,
+            Group::Apps => &pkg,
+            Group::Custom => user,
+        };
         if group.is_empty() {
             continue;
         }
@@ -506,6 +541,26 @@ pub fn dedupe_packaged(packaged: &[MenuItem], native: &[MenuItem], tsubame: &[Me
 /// and moved, never deleted).
 pub fn native_entry(item: &MenuItem) -> MenuEntry {
     MenuEntry { id: item.key.clone(), source: Source::Windows, name: item.label.clone(), kind: if item.kind == ItemKind::Submenu { EntryKind::Submenu } else { EntryKind::Item }, ..Default::default() }
+}
+
+/// Keys that live in `[[context_menu.items]]` (not in the U4 list).
+pub fn is_item_key(key: &str) -> bool {
+    ["windows.verb:", "windows.label:", "windows.pkg:", "app:"].iter().any(|p| key.len() > p.len() && key[..p.len()].eq_ignore_ascii_case(p))
+}
+
+/// Where the item keyed `key` comes from, as Settings shows it: the package
+/// family of a packaged item, `Tsubame` for an app row, else `Windows`.
+pub fn from_of(key: &str) -> String {
+    if let Some(rest) = key.get(..12).filter(|p| p.eq_ignore_ascii_case("windows.pkg:")).map(|_| &key[12..]) {
+        return rest.rsplit_once('/').map_or(rest, |(f, _)| f).to_string();
+    }
+    if key.starts_with("app:") { "Tsubame".into() } else { "Windows".into() }
+}
+
+/// The top-level items of a menu worth remembering for Settings (key,
+/// label, from): Windows', the apps' and Tsubame's rows outside the list.
+pub fn seen(items: &[MenuItem]) -> Vec<(String, String, String)> {
+    items.iter().filter(|it| !it.is_separator() && is_item_key(&it.key)).map(|it| (it.key.clone(), it.label.clone(), from_of(&it.key))).collect()
 }
 
 // ---- batches and the model the UI holds ----------------------------------
@@ -618,8 +673,8 @@ impl MenuModel {
     }
 
     /// The rows to draw now.
-    pub fn rows(&self, entries: &[MenuEntry]) -> Vec<MenuItem> {
-        compose_all(&self.tsubame, &self.native, &self.packaged, &self.user, entries)
+    pub fn rows(&self, menu: &ContextMenu) -> Vec<MenuItem> {
+        compose_all(&self.tsubame, &self.native, &self.packaged, &self.user, menu)
     }
 }
 
@@ -901,27 +956,55 @@ mod tests {
         MenuEntry { id: id.into(), source: Source::Windows, name: name.into(), hidden, ..Default::default() }
     }
 
+    fn cm(entries: Vec<MenuEntry>) -> ContextMenu {
+        ContextMenu { entries, ..Default::default() }
+    }
+
+    fn pref(key: &str, name: &str, hidden: bool) -> menu::ItemPref {
+        menu::ItemPref { key: key.into(), name: name.into(), hidden, ..Default::default() }
+    }
+
+    fn prefs(items: Vec<menu::ItemPref>) -> ContextMenu {
+        ContextMenu { items, ..Default::default() }
+    }
+
     #[test]
-    fn overrides_hide_rename_and_reorder_by_verb_or_label() {
+    fn overrides_hide_and_rename_by_verb_or_label_and_never_reorder() {
         let mut icons = IconCache::new(4);
         let base = build_native(&[verb(raw(1, "&Open"), "open"), raw(2, "7-Zip"), sep(), verb(raw(3, "Share"), "Windows.ModernShare"), raw(4, "Git Bash Here"), sep(), verb(raw(5, "Properties"), "properties")], &mut icons);
         // hide Share and Properties (the separator before Properties goes too)
         let mut m = base.clone();
-        apply_overrides(&mut m, &[win("windows.verb:windows.modernshare", "", true), win("windows.verb:properties", "", true)]);
+        apply_overrides(&mut m, &prefs(vec![pref("windows.verb:windows.modernshare", "", true), pref("windows.verb:properties", "", true)]));
         assert_eq!(labels(&m), ["Open", "7-Zip", "--", "Git Bash Here"]);
         // rename by label key, keep the accelerator of the new name
         let mut m = base.clone();
-        apply_overrides(&mut m, &[win("windows.label:7-zip", "&Archive", false)]);
+        apply_overrides(&mut m, &prefs(vec![pref("windows.label:7-zip", "&Archive", false)]));
         assert_eq!(m[1].label, "Archive");
         assert_eq!(m[1].accel, Some('a'));
-        // reorder: Git before Open; unlisted items stay where they are
+        // the list's order never moves native items
         let mut m = base.clone();
-        apply_overrides(&mut m, &[win("windows.label:git bash here", "", false), win("windows.verb:open", "", false)]);
-        assert_eq!(labels(&m), ["Git Bash Here", "7-Zip", "--", "Share", "Open", "--", "Properties"]);
-        // case does not matter, other sources never match native items
+        apply_overrides(&mut m, &prefs(vec![pref("windows.label:git bash here", "", false), pref("windows.verb:open", "", false)]));
+        assert_eq!(labels(&m), labels(&base));
+        // case does not matter; legacy U4 entries of source Windows still
+        // apply, other sources never match native items
         let mut m = base.clone();
-        apply_overrides(&mut m, &[MenuEntry { source: Source::Custom, ..win("windows.verb:open", "", true) }, win("WINDOWS.VERB:OPEN", "Run", false)]);
+        apply_overrides(&mut m, &cm(vec![MenuEntry { source: Source::Custom, ..win("windows.verb:open", "", true) }, win("WINDOWS.VERB:OPEN", "Run", false)]));
         assert_eq!(m[0].label, "Run");
+        // an item pref wins over a legacy entry for the same key
+        let mut both = cm(vec![win("windows.verb:open", "", true)]);
+        both.items.push(pref("windows.verb:open", "Go", false));
+        let mut m = base.clone();
+        apply_overrides(&mut m, &both);
+        assert_eq!(m[0].label, "Go");
+    }
+
+    #[test]
+    fn unknown_overrides_change_nothing() {
+        let mut icons = IconCache::new(4);
+        let base = build_native(&[verb(raw(1, "Open"), "open"), raw(2, "7-Zip")], &mut icons);
+        let mut m = base.clone();
+        apply_overrides(&mut m, &prefs(vec![pref("windows.verb:gone", "X", true), pref("", "Empty", true), pref("app:x.nothing", "", true)]));
+        assert_eq!(m, base);
     }
 
     #[test]
@@ -929,10 +1012,53 @@ mod tests {
         let mut icons = IconCache::new(4);
         let sub = RawItem { text: "Send to".into(), submenu: Some(vec![raw(10, "Desktop (create shortcut)"), raw(11, "Mail recipient")]), ..Default::default() };
         let mut m = build_native(&[sub], &mut icons);
-        apply_overrides(&mut m, &[win("windows.label:mail recipient", "", true)]);
+        apply_overrides(&mut m, &prefs(vec![pref("windows.label:mail recipient", "", true)]));
         assert_eq!(labels(&m[0].children), ["Desktop (create shortcut)"]);
     }
 
+    #[test]
+    fn packaged_keys_carry_the_package_and_old_clsid_keys_still_apply() {
+        let mut icons = IconCache::new(4);
+        let r = RawItem { package: Some("Microsoft.WindowsTerminal_8wekyb3d8bbwe".into()), ..verb(raw(0xA000, "Open in Terminal"), "{9F156763-7844-4DC4-B2B1-901F640F5155}") };
+        let pkg = build_native(&[r], &mut icons);
+        assert_eq!(pkg[0].key, "windows.pkg:Microsoft.WindowsTerminal_8wekyb3d8bbwe/{9f156763-7844-4dc4-b2b1-901f640f5155}");
+        assert_eq!(from_of(&pkg[0].key), "Microsoft.WindowsTerminal_8wekyb3d8bbwe");
+        assert_eq!(legacy_key(&pkg[0].key).as_deref(), Some("windows.verb:{9f156763-7844-4dc4-b2b1-901f640f5155}"));
+        let mut m = pkg.clone();
+        apply_overrides(&mut m, &cm(vec![win("windows.verb:{9f156763-7844-4dc4-b2b1-901f640f5155}", "", true)]));
+        assert!(m.is_empty(), "a CM7-era hide still hides it");
+        let mut m = pkg.clone();
+        apply_overrides(&mut m, &prefs(vec![pref("WINDOWS.PKG:microsoft.windowsterminal_8wekyb3d8bbwe/{9f156763-7844-4dc4-b2b1-901f640f5155}", "Terminal", false)]));
+        assert_eq!(m[0].label, "Terminal");
+    }
+
+    #[test]
+    fn row_keys_survive_a_translated_label_and_seen_lists_learnable_rows() {
+        let mut icons = IconCache::new(4);
+        let en = build_native(&[verb(raw(1, "Share"), "Windows.ModernShare"), raw(2, "7-Zip")], &mut icons);
+        let de = build_native(&[verb(raw(9, "Teilen"), "windows.modernshare"), raw(2, "7-Zip")], &mut icons);
+        assert_eq!(en[0].key, de[0].key, "the verb keys it, not the label");
+        assert_eq!(en[1].key, "windows.label:7-zip");
+        let mut own = vec![MenuItem::command(ItemSource::Tsubame, "Copy name", "x.copy-name"), MenuItem::command(ItemSource::Tsubame, "Copy", "file.copy")];
+        own[0].key = "app:x.copy-name".into();
+        own[1].key = "builtin.copy".into();
+        let s = seen(&[own, en].concat());
+        assert_eq!(s.iter().map(|x| (x.0.as_str(), x.2.as_str())).collect::<Vec<_>>(), [("app:x.copy-name", "Tsubame"), ("windows.verb:windows.modernshare", "Windows"), ("windows.label:7-zip", "Windows")]);
+    }
+
+    #[test]
+    fn group_order_moves_whole_groups() {
+        let ts = vec![MenuItem::command(ItemSource::Tsubame, "Open", "file.open")];
+        let native = build_native(&[raw(1, "7-Zip")], &mut IconCache::new(2));
+        let user = vec![MenuItem::command(ItemSource::User, "My tool", "custom.1")];
+        let m = ContextMenu { groups: vec![Group::Custom, Group::Windows], ..Default::default() };
+        assert_eq!(labels(&compose(&ts, &native, &user, &m)), ["My tool", "--", "7-Zip", "--", "Open"]);
+        let mut hide = m.clone();
+        hide.items.push(pref("app:file.open", "", true));
+        let mut ts2 = ts.clone();
+        ts2[0].key = "app:file.open".into();
+        assert_eq!(labels(&compose(&ts2, &native, &user, &hide)), ["My tool", "--", "7-Zip"], "an app row hides like a native one");
+    }
     #[test]
     fn compose_puts_groups_in_order_and_drops_covered_verbs() {
         let entries = default_entries();
@@ -942,7 +1068,7 @@ mod tests {
         let user = vec![MenuItem::command(ItemSource::User, "VS Code", "custom.1")];
         let mut icons = IconCache::new(4);
         let native = build_native(&[verb(raw(1, "Open"), "open"), verb(raw(2, "Copy"), "copy"), raw(3, "7-Zip"), verb(raw(4, "Properties"), "properties")], &mut icons);
-        let rows = compose(&ts, &native, &user, &entries);
+        let rows = compose(&ts, &native, &user, &cm(entries.clone()));
         let l = labels(&rows);
         assert_eq!(l.iter().filter(|s| *s == "Copy").count(), 1, "{l:?}");
         assert_eq!(l.iter().filter(|s| *s == "Properties").count(), 1, "{l:?}");
@@ -954,7 +1080,7 @@ mod tests {
         let mut e2 = entries.clone();
         e2.iter_mut().find(|e| e.id == "builtin.copy").unwrap().hidden = true;
         let (ts2, _) = own_items(&e2, Target::File, "txt");
-        let rows = compose(&ts2, &native, &[], &e2);
+        let rows = compose(&ts2, &native, &[], &cm(e2.clone()));
         assert!(rows.iter().any(|r| r.source == ItemSource::Native && r.label == "Copy"));
     }
 
@@ -975,7 +1101,7 @@ mod tests {
     fn model_drops_stale_generations_and_fills_lazy_submenus() {
         let mut m = MenuModel::new(7, vec![MenuItem::command(ItemSource::Tsubame, "Copy path", "file.copy-path")], vec![]);
         assert_eq!(m.state, LoadState::Loading);
-        assert_eq!(labels(&m.rows(&[])), ["Copy path"], "own items at t = 0");
+        assert_eq!(labels(&m.rows(&ContextMenu::default())), ["Copy path"], "own items at t = 0");
         let mut icons = IconCache::new(4);
         let native = build_native(&[raw(1, "7-Zip"), RawItem { text: "Open with".into(), submenu: Some(vec![]), sub: 3, ..Default::default() }], &mut icons);
         assert!(!m.apply(MenuBatch { generation: 6, part: Part::Native(native.clone()), timing: [0; 3] }), "stale");
@@ -1107,7 +1233,7 @@ mod tests {
         let entries = default_entries();
         let (ts, _) = own_items(&entries, Target::File, "txt");
         let native = build_native(&[verb(raw(9, "Copy as path"), "copyaspath"), raw(10, "7-Zip")], &mut IconCache::new(2));
-        let l = labels(&compose(&ts, &native, &[], &entries));
+        let l = labels(&compose(&ts, &native, &[], &cm(entries.clone())));
         assert_eq!(l.iter().filter(|s| *s == "Copy as path").count(), 1, "{l:?}");
     }
 
@@ -1124,19 +1250,19 @@ mod tests {
             &mut icons,
         );
         let user = vec![MenuItem::command(ItemSource::User, "My tool", "custom.1")];
-        let l = labels(&compose_all(&ts, &native, &pkg, &user, &[]));
+        let l = labels(&compose_all(&ts, &native, &pkg, &user, &ContextMenu::default()));
         assert_eq!(l, ["Open", "--", "Open with", "Edit in Notepad", "Properties", "--", "Open in Terminal", "--", "More tools", "--", "My tool"], "one menu: classic, packaged, user");
         // ids route to the worker that holds the packaged command
-        let all = compose_all(&ts, &native, &pkg, &user, &[]);
+        let all = compose_all(&ts, &native, &pkg, &user, &ContextMenu::default());
         let term = all.iter().find(|i| i.label == "Open in Terminal").unwrap();
         assert_eq!(route(term), Route::Shell(0xA000));
         assert_eq!(term.key, "windows.verb:{9f156763-7844-4dc4-b2b1-901f640f5155}", "the CLSID keys the user's edits");
         assert_eq!(term.accel, Some('t'));
         // hidden by the user like any native item
         let hide = vec![MenuEntry { id: term.key.clone(), source: Source::Windows, hidden: true, ..Default::default() }];
-        assert!(!labels(&compose_all(&ts, &native, &pkg, &user, &hide)).contains(&"Open in Terminal".to_string()));
+        assert!(!labels(&compose_all(&ts, &native, &pkg, &user, &cm(hide))).contains(&"Open in Terminal".to_string()));
         // no packaged items: no stray separator
-        assert_eq!(labels(&compose_all(&ts, &native, &[], &[], &[])), labels(&compose(&ts, &native, &[], &[])));
+        assert_eq!(labels(&compose_all(&ts, &native, &[], &[], &ContextMenu::default())), labels(&compose(&ts, &native, &[], &ContextMenu::default())));
         // a model: packaged batch after the top level, its lazy submenu fills
         let mut m = MenuModel::new(5, ts.clone(), vec![]);
         assert!(m.apply(MenuBatch { generation: 5, part: Part::Native(native.clone()), timing: [0; 3] }));
@@ -1146,7 +1272,7 @@ mod tests {
         assert_eq!(m.packaged_us, Some(1234));
         assert!(is_lazy(find_sub(&m.packaged, 0x1_0000).unwrap()));
         m.apply(MenuBatch { generation: 5, part: Part::Submenu { sub: 0x1_0000, items: vec![MenuItem { id: 0xA003, ..MenuItem::command(ItemSource::Native, "Sub tool", "") }] }, timing: [0; 3] });
-        let rows = m.rows(&[]);
+        let rows = m.rows(&ContextMenu::default());
         let more = rows.iter().find(|i| i.label == "More tools").unwrap();
         assert!(!is_lazy(more) && more.children[0].label == "Sub tool");
     }

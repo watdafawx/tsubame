@@ -85,7 +85,7 @@ config writer. A "Find a setting" box in the nav filters the page list by title 
 |---|---|
 | General | start folder, restore session, show hidden, show system, confirm delete, delete to recycle bin |
 | Appearance | colour mode (Match Windows / Light / Dark), 19 themes with previews, accent colour (9 swatches + theme default), row density with live previews (Compact 22 / Normal 26 / Comfortable 30 px), zebra, font size slider |
-| Context menu | list of entries with visibility toggles, drag to reorder, add custom entry (name, command line, optional extension filter), Nilesoft import, reset |
+| Context menu | search, filter chips, group order, the U4 list (eye, rename, drag to reorder, add custom entry, Nilesoft import), the items learned from real menus (eye, rename, New), reset to defaults |
 | Keys | see above |
 | Updates | version, channel, last checked, state line (see below), Check now, Download and restart, Roll back, "Check automatically" and "Install updates automatically" (off) |
 | Default file manager | opt-in state, switch, Repair, Remove (see below, `docs/default-file-manager.md`) |
@@ -95,15 +95,22 @@ Density naming: config `compact/normal/comfortable` = kit `Compact/Comfortable/S
 
 ### Context menu editor
 
-The W1 native shell menu is untouched (`crates/tsubame-win/src/shell/menu.rs`). What the editor changes
-is what Tsubame *adds* to it, through the `extras` list in `src/shellops.rs`:
+Settings > Context menu edits the own-drawn menu (`docs/ctxmenu.md`; mock state 6b). Top to bottom:
 
-- the built-in lines of ours (Rename, Copy path, Paste, New folder, ...) that are hidden are left out;
-- enabled custom / imported entries that apply to the click (file with matching extension, folder,
-  background) are appended after a separator, in the saved order, submenus flattened to their children.
+- the approved note that Windows' items are only hidden in Tsubame, never removed from the system;
+- search (name, original label, source) and the chips All / Windows / Tsubame / Hidden;
+- Add custom entry, New submenu, Add separator, Import from Nilesoft Shell…, Reset to defaults (asks
+  once; drops every hide, rename, reorder and the group order, keeps the learned items);
+- Groups: Tsubame, Windows, Installed apps, Custom, with a grip to reorder (`context_menu.groups`);
+- the U4 list (Tsubame's built-ins and the custom / imported entries): grip (off while filtered), eye,
+  double-click rename ("— was …" for a renamed built-in), source tag, × on custom rows;
+- the items learned from real right-clicks (`[[context_menu.items]]`): eye, double-click rename
+  ("— was …"), where it comes from, New for items that appeared since the last visit (the flags clear when
+  the page opens). No grip: Windows' items keep their native order;
+- the preview of the U4 list and the "How the list is filled" note.
 
-Not possible while the native menu stays: hiding or renaming Windows' own items (Open with, Share, ...).
-They show as "Windows" rows in the editor, locked.
+The native popup (`TSUBAME_NATIVE_MENU=1`) still gets only what Tsubame adds: hidden built-ins are left
+out and enabled custom / imported entries are appended (`src/shellops.rs`).
 
 Custom entry run (`custom_cmd`): the command line is split into arguments first, then the tokens
 (`{path}` `{selection}` `{dir}` `{name}` `{ext}` `{parent}`, also `%1` / `%*`) are replaced inside each
@@ -184,7 +191,9 @@ nothing of U4 runs per frame in a list.
   packs, hover preview of a theme, Win+E takeover and the extra Explorer verb.
 - "Match Windows" colour mode reads the system theme once at startup/selection; it does not follow a
   live change.
-- Hiding or renaming Windows' own context menu items (see above).
+- Context menu editor (CM8): no user-defined groups ("New group", dragging a Windows item into a group),
+  no "3rd party" chip (classic items expose no owning program), no "Refresh from last menu", no Pin to
+  top, no row "…" menu, no Ctrl+F, Nilesoft import without the file-detected state or a file picker.
 - `advanced.diagnostics` persists, the log writer is not wired.
 - `updates.channel` is read; the updater is pinned to stable.
 - The memory readout on Advanced refreshes on repaint (about once a second while the page is visible),

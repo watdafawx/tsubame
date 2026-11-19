@@ -12,8 +12,9 @@
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
-use tsubame_config::menu::{MenuEntry, Target as Kind};
-use tsubame_ui::widgets::menu::{SubLoad, menu};
+use tsubame_config::ContextMenu;
+use tsubame_config::menu::{self, MenuEntry, Target as Kind};
+use tsubame_ui::widgets::menu::{EDIT_DOWN, EDIT_HIDE, EDIT_RENAME, EDIT_SETTINGS, EDIT_UP, G_EYE_OFF, SubLoad, menu as draw_menu};
 use tsubame_ui::{Canvas, Id, MenuRow, MenuSource, MenuState, MenuStyle, Pt, Rect, RowIcon, RowKind, Ui};
 use tsubame_win::shell::ctxmodel::{self, IconCache, ItemKind, ItemSource, LoadState, MenuBatch, MenuItem, MenuModel, Part, Route, SubLoads, SubState, flag};
 use tsubame_win::shell::{CtxHandle, CtxOpts, Pool, Request};
@@ -93,7 +94,19 @@ pub struct CtxMenu {
     pub generation: u64,
     pub target: Target,
     pub model: MenuModel,
-    pub entries: Vec<MenuEntry>,
+    /// the menu settings this menu was built from (`entries` is the effective
+    /// list); edits from the menu itself (CM8) change this copy, and the app
+    /// saves it when `edited` / `learned` is set
+    pub menu: ContextMenu,
+    /// the user hid, renamed or moved a row: the app saves `menu`
+    pub edited: bool,
+    /// new items were remembered in `menu.items`: the app saves them
+    pub learned: bool,
+    /// "Edit in Settings…" / Manage: the app opens Settings on this key
+    pub settings_key: Option<String>,
+    /// the row the last Hide hid, (key, label) (Undo on the strip)
+    undo: Option<(String, String)>,
+    dual: bool,
     handle: Option<CtxHandle>,
     /// the pool job (the watchdog reports it when it hangs)
     pub ticket: u64,
@@ -148,8 +161,9 @@ pub fn is_root(path: &str) -> bool {
 }
 
 /// App rows that are not in the U4 list.
+/// Keyed `app:<action>`, so they can be hidden and renamed (CM8).
 pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
-    let c = |l: &str, a: &str| MenuItem::command(ItemSource::Tsubame, l, a);
+    let c = |l: &str, a: &str| MenuItem { key: format!("app:{a}"), ..MenuItem::command(ItemSource::Tsubame, l, a) };
     match kind {
         Kind::Background => vec![c("Paste", "file.paste"), c("New folder", "x.new-folder"), c("New text file", "x.new-file"), c("Copy as path", "file.copy-path"), c("Open terminal here", "x.terminal"), c("Refresh", "x.refresh")],
         _ => {
@@ -177,6 +191,87 @@ pub fn tsubame_rows(entries: &[MenuEntry], kind: Kind, ext: &str, n: usize, dual
     rows
 }
 
+/// The Tsubame and user rows for `target` (drive roots: no Cut, Delete,
+/// Rename).
+fn own_parts(target: &Target, entries: &[MenuEntry], dual: bool) -> (Vec<MenuItem>, Vec<MenuItem>) {
+    let (kind, ext) = kind_of(target);
+    let mut tsubame = tsubame_rows(entries, kind, &ext, target.paths.len(), dual);
+    if target.paths.iter().any(|p| is_root(p)) && !target.background {
+        for row in &mut tsubame {
+            if matches!(row.action.as_str(), "file.cut" | "file.delete" | "file.rename") {
+                row.flags |= flag::DISABLED;
+            }
+        }
+    }
+    (tsubame, ctxmodel::own_items(entries, kind, &ext).1)
+}
+
+/// Hides (or shows) the row keyed `key`: a list entry (built-in, custom) by
+/// its `hidden`, any other row by its `[[context_menu.items]]` pref (made on
+/// first edit, `label` its label). A CM7-era `Source::Windows` entry of the
+/// same key is kept in step so it cannot hide the row again.
+pub fn set_hidden(m: &mut ContextMenu, key: &str, label: &str, hidden: bool) {
+    if let Some(e) = m.entries.iter_mut().find(|e| e.id == key && !ctxmodel::is_item_key(key)) {
+        e.hidden = hidden;
+        return;
+    }
+    for e in m.entries.iter_mut().filter(|e| e.source == menu::Source::Windows && e.id.eq_ignore_ascii_case(key)) {
+        e.hidden = false;
+    }
+    pref_mut(m, key, label).hidden = hidden;
+}
+
+/// Renames the row keyed `key` (empty `name`: the original label again).
+pub fn set_name(m: &mut ContextMenu, key: &str, label: &str, name: &str) {
+    let name = name.trim();
+    if let Some(e) = m.entries.iter_mut().find(|e| e.id == key && !ctxmodel::is_item_key(key)) {
+        if !name.is_empty() {
+            e.name = name.to_string();
+        } else if let Some(d) = menu::default_entries().into_iter().find(|d| d.id == key) {
+            // built-ins go back to their default name; custom ones need a name
+            e.name = d.name;
+        }
+        return;
+    }
+    for e in m.entries.iter_mut().filter(|e| e.source == menu::Source::Windows && e.id.eq_ignore_ascii_case(key)) {
+        e.name.clear();
+    }
+    pref_mut(m, key, label).name = name.to_string();
+}
+
+fn pref_mut<'a>(m: &'a mut ContextMenu, key: &str, label: &str) -> &'a mut menu::ItemPref {
+    if menu::item(&m.items, key).is_none() {
+        m.items.push(menu::ItemPref { key: key.to_string(), label: label.to_string(), from: ctxmodel::from_of(key), ..Default::default() });
+    }
+    menu::item_mut(&mut m.items, key).expect("just added")
+}
+
+/// List entries Move up / down works on: Tsubame's built-ins (and the
+/// classic-menu row) among themselves, custom and imported ones among
+/// themselves. Windows' items keep their native order.
+fn movable(e: &MenuEntry) -> bool {
+    e.parent.is_empty() && !e.is_separator() && (e.source == menu::Source::Builtin || e.source.runs_program() || e.id == ctxmodel::ACTION_CLASSIC)
+}
+
+fn same_group(a: &MenuEntry, b: &MenuEntry) -> bool {
+    a.source.runs_program() == b.source.runs_program()
+}
+
+/// The entry Move up / down of `key` would pass: the next movable one of
+/// the same group that the menu shows (`shown`: the drawn rows' keys).
+fn move_neighbour(entries: &[MenuEntry], key: &str, up: bool, shown: &[&str]) -> Option<(usize, usize)> {
+    let i = entries.iter().position(|e| e.id == key && movable(e))?;
+    let ok = |j: &usize| movable(&entries[*j]) && same_group(&entries[i], &entries[*j]) && shown.contains(&entries[*j].id.as_str());
+    let j = if up { (0..i).rev().find(ok) } else { (i + 1..entries.len()).find(ok) }?;
+    Some((i, j))
+}
+
+/// Moves the entry `key` one shown row up or down. False: it cannot move.
+pub fn move_entry_by(entries: &mut Vec<MenuEntry>, key: &str, up: bool, shown: &[&str]) -> bool {
+    let Some((i, j)) = move_neighbour(entries, key, up, shown) else { return false };
+    menu::move_entry(entries, i, if up { j } else { j + 1 }).is_some()
+}
+
 /// The clipboard holds files (Paste is enabled). No COM: format probes only.
 pub fn clipboard_has_files() -> bool {
     use windows::Win32::System::DataExchange::{IsClipboardFormatAvailable, RegisterClipboardFormatW};
@@ -189,22 +284,20 @@ pub fn clipboard_has_files() -> bool {
 
 impl CtxMenu {
     /// Builds the menu (own rows now) and asks a worker for the shell's.
-    pub fn open(target: Target, entries: Vec<MenuEntry>, dual: bool, paste_ok: bool, icon_px: u32, pool: &mut Pool) -> CtxMenu {
-        let (kind, ext) = kind_of(&target);
-        let mut tsubame = tsubame_rows(&entries, kind, &ext, target.paths.len(), dual);
-        if target.paths.iter().any(|p| is_root(p)) && !target.background {
-            for row in &mut tsubame {
-                if matches!(row.action.as_str(), "file.cut" | "file.delete" | "file.rename") { row.flags |= flag::DISABLED; }
-            }
-        }
-        let user = ctxmodel::own_items(&entries, kind, &ext).1;
+    pub fn open(target: Target, menu: ContextMenu, dual: bool, paste_ok: bool, icon_px: u32, pool: &mut Pool) -> CtxMenu {
+        let (tsubame, user) = own_parts(&target, &menu.entries, dual);
         let generation = next_gen();
         let state = MenuState::new(target.anchor, target.keyboard);
         let mut m = CtxMenu {
             generation,
             model: MenuModel::new(generation, tsubame, user),
             target,
-            entries,
+            menu,
+            edited: false,
+            learned: false,
+            settings_key: None,
+            undo: None,
+            dual,
             handle: None,
             ticket: 0,
             state,
@@ -227,8 +320,87 @@ impl CtxMenu {
             paste_ok,
             icon_px,
         };
+        m.learn_from(&m.model.tsubame.clone());
         m.submit(pool);
         m
+    }
+
+    /// Remembers the rows of `items` Settings does not know yet (CM8).
+    fn learn_from(&mut self, items: &[MenuItem]) {
+        let seen = ctxmodel::seen(items);
+        if seen.is_empty() {
+            return;
+        }
+        // the very first menu (nothing remembered yet) tags nothing New
+        let fresh = !self.menu.items.is_empty();
+        self.learned |= menu::learn(&mut self.menu.items, &seen, fresh);
+    }
+
+    /// Rebuilds the Tsubame and user rows after an edit of the list.
+    fn rebuild_own(&mut self) {
+        let (t, u) = own_parts(&self.target, &self.menu.entries, self.dual);
+        self.model.tsubame = t;
+        self.model.user = u;
+        self.dirty = true;
+    }
+
+    /// The item at `path` of the drawn rows.
+    fn item(&self, path: &[u64]) -> Option<&MenuItem> {
+        let (&last, up) = path.split_last()?;
+        let mut level = &self.items[..];
+        for &k in up {
+            level = &level.iter().find(|it| it.kind == ItemKind::Submenu && item_key(it) == k)?.children;
+        }
+        level.iter().find(|it| item_key(it) == last)
+    }
+
+    /// Runs an edit-menu row (CM8) on the row at `path`.
+    pub fn edit(&mut self, path: &[u64], act: u64) {
+        let Some(it) = self.item(path) else { return };
+        let (key, label) = (it.key.clone(), it.label.clone());
+        if key.is_empty() {
+            return;
+        }
+        match act {
+            EDIT_HIDE => {
+                self.undo = Some((key.clone(), label.clone()));
+                set_hidden(&mut self.menu, &key, &label, true);
+            }
+            EDIT_UP | EDIT_DOWN => {
+                let shown: Vec<&str> = self.items.iter().map(|i| i.key.as_str()).collect();
+                if !move_entry_by(&mut self.menu.entries, &key, act == EDIT_UP, &shown) {
+                    return;
+                }
+            }
+            EDIT_SETTINGS => {
+                self.settings_key = Some(key);
+                return;
+            }
+            _ => return,
+        }
+        self.edited = true;
+        self.rebuild_own();
+    }
+
+    /// An inline rename was kept (empty: the original label again).
+    pub fn rename(&mut self, path: &[u64], name: &str) {
+        let Some(it) = self.item(path) else { return };
+        let (key, label) = (it.key.clone(), it.label.clone());
+        if key.is_empty() || name == label {
+            return;
+        }
+        set_name(&mut self.menu, &key, &label, name);
+        self.edited = true;
+        self.rebuild_own();
+    }
+
+    /// Undo on the strip: the row the last Hide hid shows again.
+    pub fn undo_hide(&mut self) {
+        if let Some((key, label)) = self.undo.take() {
+            set_hidden(&mut self.menu, &key, &label, false);
+            self.edited = true;
+            self.rebuild_own();
+        }
     }
 
     fn submit(&mut self, pool: &mut Pool) {
@@ -300,8 +472,15 @@ impl CtxMenu {
                     self.sub_latency = Some(Duration::from_millis(self.now_ms().saturating_sub(at)));
                 }
                 let native = matches!(part, Part::Native(_));
+                let packaged = matches!(part, Part::Packaged(_));
                 self.model.apply(MenuBatch { part, ..b });
                 self.dirty = true;
+                // CM8: Settings lists what real menus showed
+                if native {
+                    self.learn_from(&self.model.native.clone());
+                } else if packaged {
+                    self.learn_from(&self.model.packaged.clone());
+                }
                 if native && let Some(v) = self.pending_verb.take() {
                     self.invoke_verb(&v);
                 }
@@ -393,7 +572,7 @@ impl CtxMenu {
             return;
         }
         if self.dirty {
-            self.items = self.model.rows(&self.entries);
+            self.items = self.model.rows(&self.menu);
             self.dirty = false;
         }
         let loading = self.loading();
@@ -402,8 +581,8 @@ impl CtxMenu {
         let now = self.now_ms();
         let style = MenuStyle { bounds, loading: phase, alt, now_ms: now };
         let failed = self.shown() == LoadState::Failed;
-        let src = Rows { items: &self.items, icons: &self.model.icons, failed, paste_ok: self.paste_ok, subs: &self.subs, now, can_load: self.handle.is_some() };
-        let r = menu(ui, g, ID_CTX, &mut self.state, &src, &style);
+        let src = Rows { items: &self.items, icons: &self.model.icons, failed, paste_ok: self.paste_ok, subs: &self.subs, now, can_load: self.handle.is_some(), menu: Some(&self.menu) };
+        let r = draw_menu(ui, g, ID_CTX, &mut self.state, &src, &style);
         if let Some(path) = r.picked {
             self.picked = src.pick(&path);
         }
@@ -424,6 +603,24 @@ impl CtxMenu {
                     h.expand(sub);
                 }
             }
+        }
+        // CM8: edits from the edit menu, the inline rename and the strip
+        if let Some((path, act)) = &r.edit {
+            self.edit(path, *act);
+        }
+        if let Some((path, name)) = &r.renamed {
+            self.rename(path, name);
+        }
+        if r.undo {
+            self.undo_hide();
+        }
+        if r.manage
+            && let Some((k, _)) = &self.undo
+        {
+            self.settings_key = Some(k.clone());
+        }
+        if self.settings_key.is_some() {
+            self.open = false;
         }
     }
 
@@ -457,7 +654,10 @@ pub fn item_key(it: &MenuItem) -> u64 {
     };
     eat(&[it.source as u8, it.kind as u8]);
     eat(it.key.as_bytes());
-    eat(it.label.as_bytes());
+    // a keyed row keeps its row key when it is renamed (focus stays on it)
+    if it.key.is_empty() {
+        eat(it.label.as_bytes());
+    }
     eat(it.action.as_bytes());
     eat(&it.id.to_le_bytes());
     h | 1
@@ -562,7 +762,12 @@ pub struct Rows<'a> {
     pub now: u64,
     /// a worker holds the menu (false: lazy submenus cannot load)
     pub can_load: bool,
+    /// the menu settings (CM8: the edit menu; None: rows cannot be edited)
+    pub menu: Option<&'a ContextMenu>,
 }
+
+/// Note under the edit menu of a Windows or app item (mock 6a).
+pub const NATIVE_NOTE: &str = "A Windows item: hiding it only changes Tsubame\u{2019}s menu. Explorer is not touched.";
 
 /// Every lazy submenu's token in `items` (the filter searches them all).
 pub fn lazy_subs(items: &[MenuItem]) -> Vec<u32> {
@@ -664,6 +869,39 @@ impl MenuSource for Rows<'_> {
             _ => SubLoad::Ready,
         }
     }
+    /// CM8, mock 6a: the edit menu of the row at `path`.
+    fn edit_rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
+        let (Some(m), Some(it)) = (self.menu, self.item_at(path)) else { return };
+        if it.key.is_empty() || it.is_separator() {
+            return;
+        }
+        let tag = match it.source {
+            ItemSource::Native => match ctxmodel::from_of(&it.key) {
+                f if f == "Windows" => f,
+                // a package family: its name part (`Microsoft.WindowsTerminal`)
+                f => f.split('_').next().unwrap_or("").to_string(),
+            },
+            ItemSource::Tsubame => "Tsubame".to_string(),
+            ItemSource::User => m.entries.iter().find(|e| e.id == it.key).map_or("Custom", |e| e.source.label()).to_string(),
+        };
+        // only Tsubame's and the user's rows move; Windows' keep their order
+        let level: Vec<&str> = match path.split_last().and_then(|(_, up)| self.level(up)) {
+            Some(l) => l.iter().map(|i| i.key.as_str()).collect(),
+            None => Vec::new(),
+        };
+        let can = |up: bool| path.len() == 1 && move_neighbour(&m.entries, &it.key, up, &level).is_some();
+        let row = |key: u64, label: &str, glyph: char, sc: &str| MenuRow { icon: RowIcon::Glyph(glyph), shortcut: sc.to_string(), ..MenuRow::item(key, label) };
+        out.push(MenuRow { kind: RowKind::Header, shortcut: tag, ..MenuRow::item(0, &it.label) });
+        out.push(row(EDIT_HIDE, &format!("Hide \u{201c}{}\u{201d}", it.label), G_EYE_OFF, "Del"));
+        out.push(row(EDIT_RENAME, "Rename\u{2026}", '\u{E8AC}', "F2"));
+        out.push(MenuRow { disabled: !can(true), ..row(EDIT_UP, "Move up", '\u{E74A}', "Alt+\u{2191}") });
+        out.push(MenuRow { disabled: !can(false), ..row(EDIT_DOWN, "Move down", '\u{E74B}', "Alt+\u{2193}") });
+        out.push(MenuRow::separator());
+        out.push(row(EDIT_SETTINGS, "Edit in Settings\u{2026}", '\u{E713}', ""));
+        if it.source == ItemSource::Native {
+            out.push(MenuRow { kind: RowKind::Note, ..MenuRow::item(0, NATIVE_NOTE) });
+        }
+    }
 }
 
 /// An empty lazy submenu: "Loading…" until it is asked and answered, the
@@ -712,7 +950,7 @@ mod tests {
     #[test]
     fn failed_pending_verb_finishes_and_stale_failure_does_not() {
         let mut c = CtxMenu {
-            generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), entries: vec![],
+            generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), menu: ContextMenu::default(), edited: false, learned: false, settings_key: None, undo: None, dual: false,
             handle: None, ticket: 0, state: MenuState::default(), open: false,
             input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: Some("properties".into()), invoked: false, invoke_result: None,
@@ -765,10 +1003,10 @@ mod tests {
         native.push(sub);
         let mut model = MenuModel::new(1, std::mem::take(&mut own), vec![]);
         model.native = native;
-        let items = model.rows(&e);
+        let items = model.rows(&ContextMenu { entries: e.clone(), ..Default::default() });
         let icons = IconCache::new(4);
         let subs = SubLoads::default();
-        let src = Rows { items: &items, icons: &icons, failed: true, paste_ok: false, subs: &subs, now: 0, can_load: true };
+        let src = Rows { items: &items, icons: &icons, failed: true, paste_ok: false, subs: &subs, now: 0, can_load: true, menu: None };
         let mut out = Vec::new();
         src.rows(&[], &mut out);
         assert_eq!(out[0].label, "Open", "no app-name caption before actions");
@@ -803,6 +1041,155 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_keyed_row_keeps_its_row_key() {
+        let mut a = MenuItem { id: 5, key: "windows.verb:share".into(), ..MenuItem::command(ItemSource::Native, "Share", "") };
+        let k = item_key(&a);
+        a.label = "Teilen".into();
+        assert_eq!(item_key(&a), k, "focus stays on a renamed row");
+        let b = MenuItem::command(ItemSource::Native, "Share", "");
+        assert_ne!(item_key(&b), item_key(&MenuItem::command(ItemSource::Native, "Teilen", "")), "unkeyed rows still tell labels apart");
+    }
+
+    fn test_menu(native: Vec<MenuItem>) -> CtxMenu {
+        let target = Target { paths: vec![r"C:\x\a.txt".into()], folder: r"C:\x".into(), ..Default::default() };
+        let menu = ContextMenu { entries: default_entries(), ..Default::default() };
+        let (ts, user) = own_parts(&target, &menu.entries, false);
+        let mut model = MenuModel::new(2, ts, user);
+        model.native = native;
+        let mut c = CtxMenu {
+            generation: 2, target, model, menu, edited: false, learned: false, settings_key: None, undo: None, dual: false,
+            handle: None, ticket: 0, state: MenuState::default(), open: true,
+            input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
+            picked: None, retry: false, pending_verb: None, invoked: false, invoke_result: None,
+            items: vec![], dirty: true, paste_ok: true, icon_px: 16,
+        };
+        c.items = c.model.rows(&c.menu);
+        c
+    }
+
+    fn row_of(c: &CtxMenu, label: &str) -> u64 {
+        item_key(c.items.iter().find(|i| i.label == label).unwrap_or_else(|| panic!("{label} in {:?}", labels(&c.items))))
+    }
+
+    fn refresh(c: &mut CtxMenu) {
+        c.items = c.model.rows(&c.menu);
+    }
+
+    #[test]
+    fn hide_rename_and_undo_from_the_menu_edit_the_settings_copy() {
+        let share = MenuItem { id: 9, key: "windows.verb:share".into(), verb: Some("share".into()), ..MenuItem::command(ItemSource::Native, "Share", "") };
+        let mut c = test_menu(vec![share]);
+        // hide a Windows item: a pref is made, the row goes
+        let k = row_of(&c, "Share");
+        c.edit(&[k], EDIT_HIDE);
+        refresh(&mut c);
+        assert!(c.edited && !labels(&c.items).contains(&"Share"));
+        let p = menu::item(&c.menu.items, "windows.verb:share").unwrap();
+        assert!(p.hidden && p.label == "Share" && p.from == "Windows");
+        c.undo_hide();
+        refresh(&mut c);
+        assert!(labels(&c.items).contains(&"Share"), "Undo shows it again");
+        // rename: the same row key, a new label; empty restores
+        c.rename(&[k], "Send");
+        refresh(&mut c);
+        assert_eq!(c.items.iter().find(|i| item_key(i) == k).unwrap().label, "Send");
+        c.rename(&[k], "");
+        refresh(&mut c);
+        assert!(labels(&c.items).contains(&"Share"));
+        // a built-in: its list entry changes
+        let copy = row_of(&c, "Copy");
+        c.rename(&[copy], "Duplicate");
+        c.edit(&[row_of(&c, "Cut")], EDIT_HIDE);
+        refresh(&mut c);
+        assert!(labels(&c.items).contains(&"Duplicate") && !labels(&c.items).contains(&"Cut"));
+        assert!(c.menu.entries.iter().find(|e| e.id == "builtin.cut").unwrap().hidden);
+        c.rename(&[copy], "");
+        refresh(&mut c);
+        assert!(labels(&c.items).contains(&"Copy"), "an empty name gives a built-in its default name back");
+        // an app row (Copy name) hides through a pref too
+        c.edit(&[row_of(&c, "Copy name")], EDIT_HIDE);
+        refresh(&mut c);
+        assert!(!labels(&c.items).contains(&"Copy name"));
+        assert!(menu::item(&c.menu.items, "app:x.copy-name").is_some_and(|p| p.hidden && p.from == "Tsubame"));
+        // Edit in Settings: the key goes to the app, nothing else changes
+        c.edit(&[k], EDIT_SETTINGS);
+        assert_eq!(c.settings_key.as_deref(), Some("windows.verb:share"));
+    }
+
+    #[test]
+    fn move_up_and_down_work_on_own_rows_only() {
+        let share = MenuItem { id: 9, key: "windows.verb:share".into(), ..MenuItem::command(ItemSource::Native, "Share", "") };
+        let mut c = test_menu(vec![share]);
+        let l = labels(&c.items);
+        let (cut, copy) = (l.iter().position(|s| *s == "Cut").unwrap(), l.iter().position(|s| *s == "Copy").unwrap());
+        assert!(cut < copy);
+        c.edit(&[row_of(&c, "Copy")], EDIT_UP);
+        refresh(&mut c);
+        let l = labels(&c.items);
+        assert!(l.iter().position(|s| *s == "Copy").unwrap() < l.iter().position(|s| *s == "Cut").unwrap(), "{l:?}");
+        // Windows' items keep their order: nothing happens
+        let before = c.menu.clone();
+        c.edited = false;
+        c.edit(&[row_of(&c, "Share")], EDIT_DOWN);
+        assert!(!c.edited && c.menu == before);
+        // the first own row cannot move up (Open is first; Open in new tab is not shown for files)
+        c.edit(&[row_of(&c, "Open")], EDIT_UP);
+        assert!(!c.edited);
+    }
+
+    #[test]
+    fn edit_rows_follow_the_mock() {
+        let share = MenuItem { id: 9, key: "windows.verb:share".into(), ..MenuItem::command(ItemSource::Native, "Share", "") };
+        let mut pk = MenuItem { id: 0xA000, key: "windows.pkg:Microsoft.WindowsTerminal_8wekyb3d8bbwe/{9f15}".into(), ..MenuItem::command(ItemSource::Native, "Open in Terminal", "") };
+        pk.verb = Some("{9f15}".into());
+        let c = test_menu(vec![share, pk]);
+        let icons = IconCache::new(2);
+        let subs = SubLoads::default();
+        let src = Rows { items: &c.items, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true, menu: Some(&c.menu) };
+        let rows = |label: &str| {
+            let mut out = Vec::new();
+            src.edit_rows(&[row_of(&c, label)], &mut out);
+            out
+        };
+        let r = rows("Share");
+        assert_eq!((r[0].kind, r[0].label.as_str(), r[0].shortcut.as_str()), (RowKind::Header, "Share", "Windows"));
+        assert_eq!(r[1].label, "Hide \u{201c}Share\u{201d}");
+        assert_eq!((r[1].key, r[1].shortcut.as_str()), (EDIT_HIDE, "Del"));
+        assert_eq!((r[2].key, r[2].shortcut.as_str()), (EDIT_RENAME, "F2"));
+        assert!(r[3].disabled && r[4].disabled, "Windows' items do not move");
+        assert_eq!(r[6].key, EDIT_SETTINGS);
+        assert_eq!((r[7].kind, r[7].label.as_str()), (RowKind::Note, NATIVE_NOTE));
+        assert_eq!(rows("Open in Terminal")[0].shortcut, "Microsoft.WindowsTerminal");
+        let own = rows("Copy");
+        assert_eq!(own[0].shortcut, "Tsubame");
+        assert!(!own[3].disabled && !own[4].disabled, "a built-in moves");
+        assert!(own.iter().all(|r| r.kind != RowKind::Note));
+        assert!(rows("Open")[3].disabled, "the first row cannot move up");
+        // no menu settings: no edit menu
+        let plain = Rows { menu: None, ..src };
+        let mut out = Vec::new();
+        plain.edit_rows(&[row_of(&c, "Share")], &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn batches_teach_settings_new_items_once() {
+        let mut c = test_menu(vec![]);
+        // the first menu ever tags nothing New
+        c.learn_from(&c.model.tsubame.clone());
+        assert!(c.learned && c.menu.items.iter().all(|p| !p.new));
+        assert!(menu::item(&c.menu.items, "app:x.copy-name").is_some());
+        c.learned = false;
+        let g = c.generation;
+        let share = MenuItem { id: 9, key: "windows.verb:share".into(), ..MenuItem::command(ItemSource::Native, "Share", "") };
+        c.apply(MenuBatch { generation: g, part: Part::Native(vec![share.clone()]), timing: [0; 3] });
+        assert!(c.learned && menu::item(&c.menu.items, "windows.verb:share").is_some_and(|p| p.new));
+        c.learned = false;
+        c.apply(MenuBatch { generation: g, part: Part::Native(vec![share]), timing: [0; 3] });
+        assert!(!c.learned, "known items do not touch the config");
+    }
+
+    #[test]
     fn copy_and_copy_name_have_different_glyphs() {
         assert_ne!(glyph("file.copy", None), glyph("x.copy-name", None));
         assert!(glyph("x.copy-name", None).is_some());
@@ -820,19 +1207,19 @@ mod tests {
         let icons = IconCache::new(4);
         let mut subs = SubLoads::default();
         let path = [item_key(&lazy)];
-        let rows = |subs: &SubLoads, now: u64, can_load: bool| Rows { items: &items, icons: &icons, failed: false, paste_ok: true, subs, now, can_load }.sub_state(&path);
+        let rows = |subs: &SubLoads, now: u64, can_load: bool| Rows { items: &items, icons: &icons, failed: false, paste_ok: true, subs, now, can_load, menu: None }.sub_state(&path);
         assert_eq!(rows(&subs, 0, true), SubLoad::Loading, "about to be asked");
         assert!(subs.want(3, 0));
         assert_eq!(rows(&subs, ctxmodel::SLOW_MS - 1, true), SubLoad::Loading);
         assert_eq!(rows(&subs, ctxmodel::SLOW_MS, true), SubLoad::Failed, "a hung handler: Retry");
         assert_eq!(rows(&subs, 0, false), SubLoad::Failed, "the worker is gone");
         subs.done(3);
-        let filled = Rows { items: &items, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true };
+        let filled = Rows { items: &items, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true, menu: None };
         assert_eq!(filled.sub_state(&[12345]), SubLoad::Ready, "unknown paths are not loading");
         let mut eager = lazy.clone();
         eager.flags = 0;
         let items2 = [eager.clone()];
-        let r2 = Rows { items: &items2, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true };
+        let r2 = Rows { items: &items2, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true, menu: None };
         assert_eq!(r2.sub_state(&[item_key(&eager)]), SubLoad::Ready, "a filled submenu is ready (even if empty)");
     }
 }
