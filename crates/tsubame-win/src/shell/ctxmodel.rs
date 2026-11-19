@@ -431,7 +431,9 @@ pub fn edit_of<'a>(menu: &'a ContextMenu, key: &str) -> (bool, &'a str) {
         if let Some(p) = menu::item(&menu.items, k) {
             return (p.hidden, p.name.trim());
         }
-        if let Some(e) = menu.entries.iter().find(|e| e.source == Source::Windows && e.id.eq_ignore_ascii_case(k)) {
+        // only native keys (`windows.verb:…`): the list's own rows
+        // (`windows.more`, `windows.open-with`) are already built from it
+        if let Some(e) = menu.entries.iter().find(|e| k.contains(':') && e.source == Source::Windows && e.id.eq_ignore_ascii_case(k)) {
             return (e.hidden, e.name.trim());
         }
     }
@@ -1192,6 +1194,12 @@ mod tests {
         assert!(!l.iter().any(|s| s == "Show more options" || s == "Open with"), "{l:?}");
         assert_eq!(rows.iter().find(|r| r.label == CLASSIC_LABEL).unwrap().action, ACTION_CLASSIC);
         assert!(!rows[0].is_separator() && !rows.last().unwrap().is_separator());
+        // an edit elsewhere (overrides run) must not rename the escape hatch
+        // back to its list name "Show more options"
+        let menu = ContextMenu { entries: entries.clone(), items: vec![pref("windows.verb:edit", "", true)], ..Default::default() };
+        let mut r2 = rows.clone();
+        apply_overrides(&mut r2, &menu);
+        assert_eq!(labels(&r2), l);
         // background: no built-in applies, the extras still show; a hidden
         // escape hatch goes
         let rows = own_rows(&entries, Target::Background, "", std::slice::from_ref(&extra));

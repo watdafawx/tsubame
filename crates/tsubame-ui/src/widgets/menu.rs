@@ -1304,11 +1304,8 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             Some(Act::Edit(l, k, kb)) => {
                 open_edit(ui, id, st, src, l, k, kb, None);
             }
-            Some(Act::Strip(manage)) => {
-                if strip_act(ui, st, manage, &mut resp) {
-                    return resp;
-                }
-            }
+            Some(Act::Strip(manage)) if strip_act(ui, st, manage, &mut resp) => return resp,
+            Some(Act::Strip(_)) => {}
             None => {}
         }
     }
@@ -1668,11 +1665,8 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                     break;
                 }
             }
-            Some(Act::Strip(manage)) => {
-                if strip_act(ui, st, manage, &mut resp) {
-                    return resp;
-                }
-            }
+            Some(Act::Strip(manage)) if strip_act(ui, st, manage, &mut resp) => return resp,
+            Some(Act::Strip(_)) => {}
             None => {}
         }
         lv += 1;

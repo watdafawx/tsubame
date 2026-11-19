@@ -102,6 +102,9 @@ pub struct CtxMenu {
     pub edited: bool,
     /// new items were remembered in `menu.items`: the app saves them
     pub learned: bool,
+    /// Settings knew items when this menu opened: newly seen ones are tagged
+    /// New (the very first menu, and each of its batches, tags nothing)
+    tag_new: bool,
     /// "Edit in Settings…" / Manage: the app opens Settings on this key
     pub settings_key: Option<String>,
     /// the row the last Hide hid, (key, label) (Undo on the strip)
@@ -288,8 +291,10 @@ impl CtxMenu {
         let (tsubame, user) = own_parts(&target, &menu.entries, dual);
         let generation = next_gen();
         let state = MenuState::new(target.anchor, target.keyboard);
+        let tag_new = !menu.items.is_empty();
         let mut m = CtxMenu {
             generation,
+            tag_new,
             model: MenuModel::new(generation, tsubame, user),
             target,
             menu,
@@ -331,9 +336,7 @@ impl CtxMenu {
         if seen.is_empty() {
             return;
         }
-        // the very first menu (nothing remembered yet) tags nothing New
-        let fresh = !self.menu.items.is_empty();
-        self.learned |= menu::learn(&mut self.menu.items, &seen, fresh);
+        self.learned |= menu::learn(&mut self.menu.items, &seen, self.tag_new);
     }
 
     /// Rebuilds the Tsubame and user rows after an edit of the list.
@@ -950,7 +953,7 @@ mod tests {
     #[test]
     fn failed_pending_verb_finishes_and_stale_failure_does_not() {
         let mut c = CtxMenu {
-            generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), menu: ContextMenu::default(), edited: false, learned: false, settings_key: None, undo: None, dual: false,
+            generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), menu: ContextMenu::default(), edited: false, learned: false, tag_new: false, settings_key: None, undo: None, dual: false,
             handle: None, ticket: 0, state: MenuState::default(), open: false,
             input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: Some("properties".into()), invoked: false, invoke_result: None,
@@ -1057,7 +1060,7 @@ mod tests {
         let mut model = MenuModel::new(2, ts, user);
         model.native = native;
         let mut c = CtxMenu {
-            generation: 2, target, model, menu, edited: false, learned: false, settings_key: None, undo: None, dual: false,
+            generation: 2, target, model, menu, edited: false, learned: false, tag_new: false, settings_key: None, undo: None, dual: false,
             handle: None, ticket: 0, state: MenuState::default(), open: true,
             input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: None, invoked: false, invoke_result: None,
@@ -1182,7 +1185,14 @@ mod tests {
         c.learned = false;
         let g = c.generation;
         let share = MenuItem { id: 9, key: "windows.verb:share".into(), ..MenuItem::command(ItemSource::Native, "Share", "") };
-        c.apply(MenuBatch { generation: g, part: Part::Native(vec![share.clone()]), timing: [0; 3] });
+        let edit = MenuItem { id: 10, key: "windows.verb:edit".into(), ..MenuItem::command(ItemSource::Native, "Edit", "") };
+        // the shell's batches of that same first menu tag nothing New either
+        c.apply(MenuBatch { generation: g, part: Part::Native(vec![edit.clone()]), timing: [0; 3] });
+        assert!(c.learned && menu::item(&c.menu.items, "windows.verb:edit").is_some_and(|p| !p.new));
+        // a later menu (Settings knew items when it opened) tags new ones
+        c.tag_new = !c.menu.items.is_empty();
+        c.learned = false;
+        c.apply(MenuBatch { generation: g, part: Part::Native(vec![edit, share.clone()]), timing: [0; 3] });
         assert!(c.learned && menu::item(&c.menu.items, "windows.verb:share").is_some_and(|p| p.new));
         c.learned = false;
         c.apply(MenuBatch { generation: g, part: Part::Native(vec![share]), timing: [0; 3] });

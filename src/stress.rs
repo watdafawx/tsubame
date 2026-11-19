@@ -253,7 +253,7 @@ impl Stress {
                     let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
                     let target = crate::ctxui::Target { paths: self.paths[..n].to_vec(), folder: view.tab().path.clone(), anchor: tsubame_ui::Pt::new(100.0, 100.0), screen: pt, ..Default::default() };
                     crate::ctxui::note_input();
-                    view.ctx = Some(Box::new(crate::ctxui::CtxMenu::open(target, tsubame_config::ContextMenu { entries: tsubame_config::menu::default_entries(), ..Default::default() }, view.dual(), false, 32, pool)));
+                    view.ctx = Some(Box::new(crate::ctxui::CtxMenu::open(target, stress_menu(), view.dual(), false, 32, pool)));
                     self.ctx_at = Some(Instant::now());
                 }
                 (false, true)
@@ -564,4 +564,15 @@ impl Mode {
 fn stats_ms(v: &[f32]) -> String {
     let us: Vec<u64> = v.iter().map(|ms| (ms * 1000.0) as u64).collect();
     pcts(&us)
+}
+
+/// The menu settings of the `ctxmenu` stress: the default list plus a few
+/// CM8 edits (a hidden and a renamed native item, and 40 remembered items) so
+/// the compose step runs its override pass like a user's menu does.
+fn stress_menu() -> tsubame_config::ContextMenu {
+    use tsubame_config::menu::ItemPref;
+    let mut items: Vec<ItemPref> = (0..40).map(|i| ItemPref { key: format!("windows.verb:stress{i}"), label: format!("Stress {i}"), from: "Windows".into(), ..Default::default() }).collect();
+    items.push(ItemPref { key: "windows.verb:print".into(), label: "Print".into(), hidden: true, ..Default::default() });
+    items.push(ItemPref { key: "windows.verb:edit".into(), label: "Edit".into(), name: "Edit it".into(), ..Default::default() });
+    tsubame_config::ContextMenu { entries: tsubame_config::menu::default_entries(), items, ..Default::default() }
 }

@@ -714,7 +714,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         modified |= menu::delete_entry(&mut list, i);
     }
 
-    // preview
+    // preview (a filtered list can be shorter than it: what follows goes below both)
+    let mut bottom = top + card.h;
     if show_preview {
         let px = pg.x + list_w + 12.0;
         let pw = 246.0;
@@ -752,8 +753,9 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         for (i, l) in hint.iter().enumerate() {
             pg.g.text(l, Rect::new(hr.x + 12.0, hr.y + 8.0 + i as f32 * 15.0, pw - 24.0, 15.0), t.font_small(), t.text_dim);
         }
+        bottom = bottom.max(hr.b());
     }
-    pg.y = top + card.h + 12.0;
+    pg.y = bottom + 12.0;
 
     // items learned from real menus: Windows', the apps' and Tsubame's own rows
     pg.section("Windows, installed apps and other menu items");
