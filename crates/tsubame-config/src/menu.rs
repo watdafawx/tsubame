@@ -287,6 +287,7 @@ pub struct ItemPref {
     pub group: String,
     /// drawn first in its group (Pin to top, from the menu's edit menu); an
     /// old file has none
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pin: bool,
 }
 
@@ -490,6 +491,7 @@ mod tests {
         }
         let w: W = toml::from_str(old).unwrap();
         assert!(w.items[0].hidden && !w.items[0].pin);
+        assert!(!toml::to_string(&W { items: w.items.clone() }).unwrap().contains("pin"), "an unpinned item writes no `pin`");
         let mut w2 = W { items: w.items.clone() };
         w2.items[0].pin = true;
         let back: W = toml::from_str(&toml::to_string(&w2).unwrap()).unwrap();
