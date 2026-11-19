@@ -6,9 +6,12 @@
 //!    an HMENU that is never shown;
 //! 2. walk the top level into [`RawItem`]s and send it ([`Part::Native`],
 //!    submenus marked lazy) at once;
-//! 3. send `WM_INITMENUPOPUP` to each submenu through `HandleMenuMsg2` (how
-//!    "Send to", "Open with" and most extensions fill theirs), walk them and
-//!    send the full tree again;
+//! 3. lazy (CM6, the default): when the UI asks ([`CtxHandle::expand`] with
+//!    the token a submenu got in step 2), send `WM_INITMENUPOPUP` to that one
+//!    submenu through `HandleMenuMsg2` (how "Send to", "Open with" and most
+//!    extensions fill theirs), walk its level and send it as
+//!    [`Part::Submenu`]; eager (`CtxOpts::submenus`): walk every submenu now
+//!    and send the full tree again;
 //! 4. keep the menu alive and wait, pumping messages, for the UI's pick
 //!    ([`CtxHandle::invoke`]) or close; then `InvokeCommand` by id, without
 //!    any popup, and release everything.
@@ -47,7 +50,8 @@ pub struct CtxOpts {
     pub extended: bool,
     /// add `CMF_CANRENAME` (the app can rename inline, like Explorer)
     pub can_rename: bool,
-    /// walk submenus (step 3); off = top level only
+    /// walk every submenu up front (eager, step 3); off = lazy: the top level,
+    /// submenus when [`CtxHandle::expand`] asks
     pub submenus: bool,
     /// icon edge in px (16 at 100 %)
     pub icon_px: u32,
@@ -58,11 +62,14 @@ pub struct CtxOpts {
     /// debug only: `Sleep(ms)` before binding, then build as usual (the
     /// loading frame; past the hang limit, the failure frame)
     pub debug_delay_ms: u32,
+    /// debug only: `Sleep(ms)` before filling a lazy submenu, without
+    /// pumping (past the 4 s hang limit: a hung submenu handler)
+    pub debug_sub_delay_ms: u32,
 }
 
 impl Default for CtxOpts {
     fn default() -> Self {
-        CtxOpts { background: false, extended: false, can_rename: true, submenus: true, icon_px: 16, linger: Duration::from_secs(600), debug_hang_ms: 0, debug_delay_ms: 0 }
+        CtxOpts { background: false, extended: false, can_rename: true, submenus: true, icon_px: 16, linger: Duration::from_secs(600), debug_hang_ms: 0, debug_delay_ms: 0, debug_sub_delay_ms: 0 }
     }
 }
 
@@ -72,6 +79,9 @@ pub enum CtxCmd {
     /// `InvokeCommand` for command id `id` (from [`super::ctxmodel::MenuItem::id`])
     /// at screen point (x, y); `no_ui` adds `CMIC_MASK_FLAG_NO_UI`
     Invoke { id: u32, x: i32, y: i32, shift: bool, ctrl: bool, no_ui: bool },
+    /// fill the lazy submenu with token `sub` (CM6): `WM_INITMENUPOPUP`,
+    /// settle, walk one level, answer with [`Part::Submenu`]
+    Expand { sub: u32 },
     Close,
 }
 
@@ -118,6 +128,11 @@ impl CtxHandle {
     pub fn close(&self) {
         self.session.push(CtxCmd::Close);
     }
+    /// Asks for the children of lazy submenu `sub` (answered as
+    /// [`Part::Submenu`] of the menu's generation).
+    pub fn expand(&self, sub: u32) {
+        self.session.push(CtxCmd::Expand { sub });
+    }
 }
 
 impl Default for CtxHandle {
@@ -133,11 +148,13 @@ impl Drop for CtxHandle {
 }
 
 /// Worker side. `emit` sends a batch to the UI now (false: the pool gave
-/// this worker up, nobody listens); `waiting` is called when
+/// this worker up, nobody listens); `waiting(true)` is called when
 /// the menu is built and only waits for the user (the pool stops treating
-/// the job as possibly hung). Returns the last batch (`Closed`).
+/// the job as possibly hung), `waiting(false)` while it fills a lazy
+/// submenu (a handler can hang there: the 4 s watchdog applies again).
+/// Returns the last batch (`Closed`).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u64, opts: &CtxOpts, session: &CtxSession, emit: &dyn Fn(MenuBatch) -> bool, waiting: &dyn Fn()) -> MenuBatch {
+pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u64, opts: &CtxOpts, session: &CtxSession, emit: &dyn Fn(MenuBatch) -> bool, waiting: &dyn Fn(bool)) -> MenuBatch {
     let batch = |part: Part, timing: [u64; 3]| MenuBatch { generation, part, timing };
     if opts.debug_hang_ms > 0 {
         unsafe { Sleep(opts.debug_hang_ms) };
@@ -154,7 +171,7 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
     menu::set_handlers(Some(&cm));
     let mut icons = IconCache::new(super::ctxmodel::ICON_CACHE_CAP);
     let t = Instant::now();
-    let mut ctx = Walk { cm: &cm, host, icon_px: opts.icon_px.clamp(8, 64), drawn: 0 };
+    let mut ctx = Walk { cm: &cm, host, icon_px: opts.icon_px.clamp(8, 64), drawn: 0, subs: Vec::new() };
     let top = ctx.level(hmenu, false, 0);
     let walk_us = t.elapsed().as_micros() as u64;
     let timing = [bind_us, query_us, walk_us];
@@ -178,12 +195,13 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
         // every row is in: the UI ends its loading line
         emit(batch(Part::Complete, timing));
     }
-    waiting();
+    waiting(true);
 
     // wait for the pick, pumping (handlers post to this STA; Properties and
     // other dialogs run their own windows on it after InvokeCommand)
     let deadline = Instant::now() + if alive { opts.linger } else { Duration::ZERO };
     let mut last = batch(Part::Closed, timing);
+    let mut expanded: Vec<u32> = Vec::new();
     'wait: loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -195,14 +213,42 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
             break;
         }
         pump();
-        let next = session.cmds.lock().unwrap().pop_front();
-        if let Some(c) = next {
+        // the event is auto-reset: take every queued command now
+        loop {
+            let next = session.cmds.lock().unwrap().pop_front();
+            let Some(c) = next else { break };
             match c {
                 CtxCmd::Close => break 'wait,
                 CtxCmd::Invoke { id, x, y, shift, ctrl, no_ui } => {
                     let (verb, res) = invoke(&cm, host, ui, id, x, y, shift, ctrl, no_ui);
                     emit(batch(Part::Invoked { id, verb, result: res }, timing));
                     break 'wait;
+                }
+                CtxCmd::Expand { sub } => {
+                    if expanded.contains(&sub) {
+                        continue;
+                    }
+                    expanded.push(sub);
+                    waiting(false);
+                    if opts.debug_sub_delay_ms > 0 {
+                        unsafe { Sleep(opts.debug_sub_delay_ms) };
+                    }
+                    let t = Instant::now();
+                    let items = ctx.expand(sub).map(|raw| {
+                        // one level: nested submenus stay lazy, so no deeper icons
+                        let any = raw.iter().any(|r| r.icon.is_some());
+                        (build_native(&raw, &mut icons), any)
+                    });
+                    let us = t.elapsed().as_micros() as u64;
+                    let (items, new_icons) = items.unwrap_or_default();
+                    // an unknown token still answers (empty), so the UI stops loading
+                    if !emit(batch(Part::Submenu { sub, items }, [bind_us, query_us, us])) {
+                        break 'wait;
+                    }
+                    if new_icons {
+                        emit(batch(Part::Icons(icons.entries()), timing));
+                    }
+                    waiting(true);
                 }
             }
         }
@@ -364,20 +410,29 @@ struct Walk<'a> {
     icon_px: u32,
     /// owner-draw / callback draws done (for the report)
     drawn: u32,
+    /// lazy submenus left unwalked: (submenu, its position in the parent,
+    /// depth); token = index + 1
+    subs: Vec<(HMENU, u32, usize)>,
 }
 
 impl Walk<'_> {
-    /// Items of `hmenu`. `deep`: send `WM_INITMENUPOPUP` to submenus and walk them.
+    /// Items of `hmenu`. `deep`: send `WM_INITMENUPOPUP` to submenus and walk
+    /// them; else submenus get a token for [`Walk::expand`].
     fn level(&mut self, hmenu: HMENU, deep: bool, depth: usize) -> Vec<RawItem> {
         let n = unsafe { GetMenuItemCount(Some(hmenu)) }.clamp(0, super::ctxmodel::MAX_ITEMS as i32) as u32;
         let mut out = Vec::with_capacity(n as usize);
         for pos in 0..n {
             let Some((mut r, sub, bmp, data)) = self.item(hmenu, pos) else { continue };
             if let Some(sub) = sub {
-                r.submenu = Some(if deep && depth + 1 < super::ctxmodel::MAX_DEPTH {
+                let room = depth + 1 < super::ctxmodel::MAX_DEPTH;
+                r.submenu = Some(if deep && room {
                     self.init_popup(sub, pos);
                     self.level(sub, true, depth + 1)
                 } else {
+                    if room && self.subs.len() < super::ctxmodel::MAX_ITEMS {
+                        self.subs.push((sub, pos, depth + 1));
+                        r.sub = self.subs.len() as u32;
+                    }
                     Vec::new()
                 });
             }
@@ -389,6 +444,15 @@ impl Walk<'_> {
             out.push(r);
         }
         out
+    }
+
+    /// Fills lazy submenu `sub` the way the menu loop would before showing
+    /// it, and walks its one level (deeper submenus get tokens of their own).
+    /// None: not a token of this menu.
+    fn expand(&mut self, sub: u32) -> Option<Vec<RawItem>> {
+        let &(h, pos, depth) = self.subs.get((sub as usize).checked_sub(1)?)?;
+        self.init_popup(h, pos);
+        Some(self.level(h, false, depth))
     }
 
     fn item(&self, hmenu: HMENU, pos: u32) -> Option<(RawItem, Option<HMENU>, Option<HBITMAP>, usize)> {
