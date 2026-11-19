@@ -1652,6 +1652,25 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 shellops::on_app(hwnd);
                 LRESULT(0)
             }
+            // CM10: a screen reader invoked or collapsed a menu row
+            tsubame_win::uia::WM_APP_UIA => {
+                with(|a| {
+                    if let Some(c) = a.view.ctx.as_mut() {
+                        c.run_a11y_requests();
+                    }
+                });
+                invalidate(hwnd);
+                LRESULT(0)
+            }
+            // CM10: a screen reader asks for the window's UI Automation provider
+            // (the own-drawn menu's rows); the repaint publishes an open menu
+            WM_GETOBJECT => match tsubame_win::uia::on_get_object(hwnd, wp, lp) {
+                Some(r) => {
+                    invalidate(hwnd);
+                    r
+                }
+                None => DefWindowProcW(hwnd, msg, wp, lp),
+            },
             WM_TIMER if wp.0 == OPS_TIMER => {
                 // file-op events: progress, conflicts (a dialog), results
                 shellops::on_ops_timer(hwnd);
@@ -1696,6 +1715,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_DESTROY => {
                 // also reached when the app closes itself (last tab, leak gate)
+                tsubame_win::uia::shutdown(hwnd);
                 save_flush(hwnd, true);
                 shellops::destroy(hwnd);
                 PostQuitMessage(0);

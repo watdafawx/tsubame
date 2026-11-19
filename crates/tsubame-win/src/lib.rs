@@ -18,6 +18,7 @@ pub mod places;
 pub mod procinfo;
 pub mod shell;
 pub mod tz;
+pub mod uia;
 pub mod watch;
 
 /// `s` as a NUL-terminated UTF-16 string.
