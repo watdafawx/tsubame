@@ -74,3 +74,7 @@ Open questions (recommendation first):
 6. Import default placement: **New group named "Nilesoft"** the first time, then the last used group (Undo import removes the empty group). Alternative: "Tools" as in the 6b wording, or end of menu.
 7. Custom entry on several items: **runs once with all paths if it uses `{selection}` / `%*`, otherwise once per item** (ask above 10). Alternative: only allow entries that use `{selection}`.
 8. Del key: Hide in the menu-side edit menu (6a), Delete entry on a custom row in Settings. **Keep**, and give Delete entry no shortcut in the menu.
+
+### Approval
+
+The gap states above were approved by the owner on 2026-11-20 with the recommended answers (1-8) as written.
