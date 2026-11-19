@@ -96,6 +96,11 @@ pub struct MenuEntry {
     pub hidden: bool,
     /// id of the submenu this entry sits in; empty = top level
     pub parent: String,
+    /// id of the user group (`[[context_menu.user_groups]]`) a top-level entry
+    /// was placed in (the Nilesoft import's "Placed in group"); empty = the
+    /// end of the menu
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub group: String,
 }
 
 impl MenuEntry {

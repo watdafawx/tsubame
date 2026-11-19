@@ -6,7 +6,7 @@
 //! Tsubame only appends the enabled custom entries to it (`shellops`).
 
 use super::lay::{Look, Pg, button, fit, wrap};
-use super::{C_MENU, Cx, nss_pick};
+use super::{C_MENU, Cx, nss_pick, nss_sel};
 use crate::keymap::KeyMap;
 use crate::{ctxui, rowmenu};
 use std::time::{Duration, Instant};
@@ -61,6 +61,8 @@ pub struct State {
     picker: Option<nss_pick::Picker>,
     /// a shell.nss found in a usual place (looked up once per visit)
     detected: Option<Option<nss::Detected>>,
+    /// the selection screen of an import that is being reviewed (mock `ctxgap-nss`)
+    review: Option<Box<nss_sel::Sel>>,
     /// the last import's report (mock 6b state 3)
     report: Option<nss::Report>,
     msg: Option<(String, bool)>,
@@ -282,11 +284,11 @@ pub fn group_count(list: &[MenuEntry], items: &[menu::ItemPref], users: &[menu::
             let entries = list.iter().filter(|e| e.parent.is_empty() && !e.is_separator() && !(e.source == Source::Windows && e.id == "windows.open-with"));
             match b {
                 menu::Group::Tsubame => entries.filter(|e| !e.source.runs_program()).count(),
-                menu::Group::Custom => entries.filter(|e| e.source.runs_program()).count(),
+                menu::Group::Custom => entries.filter(|e| e.source.runs_program() && e.group.is_empty()).count(),
                 _ => 0,
             }
         }
-        menu::GroupRef::User(_) => 0,
+        menu::GroupRef::User(id) => list.iter().filter(|e| e.parent.is_empty() && !e.is_separator() && e.group == *id).count(),
     };
     n + items.iter().filter(|p| item_group(p, users) == *g).count()
 }
@@ -346,6 +348,7 @@ pub fn reset_menu(m: &mut tsubame_config::ContextMenu) {
     m.entries.clear();
     m.groups.clear();
     m.user_groups.clear();
+    m.nss_group.clear();
     for p in &mut m.items {
         p.hidden = false;
         p.name.clear();
@@ -927,7 +930,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             nss_pick::Poll::Cancelled => st.picker = None,
             nss_pick::Poll::Chosen(path) => {
                 st.picker = None;
-                modified |= run_import(st, &mut list, &path);
+                modified |= run_import(st, &mut list, &path, &cx.prefs.context_menu);
             }
         }
     }
@@ -1017,7 +1020,26 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         }
     }
     // Nilesoft import, mock 6b: 1 nothing found (the hint), 2 file detected, 3 imported (report)
-    if st.report.is_none() {
+    if st.review.is_some() {
+        let users = cx.prefs.context_menu.user_groups.clone();
+        let act = nss_sel::draw(pg, st.review.as_mut().unwrap(), &users);
+        match act {
+            nss_sel::Act::Cancel => {
+                st.review = None;
+                st.msg = Some(("Import cancelled. Nothing was added.".into(), false));
+            }
+            nss_sel::Act::Import => {
+                let sel = st.review.take().unwrap();
+                let rep = sel.commit(&mut list, &mut cx.prefs.context_menu);
+                st.msg = None;
+                st.report = Some(rep);
+                modified = true;
+                cx.changed |= C_MENU;
+            }
+            nss_sel::Act::None => {}
+        }
+    }
+    if st.report.is_none() && st.review.is_none() {
         if st.detected.is_none() {
             st.detected = Some(nss::detect(&list));
         }
@@ -1038,7 +1060,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
                 pg.g.text(&shown, Rect::new(r.x + 40.0, r.y, br.x - r.x - 48.0, r.h), t.font_small(), t.text);
                 pg.y += r.h + 10.0;
                 if go {
-                    modified |= run_import(st, &mut list, &d.path);
+                    modified |= run_import(st, &mut list, &d.path, &cx.prefs.context_menu);
                 }
             }
         }
@@ -1056,7 +1078,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         let hw = (sr2.x - r.x - 56.0).max(40.0);
         let hs = fit(pg.g, &head, t.font().b(), hw);
         pg.g.text(&hs, Rect::new(r.x + 44.0, r.y + 8.0, hw, 20.0), t.font().b(), t.text);
-        let sub = fit(pg.g, "Added at the end of the menu, tagged \u{201C}From Nilesoft\u{201D}. The original file was not changed.", t.font_small(), hw);
+        let place = if rep.group_name.is_empty() { "at the end of the menu".to_string() } else { format!("in the group \u{201C}{}\u{201D}", rep.group_name) };
+        let sub = fit(pg.g, &format!("Added {place}, tagged \u{201C}From Nilesoft\u{201D}. The original file was not changed."), t.font_small(), hw);
         pg.g.text(&sub, Rect::new(r.x + 44.0, r.y + 30.0, hw, 16.0), t.font_small(), t.text_dim);
         let mut y = r.y + 58.0;
         for s in rep.skipped.iter().take(shown_skips) {
@@ -1074,7 +1097,9 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         }
         pg.y += r.h + 12.0;
         if undo {
-            rep.undo(&mut list);
+            let m = &mut cx.prefs.context_menu;
+            rep.undo_all(&mut list, &mut m.user_groups, &mut m.items);
+            cx.changed |= C_MENU;
             modified = true;
             st.report = None;
             st.detected = None;
@@ -1576,7 +1601,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     {
         modified |= apply(st, cx, &mut list, &f, &target, k);
     }
-    if st.pop.is_none() && pg.ui.popups_open() > 0 {
+    if st.pop.is_none() && pg.ui.popups_open() > usize::from(nss_sel::dropdown_open(pg.ui)) {
         pg.ui.close_all_popups();
     }
     if let Some((at, text)) = st.tip.take() {
@@ -1801,24 +1826,26 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
     pg.y = card.b() + 12.0;
 }
 
-/// Reads `path` (never writes it), adds what Tsubame can run to `list` and keeps the report
-/// for the page. Returns whether `list` changed.
-fn run_import(st: &mut State, list: &mut Vec<MenuEntry>, path: &std::path::Path) -> bool {
+/// Reads `path` (never writes it) and opens the selection screen for what Tsubame can run. A file
+/// with nothing to import goes straight to the report (it lists why). Returns whether `list` changed.
+fn run_import(st: &mut State, list: &mut Vec<MenuEntry>, path: &std::path::Path, m: &tsubame_config::ContextMenu) -> bool {
     match nss::read_file(path) {
         Ok(src) => {
             let imp = nss::import(&src, list, "");
             let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "shell.nss".into());
-            let changed = !imp.entries.is_empty();
-            st.report = Some(nss::Report::new(&file, &imp));
-            st.msg = if imp.imported == 0 { Some(("Nothing in that file can be imported. The report lists why.".into(), true)) } else { None };
-            list.extend(imp.entries);
-            changed
+            if imp.imported == 0 {
+                st.report = Some(nss::Report::new(&file, &imp));
+                st.msg = Some(("Nothing in that file can be imported. The report lists why.".into(), true));
+            } else {
+                st.review = Some(Box::new(nss_sel::Sel::new(&file, &path.display().to_string(), imp, &m.nss_group, &m.user_groups)));
+                st.report = None;
+                st.add = None;
+                st.msg = None;
+            }
         }
-        Err(e) => {
-            st.msg = Some((e, true));
-            false
-        }
+        Err(e) => st.msg = Some((e, true)),
     }
+    false
 }
 
 #[cfg(test)]

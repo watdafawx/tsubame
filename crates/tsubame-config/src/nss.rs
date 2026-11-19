@@ -16,7 +16,7 @@
 //!
 //! The source text is only read, never changed.
 
-use crate::menu::{EntryKind, MenuEntry, ShowFor, Source};
+use crate::menu::{self, EntryKind, MenuEntry, ShowFor, Source};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skipped {
@@ -34,9 +34,62 @@ pub struct Import {
     /// items and submenus that were read (separators are not counted)
     pub imported: usize,
     pub skipped: Vec<Skipped>,
+    /// 1-based source line of each item and submenu (by entry id; separators have none)
+    pub lines: Vec<(String, usize)>,
 }
 
 impl Import {
+    /// The source line an entry was read from.
+    pub fn line_of(&self, id: &str) -> Option<usize> {
+        self.lines.iter().find(|(i, _)| i == id).map(|(_, l)| *l)
+    }
+
+    /// The import reduced to the entries in `keep` (ids of items; a submenu is
+    /// kept when it or one of its descendants is). Unlike [`Import::keep_only`]
+    /// this chooses single children. Separators that end up first, last or
+    /// doubled in their level are dropped; `imported` is recounted.
+    pub fn keep_ids(&self, keep: &[String]) -> Import {
+        let kept = |e: &MenuEntry| -> bool {
+            if e.is_separator() {
+                return false;
+            }
+            keep.contains(&e.id) || (e.is_submenu() && self.has_kept_descendant(&e.id, keep))
+        };
+        let mut tidy: Vec<MenuEntry> = Vec::new();
+        for e in &self.entries {
+            if e.is_separator() {
+                // a separator stays when its submenu (or the top level) is kept
+                let level_kept = e.parent.is_empty() || self.entries.iter().any(|p| p.id == e.parent && kept(p));
+                if !level_kept {
+                    continue;
+                }
+                let prev = tidy.iter().rev().find(|p| p.parent == e.parent);
+                if prev.is_none_or(|p| p.is_separator()) {
+                    continue;
+                }
+                tidy.push(e.clone());
+            } else if kept(e) && (e.parent.is_empty() || tidy.iter().any(|p| p.id == e.parent)) {
+                tidy.push(e.clone());
+            }
+        }
+        let levels: Vec<String> = tidy.iter().map(|e| e.parent.clone()).collect();
+        for lv in levels {
+            while let Some(i) = tidy.iter().rposition(|e| e.parent == lv) {
+                if tidy[i].is_separator() {
+                    tidy.remove(i);
+                } else {
+                    break;
+                }
+            }
+        }
+        let imported = tidy.iter().filter(|e| !e.is_separator()).count();
+        Import { entries: tidy, imported, skipped: self.skipped.clone(), lines: self.lines.clone() }
+    }
+
+    fn has_kept_descendant(&self, id: &str, keep: &[String]) -> bool {
+        self.entries.iter().any(|c| c.parent == id && !c.is_separator() && (keep.contains(&c.id) || (c.is_submenu() && self.has_kept_descendant(&c.id, keep))))
+    }
+
     /// What the user can choose between: each top-level item or submenu of the
     /// import (a submenu stands for itself and its children), in menu order.
     pub fn choices(&self) -> Vec<Choice> {
@@ -97,7 +150,7 @@ impl Import {
         // a kept submenu whose children all went is not worth showing (cannot
         // happen through `choices`, but keep the list consistent)
         let imported = tidy.iter().filter(|e| !e.is_separator()).count();
-        Import { entries: tidy, imported, skipped: self.skipped.clone() }
+        Import { entries: tidy, imported, skipped: self.skipped.clone(), lines: self.lines.clone() }
     }
 
     /// Statements the file gave: imported plus skipped.
@@ -168,6 +221,51 @@ pub fn read_file(path: &std::path::Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(&bytes)).into_owned())
 }
 
+/// Where an import goes (the selection screen's "Placed in group").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// an existing user group (its id)
+    Group(String),
+    /// a user group made for the import (its name)
+    NewGroup(String),
+    /// the end of the menu, no group
+    End,
+}
+
+/// The `context_menu.nss_group` value for "the end of the menu".
+pub const PLACE_END: &str = "end";
+
+/// The place the screen starts on: a new group "Nilesoft" the first time, then the
+/// group of the last import (when it still exists), `End` when that was the end.
+pub fn default_place(last: &str, users: &[menu::UserGroup]) -> Place {
+    if last == PLACE_END {
+        Place::End
+    } else if !last.is_empty() && users.iter().any(|u| u.id == last) {
+        Place::Group(last.to_string())
+    } else {
+        Place::NewGroup("Nilesoft".into())
+    }
+}
+
+/// Puts the import's top-level entries (separators too) in `place`, making the group for
+/// `NewGroup`. Returns the id of the group it made, and the value to remember as the last place.
+pub fn place_import(imp: &mut Import, place: &Place, users: &mut Vec<menu::UserGroup>, saved: &[menu::Group]) -> (Option<String>, String) {
+    let (gid, created) = match place {
+        Place::End => (String::new(), None),
+        Place::Group(id) if users.iter().any(|u| u.id == *id) => (id.clone(), None),
+        Place::Group(_) => (String::new(), None),
+        Place::NewGroup(name) => {
+            let id = menu::add_group(users, saved, name);
+            (id.clone(), Some(id))
+        }
+    };
+    for e in imp.entries.iter_mut().filter(|e| e.parent.is_empty()) {
+        e.group = gid.clone();
+    }
+    let last = if gid.is_empty() { PLACE_END.to_string() } else { gid };
+    (created, last)
+}
+
 /// What an import did, kept so the report can show it and Undo can reverse it
 /// (mock 6b, state 3).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -177,16 +275,29 @@ pub struct Report {
     /// ids of every entry added (separators included)
     pub ids: Vec<String>,
     pub skipped: Vec<Skipped>,
+    /// the user group the import made (Undo removes it again)
+    pub created_group: Option<String>,
+    /// the name of the group the entries went to (empty: the end of the menu)
+    pub group_name: String,
 }
 
 impl Report {
     pub fn new(file: &str, imp: &Import) -> Report {
-        Report { file: file.to_string(), imported: imp.imported, ids: imp.entries.iter().map(|e| e.id.clone()).collect(), skipped: imp.skipped.clone() }
+        Report { file: file.to_string(), imported: imp.imported, ids: imp.entries.iter().map(|e| e.id.clone()).collect(), skipped: imp.skipped.clone(), created_group: None, group_name: String::new() }
     }
 
     /// Takes the imported entries back out of `list`.
     pub fn undo(&self, list: &mut Vec<MenuEntry>) {
         list.retain(|e| !self.ids.contains(&e.id));
+    }
+
+    /// [`Report::undo`], and the group the import made goes too (anything the user moved
+    /// into it since goes back to where it came from).
+    pub fn undo_all(&self, list: &mut Vec<MenuEntry>, users: &mut Vec<menu::UserGroup>, items: &mut [menu::ItemPref]) {
+        self.undo(list);
+        if let Some(g) = &self.created_group {
+            menu::delete_group(users, items, g);
+        }
     }
 }
 
@@ -657,6 +768,7 @@ impl Parser<'_> {
             self.push_sep(scope);
         }
         let id = self.new_id();
+        self.out.lines.push((id.clone(), line));
         let show_for = self.show_for(props, scope);
         self.out.entries.push(MenuEntry {
             id,
@@ -669,6 +781,7 @@ impl Parser<'_> {
             show_for,
             hidden: false,
             parent: scope.parent.clone(),
+            group: String::new(),
         });
         self.out.imported += 1;
         if matches!(sep.as_str(), "after" | "bottom" | "both") {
@@ -695,6 +808,7 @@ impl Parser<'_> {
             return self.skip(line, "menu without a title or body");
         }
         let id = self.new_id();
+        self.out.lines.push((id.clone(), line));
         let show = self.show_for(props, scope);
         let at = self.out.entries.len();
         self.out.entries.push(MenuEntry {
@@ -996,5 +1110,71 @@ shell
         assert_eq!(map_vars("@sel.path @SEL.DIR @sel.pathx"), "{path} {dir} @sel.pathx");
         assert_eq!(map_vars("@sys.bin\\cmd.exe"), "%SystemRoot%\\System32\\cmd.exe");
         assert_eq!(clean_title("E&xplore && more"), "Explore & more");
+    }
+
+    #[test]
+    fn keep_ids_picks_single_children_and_tidies_separators() {
+        let r = parse(SAMPLE);
+        let (tools, code, git, hash) = (r.entries[0].id.clone(), r.entries[1].id.clone(), r.entries[2].id.clone(), r.entries[4].id.clone());
+        // one child kept: the submenu comes with it, the separator before the unkept child goes
+        let k = r.keep_ids(&[code.clone()]);
+        assert_eq!(k.entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec![tools.clone(), code.clone()]);
+        assert_eq!(k.imported, 2);
+        // children either side of the separator keep it
+        let k = r.keep_ids(&[git.clone(), hash.clone()]);
+        assert_eq!(k.entries.len(), 4, "tools, git, separator, hash");
+        assert!(k.entries[2].is_separator());
+        // only the item after the submenu: no submenu
+        let np = r.entries.last().unwrap().id.clone();
+        let k = r.keep_ids(&[np.clone()]);
+        assert_eq!(k.entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec![np]);
+        assert!(r.keep_ids(&[]).entries.is_empty());
+        // the source lines survive
+        assert_eq!(r.line_of(&code), Some(10));
+        assert_eq!(r.line_of(&tools), Some(8));
+    }
+
+    #[test]
+    fn placing_an_import_and_undoing_a_created_group() {
+        let mut users: Vec<menu::UserGroup> = Vec::new();
+        let mut items: Vec<menu::ItemPref> = Vec::new();
+        let mut list = vec![MenuEntry::custom("custom.1", "Mine", "m.exe", "")];
+        let mut imp = parse(SAMPLE);
+        let (created, last) = place_import(&mut imp, &Place::NewGroup("Nilesoft".into()), &mut users, &[]);
+        let gid = created.clone().expect("made a group");
+        assert_eq!((users.len(), users[0].name.as_str(), last.as_str()), (1, "Nilesoft", gid.as_str()));
+        assert!(imp.entries.iter().filter(|e| e.parent.is_empty()).all(|e| e.group == gid), "top level placed");
+        assert!(imp.entries.iter().filter(|e| !e.parent.is_empty()).all(|e| e.group.is_empty()), "children follow their submenu");
+        let mut rep = Report::new("shell.nss", &imp);
+        rep.created_group = created;
+        list.extend(imp.entries);
+        // something the user moved into the group afterwards goes back to its origin
+        items.push(menu::ItemPref { key: "windows.verb:share".into(), group: gid.clone(), ..Default::default() });
+        rep.undo_all(&mut list, &mut users, &mut items);
+        assert_eq!(list.len(), 1);
+        assert!(users.is_empty() && items[0].group.is_empty());
+        // an existing group stays on undo
+        users.push(menu::UserGroup { id: "g1".into(), name: "Tools".into(), pos: 4 });
+        let mut imp = parse(SAMPLE);
+        let (created, last) = place_import(&mut imp, &Place::Group("g1".into()), &mut users, &[]);
+        assert_eq!((created.clone(), last.as_str()), (None, "g1"));
+        let mut rep = Report::new("shell.nss", &imp);
+        rep.created_group = created;
+        rep.undo_all(&mut list, &mut users, &mut items);
+        assert_eq!(users.len(), 1);
+        // the end of the menu: no group, remembered as `end`; an unknown group is the end too
+        let mut imp = parse(SAMPLE);
+        assert_eq!(place_import(&mut imp, &Place::End, &mut users, &[]), (None, PLACE_END.to_string()));
+        assert!(imp.entries.iter().all(|e| e.group.is_empty()));
+        assert_eq!(place_import(&mut imp, &Place::Group("gone".into()), &mut users, &[]), (None, PLACE_END.to_string()));
+    }
+
+    #[test]
+    fn the_default_place_is_a_new_nilesoft_group_then_the_last_one() {
+        let users = vec![menu::UserGroup { id: "g2".into(), name: "Tools".into(), pos: 4 }];
+        assert_eq!(default_place("", &users), Place::NewGroup("Nilesoft".into()));
+        assert_eq!(default_place("g2", &users), Place::Group("g2".into()));
+        assert_eq!(default_place("g9", &users), Place::NewGroup("Nilesoft".into()), "the group is gone");
+        assert_eq!(default_place(PLACE_END, &users), Place::End);
     }
 }

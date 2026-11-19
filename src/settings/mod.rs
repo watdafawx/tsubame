@@ -15,6 +15,7 @@ mod general;
 mod keys_page;
 mod menu_ed;
 mod nss_pick;
+mod nss_sel;
 mod updates_page;
 
 use lay::Pg;
