@@ -930,7 +930,7 @@ mod tests {
         vec![
             TabRow { pane: 0, index: 0, title: "Downloads".into(), path: "C:\\Users\\Alex\\Downloads".into(), current: true },
             TabRow { pane: 0, index: 1, title: "tsubame".into(), path: "X:\\Dev\\tsubame".into(), current: false },
-            TabRow { pane: 1, index: 0, title: "blink".into(), path: "X:\\Dev\\blink".into(), current: false },
+            TabRow { pane: 1, index: 0, title: "notes".into(), path: "D:\\Notes".into(), current: false },
         ]
     }
 

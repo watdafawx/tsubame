@@ -136,11 +136,11 @@ tsubame-bench: fixture generators, directory-enumeration benchmark, bench log
 
   tsubame-bench purge [--mode working|standby|filecache]
       Flush the system caches once (needs elevation) and say what happened.
-      Exit 0 only when the purge really ran: tools/bench-rig.ps1 uses this to
+      Exit 0 only when the purge really ran: the benchmark harness uses this to
       decide whether a cold-cache app run is possible.
 
   tsubame-bench app --reports DIR [--commit SHA] [--append FILE]
-      Read one rig run's raw app reports (meta.txt, idle.txt,
+      Read one benchmark run's raw app reports (meta.txt, idle.txt,
       cold-start-NN.txt, timing.txt, leak-gate.txt) and render the
       docs/bench-log.md section: the budget table with pass/fail, the leak
       gate evidence and the raw output. --append writes it (creating the file
@@ -504,7 +504,7 @@ fn cmd_app(argv: &[String]) -> Result<(), String> {
 fn cmd_coldtest() -> Result<(), String> {
     println!("elevation: {}", cold::elevation_note());
     // `working` is deliberately not exercised here: it empties every working
-    // set on the machine, including the game servers rig runs.
+    // set on the machine, including any other workload that machine runs.
     for mode in [cold::PurgeMode::Standby, cold::PurgeMode::FileCache] {
         let s = cold::purge(mode);
         println!("purge {:<10} {} ({:?})", mode.name(), s.label(), s.detail());

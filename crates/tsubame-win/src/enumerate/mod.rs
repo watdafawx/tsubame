@@ -6,7 +6,7 @@
 //! cheap wake callback after every send so the UI can `PostMessageW` itself.
 //! The last message of every request is [`Done`].
 //!
-//! Method (decided by `docs/spike-enum.md`, measured on rig):
+//! Method (decided by `docs/spike-enum.md`, measured on a dedicated test PC):
 //! `NtQueryDirectoryFile` with `FileIdExtdDirectoryInformation` (class 60) and a
 //! 64 KB query buffer, which returns name, size, allocation size, mtime, the full
 //! attribute set, the 128-bit file id and the reparse tag in one syscall. When a

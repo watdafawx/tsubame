@@ -8,7 +8,7 @@
 //!   verify    cross-check that all four methods return identical entries
 //!   coldtest  report whether the standby-list purge is available
 //!   purge     flush caches before a cold run (needs elevation)
-//!   app       turn one rig benchmark run's raw reports into a bench-log section
+//!   app       turn one benchmark run's raw reports into a bench-log section
 
 mod appbench;
 mod bench;

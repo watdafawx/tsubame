@@ -583,7 +583,7 @@ fn main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        // drop D2D/D3D objects now, while the process is fully alive (blink: a
+        // drop D2D/D3D objects now, while the process is fully alive (a
         // thread-local destructor run inside ExitProcess crashes in D3D teardown)
         let taken = APP.with(|a| a.try_borrow_mut().ok().and_then(|mut a| a.take()));
         drop(taken);
