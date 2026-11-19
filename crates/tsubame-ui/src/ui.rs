@@ -792,13 +792,19 @@ impl Ui {
     /// when closed. Every `true` needs a `popup_end`. Call popups after all
     /// other widgets, lower popups first.
     pub fn popup_begin(&mut self, c: &mut dyn Canvas, id: Id, rect: Rect) -> bool {
+        let r = self.theme.radius_md;
+        self.popup_begin_r(c, id, rect, r)
+    }
+    /// `popup_begin` with corner radius `radius` (the context menu uses
+    /// `radius_lg`).
+    pub fn popup_begin_r(&mut self, c: &mut dyn Canvas, id: Id, rect: Rect, radius: f32) -> bool {
         let Some(p) = self.popups.iter_mut().find(|p| p.id == id) else { return false };
         p.rect = rect;
         // swallows clicks and wheel over the panel that no child takes
         self.interact(id, rect, Sense::click().wheel());
         let t = &self.theme;
-        c.round(rect, t.radius_md, t.popup);
-        c.round_stroke(rect, t.radius_md, t.popup_border, 1.0);
+        c.round(rect, radius, t.popup);
+        c.round_stroke(rect, radius, t.popup_border, 1.0);
         c.clip(rect);
         self.popup_depth += 1;
         true
