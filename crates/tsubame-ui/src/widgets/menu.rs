@@ -197,6 +197,9 @@ pub struct MenuStyle {
     pub loading: Option<f32>,
     /// a monotonic clock in ms (submenu hover timing)
     pub now_ms: u64,
+    /// a screen reader listens (CM10): fill [`MenuState::a11y`] this frame.
+    /// False: no snapshot work at all
+    pub a11y: bool,
 }
 
 /// Submenu hover timing of one level, a state machine over a clock.
@@ -342,9 +345,65 @@ pub struct Level {
     hdr: f32,
 }
 
+/// One row as a screen reader sees it (CM10): plain data the app copies to
+/// the UI Automation thread. Separators, headers and notes are not listed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct A11yRow {
+    pub key: u64,
+    /// the label without its accelerator marker; in a filtered list the
+    /// parents' labels come first ("Send to > Desktop")
+    pub name: String,
+    /// the accelerator letter (Alt + it runs the row)
+    pub accel: Option<char>,
+    pub shortcut: String,
+    /// client-area DIPs; may lie outside the viewport (see `visible`)
+    pub rect: Rect,
+    pub enabled: bool,
+    pub checked: bool,
+    pub radio: bool,
+    pub submenu: bool,
+    /// its submenu is open
+    pub expanded: bool,
+    /// the menu's keyboard focus: the deepest level's focused row
+    pub focused: bool,
+    /// at least partly inside the scroll viewport
+    pub visible: bool,
+    /// a button of the icon row
+    pub quick: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct A11yLevel {
+    /// key of the row that opened it (0 for the top)
+    pub key: u64,
+    pub rect: Rect,
+    pub rows: Vec<A11yRow>,
+    /// the type-to-filter field (top level only): rect and text
+    pub filter: Option<(Rect, String)>,
+}
+
+/// What the open menu looks like to a screen reader, one entry per open level.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct A11ySnap {
+    pub levels: Vec<A11yLevel>,
+}
+
+/// What a screen reader asked of a row (CM10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum A11yReq {
+    /// the same path as Enter on the focused row
+    Invoke,
+    /// close the submenu this row opened (and the ones above it)
+    Collapse,
+}
+
 /// The app keeps this while the menu is open.
 #[derive(Clone, Debug, Default)]
 pub struct MenuState {
+    /// CM10: filled by [`menu`] each frame while [`MenuStyle::a11y`] is set
+    pub a11y: Option<A11ySnap>,
+    /// CM10: requests from the screen reader, run by the next frame
+    a11y_req: Vec<(usize, u64, A11yReq)>,
     /// top-left corner the menu opens at (it flips left / up from here)
     pub anchor: Pt,
     /// opened from the keyboard (Shift+F10, Menu key): accelerators are
@@ -405,6 +464,17 @@ impl MenuState {
 
     pub fn filtering(&self) -> bool {
         !self.filter.is_empty()
+    }
+
+    /// CM10: a screen reader invokes (or collapses) row `key` of level `lv`;
+    /// the next frame runs it like the keyboard would.
+    pub fn request(&mut self, lv: usize, key: u64, what: A11yReq) {
+        self.a11y_req.push((lv, key, what));
+    }
+
+    /// CM10: requests are waiting for the next frame.
+    pub fn has_requests(&self) -> bool {
+        !self.a11y_req.is_empty()
     }
 }
 
@@ -1181,8 +1251,30 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     let mut rows: Vec<MenuRow> = Vec::new();
     let mut found: Vec<Found> = Vec::new();
 
+    // CM10: the screen reader's request runs as the keyboard would (one per
+    // frame): the row's level becomes the deepest, the row gets the focus
+    // and Enter is typed for it
+    let mut evs = ui.key_input(lid(0));
+    if !st.a11y_req.is_empty() {
+        let (lv, key, what) = st.a11y_req.remove(0);
+        if lv < st.levels.len() && !st.editing() {
+            close_above(ui, id, st, lv);
+            match what {
+                A11yReq::Invoke => {
+                    let l = &mut st.levels[lv];
+                    l.focus = Some(key);
+                    l.kb = true;
+                    l.reveal = true;
+                    evs.insert(0, (usize::MAX, Event::KeyDown { key: Key::Enter, mods: Mods::NONE, repeat: false }));
+                }
+                A11yReq::Collapse => {}
+            }
+        }
+        ui.request_repaint();
+    }
+    st.a11y = style.a11y.then(A11ySnap::default);
     // keys go to the deepest level
-    for (qi, ev) in ui.key_input(lid(0)) {
+    for (qi, ev) in evs {
         ui.consume(qi);
         // CM8: the edit menu takes every key while it is open
         if st.edit.is_some() {
@@ -1454,6 +1546,46 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             c.round(Rect::new(rect.r() - 1.0 - 4.0, ty, 4.0, th), 2.0, t.scrollbar);
         }
         st.levels[lv].scroll = scroll;
+        // CM10: the screen reader's copy of this level (only when one listens)
+        if st.a11y.is_some() {
+            let focus = if lv + 1 == st.levels.len() && st.edit.is_none() { st.levels[lv].focus } else { None };
+            let open = st.levels[lv].open;
+            let row_of = |row: &MenuRow, r: Rect, visible: bool, quick: bool, prefix: &str| A11yRow {
+                key: row.key,
+                name: if prefix.is_empty() { row.label.clone() } else { format!("{prefix}{PARENT_SEP}{}", row.label) },
+                accel: row.accel_char(),
+                shortcut: row.shortcut.clone(),
+                rect: r,
+                enabled: !row.disabled,
+                checked: row.checked,
+                radio: row.radio,
+                submenu: row.submenu,
+                expanded: row.submenu && open == Some(row.key),
+                focused: focus == Some(row.key) && row.focusable(),
+                visible,
+                quick,
+            };
+            let mut out = A11yLevel {
+                key: st.levels[lv].key,
+                rect,
+                rows: Vec::with_capacity(rows.len() + quick.len()),
+                filter: filtering.then(|| (Rect::new(rect.x + m.inset(), rect.y + m.inset(), rect.w - 2.0 * m.inset(), m.field_h()), st.filter.clone())),
+            };
+            for (row, r) in quick.iter().zip(qrects.iter()) {
+                out.rows.push(row_of(row, *r, true, true, ""));
+            }
+            for (i, row) in rows.iter().enumerate() {
+                if matches!(row.kind, RowKind::Separator | RowKind::Header | RowKind::Note) {
+                    continue;
+                }
+                let r = Rect::new(vp.x, vp.y + ys[i] - scroll, vp.w, m.row_h(row));
+                let prefix = found.get(i).map_or("", |f| f.prefix.as_str());
+                out.rows.push(row_of(row, r, r.b() > vp.y && r.y < vp.b(), false, prefix));
+            }
+            if let Some(snap) = st.a11y.as_mut() {
+                snap.levels.push(out);
+            }
+        }
         if lv == 0
             && let Some(ph) = style.loading
         {
@@ -1881,7 +2013,10 @@ fn paint_row(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow,
         c.round(r, rr, t.selected_inactive);
     }
     let lit = s.focused || s.open;
-    let (mut fg, mut ico) = (t.text, if lit { t.text } else { t.text_dim });
+    // CM10 high contrast: a selection filled with the accent (system
+    // highlight) takes the colour made for it, not the window text colour
+    let on_sel = if s.focused && t.selected == t.accent { t.on_accent } else { t.text };
+    let (mut fg, mut ico) = (on_sel, if lit { on_sel } else { t.text_dim });
     if row.danger {
         fg = t.danger;
         ico = t.danger;
@@ -1896,7 +2031,7 @@ fn paint_row(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow,
     }
     let mid = r.center().y;
     if row.custom {
-        c.circle(r.x + 4.0, mid, 2.0, t.accent);
+        c.circle(r.x + 4.0, mid, 2.0, if on_sel != t.text { t.on_accent } else { t.accent });
     }
     let ir = Rect::new(r.x + 6.0, mid - m.icon / 2.0, m.icon, m.icon);
     if row.kind == RowKind::Status {
@@ -1910,11 +2045,13 @@ fn paint_row(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow,
         c.text(RETRY, br, m.small.c(), t.text);
         return;
     }
+    // the accent marks (check, radio dot) must not vanish on an accent-filled selection
+    let mark = if s.pressed || on_sel != t.text { t.on_accent } else { t.accent };
     if row.checked {
         c.round(ir, t.radius_sm, t.selected_inactive);
-        c.text(&G_CHECK.to_string(), ir, f(m.icon * 0.75).icon().c(), if s.pressed { t.on_accent } else { t.accent });
+        c.text(&G_CHECK.to_string(), ir, f(m.icon * 0.75).icon().c(), mark);
     } else if row.radio {
-        c.circle(ir.center().x, mid, 3.0 * m.sc, if s.pressed { t.on_accent } else { t.accent });
+        c.circle(ir.center().x, mid, 3.0 * m.sc, mark);
     } else {
         match row.icon {
             RowIcon::None => {}
@@ -1930,14 +2067,14 @@ fn paint_row(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow,
     if row.submenu {
         let aw = m.arrow_w();
         let ar = Rect::new(right - aw + 3.0, mid - aw / 2.0, aw, aw);
-        c.text(&G_ARROW.to_string(), ar, f(aw * 0.85).icon().c(), if s.pressed { t.on_accent } else if row.disabled { t.text_disabled } else { t.text_dim });
+        c.text(&G_ARROW.to_string(), ar, f(aw * 0.85).icon().c(), if s.pressed { t.on_accent } else if row.disabled { t.text_disabled } else if on_sel != t.text { on_sel } else { t.text_dim });
         right -= aw + m.gap;
     }
     if !row.shortcut.is_empty() {
         // The backend quantizes layout widths to quarter DIPs. Leave a DIP
         // of slack so rounding cannot ellipsize a precisely measured chord.
         let sw = c.measure(&row.shortcut, m.small).ceil() + 1.0;
-        let col = if s.pressed { t.on_accent } else if row.disabled { t.text_disabled } else { t.text_dim };
+        let col = if s.pressed { t.on_accent } else if row.disabled { t.text_disabled } else if on_sel != t.text { on_sel } else { t.text_dim };
         c.text(&row.shortcut, Rect::new(right - sw, r.y, sw, r.h), m.small, col);
         right -= sw + 2.0 * m.gap;
     }
@@ -1990,7 +2127,7 @@ fn paint_quick(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRo
             c.round_stroke(b, rr, t.focus, t.layout_focus_ring_width.max(1.0));
         }
     }
-    let mut col = if s.focused { t.text } else { t.text_dim };
+    let mut col = if s.focused { if t.selected == t.accent { t.on_accent } else { t.text } } else { t.text_dim };
     if row.danger {
         col = t.danger;
     }
@@ -2209,11 +2346,12 @@ mod tests {
         src: Src,
         now: u64,
         alt: bool,
+        a11y: bool,
     }
     const ID: Id = Id::new("test.menu");
     impl H {
         fn new(at: Pt, keyboard: bool) -> H {
-            H { ui: Ui::default(), c: TestCanvas::new(800.0, 600.0), st: MenuState::new(at, keyboard), src: src(), now: 1000, alt: false }
+            H { ui: Ui::default(), c: TestCanvas::new(800.0, 600.0), st: MenuState::new(at, keyboard), src: src(), now: 1000, alt: false, a11y: false }
         }
         fn frame(&mut self) -> MenuResponse {
             self.c.clear();
@@ -2221,7 +2359,7 @@ mod tests {
             self.ui.begin_frame((800.0, 600.0));
             // like the app: the menu sets it again while it is drawn
             self.ui.capture_keys = false;
-            let style = MenuStyle { bounds: Rect::new(0.0, 0.0, 800.0, 600.0), loading: None, alt: self.alt, now_ms: self.now };
+            let style = MenuStyle { bounds: Rect::new(0.0, 0.0, 800.0, 600.0), loading: None, alt: self.alt, now_ms: self.now, a11y: self.a11y };
             let r = menu(&mut self.ui, &mut self.c, ID, &mut self.st, &self.src, &style);
             self.ui.end_frame();
             self.c.end();
@@ -3102,5 +3240,100 @@ mod tests {
         h.frame();
         assert!(!h.st.levels[0].folded);
         assert!(h.c.has_text("Cut") && h.c.has_text("Rename"));
+    }
+
+    #[test]
+    fn screen_reader_snapshot_exists_only_when_asked() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.frame();
+        assert!(h.st.a11y.is_none(), "nobody listens: no snapshot work");
+        h.a11y = true;
+        h.src.top[2].checked = true;
+        h.frame();
+        let snap = h.st.a11y.clone().unwrap();
+        assert_eq!(snap.levels.len(), 1);
+        let names: Vec<&str> = snap.levels[0].rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Open", "Copy", "Send to", "Paste"], "separator not listed");
+        let rows = &snap.levels[0].rows;
+        assert!(rows[0].focused && rows[0].visible && rows[0].enabled);
+        assert!(rows[1].checked && !rows[0].checked);
+        assert!(rows[2].submenu && !rows[2].expanded);
+        assert!(!rows[3].enabled);
+        assert_eq!(rows[0].accel, Some('o'));
+        assert!(snap.levels[0].rect.contains_pt(rows[0].rect.center()));
+        h.a11y = false;
+        h.frame();
+        assert!(h.st.a11y.is_none(), "listener gone: snapshot dropped");
+    }
+
+    #[test]
+    fn snapshot_follows_submenus_and_focus() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.a11y = true;
+        h.frame();
+        h.key(Key::Down);
+        h.key(Key::Down);
+        h.key(Key::Right);
+        let snap = h.st.a11y.clone().unwrap();
+        assert_eq!(snap.levels.len(), 2);
+        assert_eq!(snap.levels[1].key, 9);
+        assert!(snap.levels[0].rows[2].expanded);
+        assert!(!snap.levels[0].rows[2].focused, "the focus is in the deepest level");
+        assert!(snap.levels[1].rows[0].focused);
+        assert_eq!(snap.levels[1].rows[0].name, "Desktop");
+    }
+
+    #[test]
+    fn scrolled_out_rows_are_offscreen_and_the_filter_is_a_field() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.a11y = true;
+        h.src.top = tall_src(60);
+        h.frame();
+        h.key(Key::End);
+        let snap = h.st.a11y.clone().unwrap();
+        let rows = &snap.levels[0].rows;
+        assert!(rows.iter().any(|r| r.quick), "icon row buttons are listed");
+        assert!(rows.iter().any(|r| !r.visible), "scrolled out rows are off-screen");
+        assert!(rows.iter().any(|r| r.visible && !r.quick));
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.a11y = true;
+        h.frame();
+        h.typed("des");
+        let snap = h.st.a11y.clone().unwrap();
+        let f = snap.levels[0].filter.clone().unwrap();
+        assert_eq!(f.1, "des");
+        assert!(snap.levels[0].rows.iter().any(|r| r.name.contains("Desktop") && r.name.starts_with("Send to")), "parents lead the name");
+    }
+
+    #[test]
+    fn screen_reader_invoke_runs_the_row_like_enter() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.a11y = true;
+        h.frame();
+        h.st.request(0, 2, A11yReq::Invoke);
+        assert!(h.st.has_requests());
+        let r = h.frame();
+        assert_eq!(r.picked, Some(vec![2]));
+        assert!(r.closed);
+
+        // a submenu row opens its submenu; Collapse closes it again
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.a11y = true;
+        h.frame();
+        h.st.request(0, 9, A11yReq::Invoke);
+        h.frame();
+        assert_eq!(h.st.levels.len(), 2);
+        h.st.request(0, 9, A11yReq::Collapse);
+        h.frame();
+        assert_eq!(h.st.levels.len(), 1);
+
+        // a row of a deeper level closes what is above it first
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        h.st.request(0, 9, A11yReq::Invoke);
+        h.frame();
+        h.st.request(1, 92, A11yReq::Invoke);
+        let r = h.frame();
+        assert_eq!(r.picked, Some(vec![9, 92]));
     }
 }

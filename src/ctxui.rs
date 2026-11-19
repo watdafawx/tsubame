@@ -14,10 +14,11 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 use tsubame_config::ContextMenu;
 use tsubame_config::menu::{self, MenuEntry, Target as Kind};
-use tsubame_ui::widgets::menu::{EDIT_DOWN, EDIT_HIDE, EDIT_PIN, EDIT_RENAME, EDIT_SETTINGS, EDIT_UP, G_EYE_OFF, SubLoad, menu as draw_menu};
-use tsubame_ui::{Canvas, Id, MenuRow, MenuSource, MenuState, MenuStyle, Pt, Rect, RowIcon, RowKind, Ui};
+use tsubame_ui::widgets::menu::{A11yReq, A11ySnap, EDIT_DOWN, EDIT_HIDE, EDIT_PIN, EDIT_RENAME, EDIT_SETTINGS, EDIT_UP, G_EYE_OFF, SubLoad, menu as draw_menu};
+use tsubame_ui::{Canvas, Id, MenuRow, MenuSource, MenuState, MenuStyle, Pt, Rect, RowIcon, RowKind, Theme, Ui};
 use tsubame_win::shell::ctxmodel::{self, IconCache, ItemKind, ItemSource, LoadState, MenuBatch, MenuItem, MenuModel, Part, Route, SubLoads, SubState, flag};
 use tsubame_win::shell::{CtxHandle, CtxOpts, Pool, Request};
+use tsubame_win::uia;
 
 pub const ID_CTX: Id = Id::new("ctxmenu");
 /// The loading line's animation tick (only while a menu is loading).
@@ -143,6 +144,18 @@ pub struct CtxMenu {
     dirty: bool,
     paste_ok: bool,
     icon_px: u32,
+    /// CM10: what the screen reader was last told
+    a11y: A11yOut,
+    /// CM10: the system colours when Windows High Contrast is on (read once
+    /// per menu); None inside: the app's theme
+    hc: Option<Option<Theme>>,
+}
+
+/// What the UI Automation side was last given (CM10).
+#[derive(Default)]
+struct A11yOut {
+    prev: Option<A11ySnap>,
+    published: bool,
 }
 
 /// The right-clicked kind and extension for the U4 rules.
@@ -349,6 +362,8 @@ impl CtxMenu {
             dirty: true,
             paste_ok,
             icon_px,
+            a11y: A11yOut::default(),
+            hc: None,
         };
         m.learn_from(&m.model.tsubame.clone());
         m.submit(pool);
@@ -620,21 +635,38 @@ impl CtxMenu {
         let phase = loading.then(|| (self.asked_at.elapsed().as_millis() % SPIN_MS) as f32 / SPIN_MS as f32);
         let alt = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x12) } < 0;
         let now = self.now_ms();
-        let style = MenuStyle { bounds, loading: phase, alt, now_ms: now };
+        // CM10: one atomic load until a screen reader has asked for the provider
+        let a11y = uia::active();
+        let style = MenuStyle { bounds, loading: phase, alt, now_ms: now, a11y };
         let failed = self.shown() == LoadState::Failed;
         let src = Rows { items: &self.items, icons: &self.model.icons, failed, paste_ok: self.paste_ok, subs: &self.subs, now, can_load: self.handle.is_some(), menu: Some(&self.menu) };
+        // CM10: Windows High Contrast draws the menu in the system colours
+        let hc = *self.hc.get_or_insert_with(|| high_contrast_theme(&ui.theme));
+        let saved = ui.theme;
+        if let Some(t) = hc {
+            ui.theme = t;
+        }
         let r = draw_menu(ui, g, ID_CTX, &mut self.state, &src, &style);
+        ui.theme = saved;
         if let Some(path) = r.picked {
             self.picked = src.pick(&path);
         }
         // CM6: ask the worker for the submenus the menu shows or is about to
         // open; while filtering, for every submenu (their rows are searched)
         let want = if self.state.filtering() { lazy_subs(&self.items) } else { self.state.wanted().iter().filter_map(|p| src.item_at(p)).filter(|it| ctxmodel::is_lazy(it)).map(|it| it.sub).collect() };
+        if a11y {
+            self.publish_a11y(r.closed);
+        } else if self.a11y.published {
+            self.close_a11y();
+        }
         if r.retry {
             self.retry = true;
         }
         if r.closed {
             self.open = false;
+        }
+        if !self.open {
+            self.close_a11y();
         }
         if self.open
             && let Some(h) = &self.handle
@@ -665,6 +697,34 @@ impl CtxMenu {
         }
     }
 
+    /// CM10: hands the screen reader this frame's menu when it changed.
+    fn publish_a11y(&mut self, closed: bool) {
+        let Some(snap) = self.state.a11y.take() else { return };
+        // a frame that stopped early (a pick, an edit menu opening) is partial
+        if closed || snap.levels.len() != self.state.levels.len() || self.a11y.prev.as_ref() == Some(&snap) {
+            return;
+        }
+        uia::publish(a11y_snap(&snap));
+        self.a11y.prev = Some(snap);
+        self.a11y.published = true;
+    }
+
+    /// CM10: the menu is gone (closed, or nobody listens any more): tell the
+    /// screen reader once and let go of the providers.
+    fn close_a11y(&mut self) {
+        if std::mem::take(&mut self.a11y.published) {
+            uia::publish(uia::Snap::default());
+        }
+        self.a11y.prev = None;
+    }
+
+    /// CM10: runs what the screen reader asked (Invoke, Collapse) on the next frame.
+    pub fn run_a11y_requests(&mut self) {
+        for r in uia::take_requests() {
+            self.state.request(r.lv, r.key, if r.collapse { A11yReq::Collapse } else { A11yReq::Invoke });
+        }
+    }
+
     /// Called after Canvas::end, so timings include submitting the frame.
     pub fn presented(&mut self) {
         if !self.open { return; }
@@ -682,6 +742,97 @@ impl CtxMenu {
         let ms = |d: Option<Duration>| d.map_or("-".to_string(), |d| format!("{:.1}", d.as_secs_f64() * 1000.0));
         format!("own menu: first paint {} ms, top level {} ms, all items {} ms, {} rows", ms(self.first_paint), ms(self.top_items), ms(self.all_items), self.items.len())
     }
+}
+
+impl Drop for CtxMenu {
+    fn drop(&mut self) {
+        self.close_a11y();
+    }
+}
+
+/// What the UI Automation side gets of a widget snapshot (CM10).
+pub fn a11y_snap(s: &A11ySnap) -> uia::Snap {
+    let px = |r: Rect| [r.x, r.y, r.w, r.h];
+    let levels = s
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let name = if i == 0 { "Context menu".to_string() } else { s.levels[i - 1].rows.iter().find(|r| r.key == l.key).map(|r| r.name.clone()).unwrap_or_else(|| "Submenu".into()) };
+            uia::Level {
+                key: l.key,
+                name,
+                rect: px(l.rect),
+                filter: l.filter.as_ref().map(|(r, t)| (px(*r), t.clone())),
+                rows: l
+                    .rows
+                    .iter()
+                    .map(|r| uia::Row {
+                        key: r.key,
+                        name: r.name.clone(),
+                        access: r.accel.map(|c| format!("Alt+{}", c.to_uppercase())).unwrap_or_default(),
+                        shortcut: r.shortcut.clone(),
+                        rect: px(r.rect),
+                        enabled: r.enabled,
+                        toggled: r.checked || r.radio,
+                        submenu: r.submenu,
+                        expanded: r.expanded,
+                        focused: r.focused,
+                        visible: r.visible,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    uia::Snap { levels }
+}
+
+/// The menu's theme under Windows High Contrast: the system colours. None
+/// when High Contrast is off. The selection is the system highlight with the
+/// system highlight text on it; there is no dim text and no accent hue.
+pub fn high_contrast_theme(base: &Theme) -> Option<Theme> {
+    use windows::Win32::Graphics::Gdi::{GetSysColor, SYS_COLOR_INDEX};
+    use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+    use windows::Win32::UI::WindowsAndMessaging::{SPI_GETHIGHCONTRAST, SystemParametersInfoW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
+    let mut hc = HIGHCONTRASTW { cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
+    let ok = unsafe { SystemParametersInfoW(SPI_GETHIGHCONTRAST, hc.cbSize, Some(&mut hc as *mut _ as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) }.is_ok();
+    if !ok || hc.dwFlags.0 & HCF_HIGHCONTRASTON.0 == 0 {
+        return None;
+    }
+    // COLORREF is 0x00BBGGRR; the theme is 0xRRGGBB
+    let sys = |i: i32| {
+        let c = unsafe { GetSysColor(SYS_COLOR_INDEX(i)) };
+        ((c & 0xff) << 16) | (c & 0xff00) | ((c >> 16) & 0xff)
+    };
+    Some(hc_colours(base, sys))
+}
+
+/// [`high_contrast_theme`] over a colour source (a `COLOR_*` index to 0xRRGGBB).
+pub fn hc_colours(base: &Theme, sys: impl Fn(i32) -> u32) -> Theme {
+    const WINDOW: i32 = 5;
+    const WINDOWTEXT: i32 = 8;
+    const HIGHLIGHT: i32 = 13;
+    const HIGHLIGHTTEXT: i32 = 14;
+    const GRAYTEXT: i32 = 17;
+    let mut t = *base;
+    t.popup = sys(WINDOW);
+    t.panel = t.popup;
+    t.text = sys(WINDOWTEXT);
+    t.text_dim = t.text;
+    t.text_disabled = sys(GRAYTEXT);
+    t.border = t.text;
+    t.popup_border = t.text;
+    t.scrollbar = t.text;
+    t.scrollbar_hover = t.text;
+    t.danger = t.text;
+    t.accent = sys(HIGHLIGHT);
+    t.selected = t.accent;
+    t.on_accent = sys(HIGHLIGHTTEXT);
+    // the open parent row and the check box have no fill of their own
+    t.selected_inactive = t.popup;
+    t.focus = t.on_accent;
+    t.highlight = t.accent;
+    t
 }
 
 /// Row key: stable across batches (the top level, then the walked tree).
@@ -1000,7 +1151,7 @@ mod tests {
             handle: None, ticket: 0, state: MenuState::default(), open: false,
             input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: Some("properties".into()), invoked: false, invoke_result: None,
-            items: vec![], dirty: false, paste_ok: false, icon_px: 16,
+            items: vec![], dirty: false, paste_ok: false, icon_px: 16, a11y: A11yOut::default(), hc: None,
         };
         let failed = |generation| MenuBatch { generation, part: Part::Failed("bind failed".into()), timing: [0; 3] };
         c.apply(failed(1));
@@ -1107,7 +1258,7 @@ mod tests {
             handle: None, ticket: 0, state: MenuState::default(), open: true,
             input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: None, invoked: false, invoke_result: None,
-            items: vec![], dirty: true, paste_ok: true, icon_px: 16,
+            items: vec![], dirty: true, paste_ok: true, icon_px: 16, a11y: A11yOut::default(), hc: None,
         };
         c.items = c.model.rows(&c.menu);
         c
@@ -1321,5 +1472,60 @@ mod tests {
         let items2 = [eager.clone()];
         let r2 = Rows { items: &items2, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true, menu: None };
         assert_eq!(r2.sub_state(&[item_key(&eager)]), SubLoad::Ready, "a filled submenu is ready (even if empty)");
+    }
+
+    #[test]
+    fn widget_snapshot_maps_to_the_automation_tree() {
+        use tsubame_ui::widgets::menu::{A11yLevel, A11yRow};
+        let row = |key, name: &str| A11yRow { key, name: name.into(), enabled: true, visible: true, ..Default::default() };
+        let mut copy = row(2, "Copy");
+        copy.accel = Some('c');
+        copy.shortcut = "Ctrl+C".into();
+        copy.checked = true;
+        let mut send = row(9, "Send to");
+        send.submenu = true;
+        send.expanded = true;
+        let snap = A11ySnap {
+            levels: vec![
+                A11yLevel { key: 0, rect: Rect::new(10.0, 20.0, 200.0, 100.0), rows: vec![copy, send], filter: None },
+                A11yLevel { key: 9, rect: Rect::new(210.0, 20.0, 100.0, 50.0), rows: vec![row(91, "Desktop")], filter: Some((Rect::new(1.0, 2.0, 3.0, 4.0), "d".into())) },
+            ],
+        };
+        let u = a11y_snap(&snap);
+        assert_eq!(u.levels[0].name, "Context menu");
+        assert_eq!(u.levels[1].name, "Send to", "a submenu is named after its row");
+        assert_eq!(u.levels[0].rows[0].access, "Alt+C");
+        assert_eq!(u.levels[0].rows[0].shortcut, "Ctrl+C");
+        assert!(u.levels[0].rows[0].toggled && u.levels[0].rows[1].submenu && u.levels[0].rows[1].expanded);
+        assert_eq!(u.levels[1].filter, Some(([1.0, 2.0, 3.0, 4.0], "d".into())));
+        assert_eq!(u.levels[1].rect, [210.0, 20.0, 100.0, 50.0]);
+    }
+
+    #[test]
+    fn high_contrast_uses_system_colours_legibly() {
+        use tsubame_ui::themes::contrast;
+        // the four Windows High Contrast themes (COLOR_WINDOW, WINDOWTEXT, HIGHLIGHT, HIGHLIGHTTEXT, GRAYTEXT)
+        let sets: [[u32; 5]; 4] = [
+            [0x000000, 0xffffff, 0x1aebff, 0x000000, 0x3ff23f], // HC Black
+            [0xffffff, 0x000000, 0x37006e, 0xffffff, 0x600000], // HC White
+            [0x202020, 0xffffff, 0x8ca2ff, 0x000000, 0x3ff23f], // HC #1
+            [0x000000, 0xffffff, 0x800080, 0xffffff, 0x00ff00], // HC #2
+        ];
+        for [w, wt, h, ht, gray] in sets {
+            let sys = |i: i32| match i {
+                5 => w,
+                8 => wt,
+                13 => h,
+                14 => ht,
+                17 => gray,
+                _ => 0x808080,
+            };
+            let t = hc_colours(&tsubame_ui::DARK, sys);
+            assert!(contrast(t.text, t.popup) >= 7.0, "row text on the menu");
+            assert!(contrast(t.on_accent, t.selected) >= 7.0, "text on the selected row");
+            assert!(contrast(t.text_disabled, t.popup) >= 3.0, "disabled text stays readable");
+            assert_eq!(t.selected, t.accent, "the widget takes on_accent text on an accent fill");
+            assert_eq!(t.text_dim, t.text, "no dim text");
+        }
     }
 }

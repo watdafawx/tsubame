@@ -223,9 +223,63 @@ in Settings, the row "..." menu's contents, how a user group is named in the
 menu (popups have no group captions, so the name is not drawn there), and any
 Pin / group state in the edit menu header.
 
-## Later-card seams
+## Accessibility (CM10)
 
-CM10: UI Automation provider and high-contrast verification remain separate.
+The menu is painted inside the main window, so Windows sees one window. A
+screen reader asks it for its UI Automation provider (`WM_GETOBJECT`,
+`UiaRootObjectId`); `tsubame-win/src/uia.rs` answers with a fragment root.
+While a menu is open its levels and rows are the root's children; closed, the
+root has none.
+
+- Tree: Window (the host's) > Menu "Context menu" > MenuItem rows (the icon
+  row's buttons first). A submenu row's child is the Menu of its open submenu
+  (named after the row). While filtering the field is the first child of the
+  top Menu (Edit "Filter menu items", read-only Value pattern with the text).
+  Separators are not listed. Scrolled-out rows stay in the tree with
+  `IsOffscreen`.
+- Per row: Name (label; in a filtered list the parents lead, "Send to > Desktop"),
+  AccessKey `Alt+<letter>`, AcceleratorKey (the shortcut text), IsEnabled,
+  HasKeyboardFocus, BoundingRectangle in screen pixels, AutomationId.
+  Patterns: Invoke (enabled rows), Toggle (rows drawn checked or radio-selected),
+  ExpandCollapse (submenu rows).
+- Invoke / Expand / Toggle post a request to the UI thread (`WM_APP + 10`);
+  the next frame runs it as Enter on that row (`MenuState::request`), so a
+  pick, a submenu opening and the Retry row behave like the keyboard.
+  Collapse closes that submenu and the ones above it.
+- Events: MenuOpened / MenuClosed, structure changed (rows or levels changed),
+  focus changed (`UIA_AutomationFocusChangedEventId` on the focused row).
+- Threads. UIA calls the providers on its own threads. They read only a
+  snapshot (`A11ySnap` -> `uia::Snap`: names, states, rects) that the UI thread
+  publishes after a frame in which it changed; they never touch widget state. A
+  row that is gone answers `UIA_E_ELEMENTNOTAVAILABLE`.
+- Cost. Nothing exists until a client first asks for the provider. After that
+  each frame of an open menu asks `UiaClientsAreListening`; with no listener the
+  widget builds nothing (`MenuStyle::a11y` false). A closed menu does no UIA work.
+- Lifetime. Providers are made on demand and cached while the menu is open
+  (stable identity). When it closes (or the listener goes) every one gets
+  `UiaDisconnectProvider` and the cache is dropped; the window's root is
+  released at `WM_DESTROY`.
+
+Not exposed (nothing invented): the CM8 edit menu, the Undo strip's buttons
+as separate elements (the strip is one MenuItem), the hover tooltip of the
+icon row, an unchecked check item (the data does not tell it from a plain
+row, so it has no Toggle pattern), the loading line (a "Loading..." row is
+there in submenus only), and SetFocus / SetValue (the menu owns its focus and
+typing goes through the keyboard).
+
+### High Contrast
+
+The app has no system-colour theme. While the menu paints it checks
+`SPI_GETHIGHCONTRAST` once per menu; when High Contrast is on it draws with
+the system colours (`ctxui::hc_colours`): window and window text for the
+popup and rows, no dim text, highlight with highlight text for the selected row
+(the widget takes `on_accent` text when the selection fill is the accent),
+grey text for disabled rows, text-coloured borders. Shell bitmaps stay as they
+are. The open parent row of a submenu and the check box have no fill of their
+own in this mode. The rest of the window keeps the app theme (not part of
+this card).
+
+## Later-card seams
 
 The stress scenario is separate from navigation/tab leak-gate: shell extensions
 have known per-menu growth; mixing 1000 menus into that gate would obscure the
