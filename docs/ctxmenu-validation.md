@@ -439,3 +439,37 @@ removed afterwards. Config: user group `g1` "Tools" at pos 1, learned item
 
 Only unit-tested: refresh from last menu (no button), Pin on packaged items,
 pin inside a user group, deleting a group with pinned items.
+
+## CM10: UI Automation provider and High Contrast
+
+Release build `39d4983` on the remote test desktop, `TSUBAME_GPU_PARK=0`, a
+scratch folder with a subfolder and five `.txt` files, throwaway data dir, all
+removed afterwards. Exe 3,183,616 B (CM8-skip B exe 3,136,512 B; < 6 MB).
+
+`--stress ctxmenu`, 200 menus, no screen reader attached (the provider costs
+nothing here): warm first paint 1.46 / 1.91 ms (p50 / p95), warm top level
+31.34 / 34.83 ms, warm all items 36.06 / 39.92 ms, growth menu 10 -> 200
+private +7.0 % (handles +0.6 %, GDI +0, USER +1), failures 0. Previous build:
+31.5-31.9 / 35.1-35.9 ms and +5.3..+7.3 %: no regression; the 5 % growth gate
+still fails as before.
+
+A UIA client (PowerShell, `System.Windows.Automation`) read the open menu
+(Shift+F10, keyboard only, foreground checked): Menu "Context menu" with 25
+MenuItem rows (names, `Alt+letter` access keys, shortcut text, IsEnabled,
+rects in screen pixels, `expand=Collapsed` on the submenu rows, `invoke` on
+every row), `Paste` disabled, `FocusedElement` followed Down. `Expand()` on
+"PeaZip" added a child Menu "PeaZip" with 12 rows and the first one focused;
+`Collapse()` closed it. `Invoke()` on "Copy name" ran the row: the clipboard
+changed and the menu closed. Not exercised live: Toggle (no checked row in this
+menu), the events (no event listener attached), scrolled-out rows.
+
+High Contrast (High Contrast Black enabled through `SystemParametersInfo`,
+restored right after): the menu drew white on black with white borders,
+the selected row cyan with dark text, disabled rows grey, accelerators
+underlined, shell icons unchanged; the rest of the window kept the app theme.
+Unit tests check text-on-popup and text-on-selection contrast >= 7:1 for the
+four Windows High Contrast colour sets.
+
+Only unit-tested: snapshot building and request handling in the widget,
+the Navigate tree and runtime ids of the provider, the widget-to-UIA mapping.
+
