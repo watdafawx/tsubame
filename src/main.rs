@@ -310,6 +310,12 @@ fn main() {
     let loaded = tsubame_config::ConfigFile::load(&loc.config);
     let cfg = loaded.value.config.clone();
     let cfg_status = loaded.status.clone();
+    for w in &cli.warnings {
+        eprintln!("tsubame: {w}");
+    }
+    if let Some(m) = cfg_status.message() {
+        eprintln!("tsubame: {m}");
+    }
     let session_loaded = tsubame_config::Session::load(&loc.session);
     let mut saved_session = session_loaded.value.clone();
     // restore only with no path on the command line, and never during a bench
@@ -431,7 +437,7 @@ fn main() {
         gfx.set_dpi(dpi);
 
         // shell workers: all COM and disk work happens there
-        let thumb_workers = arg_value(&args, "--thumb-workers").and_then(|v| v.parse().ok()).unwrap_or(shellui::THUMB_WORKERS);
+        let thumb_workers = cli.thumb_workers.unwrap_or(shellui::THUMB_WORKERS);
         let mut pool = Pool::with_lanes(workers, thumb_workers, hwnd.0 as isize, WM_APP_SHELL);
         if let Some(ms) = std::env::var("TSUBAME_HANG_MS").ok().and_then(|v| v.parse().ok()) {
             pool.hang_after = Duration::from_millis(ms);

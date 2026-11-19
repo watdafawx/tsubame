@@ -33,9 +33,21 @@ saving.
   timer for the remaining time only while a change is pending). The window
   close/exit flushes whatever is still inside the window.
 - No write when the rendered contents equal the last write.
-- A corrupt file (bad TOML, wrong value types, not UTF-8) is moved to
+- A file that is not TOML at all (syntax error, not UTF-8) is moved to
   `<name>.bad` and the defaults are used; the app never fails to start. The
-  corrupt payload is kept for bug reports.
+  reason names the line and column (`line 2, column 17: ...`).
+- A file that is valid TOML but has a wrong-shaped value (a number where a
+  string belongs, `pinned = "x"`, one bad `[[sidebar.pinned]]` entry) is **not
+  moved**. Only the failing key (or array entry) is dropped and uses its
+  default; every other setting is kept. The original text is copied to
+  `<name>.bad` first, and the reason is printed to stderr as
+  ``sidebar.pinned[1] (line 9): invalid type: integer `5`, expected a string``.
+  The next save writes a clean file.
+- A Windows path in a double-quoted string (`path = "D:\work"`) is invalid
+  TOML (`\w` is not an escape). The loader fixes the backslashes, keeps the
+  copy as `.bad` and reports it. Write paths in single quotes (`'D:\work'`) or
+  double the backslashes (`"D:\\work"`) to avoid the warning. (Careful:
+  `"D:\temp"` is valid TOML and means `D:<tab>emp`.)
 - Unknown keys are kept: the file is parsed into the typed schema and the
   raw table is remembered; saving merges keys this build does not know back
   in, under the keys it does. A newer Tsubame's settings survive an older
@@ -85,7 +97,7 @@ closed = ["network"]         # folded sections: pinned | quick | recent | pc | n
 
 [[sidebar.pinned]]           # bookmarks, in order; drag between rows to pin
 name = "Work"
-path = "D:\work"
+path = 'D:\work'            # single quotes: backslashes are literal
 
 [updates]
 auto_check = true            # background check at most once per 24 h
@@ -134,7 +146,7 @@ maximized = false
 | `panes.ratio` | `0.5` | first pane's share, clamped 0.15–0.85; the splitter drags it, double-click resets |
 | `panes.sidebar_width` | `208.0` | sidebar width, clamped 120–480; dragging under 120 collapses to the rail |
 | `panes.sidebar_collapsed` | `false` | `true` = the 48 px icon rail (Ctrl+B) |
-| `sidebar.pinned` | empty | `[[sidebar.pinned]]` `name` + `path`, shown in the Pinned section |
+| `sidebar.pinned` | empty | `[[sidebar.pinned]]` `name` + `path` (both strings; write the path in single quotes, `path = 'D:\work'`), shown in the Pinned section. Extra keys in an entry are ignored |
 | `sidebar.closed` | empty | sidebar sections folded by the user |
 | `updates.auto_check` | `true` | background check at start (<= 1 per 24 h). `false` = no network from the automatic path |
 | `updates.auto_install` | `false` | download without a click; installing is still only at restart |
@@ -229,12 +241,15 @@ tsubame [options] [path ...]
 | `--select <path>` | open the folder of `<path>` and select the entry |
 | `--portable` | use `<exe folder>\data\` for config and session |
 | `--config <file>` | read and write this config file |
+| `--thumb-workers <n>` | threads that load thumbnails; default 2, `0` shares the icon threads, values above 16 are clamped to 16. A missing or non-numeric value is reported on stderr and ignored |
 | `--help`, `-h` | print usage and exit |
 | `--version`, `-V` | print the version and exit |
 | `--dir <path>` | old spelling of a folder to open (kept for the benches) |
 
 `--help`/`--version` attach to the parent console (`AttachConsole`), print, and
 exit — the exe is a GUI-subsystem app and has no console of its own.
+
+An unknown option (`--nonsense`, `-x`) is never a path: it is ignored with a one-line warning on stderr (`tsubame: unknown option --nonsense; ignored`) and the launch carries on, so no tab is opened for it. Options that take a value (`--thumb-workers 20`, `--view grid-small`, `--theme`, `--workers`, ...) consume it, so the value is not mistaken for a folder.
 
 Path parsing: surrounding quotes are dropped, `/` becomes `\`, `.`/`..` are
 resolved, relative paths use the working directory, `C:` is `C:\`, trailing

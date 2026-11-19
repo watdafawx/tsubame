@@ -37,6 +37,8 @@ pub const HELP: &str = concat!(
     "  --select <path>     open the folder of <path> and select the entry\n",
     "  --portable          use .\\data\\ next to the exe for config and session\n",
     "  --config <file>     read and write this config file instead of the default\n",
+    "  --thumb-workers <n> threads that load thumbnails (default 2, 0-16; 0 shares the icon\n",
+    "                      threads)\n",
     "  --help, -h          print this text and exit (attaches to the parent console)\n",
     "  --version, -V       print the version and exit\n",
     "\n",
@@ -47,7 +49,13 @@ pub const HELP: &str = concat!(
 
 /// Flags that take a value. Needed so a value that looks like a flag is not
 /// mistaken for a positional path.
-const VALUE_FLAGS: &[&str] = &["--config", "--select", "--dir", "--theme", "--density", "--stress", "--workers", "--timing-dirs", "--reps", "--gate-fixture", "--gate-navs", "--gate-tabs", "--gate-sample", "--gate-settle"];
+const VALUE_FLAGS: &[&str] = &["--config", "--select", "--dir", "--theme", "--density", "--stress", "--workers", "--timing-dirs", "--reps", "--gate-fixture", "--gate-navs", "--gate-tabs", "--gate-sample", "--gate-settle", "--thumb-workers", "--view"];
+
+/// Value-less flags the app reads from the raw arguments.
+const BOOL_FLAGS: &[&str] = &["--windowed", "--zebra"];
+
+/// Upper bound of `--thumb-workers`: more threads than this only fight over the disk.
+pub const MAX_THUMB_WORKERS: usize = 16;
 
 /// Measurement / diagnostics flags: the process is a one-off run, not a window
 /// the user is opening, so it neither forwards to a running instance nor writes
@@ -70,6 +78,11 @@ pub struct Cli {
     /// `--after-update <pid>`: the updater started this copy; wait for that process to exit
     /// before claiming the single-instance lock.
     pub after_update: Option<u32>,
+    /// `--thumb-workers <n>`, clamped to `0..=MAX_THUMB_WORKERS`.
+    pub thumb_workers: Option<usize>,
+    /// One line per ignored or malformed argument. The caller prints them to stderr;
+    /// they never stop the launch and never become paths.
+    pub warnings: Vec<String>,
     /// Flags this parser does not own, with their values, in order. The app's
     /// existing measurement flags are read from here (and from the raw args).
     pub passthrough: Vec<String>,
@@ -114,15 +127,30 @@ impl Cli {
                         i += 1;
                     }
                 }
+                "--thumb-workers" => match args.get(i + 1).filter(|v| !v.starts_with('-')) {
+                    Some(v) => {
+                        i += 1;
+                        match v.trim().parse::<usize>() {
+                            Ok(n) => c.thumb_workers = Some(n.min(MAX_THUMB_WORKERS)),
+                            Err(_) => c.warnings.push(format!("--thumb-workers needs a number (0-{MAX_THUMB_WORKERS}), got \"{v}\"; ignored")),
+                        }
+                    }
+                    None => c.warnings.push(format!("--thumb-workers needs a number (0-{MAX_THUMB_WORKERS}); ignored")),
+                },
                 _ if a.starts_with("--") => {
                     if is_value_flag(a) {
                         if let Some(v) = args.get(i + 1) {
                             c.passthrough.push(a.to_string());
                             c.passthrough.push(v.clone());
                             i += 1;
+                        } else {
+                            c.warnings.push(format!("{a} needs a value; ignored"));
                         }
                     } else {
                         c.passthrough.push(a.to_string());
+                        if !BOOL_FLAGS.contains(&a) && !DEV_FLAGS.contains(&a) {
+                            c.warnings.push(format!("unknown option {a}; ignored"));
+                        }
                     }
                     if DEV_FLAGS.contains(&a) {
                         c.dev = true;
@@ -130,7 +158,10 @@ impl Cli {
                 }
                 // a single dash is a path-ish argument, anything else with a dash
                 // is an unknown flag: pass it through rather than opening a folder
-                _ if a.starts_with('-') && a.len() > 1 => c.passthrough.push(a.to_string()),
+                _ if a.starts_with('-') && a.len() > 1 => {
+                    c.passthrough.push(a.to_string());
+                    c.warnings.push(format!("unknown option {a}; ignored"));
+                }
                 _ => {
                     if let Some(p) = normalize(a, cwd) {
                         c.paths.push(p);
@@ -486,6 +517,55 @@ mod tests {
     }
 
     #[test]
+    fn thumb_workers_takes_its_number_and_never_opens_a_tab() {
+        let c = cli(&["--thumb-workers", "20"]);
+        assert!(c.paths.is_empty(), "the value must not become a path: {:?}", c.paths);
+        assert_eq!(c.thumb_workers, Some(MAX_THUMB_WORKERS), "20 is clamped");
+        assert!(c.warnings.is_empty() && c.passthrough.is_empty());
+        assert!(targets(&c).is_empty());
+        assert_eq!(cli(&["--thumb-workers", "0"]).thumb_workers, Some(0));
+        assert_eq!(cli(&["--thumb-workers", "4", "C:\\a"]).paths, ["C:\\a"]);
+        assert_eq!(cli(&["C:\\a", "--thumb-workers", "4"]).paths, ["C:\\a"]);
+        assert_eq!(cli(&["--thumb-workers", "3"]).thumb_workers, Some(3));
+    }
+
+    #[test]
+    fn a_bad_thumb_workers_value_warns_and_carries_on() {
+        for args in [&["--thumb-workers", "lots"][..], &["--thumb-workers", "1.5"], &["--thumb-workers"]] {
+            let c = cli(args);
+            assert_eq!(c.thumb_workers, None, "{args:?}");
+            assert_eq!(c.warnings.len(), 1, "{args:?}");
+            assert!(c.warnings[0].starts_with("--thumb-workers needs a number"), "{:?}", c.warnings);
+            assert!(c.paths.is_empty(), "{args:?}");
+        }
+        // a following flag is not eaten as the value
+        let c = cli(&["--thumb-workers", "--new-tab", "C:\\a"]);
+        assert!(c.new_tab);
+        assert_eq!(c.paths, ["C:\\a"]);
+    }
+
+    #[test]
+    fn view_value_is_not_a_path() {
+        let c = cli(&["--view", "grid-small", "C:\\a"]);
+        assert_eq!(c.paths, ["C:\\a"]);
+        assert_eq!(c.passthrough, ["--view", "grid-small"]);
+        assert!(c.warnings.is_empty());
+    }
+
+    #[test]
+    fn unknown_flags_warn_and_known_ones_do_not() {
+        let c = cli(&["--nonsense", "-x", "--frobnicate=3", "C:\\a"]);
+        assert_eq!(c.paths, ["C:\\a"]);
+        assert_eq!(c.warnings, ["unknown option --nonsense; ignored", "unknown option -x; ignored", "unknown option --frobnicate=3; ignored"]);
+        let c = cli(&["--bench", "--zebra", "--windowed", "--theme", "light", "--workers", "2", "--new-tab", "--portable"]);
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        // a value flag at the end of the line has nothing to read
+        let c = cli(&["--theme"]);
+        assert_eq!(c.warnings, ["--theme needs a value; ignored"]);
+        assert!(c.paths.is_empty());
+    }
+
+    #[test]
     fn a_path_that_starts_with_a_dash_is_still_a_flag() {
         // Windows cannot make a file starting with '-' at the root of a drive,
         // but a relative one works through .\\
@@ -540,7 +620,7 @@ mod tests {
 
     #[test]
     fn help_text_mentions_the_contract() {
-        for needle in ["tsubame [options] [path ...]", "--new-tab", "--new-window", "--select", "--portable", "--config", "--help", "--version", "APPDATA"] {
+        for needle in ["tsubame [options] [path ...]", "--new-tab", "--new-window", "--select", "--portable", "--config", "--thumb-workers", "--help", "--version", "APPDATA"] {
             assert!(HELP.contains(needle), "help is missing {needle}");
         }
     }
