@@ -8,5 +8,10 @@ dist/
 update-signing*
 .tsubame/
 
-# master session state: local only, may hold machine paths
+# local-only: machine-specific tooling and session notes
 docs/HANDOFF.md
+docs/MASTER.md
+docs/PLAN-private.md
+tools/bench-rig.ps1
+tools/open-probe.ps1
+tools/release-installer-test.ps1

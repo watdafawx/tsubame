@@ -101,7 +101,7 @@ now; `docs/u3-panes.md` and `docs/shell-integration.md` describe each half.
 | Drop rules | `dnd.rs`, `ole_glue.rs` (Ctrl+Shift = link, partial same-folder drops, drive roots) |
 | Shortcuts | `crates/tsubame-win/tests/dnd.rs`: `shortcuts` (names returned) |
 
-By hand on rig (dual pane, fixtures under `G:\rig-test\int1-fixtures`, deleted
+By hand on the benchmark machine (dual pane, throwaway fixtures, deleted
 afterwards): copy/paste across panes, cut/paste, Delete then Ctrl+Z, menu
 Rename then Ctrl+Z, batch rename of 4 then one Ctrl+Z, drag of a 4-item
 selection to the other pane, drag onto a sidebar folder (conflict → keep

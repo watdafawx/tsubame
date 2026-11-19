@@ -112,11 +112,11 @@ per-entry allocation.
 3. Any other NT failure is returned as a typed error; no partial listing is
    reported as complete.
 
-## Measured (rig, NVMe `G:`)
+## Measured (benchmark machine, NVMe)
 
-`enum_bench` on `G:\rig-bench\tsubame-c2\100k` (100,000 entries, S2 fixture
-generator, seed 20261117, empty files), release build, warm file cache, rig also
-serving Minecraft and other agent builds (CPU busy 15 % at the time of the run).
+`enum_bench` on a 100k fixture folder (100,000 entries, S2 fixture
+generator, seed 20261117, empty files), release build, warm file cache, the machine also
+running unrelated background services (CPU busy 15 % at the time of the run).
 Times are measured in the caller from just before `Enumerator::start` to the first
 `Batch` and to `Done`, so they include thread spawn — the honest app-side number.
 
@@ -146,14 +146,12 @@ S2 measurement of the same syscall, not a property of the batching code.
 Reproduce:
 
 ```powershell
-# on FOX: build the fixture generator and the example on rig (slot 2 was used)
-pwsh -NoProfile -File X:\Dev\tools\push-to-rig.ps1 -Project <worktree> -BuildOnRig -Exe tsubame-bench -CargoArgs --package=tsubame-bench -Profile release
-ssh rig "G:\rig-test\tsubame-s2\tsubame-bench.exe gen --root G:\rig-bench\tsubame-c2 --sizes 100k --seed 20261117"
-# (cargo can only take one target filter per build; run the example build directly in the slot)
-ssh rig 'Set-Location ''G:\rig-build\tsubame-s2''; cargo build -j 12 --release --package=tsubame-win --example enum_bench'
-ssh rig 'G:\rig-build\tsubame-s2\target\release\examples\enum_bench.exe G:\rig-bench\tsubame-c2\100k --runs 7'
-pwsh -NoProfile -File X:\Dev\tools\push-to-rig.ps1 -Project <worktree> -Stop -Slot 2
-# fixture G:\rig-bench\tsubame-c2 deleted after the run
+# build the fixture generator and the example (release) on the benchmark machine
+cargo build --release --package=tsubame-bench
+cargo build --release --package=tsubame-win --example enum_bench
+target\release\tsubame-bench.exe gen --root <fixture root> --sizes 100k --seed 20261117
+target\release\examples\enum_bench.exe <fixture root>\100k --runs 7
+# delete the fixture after the run
 ```
 
 ## Tests (`cargo test -p tsubame-win`)
@@ -188,5 +186,5 @@ Skipped on purpose:
   leave a locked directory behind in the temp folder.
 - **Cold** measurement, see above.
 - `Method::Nt` on a filesystem that rejects class 60: no such share is available
-  on rig, so the fallback is covered via `Method::Find` plus the code path guard
+  on the benchmark machine, so the fallback is covered via `Method::Find` plus the code path guard
   (fallback only when nothing was delivered).

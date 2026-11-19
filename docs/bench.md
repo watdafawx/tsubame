@@ -1,31 +1,25 @@
-# Benchmarks and the leak gate on rig
+# Benchmarks and the leak gate
 
-`tools/bench-rig.ps1` builds the app on rig, generates the fixtures, runs the
-app benchmarks and the full leak gate in real windows, and appends one section
-to `docs/bench-log.md`. Every number in that log comes from the app's own
-reports (`src/bench.rs`, `src/timing.rs`, `src/leak.rs`), never from a proxy.
+A benchmark run builds the release app on a dedicated benchmark machine (one 4K
+display at 200%, NVMe disk), generates the fixtures, runs the app benchmarks and
+the full leak gate in real windows, and appends one section to
+`docs/bench-log.md`. Every number in that log comes from the app's own reports
+(`src/bench.rs`, `src/timing.rs`, `src/leak.rs`), never from a proxy.
 
-```
-pwsh X:\Dev\tools\bench-rig.ps1 -Project <worktree>     # full run, appends to the log
-pwsh X:\Dev\tools\bench-rig.ps1 -Quick                  # 2 min smoke of the harness, no log entry
-pwsh X:\Dev\tools\bench-rig.ps1 -LeakGateOnly -NoLog -GateRuns 1   # just the gate
-```
+The GUI only ever runs in an interactive desktop session on the benchmark
+machine. The harness builds there, launches each run in that session, reads the
+reports back, and finally hands them to `tsubame-bench app`, which owns the
+parsing, the budget thresholds and the markdown. That split is deliberate: the
+machine plumbing (build, launch, copy) is a script, while the part that can be
+wrong in interesting ways (parsing, pass/fail, the log format) is Rust with unit
+tests in `crates/tsubame-bench/src/appbench.rs`.
 
-The GUI only ever runs on rig (see the `rig` skill): the script ships with
-`X:\Dev\tools\push-to-rig.ps1 -BuildOnRig`, launches through a scheduled task
-in rig's interactive session, reads the reports back over `\\Rig\g`, and
-finally hands them to `tsubame-bench app`, which owns the parsing, the budget
-thresholds and the markdown. That split is deliberate: the rig plumbing must be
-PowerShell (push-to-rig, ssh, `schtasks`), while the part that can be wrong in
-interesting ways (parsing, pass/fail, the log format) is Rust with unit tests
-in `crates/tsubame-bench/src/appbench.rs`.
-
-Freshness: `push-to-rig.ps1` mirrors the source with `robocopy`, which preserves
-each file's LastWriteTime, and cargo's fingerprints are mtime-based - so a warm
-rig slot could reuse a stale artifact and ship the previous exe (that is how a
-pre-updater binary once landed in a `Main exe` row). It now refreshes the mtime
-of exactly the files a run copied and puts the source mtimes back after the
-build, so the next sync copies nothing, and it refuses to ship an exe the build
+Freshness: cargo's fingerprints are mtime-based, so mirroring the source to the
+build machine with a tool that preserves each file's LastWriteTime can make a
+warm build directory reuse a stale artifact and ship the previous exe (that is
+how a pre-updater binary once landed in a `Main exe` row). The harness refreshes
+the mtime of exactly the files a run copied, puts the source mtimes back after
+the build so the next sync copies nothing, and refuses to ship an exe the build
 did not write. Every section also names the binary: `- Exe: <bytes> B, SHA-256`.
 
 ## What a run does
@@ -35,34 +29,32 @@ did not write. Every section also names the binary: `- Exe: <bytes> B, SHA-256`.
 | 10 launches | `--bench --dir <100k>` | cold start to first painted frame, 5 s scroll paint p50/p95, private bytes before/after the scroll, exe size |
 | 1 launch | `--timing --timing-dirs <100k> --reps 10` | open a 100,000-entry folder: first rows and complete+sorted, per navigation |
 | 1 launch | plain, `--dir <100k>` | idle CPU over 10 s, twice (the second window is reported), thread count |
-| 3 × (purge + 1 launch) | `tsubame-bench purge --mode working` from the elevated ssh session (`gsudo -n` as fallback), wait for rig's disks to settle, then `--timing --timing-dirs "<tiny>;<idle>;<1k>;<tiny>;<100k>" --reps 1` | cold-cache open of the 100k folder: only the last navigation counts, so the warm-up takes the app's own cold start (only if the purge is permitted; `-ColdRuns N`) |
+| 3 × (purge + 1 launch) | `tsubame-bench purge --mode working` from an elevated session, wait for the disks to settle, then `--timing --timing-dirs "<tiny>;<idle>;<1k>;<tiny>;<100k>" --reps 1` | cold-cache open of the 100k folder: only the last navigation counts, so the warm-up takes the app's own cold start (only if the purge is permitted) |
 | 3 launches | `--leak-gate --gate-fixture <gate> --gate-navs 10000 --gate-tabs 1000` | the leak gate: 10,000 navigations + 1,000 tab open/close in one process, counters every 1,000 ops |
 
-Fixtures come from `tsubame-bench gen --root G:\rig-bench\tsubame-b1 --sizes 100k`
+Fixtures come from `tsubame-bench gen --root <fixture root> --sizes 100k`
 (100,000 empty files, mixed names, seed 20261117) and
-`tsubame-bench gate-fixture --root G:\rig-bench\tsubame-b1`, which creates
+`tsubame-bench gate-fixture --root <fixture root>`, which creates
 `gate\tiny\0001..0190` (20 entries each), `gate\small\0001..0009` (1,000 each)
 and `gate\big\0001` (10,000) — 204 folders in total, plus `setup.exe`,
 `tool.exe`, `shortcut.lnk` and `link.lnk` in every folder so the per-path icon
-cache is exercised. They stay under 10 GB and are deleted at the end unless
-`-KeepFixtures`. The raw reports of a run stay in
-`G:\rig-test\<slot>\bench-<stamp>\` (a few hundred KB) and the log names that
-directory.
+cache is exercised. They stay under 10 GB and are deleted at the end of a run.
+The raw reports of a run stay in a per-run directory next to the exe (a few
+hundred KB) and the log names that directory.
 
-Options: `-Runs` (cold-start launches, default 10), `-GateNavs`, `-GateTabs`,
-`-GateRuns` (default 3), `-ColdMode none|standby|working`, `-ColdRuns` (default 3), `-Slot N`,
-`-SkipBuild`, `-SkipGen`, `-SkipLeakGate`, `-LeakGateOnly`, `-KeepFixtures`,
-`-Quick`, `-NoLog`, `-LogPath`, `-GateFixture` (override the tree, for bisecting).
+Run counts: 10 cold-start launches, 3 leak-gate runs, 3 cold-cache runs. The
+cold-cache mode is `none`, `standby` or `working`. A quick smoke run (about
+2 minutes) exercises the harness without writing a log entry, and the gate can
+be run alone for bisecting.
 
-The script never leaves a process behind: it stops the app and deletes its
-scheduled task even when a stage throws, and it takes the slot through
-push-to-rig's own bookkeeping, so `-Stop -Slot N` from a shell does the same.
+The harness never leaves a process behind: it stops the app and removes its
+launcher even when a stage fails.
 
 ## The leak gate
 
 `tsubame --leak-gate --gate-fixture DIR [--gate-navs 10000] [--gate-tabs 1000]
 [--gate-sample 1000] [--gate-settle 5]` runs in the real window (maximized, 4K
-on rig) with the real enumerator, the real shell icon workers and real tabs:
+on the benchmark machine) with the real enumerator, the real shell icon workers and real tabs:
 
 1. Discover every folder under the fixture (depth 3).
 2. Show the fixture's first folder in one tab, wait for the GPU target and
@@ -106,7 +98,7 @@ is as large as the threshold (see below).
 | 100k folder: complete and sorted | < 200 ms median of 9 | `--timing` |
 | 100k folder, cold cache | < 30 / < 200 ms median of 3, or "not measured" | `--timing` after a purge, last navigation only |
 | Scroll paint p95, 4K | < 5 ms median of 10 runs' p95 | `--bench` |
-| Idle CPU, 10 s | < 50 ms of CPU (the budget is 0 wake-ups; process CPU time is quantised to ~15.6 ms on rig, so one tick reads as 15.6 ms) | plain launch |
+| Idle CPU, 10 s | < 50 ms of CPU (the budget is 0 wake-ups; process CPU time is quantised to ~15.6 ms on Windows, so one tick reads as 15.6 ms) | plain launch |
 | Private bytes, one tab, small folder, 4K | < 110 MB | gate's idle sample |
 | Private bytes after the 5 s scroll run | < 110 MB | `--bench` |
 | Main exe | < 6 MB | `--bench`; `tsubame-bench app` prints a WARNING (not a fail) when the size moves more than 10% against the previous log row |
@@ -138,7 +130,7 @@ Measured on `7eac782` (U2 merged), first real entry: `docs/bench-log.md`.
   includes the app's cold start (first paint 505 ms vs 74 ms warm); a cold
   measurement that isolates the folder would need the app to purge mid-run.
 - Idle wake-ups were not counted with ETW; `Get-Counter \Thread(*)` has no
-  instances for this process on rig, so only CPU time is reported.
+  instances for this process on the benchmark machine, so only CPU time is reported.
 
 PERF1: timing reports additionally print `store_cpu` (cumulative UI batch
 conversion + store insertion + incremental sorting). It overlaps `worker`,
@@ -148,9 +140,9 @@ is the final presentation tail. Cold app + cold metadata remains the exact
 purge-and-launch scenario; it does not isolate a warm renderer navigating
 into cold metadata. Stale report files are removed before each launch.
 
-PERF2: `tools/open-probe.ps1` is the open-a-folder probe (cold or warm,
-several builds interleaved per run so rig load hits all of them). Cold runs
-purge with `working` from the elevated ssh session, wait until rig's disks
+PERF2: the open-a-folder probe measures a folder open (cold or warm),
+with several builds interleaved per run so machine load hits all of them. Cold
+runs purge with `working` from an elevated session, wait until the disks
 are idle (the purge starts a paging storm that otherwise dominates), then
 launch with `--timing-dirs "tiny;<idle>;1k;tiny;<dir>"`: the app's startup
 tail (GPU paint path) is over and its paint path is warm again, and only the
@@ -162,14 +154,14 @@ filter-as-you-type keystrokes on the folder listed last, UI work) are
 Reports further print `final_sort` (the one sort at Done), `watch_start`
 (UI time to start the folder watcher; the watcher now opens off the UI
 thread) and `frames`. Lessons: `standby` purges do not make NTFS metadata
-cold on rig (the worker stays at warm speed); a VHDX dismount does, but at
+cold (the worker stays at warm speed); a VHDX dismount does, but at
 ~7x the real disk's cost; worker time is the disk floor and varies 120 ms to
-1.9 s with other load on rig's G:, so compare `overhead` across builds and
+1.9 s with other load on the disk, so compare `overhead` across builds and
 report medians with p95.
 
 PERF3 (2026-11-19): scroll p95 was 6.18 ms median of 10 on main `5b1cafb`, 2.70 ms
-after the fix (interleaved same session, rig CPU 12%). Not U4: 63c27b7, e230e30
-and 4c37edb all read ~6 ms interleaved after a rig reboot left the GPU shared
+after the fix (interleaved same session, CPU 12%). Not U4: 63c27b7, e230e30
+and 4c37edb all read ~6 ms interleaved after a reboot left the GPU shared
 (wallpaper, Parsec). Cause: every `text` drew with `D2D1_DRAW_TEXT_OPTIONS_CLIP`,
 a clip per string (~250 per frame) that splits Direct2D's batch; now only layouts
 whose ink overhangs the box clip (`GetOverhangMetrics`), and

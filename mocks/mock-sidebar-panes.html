@@ -82,7 +82,7 @@
 
   <div class="sec" id="drag-bookmark">
     <h2>10. Dragging files over a sidebar bookmark</h2>
-    <p class="cap">Same files dropped onto the <i>blink</i> bookmark (X: is another drive, so the default flips to Copy). Row highlight identical to the folder row. Drops between pinned rows pin instead (shot 3).</p>
+    <p class="cap">Same files dropped onto the <i>blink</i> bookmark (D: is another drive, so the default flips to Copy). Row highlight identical to the folder row. Drops between pinned rows pin instead (shot 3).</p>
     <div class="win-frame" id="w-drag-bookmark"></div>
   </div>
 
@@ -112,7 +112,7 @@
     for (var k in x) p[k] = x[k]; return p;
   }
   function pB(x) {
-    var p = { rows: B, cols: 'full', tabs: [{ t: 'Invoices-2026', active: true }, { t: 'tsubame' }, { t: 'rig' }], path: ['X:', 'Dev', 'Invoices-2026'], sel: { 8: 1 }, focus: 8, hover: -1, free: '1.1 TB free' };
+    var p = { rows: B, cols: 'full', tabs: [{ t: 'Invoices-2026', active: true }, { t: 'tsubame' }, { t: 'server' }], path: ['D:', 'Projects', 'Invoices-2026'], sel: { 8: 1 }, focus: 8, hover: -1, free: '1.1 TB free' };
     for (var k in x) p[k] = x[k]; return p;
   }
   function hs(items) { return items.map(function (i) { return '<span>' + K(i[0]) + i[1] + '</span>'; }).join(''); }
@@ -149,7 +149,7 @@
     $('w-dual-v').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sync: false, sb: sbDual(), panes: [pA({ cols: 'narrow' }), pB({ cols: 'narrow', sel: { 8: 1 } })] });
     // 7 dual h
     $('w-dual-h').innerHTML = Tsu3.win({ mode: 'h', h: 860, density: d, active: 1, sync: false, sb: sbDual({ cur: ['pc', 1] }),
-      panes: [pA({ sel: { 9: 1 }, focus: 9 }), pB({ sel: { 5: 1, 6: 1, 8: 1 }, focus: 6, path: ['X:', 'Dev', 'Invoices-2026'] })] });
+      panes: [pA({ sel: { 9: 1 }, focus: 9 }), pB({ sel: { 5: 1, 6: 1, 8: 1 }, focus: 6, path: ['D:', 'Projects', 'Invoices-2026'] })] });
     // 8 splitter drag, sync on
     $('w-dual-drag').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sync: true, split: { pct: 62, state: 'dragging' }, sb: sbDual(),
       panes: [pA({}), pB({ cols: 'narrow' })],
@@ -166,12 +166,12 @@
     $('w-drag-bookmark').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sb: sbDual({ drop: ['pin', 1] }),
       panes: [pA({ cols: 'narrow', focus: -1 }), pB({ cols: 'narrow' })],
       ov: Tsu3.dragImg(104, 34 + sbd.pos.pin1 + 14, 'crash-report-2026-11-09.txt', 4) +
-        Tsu3.dragTip(104, 34 + sbd.pos.pin1 + 44, 'copyto', 'Copy to blink', ['<span class="dim">X:\\Dev\\blink</span>', Tsu3.mod('Shift', 'Move')]) });
+        Tsu3.dragTip(104, 34 + sbd.pos.pin1 + 44, 'copyto', 'Copy to blink', ['<span class="dim">D:\\Projects\\blink</span>', Tsu3.mod('Shift', 'Move')]) });
     // 11 drag over other pane
     $('w-drag-pane').innerHTML = Tsu3.win({ mode: 'v', h: 720, density: d, active: 0, sb: sbDual(),
       panes: [pA({ cols: 'narrow', focus: -1 }), pB({ cols: 'narrow', dropPane: true, sel: {}, focus: -1,
         ov: Tsu3.dragImg(150, 300, 'crash-report-2026-11-09.txt', 4) +
-          Tsu3.dragTip(150, 330, 'copyto', 'Copy to Invoices-2026', ['<span class="dim">X:\\Dev\\Invoices-2026</span>', Tsu3.mod('Shift', 'Move')]) })] });
+          Tsu3.dragTip(150, 330, 'copyto', 'Copy to Invoices-2026', ['<span class="dim">D:\\Projects\\Invoices-2026</span>', Tsu3.mod('Shift', 'Move')]) })] });
     // 12 keys
     $('w-keys').innerHTML = Tsu3.keycard();
   }

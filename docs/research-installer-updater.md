@@ -250,7 +250,7 @@ Defender's Protection history checked after every registry write.
 1. Per-user install root: `%LOCALAPPDATA%\Programs\Tsubame` (no admin ever, but users can delete it) vs
    defaulting to `%ProgramFiles%` with the "all users" option (needs UAC once, safer against accidental
    deletion of the shim). Recommendation: per-user default, Program Files as the documented option.
-2. Whether the handler shim's spawn cost justifies itself (doc 1 §7). Measure on rig before locking the
+2. Whether the handler shim's spawn cost justifies itself (doc 1 §7). Measure on the benchmark machine before locking the
    design; the fallback is to register `tsubame.exe --open %1` directly.
 3. Beta channel: one extra GitHub release field plus a channel check, or skip until 1.x.
 4. Whether to keep `tsubame-plughost.exe` in the same update unit as the app (it must be, if the IPC/WIT

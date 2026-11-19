@@ -121,7 +121,7 @@ folder or a mail client) are written to a staging folder under `%TEMP%`, then
 moved into place by the queue. Paste only; virtual files are not accepted from
 a drop yet.
 
-Dimming cut items is **not done** (the brief made it optional).
+Dimming cut items is **not done** (it is optional).
 
 ## Security
 
@@ -170,7 +170,7 @@ Our item menu also has "Rename\tF2" on top. Intercepted verbs: delete, cut,
 copy, paste, rename. Delete takes the delete flow and the queue; rename (ours
 or the shell's verb) starts the inline rename in the pane the menu belongs to.
 
-## Measured on rig
+## Measured on the benchmark machine
 
 Debug build, `--stress clip`: 200 cycles of (item menu with our entries, auto
 closed) + (clipboard set files, copy or cut) + (clipboard read), fixture folder
@@ -187,11 +187,11 @@ of 3 files.
 
 Leak gate B (menu 10 → menu 200) gave private bytes +8.0% with W1's clipboard
 cycles, +8.4% for the plain `--stress menu` on this branch, and **+9.0% for
-plain `--stress menu` on `main` (4a0c29a)**, same rig, same fixture. Handles
+plain `--stress menu` on `main` (4a0c29a)**, same machine, same fixture. Handles
 and GDI/USER objects are flat (±5). So the growth (about 30 KB per menu) is
 older than W1 and comes from the menu path itself, not from the clipboard or
 our entries. `docs/shell-threading.md` recorded −5.3% for the same gate at S4;
-what changed since then (shell extensions on rig, or code merged after S4) is
+what changed since then (shell extensions on the benchmark machine, or code merged after S4) is
 not found yet.
 
 Scroll paint p95 and idle wake-ups were not re-measured. W1 adds almost no per-frame
@@ -206,7 +206,7 @@ Unit tests (`cargo test`):
 - `crates/tsubame-win/src/dnd/formats.rs`: HDROP/effect/descriptor bytes both ways, path validation (GLOBALROOT, ADS, device names), safe relative names.
 - `crates/tsubame-win/tests/dnd.rs` (headless OLE): our data object read back through `IDataObject`, the real clipboard round trip (copy, cut consumed once, text), virtual-file staging under caps and with hostile names, shortcut creation.
 
-By hand on rig (push-to-rig, fixtures in `G:\rig-test\w1-fixtures`, deleted afterwards):
+By hand on the benchmark machine (throwaway fixtures, deleted afterwards):
 - item menu and background menu with our entries; Copy path; New folder; background Paste
 - Ctrl+C in Tsubame → paste in Explorer; Ctrl+X in Explorer → Ctrl+V in Tsubame (moved, selected), Ctrl+Z restores it
 - Shift+Ctrl+C → quoted path text

@@ -2,18 +2,18 @@
 
 A very fast, feature-rich file browser. Windows first, portable core. File Pilot's look and speed, the features of Files and OneCommander, and no leaks.
 
-Written 2026-11-17 by the planning session. No code exists yet. This file is the handoff: a master session reads it, writes one brief per task card, and delegates.
+Written 2026-11-17 at the start of the project. Sections 1-5 record the decisions that bind the work; sections 6-7 track the roadmap.
 
 ## 1. Tech stack (decided)
 
-**Rust + raw Win32 (`windows` crate) + Direct2D/DirectWrite, with our own immediate-mode UI kit. Same stack as `X:\Dev\blink`.**
+**Rust + raw Win32 (`windows` crate) + Direct2D/DirectWrite, with our own immediate-mode UI kit. Same stack as blink, an earlier project by the same author.**
 
 | Option | Verdict | Why |
 |---|---|---|
-| Rust + Win32 + Direct2D (blink's stack) | **Chosen** | Measured on rig in `X:\Dev\blink\docs\gpu-render.md`: first paint 79–85 ms, paint 3–5 ms at 4K, 2.3 MB exe. `blink\src\gfx.rs` (742 lines) already has rect, text, image, clip and the software-first-frame / GPU-swap / device-loss handling. |
+| Rust + Win32 + Direct2D (blink's stack) | **Chosen** | Measured on a 4K test machine in blink's `docs/gpu-render.md`: first paint 79–85 ms, paint 3–5 ms at 4K, 2.3 MB exe. blink's `src/gfx.rs` (742 lines) already has rect, text, image, clip and the software-first-frame / GPU-swap / device-loss handling. |
 | GPUI (hopper's stack) | No | Cross-platform for free, but hopper needed a memory project (646 MB working set on a 1,188-row list before 0.59.0) and has a 2,000 ms cold-start budget. Wrong weight class. No native shell context menus. |
 | egui (spotifast's stack) | No | Fine speed, weaker text, repaint-loop traps, still a GL context at start. |
-| C + custom engine (what File Pilot does) | No | Same result as option 1 with no crates, no cargo tooling, and worse output from the executing models. |
+| C + custom engine (what File Pilot does) | No | Same result as option 1 with no crates and no cargo tooling. |
 | Tauri / WinUI / WPF | No | This is why Files and OneCommander are slow. |
 
 File Pilot itself is C with a custom immediate-mode UI and moved its renderer to Direct3D in v0.7.1, so the chosen shape matches the app whose speed we want.
@@ -39,7 +39,7 @@ These are targets, not facts. Phase 0 measures them and the plan changes if they
 - Wasmtime: host size, cold spawn time and per-call cost for our call pattern are unmeasured.
 - MFT index crates (`usn-journal-rs`, `ntfs-reader`, `ntfs-core`): one README number only (full MFT scan 3.8 s cached). All need admin rights.
 
-## 2. Budgets (gates, checked by `tsubame-bench` on rig)
+## 2. Budgets (gates, checked by `tsubame-bench` on a dedicated benchmark machine)
 
 | Metric | Target |
 |---|---|
@@ -64,7 +64,7 @@ tsubame/                   workspace
                            recycle bin, shell icons/thumbnails/context menu, OLE drag-drop, clipboard.
     tsubame-ui/               Immediate-mode kit over `Canvas`: layout, virtual list/grid, text input,
                            menus, tabs, splitters, scrollbars, popups, focus and keyboard routing.
-    tsubame-d2d/              `Canvas` backend. Lifted from blink\src\gfx.rs.
+    tsubame-d2d/              `Canvas` backend. Lifted from blink's `src/gfx.rs`.
     tsubame-ext-api/          Extension traits + WIT file. Used by built-ins and by the wasm host.
     tsubame-plughost/         Separate exe. Wasmtime. Started only when a wasm plugin is enabled.
     tsubame-bench/            Fixture generator, benchmarks, leak gate.
@@ -79,7 +79,7 @@ Rules every task follows:
 3. **Only visible rows are measured and drawn.** Icons and thumbnails are requested for visible rows only, cached in a bounded LRU, and cancelled when scrolled away.
 4. **Shell COM runs on dedicated STA worker threads.** Third-party shell extensions crash and leak. If the leak gate shows them leaking, move them into a helper process (P6 task).
 5. **Every cache has a hard cap and an eviction test.** No unbounded maps.
-6. **Dependencies stay tiny** (`windows`, `serde`, `toml`, little else in the main exe). X: is a hard disk and target dirs are the main disk hog.
+6. **Dependencies stay tiny** (`windows`, `serde`, `toml`, little else in the main exe).
 
 ## 4. Plugins
 
@@ -99,100 +99,105 @@ Wasm rules: batch calls only; a capability manifest (which paths, network yes/no
 
 ## 5. Mock-first workflow
 
-Same as blink (`blink\docs\mock-*.html`, `design-tokens.md`).
+Mocks come before UI code.
 1. `mocks/tokens.json` is the single source: colours, spacing, radii, font sizes, row heights. A script emits CSS variables for mocks and a Rust `theme.rs` for the app.
-2. Before each UI task a Sonnet child builds a static HTML mock in `mocks/`. The user approves or edits it.
-3. The implementing child gets the mock path and matches it. It is verified on rig with screenshots (`push-to-rig.ps1`, `rig-windows` Screenshot with `region=`). Never launch the app on FOX.
+2. Before each UI task a static HTML mock is built in `mocks/`. It is approved or edited before the implementation starts.
+3. The implementation matches the mock and is verified with screenshots on a real display (4K at 200%).
 
-## 6. Who does what
 
-| Model | `target` | Gets |
-|---|---|---|
-| DeepSeek V4.1 Flash, up to 3 | `{"providerInstanceId":"opencode","model":"opencode-go/deepseek-v4.1-flash"}` | Scaffolding, fixture generators, bench runs and reports, config/TOML code, mechanical ports from blink, docs, changelogs. |
-| GPT, 1 at a time (small limit, spend carefully) | `{"providerInstanceId":"codex","model":"gpt-6.1-sol","options":{"reasoningEffort":"medium"}}` | Dense, well-specified logic with tests: entry store, sort/filter, op queue + undo, watcher coalescing. Second-opinion review of `unsafe` and COM code. |
-| Sonnet 5.5, 2–3 | `{"providerInstanceId":"claudeAgent","model":"claude-sonnet-5-5"}` | HTML mocks, widgets, views, anything checked by screenshot on rig. |
-| Opus 5.5, 1, never xhigh | `{"providerInstanceId":"claudeAgent","model":"claude-opus-5-5"}` | UI kit core, shell COM (context menu, OLE drag-drop), plugin API + WIT + capability model, hard bugs, anything a cheaper model failed. |
-| Master session | — | Writes briefs, reviews every report, merges, removes worktrees, writes a handoff at the end of each phase and starts fresh. |
+## 6. Roadmap
 
-Every brief must contain:
-- Read first: `X:\Dev\tsubame\docs\PLAN.md` sections 2–3, plus the files the card names.
-- Build only with `pwsh -NoProfile -File X:\Dev\tools\cargo-ccd1.ps1 <cargo args>`. GUI runs only on rig via `X:\Dev\tools\push-to-rig.ps1 -Project <worktree> -BuildOnRig -Launch`, then `-Stop -Slot N`.
-- Builds and tests in the foreground. Never end a turn while a build, test or agent runs.
-- Work in the given worktree, commit on its branch, do not push.
-- Report: what changed, test output, measured numbers against the budgets in section 2, anything skipped.
-- Max 4 sessions building at once across all children.
+Work is split into phases. Each phase has a gate that is checked before the next one starts. Status below is as of 2026-11-19.
 
-## 7. Phases and task cards
-
-Times are estimates for agent wall-clock, unverified.
-
-### P0. Spikes (about 1 day, all four in parallel). Gate: budgets reachable, or change the plan.
-
-| ID | Model | Task | Done when |
+| Phase | Scope | Gate | Status |
 |---|---|---|---|
-| S0 | DeepSeek | Create workspace, crates as empty stubs, release profile copied from blink (`lto`, `codegen-units=1`, `strip`, `panic=abort`), `.gitignore`, `git init`. | `cargo check` passes. |
-| S0b | DeepSeek | Build `res\tsubame.ico` from the two SVGs in `res\`: 16 and 24 px from `tsubame-small.svg`, 32, 48, 64 and 256 px from `tsubame.svg`. Embed it with `embed-resource` as blink does. Brand colours (navy `#16233f`, cream `#f3ecdf`, red `#e0492c`) go into `mocks/tokens.json`. Reference sheet: `mocks\logo-final.html`. | Exe shows the icon in Explorer and the taskbar on rig. |
-| S1 | Sonnet | Copy `blink\src\gfx.rs` into `tsubame-d2d`. Window that draws a details list of 1,000,000 fake rows with scrolling. | Numbers on rig: first paint, paint p95, private bytes, exe size. |
-| S2 | DeepSeek | `tsubame-bench`: fixture generator (folders of 1k / 100k / 1M files) and an enumeration benchmark of three methods: `FindFirstFileExW` large fetch, `NtQueryDirectoryFile` with 64 KB and 1 MB buffers, `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)`. Cold and warm cache, NVMe and hard disk. | Table of results in `docs/spike-enum.md`, with a recommended method. |
-| S3 | GPT | Minimal wasmtime component host exe + one guest that returns a column value for a batch of 10,000 paths. | `docs/spike-wasm.md`: host exe size, cold spawn ms, batch call ms, idle memory. |
-| S4 | Opus | Shell on worker STA threads: system icon for a path, `IShellItemImageFactory` thumbnail, `IContextMenu` popup at a point, all from a non-UI thread into the S1 window. | Works on rig; notes on threading rules in `docs/shell-threading.md`. |
+| P0 | Spikes: renderer, enumeration, wasm host, shell on worker threads | Budgets reachable, or the plan changes | Done |
+| P1 | A skeleton you can browse with | Browse, sort, filter, tabs; leak gate runs | Done |
+| P2 | Daily driver: file operations, watcher, shell integration, icons, panes, palette, config | Daily use without data-loss hazards | Done |
+| P3 | Extension registry | Built-in features registered through `tsubame-ext-api` | Not started (`tsubame-ext-api` is a stub) |
+| P4 | Features as built-in extensions | Each feature switchable | Not started (batch rename shipped early, in P2) |
+| P5 | Wasm plugins | Host lifecycle, capability manifest, SDK | Partial (P0 host spike and sample column only) |
+| P6 | Ship: installer, updater, default file manager | Signed release a user can install and update | Mostly done; two items open |
 
-### P1. Skeleton you can browse with (about 2–3 days)
+Work outside the original plan that has landed: the memory work (MEM1: flip-model swap chain, WARP prewarm, segment heap), the performance passes (PERF1 to PERF3), the integration pass that unified file operations, panes and drag-drop (INT1), the opt-in default-file-manager shim (R2) and the own-drawn context menu (CM1 to CM5, see `docs/ctxmenu.md`).
 
-| ID | Model | Deps | Task |
+## 7. Phases and tasks
+
+### P0. Spikes. Gate: budgets reachable, or change the plan.
+
+| ID | Task | Deliverable | Status |
 |---|---|---|---|
-| M1 | Sonnet | — | Mocks: main window (tabs, path bar, sidebar, details list, status bar) in File Pilot's density. `tokens.json` + generator script. **User approves before U-tasks start.** |
-| C1 | GPT | S2 | `tsubame-core` entry store (section 3 rule 2), sort by name (natural order) / size / date / type, filter-as-you-type, selection model. Unit tests + 1M-entry bench. |
-| C2 | DeepSeek | S2 | `tsubame-win` enumerator using the S2 winner, streaming batches with generation cancel. |
-| U1 | Opus | S1 | `tsubame-ui` core: `Canvas` trait, immediate-mode ids/focus/hot/active, layout, virtual list, scrollbar, text input, popup layer, keyboard routing. |
-| U2 | Sonnet | U1, M1, C1, C2 | Details view, path bar with breadcrumbs and edit mode, back/forward/up, tabs. |
-| B1 | DeepSeek | U2 | Leak gate + startup and folder-open benches in `tsubame-bench`, runnable on rig, results appended to `docs/bench-log.md`. |
+| S0 | Workspace, crates as empty stubs, release profile (`lto`, `codegen-units=1`, `strip`, `panic=abort`), `.gitignore` | `cargo check` passes | Done |
+| S0b | App icon from the two SVGs in `res/` (16 and 24 px from `tsubame-small.svg`; 32, 48, 64 and 256 px from `tsubame.svg`), embedded with `embed-resource`. Brand colours (navy `#16233f`, cream `#f3ecdf`, red `#e0492c`) in `mocks/tokens.json`. Reference sheet: `mocks/logo-final.html` | The exe shows the icon in Explorer and the taskbar | Done |
+| S1 | Direct2D spike: a details list of 1,000,000 fake rows with scrolling | First paint, paint p95, private bytes, exe size in `docs/spike-d2d.md` | Done |
+| S2 | `tsubame-bench`: fixture generator (folders of 1k / 100k / 1M files) and an enumeration benchmark of three methods: `FindFirstFileExW` large fetch, `NtQueryDirectoryFile` with 64 KB and 1 MB buffers, `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)`; cold and warm cache, NVMe and hard disk | Results table and a recommended method in `docs/spike-enum.md` | Done |
+| S3 | Minimal wasmtime component host exe plus one guest that returns a column value for a batch of 10,000 paths | Host size, cold spawn, batch call, idle memory in `docs/spike-wasm.md` | Done |
+| S4 | Shell on worker STA threads: system icon for a path, `IShellItemImageFactory` thumbnail, `IContextMenu` popup at a point, all from a non-UI thread | Threading rules in `docs/shell-threading.md` | Done |
 
-### P2. Daily driver (about 1–2 weeks)
+### P1. Skeleton you can browse with
 
-| ID | Model | Task |
+| ID | Deps | Task | Status |
+|---|---|---|---|
+| M1 | none | Mocks: main window (tabs, path bar, sidebar, details list, status bar) in File Pilot's density; `tokens.json` plus generator script | Done |
+| C1 | S2 | `tsubame-core` entry store (section 3 rule 2); sort by name (natural order), size, date, type; filter-as-you-type; selection model | Done |
+| C2 | S2 | `tsubame-win` enumerator using the S2 winner, streaming batches with generation cancel | Done |
+| U1 | S1 | `tsubame-ui` core: `Canvas` trait, immediate-mode ids/focus/hot/active, layout, virtual list, scrollbar, text input, popup layer, keyboard routing | Done |
+| U2 | U1, M1, C1, C2 | Details view, path bar with breadcrumbs and edit mode, back/forward/up, tabs | Done |
+| B1 | U2 | Leak gate plus startup and folder-open benches in `tsubame-bench`, results appended to `docs/bench-log.md` | Done |
+
+### P2. Daily driver
+
+| ID | Task | Status |
 |---|---|---|
-| C3 | GPT | File-op queue: copy/move/delete/rename via `IFileOperation`, progress, conflicts, undo/redo journal. |
-| C4 | GPT | Directory watcher with event coalescing; applies diffs to the entry store without a relist. |
-| W1 | Opus | Shell context menu, OLE drag-drop in and out, clipboard cut/copy/paste (shell formats). |
-| W2 | Sonnet | Icon and thumbnail pipeline: visible-only requests, bounded LRU, cancel on scroll. Grid/thumbnail view. |
-| U3 | Sonnet | Sidebar (drives, bookmarks, recents), dual pane and splits, inline rename, status bar. Mock first. |
-| U4 | Sonnet | Command palette, rebindable keys, settings screen. Mock first. |
-| D1 | DeepSeek | Config load/save (TOML, atomic write), session restore, CLI arguments (`tsubame <path>`, `--new-tab`). |
+| C3 | File-op queue: copy/move/delete/rename via `IFileOperation`, progress, conflicts, undo/redo journal | Done |
+| C4 | Directory watcher with event coalescing; applies diffs to the entry store without a relist | Done |
+| W1 | Shell context menu, OLE drag-drop in and out, clipboard cut/copy/paste (shell formats) | Done |
+| W2 | Icon and thumbnail pipeline: visible-only requests, bounded LRU, cancel on scroll; grid/thumbnail view | Done |
+| U3 | Sidebar (drives, bookmarks, recents), dual pane and splits, inline rename, status bar | Done |
+| U4 | Command palette, rebindable keys, settings screen | Done |
+| D1 | Config load/save (TOML, atomic write), session restore, CLI arguments (`tsubame <path>`, `--new-tab`) | Done |
 
-### P3. Extension registry (about 3 days)
+### P3. Extension registry
 
-| ID | Model | Task |
+| ID | Task | Status |
 |---|---|---|
-| X1 | Opus | `tsubame-ext-api`: traits for every extension point in section 4, registry, enable/disable. Move P2's commands and columns onto it. |
-| X2 | DeepSeek | Tier 1 loader: TOML packs for commands, menu entries, keybinds, themes, file-type rules. Two example packs. Docs. |
+| X1 | `tsubame-ext-api`: traits for every extension point in section 4, registry, enable/disable; move P2's commands and columns onto it | Not done |
+| X2 | Tier 1 loader: TOML packs for commands, menu entries, keybinds, themes, file-type rules; two example packs; docs | Not done |
 
-### P4. Features as built-in extensions (parallel, each mock-first where it has UI)
+### P4. Features as built-in extensions
 
-| ID | Model | Extension |
+Each one gets a mock first where it has UI.
+
+| ID | Extension | Status |
 |---|---|---|
-| F1 | GPT | Global search: MFT/USN index (admin) with a plain parallel walk fallback. Separately, an Everything IPC search provider. |
-| F2 | Sonnet | Preview pane: image, text/code, media info, hex; Quick Look on Space. |
-| F3 | DeepSeek | Archive VFS (zip, 7z, tar) browse and extract. |
-| F4 | Sonnet | Batch rename with live preview. |
-| F5 | DeepSeek | Folder sizes column (background, cached), git status column, checksum command. |
-| F6 | Sonnet | Miller columns view, tree view, tags and colours, file-age colouring (OneCommander). |
+| F1 | Global search: MFT/USN index (admin) with a plain parallel walk fallback; separately, an Everything IPC search provider | Not done |
+| F2 | Preview pane: image, text/code, media info, hex; Quick Look on Space | Not done |
+| F3 | Archive VFS (zip, 7z, tar) browse and extract | Not done |
+| F4 | Batch rename with live preview | Done in U3 as a built-in; not yet on the extension registry |
+| F5 | Folder sizes column (background, cached), git status column, checksum command | Not done |
+| F6 | Miller columns view, tree view, tags and colours, file-age colouring | Not done |
 
-### P5. Wasm plugins (about 1 week)
+### P5. Wasm plugins
 
-| ID | Model | Task |
+| ID | Task | Status |
 |---|---|---|
-| P1 | Opus | WIT interface from `tsubame-ext-api`, capability manifest, `tsubame-plughost` lifecycle (lazy start, kill on hang), IPC. |
-| P2 | GPT | Guest SDK crate + two sample plugins (a column, a previewer) + plugin author docs. |
-| P3 | GPT | Security review of P1 (as a fresh review task). |
+| P1 | WIT interface from `tsubame-ext-api`, capability manifest, `tsubame-plughost` lifecycle (lazy start, kill on hang), IPC | Not done (the S3 host spike exists) |
+| P2 | Guest SDK crate, two sample plugins (a column, a previewer), plugin author docs | Not done (`plugins/sample-column` is the S3 guest) |
+| P3 | Security review of P1 | Not done |
 
 ### P6. Ship
 
-Installer and portable zip, set-as-default-explorer, self-update (reuse blink's `update/`), shell helper process if the leak gate needs it, then decide on the second `Canvas` backend for Linux/macOS.
+| Item | Status |
+|---|---|
+| Installer and portable zip, signed update manifest, release pipeline (`docs/release.md`) | Done |
+| Self-update (`tsubame-update`, `docs/updater.md`) | Done |
+| Set as default file manager, opt-in and fail-safe (`docs/default-file-manager.md`) | Done |
+| Shell helper process, only if the leak gate shows shell extensions leaking | Not done |
+| Decide on a second `Canvas` backend for Linux/macOS | Not done |
 
 ## 8. Open decisions (defaults apply if nobody answers)
 
-1. **Name.** Decided 2026-11-17: Tsubame (燕, swallow: fast, and a sign of a safe house). Folder `X:\Dev\tsubame`. Logo concepts: `mocks\logos.html`.
+1. **Name.** Decided 2026-11-17: Tsubame (燕, swallow: fast, and a sign of a safe house). Logo concepts: `mocks/logos.html`.
 2. **MFT search needs admin.** Default: optional elevated helper, off until enabled; the Everything provider and the walk fallback need no admin.
 3. **Linux/macOS.** Default: not before P6.
 
@@ -204,4 +209,3 @@ Installer and portable zip, set-as-default-explorer, self-update (reuse blink's 
 - MFT/USN crates: https://docs.rs/usn-journal-rs , https://docs.rs/crate/ntfs-reader/latest , https://docs.rs/crate/ntfs-core/0.9.0
 - Plugins: https://github.com/extism/extism/issues/666 , https://news.lavx.hu/article/the-rust-plugin-puzzle-navigating-trade-offs-in-extensible-system-design
 - GPUI on Windows: https://zed.dev/blog/windows-progress-report
-- Local measurements: `X:\Dev\blink\docs\gpu-render.md`, `X:\Dev\hopper\docs\changelog\cards\0.59.0-memory.md`

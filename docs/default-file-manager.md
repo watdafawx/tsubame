@@ -27,7 +27,7 @@ Hive `HKCU`, base `Software\Classes\Directory\shell`. Verb name: **`Tsubame`**.
 | | `PreviousDefault` | what `Directory\shell` `(Default)` held before (missing when it held nothing) |
 | `Directory\shell\Tsubame\command` | `(Default)` | `"<install dir>\tsubame-handler.exe" "%1"` |
 
-Nothing else is written. Checked on rig after pressing the switch (`reg query "HKCU\Software\Classes\Directory\shell" /s`):
+Nothing else is written. Checked on the benchmark machine after pressing the switch (`reg query "HKCU\Software\Classes\Directory\shell" /s`):
 exactly the four values above plus whatever other apps already had there.
 
 Rules the code follows (`crates\tsubame-handler\src\registry.rs`, same code in the app and in the shim):
@@ -72,7 +72,7 @@ All of these use the same inverse (`disable`):
 
 `disable` is idempotent: it restores `PreviousDefault` (or deletes the default value when there was none),
 deletes `Directory\shell\Tsubame`, notifies the shell (`SHChangeNotify`) and reads back. Nothing needs a
-sign-out. Verified on rig: with a hand-made registration holding `PreviousDefault=none`, `--remove`
+sign-out. Verified on the benchmark machine: with a hand-made registration holding `PreviousDefault=none`, `--remove`
 restored `none` and deleted the verb; running it again changed nothing.
 
 `remove_if_ours` (used by the shim) only removes a registration whose command points at **this** shim's
@@ -111,10 +111,10 @@ Files (in the Tsubame data dir: `TSUBAME_DATA_DIR`, else `<exe dir>\data` when a
 - Paths containing unpaired UTF-16 surrogates are decoded lossily.
 - Explorer itself opens `Documents` for a folder path longer than 260 characters; the fallback inherits that.
 - A hang can only be detected when the app is a GUI process that never goes idle; it is unit-tested with a
-  fake host and was checked on rig with a stand-in app that never creates a window (Explorer opened after
+  fake host and was checked on the benchmark machine with a stand-in app that never creates a window (Explorer opened after
   about 4.5 s, failure logged).
 
-### Measured on rig (debug app, release shim comparable)
+### Measured on the benchmark machine (debug app, release shim comparable)
 
 | Case | Result |
 |---|---|
@@ -137,7 +137,7 @@ Files (in the Tsubame data dir: `TSUBAME_DATA_DIR`, else `<exe dir>\data` when a
 
 ## Manual test matrix (clean Windows 11 VM, Defender on): NOT RUN
 
-Copied from research section 5.5 for the VM task. Nothing below was run for this feature; only the rig
+Copied from research section 5.5 for the VM task. Nothing below was run for this feature; only the benchmark-machine
 checks listed above were. "Tier 1" is this feature; Tier 0 and Tier 2 are not implemented yet.
 
 **A. Baseline / no regression**

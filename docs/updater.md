@@ -193,7 +193,7 @@ None of this is done yet; `src\` and the UI crates were deliberately not touched
 7. **Do not** add a Run key, a task, or a service for updating. The only moment the updater runs is while the app is open and the
    user (or the opt-out check on start) asked.
 
-CLI (same logic, for scripts, rig tests and support): `tsubame-update check [--force] | download | apply [--restart] | rollback [--restart] | status`,
+CLI (same logic, for scripts, installer tests and support): `tsubame-update check [--force] | download | apply [--restart] | rollback [--restart] | status`,
 flags `--install-dir`, `--current-version`. Exit code 3 from `check` means "update available".
 
 ## Rate limiting and politeness

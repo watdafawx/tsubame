@@ -1,6 +1,6 @@
 # Spike: directory enumeration (S2)
 
-Measured 2026-11-17 on **rig** (Ryzen 9 5900X, 64 GB DDR4-3600, Windows 11) by
+Measured 2026-11-17 on the **benchmark machine** (Ryzen 9 5900X, 64 GB DDR4-3600, Windows 11) by
 `crates/tsubame-bench`. Question from `docs/PLAN.md` §1: no public benchmark
 compares `NtQueryDirectoryFile` against `FindFirstFileExW` with large fetches, so
 this decides which one `tsubame-win` uses (C2).
@@ -22,7 +22,7 @@ with 6x headroom and cold with about 7%.
 | first-batch | ticks from call start until the **256th** entry is in the store |
 | complete | ticks until the last entry is in the store (enumeration only; sort measured separately) |
 | Store | one contiguous UTF-16 name buffer + `Vec<EntryRec>` of 48-byte records (name span, size, mtime, attributes, reparse tag, 128-bit file id). No per-entry allocation, as PLAN §3 rule 2 requires |
-| Background load | rig was also running two Minecraft servers (one at 8.3 GB working set) and other agents' cargo builds. CPU busy sampled 6–37 % before each run and printed in every log; repeat runs of the same cell moved by up to ~15 % (see "Noise") |
+| Background load | The machine was also running two game servers (one at 8.3 GB working set) and other cargo builds. CPU busy sampled 6–37 % before each run and printed in every log; repeat runs of the same cell moved by up to ~15 % (see "Noise") |
 
 Every run also compares its store against the previous method's store: entry
 count, names, attributes, size, mtime, reparse flag and (where both methods have
@@ -210,7 +210,7 @@ Honest account, because "cold" is easy to fake by accident:
 
 This is `--purge-mode working` (the default for `--cold` is `filecache`, which
 does not work on this build and says so). It is a system-wide flush: it also
-empties the working sets of the Minecraft servers running on rig, which re-fault
+empties the working sets of the game servers running on the benchmark machine, which re-fault
 their pages from NVMe afterwards. That is the cost of a real cold number on a
 machine that cannot be rebooted between runs; it is stated here rather than
 hidden.
@@ -264,18 +264,18 @@ medians of 5–10 runs, and the pass/fail conclusions hold under every repeat.
 ## Reproduce
 
 ```powershell
-# on FOX: build the bench on rig
-pwsh -NoProfile -Command "& 'X:\Dev\tools\push-to-rig.ps1' -Project <worktree> -BuildOnRig -Exe tsubame-bench -CargoArgs '-p','tsubame-bench' -Profile release"
+# build the bench (release)
+cargo build --release -p tsubame-bench
 
-# on rig
-G:\rig-bench\bin\tsubame-bench.exe gen --root G:\rig-bench\tsubame --sizes 1k,100k,1m --seed 20261117
-G:\rig-bench\bin\tsubame-bench.exe enum --dir G:\rig-bench\tsubame\100k --method all --runs 10 --sort --disk nvme
-G:\rig-bench\bin\tsubame-bench.exe enum --dir G:\rig-bench\tsubame\100k --method all --runs 5 --cold --purge-mode working --sort --disk nvme
-G:\rig-bench\bin\tsubame-bench.exe verify --dir G:\rig-bench\tsubame\100k
+# then, on the benchmark machine
+tsubame-bench.exe gen --root <fixture root> --sizes 1k,100k,1m --seed 20261117
+tsubame-bench.exe enum --dir <fixture root>\100k --method all --runs 10 --sort --disk nvme
+tsubame-bench.exe enum --dir <fixture root>\100k --method all --runs 5 --cold --purge-mode working --sort --disk nvme
+tsubame-bench.exe verify --dir <fixture root>\100k
 ```
 
 `gen` is deterministic (names derive from seed+index) and resumable (an existing
 complete folder is skipped, a partial one is completed without overwriting).
 `enum --method all` verifies the four methods against each other as it goes.
-Fixtures lived under `G:\rig-bench\tsubame` and `E:\rig-bench\tsubame` and were
-deleted after the measurements.
+Fixtures lived on an NVMe drive and on a hard disk and were deleted after the
+measurements.

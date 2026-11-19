@@ -93,9 +93,9 @@ Coverage: recycle delete and undo/redo of file and folder, restore refuses to ov
 - Recycling is one `IFileOperation` per item (each call creates the COM object and performs on its own); batching many deletes into one `IFileOperation` is not done and its cost for large selections is not measured.
 - No GUI integration. Do not wire this to destructive UI commands before grouped undo and the error-response choices exist.
 
-## FOX measurements
+## Measurements (dev machine)
 
-Measured 2026-11-18 on FOX (a game was running, so cargo-ccd1 used -j 8; disk noise is real), test profile, CCD1, 10,000 files of 128 bytes in `%TEMP%` (system drive), warm cache, `FsBackend` copy of the whole tree against `robocopy /E /R:0 /W:0` (includes process start), serial, nothing else building:
+Measured 2026-11-18 on the dev machine (a game was running in the background; disk noise is real), test profile, 10,000 files of 128 bytes in `%TEMP%` (system drive), warm cache, `FsBackend` copy of the whole tree against `robocopy /E /R:0 /W:0` (includes process start), serial, nothing else building:
 
 | Run | fs copy | robocopy |
 |---|---|---|

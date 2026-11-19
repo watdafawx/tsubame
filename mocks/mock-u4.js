@@ -225,7 +225,7 @@
         '<span class="sub">' + d[1] + ' items</span>' + (i === 2 ? '<span class="keys">' + kc('Tab') + '<span class="sub" style="margin-left:4px">complete</span></span>' : '<span class="keys" style="width:84px"></span>') + '</div>';
     });
     rows += '<div class="pal-sec">Recent folders</div>';
-    [['X:\\Dev\\tsubame\\mocks', 'yesterday'], ['\\\\rig\\Games\\Minecraft packs', '2 days ago'], ['C:\\Users\\Alex\\Documents\\Invoices', 'last week']].forEach(function (r) {
+    [['D:\\Projects\\tsubame\\mocks', 'yesterday'], ['\\\\server\\Games\\Game packs', '2 days ago'], ['C:\\Users\\Alex\\Documents\\Invoices', 'last week']].forEach(function (r) {
       rows += '<div class="pr">' + ic('clock') + '<span class="nm t path">' + esc(r[0]) + '</span><span class="sub">' + r[1] + '</span></div>';
     });
     return '<div class="pal-res">' + rows + '</div>' + palFoot([['\u2191 \u2193', 'Move'], ['Tab', 'Complete'], ['Enter', 'Go'], ['Ctrl+Enter', 'Open in new tab'], ['Backspace', 'Up one level']]);
@@ -244,8 +244,8 @@
     return '<div class="pal-res">' + rows + '</div>' + palFoot([['Enter', 'Keep filter in folder'], ['\u2191 \u2193', 'Select a match'], ['Shift+Enter', 'Open selected'], ['Esc', 'Cancel, clear filter']]);
   }
 
-  var TABS = [['Downloads', 'C:\\Users\\Alex\\Downloads', 'Pane 1', 1, true], ['tsubame', 'X:\\Dev\\tsubame', 'Pane 1', 2], ['Documents', 'C:\\Users\\Alex\\Documents', 'Pane 1', 3],
-    ['Minecraft packs', '\\\\rig\\Games\\Minecraft packs', 'Pane 2', 4], ['blink', 'X:\\Dev\\blink', 'Pane 2', 5], ['Invoices', 'C:\\Users\\Alex\\Documents\\Invoices', 'Pane 2', 6]];
+  var TABS = [['Downloads', 'C:\\Users\\Alex\\Downloads', 'Pane 1', 1, true], ['tsubame', 'D:\\Projects\\tsubame', 'Pane 1', 2], ['Documents', 'C:\\Users\\Alex\\Documents', 'Pane 1', 3],
+    ['Game packs', '\\\\server\\Games\\Game packs', 'Pane 2', 4], ['blink', 'D:\\Projects\\blink', 'Pane 2', 5], ['Invoices', 'C:\\Users\\Alex\\Documents\\Invoices', 'Pane 2', 6]];
   function palTabs(st) {
     var rows = '<div class="pal-sec">Open tabs <span class="n">6, across 2 panes</span></div>', hot = st.hot == null ? 1 : st.hot;
     TABS.forEach(function (t, i) {

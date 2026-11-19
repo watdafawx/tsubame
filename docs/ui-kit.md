@@ -91,7 +91,7 @@ The app has 2 more: the selection model and the case-insensitive filter.
 
 `src/view.rs` draws the toolbar with the filter box, the header, the details list and scrollbar (`list`), the thumbnail panel and the status bar. `src/main.rs` keeps the Win32 loop and the S4 shell workers, and translates messages into `Event`s. Shortcuts: Ctrl+F focuses the filter; letters T/H/W reach the app through `leftover()`.
 
-## Measured on rig (4K, 3840x2019 client at 192 dpi, release, 1M procedural rows, `--bench`)
+## Measured on the benchmark machine (4K, 3840x2019 client at 192 dpi, release, 1M procedural rows, `--bench`)
 
 | Metric | Budget | Kit (U1), 3 runs | Same day, pre-kit `ccd7dfd`, 2 runs | |
 |---|---|---|---|---|

@@ -10,7 +10,7 @@ Code:
 
 ## Result against PLAN §2
 
-All numbers were measured on rig: 4K at 200%, release build, 2 workers, `--dir C:\Windows\System32` (5,013 entries).
+All numbers were measured on the benchmark machine: 4K at 200%, release build, 2 workers, `--dir C:\Windows\System32` (5,013 entries).
 
 | Gate | Budget | Measured | Result |
 |---|---|---|---|
@@ -29,14 +29,14 @@ Handles rise by about 390 once, at the first menu. That is shell extensions load
 
 ## Measured numbers
 
-All from rig unless marked FOX.
+All from the benchmark machine unless marked "dev machine".
 
 **Icons** (SHGetFileInfo + system image list, 32 px at 200%):
 
 | Case | Worker time | Submit → applied on UI |
 |---|---|---|
 | First icon in a fresh process (folder) | 13.7 ms | 13.8 ms |
-| FOX, direct, cold: Folder16 / txt16 / txt48 / txt256 | 25.6 / 8.8 / 7.4 / 12.5 ms | n/a |
+| Dev machine, direct, cold: Folder16 / txt16 / txt48 / txt256 | 25.6 / 8.8 / 7.4 / 12.5 ms | n/a |
 | By extension, warm | p50 1.64, p95 24.6 ms (n=37, includes cold first hits) | p50 10.3, p95 40.0 ms |
 | Per path, warm (exe, dll, lnk, ico, custom folders) | p50 0.74, p95 2.15 ms (n=3,139) | p50 6.6, p95 19.0 ms |
 | Per path via IShellItemImageFactory (`TSUBAME_ICON_FACTORY=1`) | p50 1.12, p95 2.44 ms | p50 9.6, p95 22.9 ms |
@@ -110,7 +110,7 @@ Interactive use: the panel showed a 768×576 thumbnail generated in 95.6 ms (col
 - **Before tracking**, the worker calls `SetForegroundWindow(host)`. After tracking it posts `WM_NULL` (KB 135788), which is what makes Escape and click-away work.
 - **After the menu**, if the host still owns the foreground, the worker gives it back to the UI window. If it didn't, the hidden host keeps the keyboard and the app stops reacting to keys.
 - **InvokeCommand** uses `CMINVOKECOMMANDINFOEX` with `CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE`, plus `CMIC_MASK_SHIFT_DOWN` when Shift was held. The verb comes from `GetCommandString(GCS_VERBW)` and is recorded.
-- **Verified on rig:**
+- **Verified on the benchmark machine:**
   - The menu appeared at the cursor.
   - "Send to" opened.
   - Properties ran: "chose 'properties', InvokeCommand ok", and the Properties dialog opened.
@@ -122,12 +122,12 @@ Interactive use: the panel showed a 768×576 thumbnail generated in 95.6 ms (col
 
 ## Pitfalls found
 
-- **A cold image-list race.** In a fresh process, two threads calling `SHGetFileInfoW(SYSICONINDEX)` at the same time make one of them return 0. This happened on every run on FOX. The fix is a process-wide mutex around the first `SHGetFileInfo` + `SHGetImageList` on each thread (`icon::warm_up`), run when a worker starts and again whenever a thread's lists are empty.
+- **A cold image-list race.** In a fresh process, two threads calling `SHGetFileInfoW(SYSICONINDEX)` at the same time make one of them return 0. This happened on every run on the dev machine. The fix is a process-wide mutex around the first `SHGetFileInfo` + `SHGetImageList` on each thread (`icon::warm_up`), run when a worker starts and again whenever a thread's lists are empty.
 - **F10 breaks the menu.** `DefWindowProc` turns F10 (including Shift+F10) into menu mode on the UI thread. `SetForegroundWindow` fails while any menu is active, so the worker's popup came up without the foreground and Escape never reached it. Fix: the app handles `WM_SYSKEYDOWN`/`WM_SYSKEYUP` for F10 itself and never passes them on. `MenuResult.foreground` records whether `SetForegroundWindow` succeeded, and the status bar says so when it failed.
 - **The host window keeps the foreground after the menu** unless the worker hands it back (see above).
 - **Letter shortcuts belong in `WM_CHAR`, not in `WM_KEYDOWN` with `'T'`.** Injected input (`VK_PACKET`) and other keyboard layouts don't produce that virtual key.
 - **The menu owner must be on the tracking thread** (wrong-owner test).
-- **Cold menu cost is large and lands on the first right-click:** 0.5-1.3 s on rig, almost all of it inside `QueryContextMenu` loading extension DLLs. It is fine on a worker (the UI kept painting), but the user still waits. Pre-warm it.
+- **Cold menu cost is large and lands on the first right-click:** 0.5-1.3 s on the benchmark machine, almost all of it inside `QueryContextMenu` loading extension DLLs. It is fine on a worker (the UI kept painting), but the user still waits. Pre-warm it.
 - **Thumbnail results depend on the system cache.** The first run generated 498 of 500, the second found all 500 in the cache. Report both, never one number.
 - **`SHGetFileInfo` icon indices are per process, but the image lists are fetched per thread.** Keep the `IImageList` in a thread_local and never share it.
 - **Abandoned hung threads stay alive until their call returns.** They are counted (`leaked_alive`) and capped. A shell extension that never returns would keep one thread forever; if that happens a lot, use the helper process.
@@ -135,7 +135,7 @@ Interactive use: the panel showed a 768×576 thumbnail generated in 95.6 ms (col
 ## How to reproduce
 
 ```
-pwsh X:\Dev\tools\push-to-rig.ps1 -Project <worktree> -BuildOnRig -Exe tsubame -Profile release -Launch "-AppArgLine:--dir C:\Windows\System32"
+tsubame.exe --dir C:\Windows\System32     (release build)
 ```
 
 - **Keys:**
@@ -151,7 +151,7 @@ pwsh X:\Dev\tools\push-to-rig.ps1 -Project <worktree> -BuildOnRig -Exe tsubame -
 
 ## PERF1 recheck (2026-11-18)
 
-The S4 negative gate was masked by delayed rendering-memory release. On rig,
+The S4 negative gate was masked by delayed rendering-memory release. On the benchmark machine,
 S4 `e2fa069` repeated 200 menus: menu 10/100/200 private MB =
 89.4/82.3/84.9 (10->200 -5.1%, yet 100->200 +2.6 MB). Extending that
 same source's stress count to 1,000 gives 88.3/82.4/107.3 MB at 10/100/1000.

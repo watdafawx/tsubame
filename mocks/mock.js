@@ -119,8 +119,8 @@
 
   var SIDE = {
     quick: [['home', 'Home'], ['desktop', 'Desktop'], ['download', 'Downloads', 'cur'], ['docs', 'Documents'], ['pics', 'Pictures']],
-    drives: [['Windows (C:)', '118 GB', 75], ['Dev (X:)', '1.1 TB', 70], ['Games (G:)', '41 GB', 97]],
-    marks: [['star', 'tsubame'], ['star', 'blink'], ['star', 'Minecraft packs'], ['net', 'rig']]
+    drives: [['Windows (C:)', '118 GB', 75], ['Projects (D:)', '1.1 TB', 70], ['Games (G:)', '41 GB', 97]],
+    marks: [['star', 'tsubame'], ['star', 'blink'], ['star', 'Game packs'], ['net', 'server']]
   };
 
   function fmtSize(b) {
