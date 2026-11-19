@@ -100,7 +100,7 @@ Interactive use: the panel showed a 768×576 thumbnail generated in 95.6 ms (col
   - Monochrome icons are handled separately.
   - Both bitmaps from `GetIconInfo` are deleted, as is the icon.
   - Thumbnails from `GetImage` that have no alpha are made opaque. Ones with straight alpha are premultiplied.
-- Thumbnails: `SHCreateItemFromParsingName` → `IShellItemImageFactory::GetImage(BIGGERSIZEOK | INCACHEONLY)`. On a miss, `GetImage(BIGGERSIZEOK)` generates one. Each reply records whether it came from the cache and how long the probe took.
+- Thumbnails: `SHCreateItemFromParsingName` → `IShellItemImageFactory::GetImage(THUMBNAILONLY | BIGGERSIZEOK | INCACHEONLY)`. On a miss, `GetImage(THUMBNAILONLY | BIGGERSIZEOK)` generates one. `THUMBNAILONLY` is required on both: without it a miss succeeds with the generic icon. Each reply records whether it came from the cache and how long the probe took.
 
 ## HWND and HMENU ownership (context menu)
 

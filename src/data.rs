@@ -147,8 +147,14 @@ pub fn fmt_size(size: u64, out: &mut String) {
     }
 }
 
-/// "2025-03-14 09:41" from unix seconds (UTC), into a reused buffer.
+/// "2025-03-14 09:41" in local time (DST of that date) from unix seconds UTC,
+/// into a reused buffer. Sorting keeps using the UTC value.
 pub fn fmt_date(secs: u32, out: &mut String) {
+    fmt_civil(tsubame_win::tz::local_secs(secs), out);
+}
+
+/// "2025-03-14 09:41" of wall-clock seconds (no zone applied).
+pub fn fmt_civil(secs: u32, out: &mut String) {
     use std::fmt::Write;
     out.clear();
     let days = (secs / 86_400) as i64;
@@ -240,9 +246,9 @@ mod tests {
     #[test]
     fn date_format() {
         let mut s = String::new();
-        fmt_date(DATE_BASE as u32, &mut s);
+        fmt_civil(DATE_BASE as u32, &mut s);
         assert_eq!(s, "2018-01-01 00:00");
-        fmt_date(1_741_945_260, &mut s);
+        fmt_civil(1_741_945_260, &mut s);
         assert_eq!(s, "2025-03-14 09:41");
     }
 

@@ -139,14 +139,14 @@ pub fn is_slow_click(prev_ms: Option<u64>, was_sole: bool, now_ms: u64) -> bool 
 pub struct BatchItem {
     pub name: String,
     pub is_dir: bool,
-    /// unix seconds (modified time), for `{date}`
+    /// unix seconds UTC (modified time), for `{date}` (shown in local time)
     pub mtime: u32,
 }
 
-/// yyyy-MM-dd of a unix time (UTC; the same day the details column shows
-/// close enough for naming).
-pub fn date_string(unix: u32) -> String {
-    let days = (unix / 86_400) as i64;
+/// yyyy-MM-dd of local wall-clock seconds (see `tsubame_win::tz::local_secs`),
+/// the same day the details column shows.
+pub fn date_string(local: u32) -> String {
+    let days = (local / 86_400) as i64;
     // civil_from_days (H. Hinnant)
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -165,6 +165,11 @@ pub fn date_string(unix: u32) -> String {
 /// `{n:3}` pads to 3 digits. Unknown braces stay as typed. The original
 /// extension is appended, so the pattern names only the stem.
 pub fn expand(pattern: &str, item: &BatchItem, index: usize) -> String {
+    expand_with(pattern, item, index, tsubame_win::tz::local_secs)
+}
+
+/// [`expand`] with the UTC to local-time conversion injected (tests).
+pub fn expand_with(pattern: &str, item: &BatchItem, index: usize, local: impl Fn(u32) -> u32) -> String {
     let (stem, ext) = split_ext(&item.name, item.is_dir);
     let mut out = String::with_capacity(pattern.len() + ext.len() + 8);
     let mut rest = pattern;
@@ -179,7 +184,7 @@ pub fn expand(pattern: &str, item: &BatchItem, index: usize) -> String {
         let token = &after[1..close];
         match token {
             "name" => out.push_str(stem),
-            "date" => out.push_str(&date_string(item.mtime)),
+            "date" => out.push_str(&date_string(local(item.mtime))),
             "n" => out.push_str(&(index + 1).to_string()),
             t if t.starts_with("n:") && t[2..].parse::<usize>().is_ok_and(|w| w <= 9) => {
                 let w: usize = t[2..].parse().unwrap_or(0);
@@ -278,6 +283,19 @@ pub fn plan_batch(pattern: &str, items: &[BatchItem], parent: &str, folder_names
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UTC as local (the machine zone must not change the expectations)
+    fn expand(pattern: &str, item: &BatchItem, index: usize) -> String {
+        expand_with(pattern, item, index, |t| t)
+    }
+
+    #[test]
+    fn date_token_uses_the_injected_local_time() {
+        // 2023-11-14 22:13 UTC is already the 15th at UTC+2
+        let it = BatchItem { name: "a.txt".into(), is_dir: false, mtime: 1_700_000_000 };
+        assert_eq!(expand_with("{date}", &it, 0, |t| t + 2 * 3600), "2023-11-15.txt");
+        assert_eq!(expand_with("{date}", &it, 0, |t| t - 23 * 3600), "2023-11-13.txt");
+    }
 
     fn none(_: &str) -> bool {
         false
