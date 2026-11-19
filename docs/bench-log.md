@@ -1,27 +1,22 @@
 # Tsubame bench log
 
-One section per `tools/bench-rig.ps1` run on rig, newest last. Budgets and the
+One section per benchmark run on the benchmark machine, newest last. Budgets and the
 leak gate are `docs/PLAN.md` section 2; the harness itself is described in
-`docs/bench.md`. Every number here comes from the release app on rig: real
+`docs/bench.md`. Every number here comes from the release app on the benchmark machine: real
 window, real enumerator, real shell icon workers. Warm filesystem cache unless
 the section says otherwise.
 
-Rerun (from a worktree; needs the rig skill's ssh):
+The harness builds the release app on the benchmark machine, generates the
+fixtures under `<fixtures>\tsubame-b1`, runs the benches and appends a section
+here (see `docs/bench.md` for the procedure).
 
-```
-pwsh X:\Dev\tools\bench-rig.ps1 -Project <worktree>
-```
-
-The script builds on rig with `push-to-rig.ps1`, generates the fixtures under
-`G:\rig-bench\tsubame-b1`, runs the benches and appends a section here.
-
-## 2026-11-18 03:19 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `7eac782`
+## 2026-11-18 03:19 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `7eac782`
 
 - Mode: full (10 cold-start runs, 10 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/bench-leak-gate-harness`, commit `7eac782` (dirty worktree)
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/bench-leak-gate-harness`, commit `7eac782` (dirty worktree)
 - Window: 3840x2064 at 192 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 5 Minecraft java process(es), 25 docker container(s), CPU 18% busy, servers loaded; rig up 341 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 5 Java server process(es), 25 docker container(s), CPU 18% busy, servers loaded; machine up 341 h
 - Cold-cache 100k open: measured (purge working ok)
   The purge also emptied the app's own pages: that process painted its first frame 505 ms after start (warm: 74 ms), so the cold row includes loading the app itself, not only the folder's metadata.
 - Idle: 16 ms of CPU over the first idle window, 0 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -89,22 +84,22 @@ stamp=2026-11-18T03:19:19
 commit=7eac782
 branch=t3/bench-leak-gate-harness
 dirty=1
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=10
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (purge working ok)
 dpi=192
-rig_load=5 Minecraft java process(es), 25 docker container(s), CPU 18% busy, servers loaded; rig up 341 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=5 Java server process(es), 25 docker container(s), CPU 18% busy, servers loaded; machine up 341 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=1
-reports=G:\rig-test\tsubame\bench-2026-11-18T03-19-19
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T03-19-19
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -132,16 +127,16 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 73.6
 private_bytes_first_paint: 94.5 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.0 MB)  first_batch    14.67  first_frame    57.08  done   194.51  final_frame   203.99  worker    41.51   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.0 MB)  first_batch     8.95  first_frame    21.21  done   173.96  final_frame   176.34  worker    44.87   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.0 MB)  first_batch     0.92  first_frame     5.02  done    85.29  final_frame    86.77  worker    44.80   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.0 MB)  first_batch     0.85  first_frame     4.12  done    70.81  final_frame    72.29  worker    37.66   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.0 MB)  first_batch     1.08  first_frame     3.79  done    67.68  final_frame    69.28  worker    34.95   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.0 MB)  first_batch     0.87  first_frame     2.29  done    67.20  final_frame    68.64  worker    36.25   G:\rig-bench\tsubame-b1\100k
-repeat 6  entries  100000 (9.0 MB)  first_batch     2.40  first_frame     5.26  done    66.55  final_frame    67.89  worker    34.63   G:\rig-bench\tsubame-b1\100k
-repeat 7  entries  100000 (9.0 MB)  first_batch     1.27  first_frame     2.77  done    65.62  final_frame    66.89  worker    35.35   G:\rig-bench\tsubame-b1\100k
-repeat 8  entries  100000 (9.0 MB)  first_batch     0.91  first_frame     3.60  done    65.09  final_frame    66.34  worker    35.15   G:\rig-bench\tsubame-b1\100k
-repeat 9  entries  100000 (9.0 MB)  first_batch     0.89  first_frame     2.51  done    68.36  final_frame    69.57  worker    37.43   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.0 MB)  first_batch    14.67  first_frame    57.08  done   194.51  final_frame   203.99  worker    41.51   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.0 MB)  first_batch     8.95  first_frame    21.21  done   173.96  final_frame   176.34  worker    44.87   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.0 MB)  first_batch     0.92  first_frame     5.02  done    85.29  final_frame    86.77  worker    44.80   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.0 MB)  first_batch     0.85  first_frame     4.12  done    70.81  final_frame    72.29  worker    37.66   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.0 MB)  first_batch     1.08  first_frame     3.79  done    67.68  final_frame    69.28  worker    34.95   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.0 MB)  first_batch     0.87  first_frame     2.29  done    67.20  final_frame    68.64  worker    36.25   <fixtures>\tsubame-b1\100k
+repeat 6  entries  100000 (9.0 MB)  first_batch     2.40  first_frame     5.26  done    66.55  final_frame    67.89  worker    34.63   <fixtures>\tsubame-b1\100k
+repeat 7  entries  100000 (9.0 MB)  first_batch     1.27  first_frame     2.77  done    65.62  final_frame    66.89  worker    35.35   <fixtures>\tsubame-b1\100k
+repeat 8  entries  100000 (9.0 MB)  first_batch     0.91  first_frame     3.60  done    65.09  final_frame    66.34  worker    35.15   <fixtures>\tsubame-b1\100k
+repeat 9  entries  100000 (9.0 MB)  first_batch     0.89  first_frame     2.51  done    68.36  final_frame    69.57  worker    37.43   <fixtures>\tsubame-b1\100k
 private_bytes_end: 177.3 MB
 ```
 </details>
@@ -154,8 +149,8 @@ window_px: 3840x2064 at 192 dpi, paint path software (GPU starting)
 first_paint_ms (process start to first completed paint): 504.6
 private_bytes_first_paint: 86.4 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   192.88  first_frame   432.44  done   432.53  final_frame   442.22  worker     4.75   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (9.6 MB)  first_batch    56.27  first_frame    66.07  done   306.52  final_frame   316.96  worker   214.28   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   192.88  first_frame   432.44  done   432.53  final_frame   442.22  worker     4.75   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (9.6 MB)  first_batch    56.27  first_frame    66.07  done   306.52  final_frame   316.96  worker   214.28   <fixtures>\tsubame-b1\100k
 private_bytes_end: 124.2 MB
 ```
 </details>
@@ -186,7 +181,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24559
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -356,7 +351,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24538
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -526,7 +521,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24552
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -688,13 +683,13 @@ exit=0
 ```
 </details>
 
-## 2026-11-18 04:15 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `02a2731`
+## 2026-11-18 04:15 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `02a2731`
 
 - Mode: full (10 cold-start runs, 10 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/private-bytes-memory-budget`, commit `02a2731`
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/private-bytes-memory-budget`, commit `02a2731`
 - Window: 3840x2064 at 192 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 11 Minecraft java process(es), 25 docker container(s), CPU 39% busy, servers loaded; rig up 342 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 11 Java server process(es), 25 docker container(s), CPU 39% busy, servers loaded; machine up 342 h
 - Cold-cache 100k open: measured (purge working ok)
   The purge also emptied the app's own pages: that process painted its first frame 450 ms after start (warm: 85 ms), so the cold row includes loading the app itself, not only the folder's metadata.
 - Idle: 0 ms of CPU over the first idle window, 31 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -762,22 +757,22 @@ stamp=2026-11-18T04:15:30
 commit=02a2731
 branch=t3/private-bytes-memory-budget
 dirty=0
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=10
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (purge working ok)
 dpi=192
-rig_load=11 Minecraft java process(es), 25 docker container(s), CPU 39% busy, servers loaded; rig up 342 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=11 Java server process(es), 25 docker container(s), CPU 39% busy, servers loaded; machine up 342 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=1
-reports=G:\rig-test\tsubame\bench-2026-11-18T04-15-30
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T04-15-30
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -805,16 +800,16 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 85.2
 private_bytes_first_paint: 35.9 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.0 MB)  first_batch    26.26  first_frame    64.92  done   169.90  final_frame   172.23  worker    44.33   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.0 MB)  first_batch     6.80  first_frame    10.57  done   103.11  final_frame   105.83  worker    42.00   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.0 MB)  first_batch     3.36  first_frame    23.86  done   156.43  final_frame   157.79  worker    56.24   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.0 MB)  first_batch     4.75  first_frame     7.92  done    77.26  final_frame    78.92  worker    40.77   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.0 MB)  first_batch     1.93  first_frame     4.59  done    78.45  final_frame    80.07  worker    42.69   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.0 MB)  first_batch     0.97  first_frame     3.73  done    66.72  final_frame    67.80  worker    31.59   G:\rig-bench\tsubame-b1\100k
-repeat 6  entries  100000 (9.0 MB)  first_batch     1.03  first_frame     4.99  done    86.32  final_frame    87.30  worker    35.45   G:\rig-bench\tsubame-b1\100k
-repeat 7  entries  100000 (9.0 MB)  first_batch     0.76  first_frame     2.66  done    70.41  final_frame    71.79  worker    33.17   G:\rig-bench\tsubame-b1\100k
-repeat 8  entries  100000 (9.0 MB)  first_batch     1.01  first_frame     2.28  done    64.78  final_frame    66.04  worker    36.47   G:\rig-bench\tsubame-b1\100k
-repeat 9  entries  100000 (9.0 MB)  first_batch     0.90  first_frame     4.13  done    69.18  final_frame    70.16  worker    36.32   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.0 MB)  first_batch    26.26  first_frame    64.92  done   169.90  final_frame   172.23  worker    44.33   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.0 MB)  first_batch     6.80  first_frame    10.57  done   103.11  final_frame   105.83  worker    42.00   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.0 MB)  first_batch     3.36  first_frame    23.86  done   156.43  final_frame   157.79  worker    56.24   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.0 MB)  first_batch     4.75  first_frame     7.92  done    77.26  final_frame    78.92  worker    40.77   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.0 MB)  first_batch     1.93  first_frame     4.59  done    78.45  final_frame    80.07  worker    42.69   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.0 MB)  first_batch     0.97  first_frame     3.73  done    66.72  final_frame    67.80  worker    31.59   <fixtures>\tsubame-b1\100k
+repeat 6  entries  100000 (9.0 MB)  first_batch     1.03  first_frame     4.99  done    86.32  final_frame    87.30  worker    35.45   <fixtures>\tsubame-b1\100k
+repeat 7  entries  100000 (9.0 MB)  first_batch     0.76  first_frame     2.66  done    70.41  final_frame    71.79  worker    33.17   <fixtures>\tsubame-b1\100k
+repeat 8  entries  100000 (9.0 MB)  first_batch     1.01  first_frame     2.28  done    64.78  final_frame    66.04  worker    36.47   <fixtures>\tsubame-b1\100k
+repeat 9  entries  100000 (9.0 MB)  first_batch     0.90  first_frame     4.13  done    69.18  final_frame    70.16  worker    36.32   <fixtures>\tsubame-b1\100k
 private_bytes_end: 80.7 MB
 ```
 </details>
@@ -827,8 +822,8 @@ window_px: 3840x2064 at 192 dpi, paint path software (GPU starting)
 first_paint_ms (process start to first completed paint): 450.5
 private_bytes_first_paint: 26.0 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   133.60  first_frame   426.58  done   426.93  final_frame   428.77  worker     3.08   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (9.6 MB)  first_batch    55.12  first_frame    59.44  done   276.18  final_frame   279.53  worker   210.10   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   133.60  first_frame   426.58  done   426.93  final_frame   428.77  worker     3.08   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (9.6 MB)  first_batch    55.12  first_frame    59.44  done   276.18  final_frame   279.53  worker   210.10   <fixtures>\tsubame-b1\100k
 private_bytes_end: 42.1 MB
 ```
 </details>
@@ -859,7 +854,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24579
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -1029,7 +1024,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24579
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -1199,7 +1194,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24518
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -1361,13 +1356,13 @@ exit=1
 ```
 </details>
 
-## 2026-11-18 04:38 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `159b639`
+## 2026-11-18 04:38 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `159b639`
 
 - Mode: full (10 cold-start runs, 10 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/private-bytes-memory-budget`, commit `159b639`
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/private-bytes-memory-budget`, commit `159b639`
 - Window: 3840x2064 at 192 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 8 Minecraft java process(es), 25 docker container(s), CPU 12% busy, servers loaded; rig up 342 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 8 Java server process(es), 25 docker container(s), CPU 12% busy, servers loaded; machine up 342 h
 - Cold-cache 100k open: measured (purge working ok)
   The purge also emptied the app's own pages: that process painted its first frame 374 ms after start (warm: 107 ms), so the cold row includes loading the app itself, not only the folder's metadata.
 - Idle: 16 ms of CPU over the first idle window, 16 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -1435,22 +1430,22 @@ stamp=2026-11-18T04:38:27
 commit=159b639
 branch=t3/private-bytes-memory-budget
 dirty=0
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=10
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (purge working ok)
 dpi=192
-rig_load=8 Minecraft java process(es), 25 docker container(s), CPU 12% busy, servers loaded; rig up 342 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=8 Java server process(es), 25 docker container(s), CPU 12% busy, servers loaded; machine up 342 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=1
-reports=G:\rig-test\tsubame\bench-2026-11-18T04-38-27
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T04-38-27
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -1478,16 +1473,16 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 107.0
 private_bytes_first_paint: 28.3 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.0 MB)  first_batch    20.27  first_frame    87.99  done   205.33  final_frame   214.96  worker    43.66   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.0 MB)  first_batch     7.11  first_frame    18.07  done   120.49  final_frame   122.08  worker    40.74   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.0 MB)  first_batch     1.00  first_frame     3.67  done    62.67  final_frame    64.21  worker    38.18   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.0 MB)  first_batch     0.94  first_frame     3.35  done    63.91  final_frame    65.32  worker    34.45   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.0 MB)  first_batch     1.20  first_frame     4.14  done    62.58  final_frame    63.95  worker    34.23   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.0 MB)  first_batch     0.81  first_frame     2.23  done    61.89  final_frame    63.23  worker    33.81   G:\rig-bench\tsubame-b1\100k
-repeat 6  entries  100000 (9.0 MB)  first_batch     1.27  first_frame     3.81  done    63.56  final_frame    64.71  worker    31.62   G:\rig-bench\tsubame-b1\100k
-repeat 7  entries  100000 (9.0 MB)  first_batch     0.79  first_frame     2.16  done    57.62  final_frame    58.95  worker    31.03   G:\rig-bench\tsubame-b1\100k
-repeat 8  entries  100000 (9.0 MB)  first_batch     0.85  first_frame     3.50  done    63.82  final_frame    65.30  worker    33.45   G:\rig-bench\tsubame-b1\100k
-repeat 9  entries  100000 (9.0 MB)  first_batch     0.86  first_frame     3.47  done    63.42  final_frame    64.63  worker    38.33   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.0 MB)  first_batch    20.27  first_frame    87.99  done   205.33  final_frame   214.96  worker    43.66   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.0 MB)  first_batch     7.11  first_frame    18.07  done   120.49  final_frame   122.08  worker    40.74   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.0 MB)  first_batch     1.00  first_frame     3.67  done    62.67  final_frame    64.21  worker    38.18   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.0 MB)  first_batch     0.94  first_frame     3.35  done    63.91  final_frame    65.32  worker    34.45   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.0 MB)  first_batch     1.20  first_frame     4.14  done    62.58  final_frame    63.95  worker    34.23   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.0 MB)  first_batch     0.81  first_frame     2.23  done    61.89  final_frame    63.23  worker    33.81   <fixtures>\tsubame-b1\100k
+repeat 6  entries  100000 (9.0 MB)  first_batch     1.27  first_frame     3.81  done    63.56  final_frame    64.71  worker    31.62   <fixtures>\tsubame-b1\100k
+repeat 7  entries  100000 (9.0 MB)  first_batch     0.79  first_frame     2.16  done    57.62  final_frame    58.95  worker    31.03   <fixtures>\tsubame-b1\100k
+repeat 8  entries  100000 (9.0 MB)  first_batch     0.85  first_frame     3.50  done    63.82  final_frame    65.30  worker    33.45   <fixtures>\tsubame-b1\100k
+repeat 9  entries  100000 (9.0 MB)  first_batch     0.86  first_frame     3.47  done    63.42  final_frame    64.63  worker    38.33   <fixtures>\tsubame-b1\100k
 private_bytes_end: 85.4 MB
 ```
 </details>
@@ -1500,8 +1495,8 @@ window_px: 3840x2064 at 192 dpi, paint path software (GPU starting)
 first_paint_ms (process start to first completed paint): 374.2
 private_bytes_first_paint: 14.5 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   130.85  first_frame   316.76  done   317.02  final_frame   334.59  worker     2.37   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (9.6 MB)  first_batch    46.20  first_frame    60.70  done   264.37  final_frame   274.22  worker   197.70   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   130.85  first_frame   316.76  done   317.02  final_frame   334.59  worker     2.37   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (9.6 MB)  first_batch    46.20  first_frame    60.70  done   264.37  final_frame   274.22  worker   197.70   <fixtures>\tsubame-b1\100k
 private_bytes_end: 43.6 MB
 ```
 </details>
@@ -1532,7 +1527,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24586
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -1702,7 +1697,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24537
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -1872,7 +1867,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24516
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -2034,13 +2029,13 @@ exit=0
 ```
 </details>
 
-## 2026-11-18 05:14 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `c908f4a`
+## 2026-11-18 05:14 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `c908f4a`
 
 - Mode: full (10 cold-start runs, 10 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/private-bytes-memory-budget`, commit `c908f4a`
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/private-bytes-memory-budget`, commit `c908f4a`
 - Window: 3840x2064 at 192 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 8 Minecraft java process(es), 25 docker container(s), CPU 15% busy, servers loaded; rig up 343 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 8 Java server process(es), 25 docker container(s), CPU 15% busy, servers loaded; machine up 343 h
 - Cold-cache 100k open: measured (purge working ok)
   The purge also emptied the app's own pages: that process painted its first frame 395 ms after start (warm: 68 ms), so the cold row includes loading the app itself, not only the folder's metadata.
 - Idle: 16 ms of CPU over the first idle window, 31 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -2108,22 +2103,22 @@ stamp=2026-11-18T05:14:59
 commit=c908f4a
 branch=t3/private-bytes-memory-budget
 dirty=0
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=10
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (purge working ok)
 dpi=192
-rig_load=8 Minecraft java process(es), 25 docker container(s), CPU 15% busy, servers loaded; rig up 343 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=8 Java server process(es), 25 docker container(s), CPU 15% busy, servers loaded; machine up 343 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=1
-reports=G:\rig-test\tsubame\bench-2026-11-18T05-14-59
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T05-14-59
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -2151,16 +2146,16 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 68.5
 private_bytes_first_paint: 36.9 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.0 MB)  first_batch    24.39  first_frame    49.72  done   128.36  final_frame   131.25  worker    45.43   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.0 MB)  first_batch     6.95  first_frame    11.15  done   102.54  final_frame   104.48  worker    50.85   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.0 MB)  first_batch     2.98  first_frame     8.51  done    96.82  final_frame    98.79  worker    46.15   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.0 MB)  first_batch     0.99  first_frame     6.01  done    71.95  final_frame    73.56  worker    39.33   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.0 MB)  first_batch     0.91  first_frame     3.71  done    64.60  final_frame    66.35  worker    39.58   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.0 MB)  first_batch     1.43  first_frame     5.43  done    67.75  final_frame    69.13  worker    40.39   G:\rig-bench\tsubame-b1\100k
-repeat 6  entries  100000 (9.0 MB)  first_batch     0.83  first_frame     3.85  done    60.40  final_frame    61.59  worker    36.62   G:\rig-bench\tsubame-b1\100k
-repeat 7  entries  100000 (9.0 MB)  first_batch     0.80  first_frame     2.87  done    59.79  final_frame    61.32  worker    33.81   G:\rig-bench\tsubame-b1\100k
-repeat 8  entries  100000 (9.0 MB)  first_batch     0.82  first_frame     2.24  done    61.43  final_frame    63.49  worker    34.90   G:\rig-bench\tsubame-b1\100k
-repeat 9  entries  100000 (9.0 MB)  first_batch     2.06  first_frame     5.21  done    63.74  final_frame    65.33  worker    37.81   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.0 MB)  first_batch    24.39  first_frame    49.72  done   128.36  final_frame   131.25  worker    45.43   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.0 MB)  first_batch     6.95  first_frame    11.15  done   102.54  final_frame   104.48  worker    50.85   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.0 MB)  first_batch     2.98  first_frame     8.51  done    96.82  final_frame    98.79  worker    46.15   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.0 MB)  first_batch     0.99  first_frame     6.01  done    71.95  final_frame    73.56  worker    39.33   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.0 MB)  first_batch     0.91  first_frame     3.71  done    64.60  final_frame    66.35  worker    39.58   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.0 MB)  first_batch     1.43  first_frame     5.43  done    67.75  final_frame    69.13  worker    40.39   <fixtures>\tsubame-b1\100k
+repeat 6  entries  100000 (9.0 MB)  first_batch     0.83  first_frame     3.85  done    60.40  final_frame    61.59  worker    36.62   <fixtures>\tsubame-b1\100k
+repeat 7  entries  100000 (9.0 MB)  first_batch     0.80  first_frame     2.87  done    59.79  final_frame    61.32  worker    33.81   <fixtures>\tsubame-b1\100k
+repeat 8  entries  100000 (9.0 MB)  first_batch     0.82  first_frame     2.24  done    61.43  final_frame    63.49  worker    34.90   <fixtures>\tsubame-b1\100k
+repeat 9  entries  100000 (9.0 MB)  first_batch     2.06  first_frame     5.21  done    63.74  final_frame    65.33  worker    37.81   <fixtures>\tsubame-b1\100k
 private_bytes_end: 90.4 MB
 ```
 </details>
@@ -2173,8 +2168,8 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 394.8
 private_bytes_first_paint: 26.2 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   172.46  first_frame   325.10  done   325.39  final_frame   327.55  worker    26.23   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (9.6 MB)  first_batch   129.02  first_frame   133.62  done  2345.03  final_frame  2346.20  worker  2308.67   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   172.46  first_frame   325.10  done   325.39  final_frame   327.55  worker    26.23   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (9.6 MB)  first_batch   129.02  first_frame   133.62  done  2345.03  final_frame  2346.20  worker  2308.67   <fixtures>\tsubame-b1\100k
 private_bytes_end: 82.4 MB
 ```
 </details>
@@ -2205,7 +2200,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24692
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -2375,7 +2370,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24616
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -2545,7 +2540,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24602
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -2707,13 +2702,13 @@ exit=0
 ```
 </details>
 
-## 2026-11-18 05:22 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `c908f4a`
+## 2026-11-18 05:22 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `c908f4a`
 
 - Mode: full (10 cold-start runs, 10 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/private-bytes-memory-budget`, commit `c908f4a` (dirty worktree)
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/private-bytes-memory-budget`, commit `c908f4a` (dirty worktree)
 - Window: 3840x2064 at 192 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 6 Minecraft java process(es), 25 docker container(s), CPU 36% busy, servers loaded; rig up 343 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 6 Java server process(es), 25 docker container(s), CPU 36% busy, servers loaded; machine up 343 h
 - Cold-cache 100k open: measured (purge working ok)
   The purge also emptied the app's own pages: that process painted its first frame 373 ms after start (warm: 62 ms), so the cold row includes loading the app itself, not only the folder's metadata.
 - Idle: 31 ms of CPU over the first idle window, 47 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -2781,22 +2776,22 @@ stamp=2026-11-18T05:22:27
 commit=c908f4a
 branch=t3/private-bytes-memory-budget
 dirty=1
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=10
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (purge working ok)
 dpi=192
-rig_load=6 Minecraft java process(es), 25 docker container(s), CPU 36% busy, servers loaded; rig up 343 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=6 Java server process(es), 25 docker container(s), CPU 36% busy, servers loaded; machine up 343 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=1
-reports=G:\rig-test\tsubame\bench-2026-11-18T05-22-27
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T05-22-27
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -2824,16 +2819,16 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 61.6
 private_bytes_first_paint: 36.2 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.0 MB)  first_batch    23.56  first_frame    44.17  done   120.80  final_frame   124.43  worker    42.23   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.0 MB)  first_batch     4.30  first_frame     9.29  done    73.14  final_frame    74.98  worker    42.84   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.0 MB)  first_batch     2.48  first_frame     7.46  done    71.62  final_frame    86.33  worker    38.74   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.0 MB)  first_batch     1.12  first_frame     4.98  done    64.13  final_frame    65.58  worker    37.28   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.0 MB)  first_batch     1.01  first_frame     3.42  done    71.67  final_frame    73.09  worker    33.63   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.0 MB)  first_batch     0.95  first_frame     3.96  done    62.09  final_frame    63.78  worker    34.40   G:\rig-bench\tsubame-b1\100k
-repeat 6  entries  100000 (9.0 MB)  first_batch     0.87  first_frame     3.15  done    61.10  final_frame    62.49  worker    32.95   G:\rig-bench\tsubame-b1\100k
-repeat 7  entries  100000 (9.0 MB)  first_batch     0.90  first_frame     3.57  done    61.60  final_frame    63.02  worker    32.54   G:\rig-bench\tsubame-b1\100k
-repeat 8  entries  100000 (9.0 MB)  first_batch     0.94  first_frame     3.30  done    60.44  final_frame    62.09  worker    33.44   G:\rig-bench\tsubame-b1\100k
-repeat 9  entries  100000 (9.0 MB)  first_batch     0.81  first_frame     3.12  done    59.98  final_frame    61.25  worker    35.65   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.0 MB)  first_batch    23.56  first_frame    44.17  done   120.80  final_frame   124.43  worker    42.23   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.0 MB)  first_batch     4.30  first_frame     9.29  done    73.14  final_frame    74.98  worker    42.84   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.0 MB)  first_batch     2.48  first_frame     7.46  done    71.62  final_frame    86.33  worker    38.74   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.0 MB)  first_batch     1.12  first_frame     4.98  done    64.13  final_frame    65.58  worker    37.28   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.0 MB)  first_batch     1.01  first_frame     3.42  done    71.67  final_frame    73.09  worker    33.63   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.0 MB)  first_batch     0.95  first_frame     3.96  done    62.09  final_frame    63.78  worker    34.40   <fixtures>\tsubame-b1\100k
+repeat 6  entries  100000 (9.0 MB)  first_batch     0.87  first_frame     3.15  done    61.10  final_frame    62.49  worker    32.95   <fixtures>\tsubame-b1\100k
+repeat 7  entries  100000 (9.0 MB)  first_batch     0.90  first_frame     3.57  done    61.60  final_frame    63.02  worker    32.54   <fixtures>\tsubame-b1\100k
+repeat 8  entries  100000 (9.0 MB)  first_batch     0.94  first_frame     3.30  done    60.44  final_frame    62.09  worker    33.44   <fixtures>\tsubame-b1\100k
+repeat 9  entries  100000 (9.0 MB)  first_batch     0.81  first_frame     3.12  done    59.98  final_frame    61.25  worker    35.65   <fixtures>\tsubame-b1\100k
 private_bytes_end: 87.9 MB
 ```
 </details>
@@ -2846,8 +2841,8 @@ window_px: 3840x2064 at 192 dpi, paint path software (GPU starting)
 first_paint_ms (process start to first completed paint): 373.2
 private_bytes_first_paint: 25.9 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   146.59  first_frame   315.23  done   315.38  final_frame   317.19  worker     1.96   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (9.6 MB)  first_batch    44.10  first_frame    47.73  done   302.36  final_frame   304.02  worker   248.71   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   146.59  first_frame   315.23  done   315.38  final_frame   317.19  worker     1.96   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (9.6 MB)  first_batch    44.10  first_frame    47.73  done   302.36  final_frame   304.02  worker   248.71   <fixtures>\tsubame-b1\100k
 private_bytes_end: 54.0 MB
 ```
 </details>
@@ -2878,7 +2873,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24566
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -3048,7 +3043,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24538
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -3218,7 +3213,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24823
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -3380,13 +3375,13 @@ exit=0
 ```
 </details>
 
-## 2026-11-18 06:12 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `18b1bc8`
+## 2026-11-18 06:12 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `18b1bc8`
 
 - Mode: full (3 cold-start runs, 3 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/526fd871`, commit `18b1bc8`
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/526fd871`, commit `18b1bc8`
 - Window: 3840x2064 at 192 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 8 Minecraft java process(es), 25 docker container(s), CPU 20% busy, servers loaded; rig up 344 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 8 Java server process(es), 25 docker container(s), CPU 20% busy, servers loaded; machine up 344 h
 - Cold-cache 100k open: measured (purge working ok)
   The purge also emptied the app's own pages: that process painted its first frame 301 ms after start (warm: 77 ms), so the cold row includes loading the app itself, not only the folder's metadata.
 - Idle: 16 ms of CPU over the first idle window, 0 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -3454,22 +3449,22 @@ stamp=2026-11-18T06:12:39
 commit=18b1bc8
 branch=t3/526fd871
 dirty=0
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=3
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (purge working ok)
 dpi=192
-rig_load=8 Minecraft java process(es), 25 docker container(s), CPU 20% busy, servers loaded; rig up 344 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=8 Java server process(es), 25 docker container(s), CPU 20% busy, servers loaded; machine up 344 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=1
-reports=G:\rig-test\tsubame\bench-2026-11-18T06-12-39
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T06-12-39
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -3490,9 +3485,9 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 77.4
 private_bytes_first_paint: 35.3 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.0 MB)  first_batch    29.08  first_frame    57.80  done   143.67  final_frame   146.10  worker    62.35   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.0 MB)  first_batch    16.78  first_frame    20.41  done   100.56  final_frame   102.61  worker    45.54   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.0 MB)  first_batch     2.46  first_frame    12.33  done   102.43  final_frame   104.12  worker    48.05   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.0 MB)  first_batch    29.08  first_frame    57.80  done   143.67  final_frame   146.10  worker    62.35   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.0 MB)  first_batch    16.78  first_frame    20.41  done   100.56  final_frame   102.61  worker    45.54   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.0 MB)  first_batch     2.46  first_frame    12.33  done   102.43  final_frame   104.12  worker    48.05   <fixtures>\tsubame-b1\100k
 private_bytes_end: 90.8 MB
 ```
 </details>
@@ -3505,8 +3500,8 @@ window_px: 3840x2064 at 192 dpi, paint path software (GPU starting)
 first_paint_ms (process start to first completed paint): 301.2
 private_bytes_first_paint: 25.9 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   126.34  first_frame   242.46  done   242.70  final_frame   245.25  worker     3.78   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (9.6 MB)  first_batch    45.03  first_frame    49.08  done   337.89  final_frame   340.57  worker   269.90   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   126.34  first_frame   242.46  done   242.70  final_frame   245.25  worker     3.78   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (9.6 MB)  first_batch    45.03  first_frame    49.08  done   337.89  final_frame   340.57  worker   269.90   <fixtures>\tsubame-b1\100k
 private_bytes_end: 56.1 MB
 ```
 </details>
@@ -3537,7 +3532,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24592
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -3809,7 +3804,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24944
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -4081,7 +4076,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24558
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -4348,7 +4343,7 @@ exit=0
 ## MEM1b diagnostic follow-up (2026-11-18)
 
 `18b1bc8`, same release with counting allocator, ten additional launches in
-`G:\rig-test\tsubame\bench-2026-11-18T06-18-56`:
+`<reports>\bench-2026-11-18T06-18-56`:
 first paint ms: 71.0, 75.0, 79.0, 66.9, 67.3, 73.3, 76.3, 101.4, 71.3, 74.3.
 Nearest-rank median 73.3 / p95 101.4 ms. Startup p95 exceeds baseline 100.9
 by 0.5 ms; this is not reported as passing that comparison.
@@ -4362,13 +4357,13 @@ warm navigations: first rows medians 8.52 / 7.60 / 8.98 ms; complete+sorted
 frame medians 101.83 / 95.40 / 108.45 ms. All nine samples pass 30 / 200 ms.
 The following production-build suite removes counting-allocator overhead;
 it is recorded separately, without discarding these diagnostic results.
-## 2026-11-18 06:21 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `18b1bc8`
+## 2026-11-18 06:21 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `18b1bc8`
 
 - Mode: full (10 cold-start runs, 10 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/526fd871`, commit `18b1bc8` (dirty worktree)
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/526fd871`, commit `18b1bc8` (dirty worktree)
 - Window: 3840x2064 at 192 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 11 Minecraft java process(es), 25 docker container(s), CPU 35% busy, servers loaded; rig up 344 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 11 Java server process(es), 25 docker container(s), CPU 35% busy, servers loaded; machine up 344 h
 - Cold-cache 100k open: not measured
 - Idle: 16 ms of CPU over the first idle window, 0 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
 - Memory context: 35.5 MB private at the first painted frame, 86.3 MB at the end of the warm navigation run (a 100k store plus the DirectWrite layout cache is live then; the budget row below uses the gate's steady state).
@@ -4435,22 +4430,22 @@ stamp=2026-11-18T06:21:01
 commit=18b1bc8
 branch=t3/526fd871
 dirty=1
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=10
 cache=warm filesystem cache (no purge before these runs)
 cold=not measured
 dpi=192
-rig_load=11 Minecraft java process(es), 25 docker container(s), CPU 35% busy, servers loaded; rig up 344 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=11 Java server process(es), 25 docker container(s), CPU 35% busy, servers loaded; machine up 344 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=1
-reports=G:\rig-test\tsubame\bench-2026-11-18T06-21-01
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T06-21-01
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -4478,16 +4473,16 @@ window_px: 3840x2064 at 192 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 69.4
 private_bytes_first_paint: 35.5 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.0 MB)  first_batch    22.24  first_frame    49.93  done   136.30  final_frame   139.38  worker    51.09   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.0 MB)  first_batch    20.26  first_frame    23.61  done    96.02  final_frame    97.80  worker    39.10   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.0 MB)  first_batch     2.57  first_frame     9.12  done    93.25  final_frame    95.07  worker    46.41   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.0 MB)  first_batch     1.46  first_frame     6.70  done    66.98  final_frame    68.28  worker    42.76   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.0 MB)  first_batch     1.57  first_frame     4.72  done    66.99  final_frame    68.25  worker    36.68   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.0 MB)  first_batch     0.89  first_frame     2.59  done    80.21  final_frame    81.61  worker    35.32   G:\rig-bench\tsubame-b1\100k
-repeat 6  entries  100000 (9.0 MB)  first_batch     1.11  first_frame     3.87  done    77.11  final_frame    78.70  worker    32.32   G:\rig-bench\tsubame-b1\100k
-repeat 7  entries  100000 (9.0 MB)  first_batch     1.12  first_frame     3.10  done    66.60  final_frame    68.10  worker    45.56   G:\rig-bench\tsubame-b1\100k
-repeat 8  entries  100000 (9.0 MB)  first_batch     1.25  first_frame     3.84  done    64.98  final_frame    66.36  worker    38.20   G:\rig-bench\tsubame-b1\100k
-repeat 9  entries  100000 (9.0 MB)  first_batch     0.78  first_frame     2.16  done    65.94  final_frame    67.57  worker    37.10   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.0 MB)  first_batch    22.24  first_frame    49.93  done   136.30  final_frame   139.38  worker    51.09   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.0 MB)  first_batch    20.26  first_frame    23.61  done    96.02  final_frame    97.80  worker    39.10   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.0 MB)  first_batch     2.57  first_frame     9.12  done    93.25  final_frame    95.07  worker    46.41   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.0 MB)  first_batch     1.46  first_frame     6.70  done    66.98  final_frame    68.28  worker    42.76   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.0 MB)  first_batch     1.57  first_frame     4.72  done    66.99  final_frame    68.25  worker    36.68   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.0 MB)  first_batch     0.89  first_frame     2.59  done    80.21  final_frame    81.61  worker    35.32   <fixtures>\tsubame-b1\100k
+repeat 6  entries  100000 (9.0 MB)  first_batch     1.11  first_frame     3.87  done    77.11  final_frame    78.70  worker    32.32   <fixtures>\tsubame-b1\100k
+repeat 7  entries  100000 (9.0 MB)  first_batch     1.12  first_frame     3.10  done    66.60  final_frame    68.10  worker    45.56   <fixtures>\tsubame-b1\100k
+repeat 8  entries  100000 (9.0 MB)  first_batch     1.25  first_frame     3.84  done    64.98  final_frame    66.36  worker    38.20   <fixtures>\tsubame-b1\100k
+repeat 9  entries  100000 (9.0 MB)  first_batch     0.78  first_frame     2.16  done    65.94  final_frame    67.57  worker    37.10   <fixtures>\tsubame-b1\100k
 private_bytes_end: 86.3 MB
 ```
 </details>
@@ -4518,7 +4513,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24535
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -4688,7 +4683,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24525
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -4858,7 +4853,7 @@ window_dpi=192
 paint_path=hardware
 start_paint_path=hardware
 paints=24517
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -5022,7 +5017,7 @@ exit=0
 
 ## MEM1b final comparison and validation
 
-Production release, rig 4K, `18b1bc8` normal app code; later cleanup removes
+Production release, 4K benchmark machine, `18b1bc8` normal app code; later cleanup removes
 only temporary instrumentation from `--leak-smoke`. No gate or cache cap changed.
 
 | Metric | Baseline `7eac782` | MEM1b production |
@@ -5038,7 +5033,7 @@ only temporary instrumentation from `--leak-smoke`. No gate or cache cap changed
 
 Full workspace check/test passed; strict clippy on app and d2d with memdiag
 passed; app tests (37) and clippy repeated after smoke-only cleanup passed.
-Rig debug lifecycle smoke passed resize, synthetic DPI changes and
+Debug lifecycle smoke on the benchmark machine passed resize, synthetic DPI changes and
 minimize/restore on flip, HWND and forced WARP. Injected device loss on both
 flip and HWND ended on software fallback and exited cleanly. See
 `lifecycle-*.txt` in `bench-2026-11-18T06-21-01`.
@@ -5046,13 +5041,13 @@ Real monitor DPI changes, physical GPU removal and actual TDR untested.
 Exact idle wake-up count unavailable. Optional cold-cache probe still failed
 49.08 / 340.57 ms in the diagnostic full suite; production full suite did not
 repeat that known purge-and-launch measurement. No threshold was relaxed.
-## 2026-11-18 19:46 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `4897312`
+## 2026-11-18 19:46 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `4897312`
 
 - Mode: full (6 cold-start runs, 6 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/unify-panes-shell-integration`, commit `4897312` (dirty worktree)
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/unify-panes-shell-integration`, commit `4897312` (dirty worktree)
 - Window: 3840x2076 at 168 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 5 Minecraft java process(es), 25 docker container(s), CPU 10% busy, servers loaded; rig up 357 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 5 Java server process(es), 25 docker container(s), CPU 10% busy, servers loaded; machine up 357 h
 - Cold-cache 100k open: measured (purge working ok)
   The purge also emptied the app's own pages: that process painted its first frame 307 ms after start (warm: 80 ms), so the cold row includes loading the app itself, not only the folder's metadata.
 - Idle: 0 ms of CPU over the first idle window, 47 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -5120,22 +5115,22 @@ stamp=2026-11-18T19:46:59
 commit=4897312
 branch=t3/unify-panes-shell-integration
 dirty=1
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=6
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (purge working ok)
 dpi=192
-rig_load=5 Minecraft java process(es), 25 docker container(s), CPU 10% busy, servers loaded; rig up 357 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=5 Java server process(es), 25 docker container(s), CPU 10% busy, servers loaded; machine up 357 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=3
-reports=G:\rig-test\tsubame-s3\bench-2026-11-18T19-46-59
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T19-46-59
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -5159,12 +5154,12 @@ window_px: 3840x2076 at 168 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 79.9
 private_bytes_first_paint: 61.9 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.0 MB)  first_batch    16.27  first_frame    57.32  done   225.95  final_frame   231.75  worker    53.27   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.0 MB)  first_batch     7.93  first_frame    18.30  done   166.18  final_frame   169.11  worker    67.68   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.0 MB)  first_batch     1.69  first_frame     7.50  done    89.16  final_frame    91.82  worker    37.94   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.0 MB)  first_batch     1.80  first_frame     6.28  done    89.46  final_frame    92.61  worker    34.65   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.0 MB)  first_batch     1.62  first_frame     7.11  done    87.84  final_frame    90.36  worker    33.70   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.0 MB)  first_batch     1.65  first_frame     5.99  done    85.59  final_frame    88.27  worker    35.74   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.0 MB)  first_batch    16.27  first_frame    57.32  done   225.95  final_frame   231.75  worker    53.27   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.0 MB)  first_batch     7.93  first_frame    18.30  done   166.18  final_frame   169.11  worker    67.68   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.0 MB)  first_batch     1.69  first_frame     7.50  done    89.16  final_frame    91.82  worker    37.94   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.0 MB)  first_batch     1.80  first_frame     6.28  done    89.46  final_frame    92.61  worker    34.65   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.0 MB)  first_batch     1.62  first_frame     7.11  done    87.84  final_frame    90.36  worker    33.70   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.0 MB)  first_batch     1.65  first_frame     5.99  done    85.59  final_frame    88.27  worker    35.74   <fixtures>\tsubame-b1\100k
 private_bytes_end: 117.8 MB
 ```
 </details>
@@ -5177,8 +5172,8 @@ window_px: 3840x2076 at 168 dpi, paint path software (GPU starting)
 first_paint_ms (process start to first completed paint): 307.0
 private_bytes_first_paint: 39.3 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   104.07  first_frame   215.29  done   215.67  final_frame   219.53  worker     2.91   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (9.6 MB)  first_batch    31.22  first_frame    40.43  done   382.62  final_frame   397.64  worker   232.65   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   104.07  first_frame   215.29  done   215.67  final_frame   219.53  worker     2.91   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (9.6 MB)  first_batch    31.22  first_frame    40.43  done   382.62  final_frame   397.64  worker   232.65   <fixtures>\tsubame-b1\100k
 private_bytes_end: 113.0 MB
 ```
 </details>
@@ -5209,7 +5204,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24543
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -5379,7 +5374,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24501
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -5549,7 +5544,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24520
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -5713,7 +5708,7 @@ exit=0
 
 ## INT1 comparison (2026-11-18)
 
-Scroll paint p95, 4K details view, 6 runs each on rig, same fixtures:
+Scroll paint p95, 4K details view, 6 runs each on the benchmark machine, same fixtures:
 
 | Build | p95 median | Budget |
 |---|---|---|
@@ -5730,10 +5725,10 @@ after a working-set purge) miss their budgets; INT1 did not touch listing.
 
 ## PERF1 investigation — 2026-11-18, base e230e30 (incomplete)
 
-Rig, slots 2/3; same generated seed-20261117 100k fixture on G: NVMe,
+Benchmark machine; same generated seed-20261117 100k fixture on an NVMe drive,
 System32 for menus. Actual desktop 3840x2076 at 168 dpi, not earlier 192 dpi.
 Production allocator for cold timing; memdiag allocator only for menu attribution.
-Two Minecraft processes, 26 Docker containers; observed CPU 10–12% (not a
+Two Java server processes, 26 Docker containers; observed CPU 10–12% (not a
 continuous load recording). Six independent working-purge + tiny-folder startup
 + 100k navigation processes per build. Stale-report attempts were discarded.
 
@@ -5781,13 +5776,12 @@ Clip stress and native allocation-stack capture were not run. Gates unchanged.
 
 Retained changes: stress memdiag/checkpoints/configurable count, timing store
 CPU counter, stale-report removal in bench harness. No menu lifetime fix or
-speed optimization claimed. No U4-owned files edited. Local CCD1 check with
+speed optimization claimed. No U4-owned files edited. Check with
 memdiag passed; app 149 tests and core 13 tests passed. Existing dead-code
-warnings remain. Cleanup stops only owned slots and removes owned fixtures,
-extra worktrees and scratch files. No push/merge.
-## U4 (2026-11-18, commit `da7b850`, rig release build, `tools/bench-rig.ps1` full run)
+warnings remain.
+## U4 (2026-11-18, commit `da7b850`, release build on the benchmark machine, full run)
 
-Rig was loaded (8 Minecraft java, 25 containers, CPU 47% busy), so latency rows are noisy.
+The benchmark machine was loaded (8 Java server processes, 25 containers, CPU 47% busy), so latency rows are noisy.
 
 | Metric | Budget | Measured | |
 |---|---|---|---|
@@ -5799,16 +5793,16 @@ Rig was loaded (8 Minecraft java, 25 containers, CPU 47% busy), so latency rows 
 | Scroll paint p95, 4K | < 5.0 ms | 6.67 ms median of 10 (8.82 max) | see below |
 | Cold start to first frame | < 100 ms | 115 ms median | see below |
 
-Scroll p95 under load: the same run of the INT1 baseline `e230e30` gave a 4.73 ms median when the rig was
-quieter (21:34) and a 7.5 ms median when run again from the same binary at 21:55 (5 Minecraft, 22% busy).
+Scroll p95 under load: the same run of the INT1 baseline `e230e30` gave a 4.73 ms median when the machine was
+quieter (21:34) and a 7.5 ms median when run again from the same binary at 21:55 (5 Java server processes, 22% busy).
 U4 builds gave 6.0 to 6.7 ms in between (`815a440`, `e1de2ee`, `da7b850`). Nothing U4 added runs per
-row or per frame in the list (palette and Settings are `None` while closed), so the spread is rig load, not a
-measured regression; rerun on a quiet rig before relying on the figure.
+row or per frame in the list (palette and Settings are `None` while closed), so the spread is machine load, not a
+measured regression; rerun on a quiet machine before relying on the figure.
 
-## PERF2 — 2026-11-18, rig, base 63c27b7 vs main 29a1d3b vs perf2 (`4c37edb`)
+## PERF2 — 2026-11-18, benchmark machine, base 63c27b7 vs main 29a1d3b vs perf2 (`4c37edb`)
 
-Method: `tools/open-probe.ps1`, 6 runs per point (warm: repeats), release.
-Cold = ssh working purge, disk settle, launch `tiny;<idle>;1k;tiny;<dir>`
+Method: the open-a-folder probe (see `docs/bench.md`), 6 runs per point (warm: repeats), release.
+Cold = working purge from an elevated session, disk settle, launch `tiny;<idle>;1k;tiny;<dir>`
 (only the folder is cold; standby purge does not cool NTFS metadata, VHDX
 dismount is ~7x real disk). overhead = final_frame - worker (app's own cost).
 
@@ -5823,7 +5817,7 @@ Bisect (startup-overlapped method, median / p95 ms, 100k cold):
 | e230e30 | 75.6 / 175 | 423 / 500 | 155 | 257 |
 | 29a1d3b | 77.4 / 121 | 385 / 762 | 163 | 223 |
 
-No step commit; old method noise (startup tail + rig disk) dominates. Clean
+No step commit; old method noise (startup tail + disk) dominates. Clean
 method: overhead base 32 -> main 44 cold, 36 -> 51 warm; main store_cpu
 65-68 ms (merge per batch into sorted view) is the cause.
 
@@ -5859,7 +5853,7 @@ Ops (`<ops>`, perf2, UI work only, median ms; filter p95 max in brackets):
 
 Erase before saved-order fix: 100k -1 10.6 / 21.3.
 
-bench-rig perf2 (`-ColdMode none`): cold first paint 88.1, 100k first rows
+Benchmark harness run for perf2 (cold mode `none`): cold first paint 88.1, 100k first rows
 6.23 / 27.29, sorted 44.64 / 140.64, scroll p95 4.75, idle CPU 31 ms, private
 65.7 / 84.1 MB, exe 1728 KB: PASS. Leak gate private +5.45 / +4.82 / +5.43 %
 (handles, GDI, threads flat): FAIL; same-day main 29a1d3b +4.96 / +4.00 /
@@ -5871,13 +5865,13 @@ Open: 1M name sort from another column 166 ms and 1M filter keystroke ~40 ms
 while streaming; needs a 16 ms timer, U4 file); cold 1M budget is disk-bound
 (worker ~1.5 s).
 
-## 2026-11-18 23:13 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `5b1cafb`
+## 2026-11-18 23:13 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `5b1cafb`
 
 - Mode: full (10 cold-start runs, 10 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `main`, commit `5b1cafb`
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `main`, commit `5b1cafb`
 - Window: 3840x2076 at 168 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 8 Minecraft java process(es), 25 docker container(s), CPU 18% busy, servers loaded; rig up 0 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 8 Java server process(es), 25 docker container(s), CPU 18% busy, servers loaded; machine up 0 h
 - Cold-cache 100k open: measured (purge working ok)
   The purge also emptied the app's own pages: that process painted its first frame 467 ms after start (warm: 91 ms), so the cold row includes loading the app itself, not only the folder's metadata.
 - Idle: 16 ms of CPU over the first idle window, 0 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -5945,22 +5939,22 @@ stamp=2026-11-18T23:13:13
 commit=5b1cafb
 branch=main
 dirty=0
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=10
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (purge working ok)
 dpi=192
-rig_load=8 Minecraft java process(es), 25 docker container(s), CPU 18% busy, servers loaded; rig up 0 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=8 Java server process(es), 25 docker container(s), CPU 18% busy, servers loaded; machine up 0 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=3
-reports=G:\rig-test\tsubame-s3\bench-2026-11-18T23-13-13
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-18T23-13-13
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -5988,16 +5982,16 @@ window_px: 3840x2076 at 168 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 90.7
 private_bytes_first_paint: 64.8 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.8 MB)  first_batch    25.79  first_frame    67.37  done   106.30  final_frame   112.10  worker    42.49  store_cpu    11.07  final_sort     6.63  watch_start     0.08  frames   3   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.8 MB)  first_batch    11.68  first_frame    19.21  done    86.71  final_frame    92.30  worker    55.07  store_cpu     6.42  final_sort    24.00  watch_start     0.03  frames   5   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.8 MB)  first_batch    10.86  first_frame    19.20  done    71.85  final_frame    86.33  worker    54.57  store_cpu     7.51  final_sort     5.57  watch_start     0.01  frames   6   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.8 MB)  first_batch     4.70  first_frame    24.55  done    77.15  final_frame   132.83  worker    55.89  store_cpu     9.82  final_sort     5.47  watch_start     0.01  frames   5   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.8 MB)  first_batch     2.44  first_frame     7.93  done    46.37  final_frame    49.16  worker    37.17  store_cpu     6.07  final_sort     5.66  watch_start     0.01  frames  10   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.8 MB)  first_batch     1.27  first_frame     5.51  done    43.98  final_frame    46.69  worker    34.68  store_cpu     5.39  final_sort     5.95  watch_start     0.01  frames   9   G:\rig-bench\tsubame-b1\100k
-repeat 6  entries  100000 (9.8 MB)  first_batch     1.32  first_frame     8.33  done    44.08  final_frame    47.29  worker    34.66  store_cpu     5.60  final_sort     6.41  watch_start     0.01  frames   8   G:\rig-bench\tsubame-b1\100k
-repeat 7  entries  100000 (9.8 MB)  first_batch     1.90  first_frame     7.52  done    40.00  final_frame    42.71  worker    33.36  store_cpu     5.51  final_sort     4.86  watch_start     0.01  frames   8   G:\rig-bench\tsubame-b1\100k
-repeat 8  entries  100000 (9.8 MB)  first_batch     2.97  first_frame    10.96  done    40.33  final_frame    42.95  worker    34.00  store_cpu     5.60  final_sort     4.94  watch_start     0.01  frames   7   G:\rig-bench\tsubame-b1\100k
-repeat 9  entries  100000 (9.8 MB)  first_batch     2.92  first_frame     8.37  done    40.76  final_frame    43.46  worker    32.62  store_cpu     5.15  final_sort     5.25  watch_start     0.01  frames   8   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.8 MB)  first_batch    25.79  first_frame    67.37  done   106.30  final_frame   112.10  worker    42.49  store_cpu    11.07  final_sort     6.63  watch_start     0.08  frames   3   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.8 MB)  first_batch    11.68  first_frame    19.21  done    86.71  final_frame    92.30  worker    55.07  store_cpu     6.42  final_sort    24.00  watch_start     0.03  frames   5   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.8 MB)  first_batch    10.86  first_frame    19.20  done    71.85  final_frame    86.33  worker    54.57  store_cpu     7.51  final_sort     5.57  watch_start     0.01  frames   6   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.8 MB)  first_batch     4.70  first_frame    24.55  done    77.15  final_frame   132.83  worker    55.89  store_cpu     9.82  final_sort     5.47  watch_start     0.01  frames   5   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.8 MB)  first_batch     2.44  first_frame     7.93  done    46.37  final_frame    49.16  worker    37.17  store_cpu     6.07  final_sort     5.66  watch_start     0.01  frames  10   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.8 MB)  first_batch     1.27  first_frame     5.51  done    43.98  final_frame    46.69  worker    34.68  store_cpu     5.39  final_sort     5.95  watch_start     0.01  frames   9   <fixtures>\tsubame-b1\100k
+repeat 6  entries  100000 (9.8 MB)  first_batch     1.32  first_frame     8.33  done    44.08  final_frame    47.29  worker    34.66  store_cpu     5.60  final_sort     6.41  watch_start     0.01  frames   8   <fixtures>\tsubame-b1\100k
+repeat 7  entries  100000 (9.8 MB)  first_batch     1.90  first_frame     7.52  done    40.00  final_frame    42.71  worker    33.36  store_cpu     5.51  final_sort     4.86  watch_start     0.01  frames   8   <fixtures>\tsubame-b1\100k
+repeat 8  entries  100000 (9.8 MB)  first_batch     2.97  first_frame    10.96  done    40.33  final_frame    42.95  worker    34.00  store_cpu     5.60  final_sort     4.94  watch_start     0.01  frames   7   <fixtures>\tsubame-b1\100k
+repeat 9  entries  100000 (9.8 MB)  first_batch     2.92  first_frame     8.37  done    40.76  final_frame    43.46  worker    32.62  store_cpu     5.15  final_sort     5.25  watch_start     0.01  frames   8   <fixtures>\tsubame-b1\100k
 private_bytes_end: 140.7 MB
 ```
 </details>
@@ -6010,8 +6004,8 @@ window_px: 3840x2076 at 168 dpi, paint path software (GPU starting)
 first_paint_ms (process start to first completed paint): 466.7
 private_bytes_first_paint: 35.0 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   124.89  first_frame   311.43  done   311.67  final_frame   315.47  worker     4.55  store_cpu     0.02  final_sort     0.00  watch_start     0.23  frames   2   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (10.4 MB)  first_batch    38.38  first_frame    47.35  done   310.59  final_frame   315.97  worker   188.04  store_cpu    16.10  final_sort    90.38  watch_start     0.01  frames  12   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   124.89  first_frame   311.43  done   311.67  final_frame   315.47  worker     4.55  store_cpu     0.02  final_sort     0.00  watch_start     0.23  frames   2   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (10.4 MB)  first_batch    38.38  first_frame    47.35  done   310.59  final_frame   315.97  worker   188.04  store_cpu    16.10  final_sort    90.38  watch_start     0.01  frames  12   <fixtures>\tsubame-b1\100k
 private_bytes_end: 118.9 MB
 ```
 </details>
@@ -6042,7 +6036,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24823
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -6212,7 +6206,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24686
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -6382,7 +6376,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24428
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -6544,13 +6538,13 @@ exit=0
 ```
 </details>
 
-## 2026-11-19 00:29 — rig (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `cb13120`
+## 2026-11-19 00:29 — bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%), commit `cb13120`
 
 - Mode: full (10 cold-start runs, 10 scroll runs)
-- Build: release (lto, codegen-units=1, strip, panic=abort) on rig, branch `t3/fix-details-scroll-paint-p95`, commit `cb13120`
+- Build: release (lto, codegen-units=1, strip, panic=abort) on the bench machine, branch `t3/fix-details-scroll-paint-p95`, commit `cb13120`
 - Window: 3840x2076 at 168 dpi, paint path `hardware`
-- Fixtures: `G:\rig-bench\tsubame-b1\100k` (100,000 entries), `G:\rig-bench\tsubame-b1\gate` (204 folders, mixed sizes)
-- Cache: warm filesystem cache (no purge before these runs); rig load: 5 Minecraft java process(es), 25 docker container(s), CPU 12% busy, servers loaded; rig up 1 h
+- Fixtures: `<fixtures>\tsubame-b1\100k` (100,000 entries), `<fixtures>\tsubame-b1\gate` (204 folders, mixed sizes)
+- Cache: warm filesystem cache (no purge before these runs); machine load: 5 Java server process(es), 25 docker container(s), CPU 12% busy, servers loaded; machine up 1 h
 - Cold-cache 100k open: measured (3 runs: purge working from outside, app warmed up on small folders, only the cold 100k navigation timed)
   3 runs, one process each: purge, then the app warms up on small folders (and idles 3 s) before it opens the still cold 100k folder; the row times only that last navigation.
 - Idle: 0 ms of CPU over the first idle window, 31 ms over the second (the table uses the second); thread context switches: not measured (Get-Counter has no \Thread instances for this process)
@@ -6618,22 +6612,22 @@ stamp=2026-11-19T00:29:16
 commit=cb13120
 branch=t3/fix-details-scroll-paint-p95
 dirty=0
-machine=rig (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+machine=bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
 build=release (lto, codegen-units=1, strip, panic=abort)
 mode=full
 runs=10
 cache=warm filesystem cache (no purge before these runs)
 cold=measured (3 runs: purge working from outside, app warmed up on small folders, only the cold 100k navigation timed)
 dpi=192
-rig_load=5 Minecraft java process(es), 25 docker container(s), CPU 12% busy, servers loaded; rig up 1 h
-fixture_100k=G:\rig-bench\tsubame-b1\100k
-gate_fixture=G:\rig-bench\tsubame-b1\gate
+machine_load=5 Java server process(es), 25 docker container(s), CPU 12% busy, servers loaded; machine up 1 h
+fixture_100k=<fixtures>\tsubame-b1\100k
+gate_fixture=<fixtures>\tsubame-b1\gate
 gate_navs=10000
 gate_tabs=1000
 gate_runs=3
 slot=3
-reports=G:\rig-test\tsubame-s3\bench-2026-11-19T00-29-16
-notes=launched through a scheduled task in rig's interactive session; every number is the app's own report from that process
+reports=<reports>\bench-2026-11-19T00-29-16
+notes=launched through a scheduled task in the benchmark machine's interactive session; every number is the app's own report from that process
 ```
 </details>
 
@@ -6661,16 +6655,16 @@ window_px: 3840x2076 at 168 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 77.7
 private_bytes_first_paint: 28.1 MB
 all times in ms from the navigation event
-startup   entries  100000 (9.8 MB)  first_batch    21.14  first_frame    49.40  done    79.42  final_frame    81.74  worker    52.50  store_cpu    11.86  final_sort     7.51  watch_start     0.11  frames   3   G:\rig-bench\tsubame-b1\100k
-repeat 1  entries  100000 (9.8 MB)  first_batch     1.03  first_frame     5.52  done    51.22  final_frame    53.62  worker    42.57  store_cpu     6.28  final_sort     6.87  watch_start     0.01  frames   6   G:\rig-bench\tsubame-b1\100k
-repeat 2  entries  100000 (9.8 MB)  first_batch     4.56  first_frame    12.56  done    61.17  final_frame    64.77  worker    53.66  store_cpu     5.64  final_sort     6.54  watch_start     0.01  frames   9   G:\rig-bench\tsubame-b1\100k
-repeat 3  entries  100000 (9.8 MB)  first_batch     4.11  first_frame    11.06  done    59.03  final_frame    62.34  worker    48.60  store_cpu     7.13  final_sort     9.81  watch_start     0.01  frames   8   G:\rig-bench\tsubame-b1\100k
-repeat 4  entries  100000 (9.8 MB)  first_batch     1.43  first_frame    29.32  done    90.82  final_frame    93.74  worker    58.46  store_cpu     7.07  final_sort     8.15  watch_start     0.01  frames   9   G:\rig-bench\tsubame-b1\100k
-repeat 5  entries  100000 (9.8 MB)  first_batch     2.16  first_frame     7.03  done    45.86  final_frame    48.04  worker    38.77  store_cpu     6.63  final_sort     6.25  watch_start     0.01  frames  18   G:\rig-bench\tsubame-b1\100k
-repeat 6  entries  100000 (9.8 MB)  first_batch     2.72  first_frame     5.41  done    44.25  final_frame    45.85  worker    37.25  store_cpu     5.72  final_sort     6.23  watch_start     0.01  frames  21   G:\rig-bench\tsubame-b1\100k
-repeat 7  entries  100000 (9.8 MB)  first_batch     0.84  first_frame     3.40  done    42.50  final_frame    43.99  worker    34.77  store_cpu     5.15  final_sort     6.68  watch_start     0.01  frames  24   G:\rig-bench\tsubame-b1\100k
-repeat 8  entries  100000 (9.8 MB)  first_batch     1.08  first_frame     3.52  done    39.85  final_frame    41.58  worker    33.68  store_cpu     5.37  final_sort     5.86  watch_start     0.01  frames  22   G:\rig-bench\tsubame-b1\100k
-repeat 9  entries  100000 (9.8 MB)  first_batch     0.94  first_frame     3.30  done    53.39  final_frame    54.85  worker    46.46  store_cpu     5.73  final_sort     5.19  watch_start     0.01  frames  26   G:\rig-bench\tsubame-b1\100k
+startup   entries  100000 (9.8 MB)  first_batch    21.14  first_frame    49.40  done    79.42  final_frame    81.74  worker    52.50  store_cpu    11.86  final_sort     7.51  watch_start     0.11  frames   3   <fixtures>\tsubame-b1\100k
+repeat 1  entries  100000 (9.8 MB)  first_batch     1.03  first_frame     5.52  done    51.22  final_frame    53.62  worker    42.57  store_cpu     6.28  final_sort     6.87  watch_start     0.01  frames   6   <fixtures>\tsubame-b1\100k
+repeat 2  entries  100000 (9.8 MB)  first_batch     4.56  first_frame    12.56  done    61.17  final_frame    64.77  worker    53.66  store_cpu     5.64  final_sort     6.54  watch_start     0.01  frames   9   <fixtures>\tsubame-b1\100k
+repeat 3  entries  100000 (9.8 MB)  first_batch     4.11  first_frame    11.06  done    59.03  final_frame    62.34  worker    48.60  store_cpu     7.13  final_sort     9.81  watch_start     0.01  frames   8   <fixtures>\tsubame-b1\100k
+repeat 4  entries  100000 (9.8 MB)  first_batch     1.43  first_frame    29.32  done    90.82  final_frame    93.74  worker    58.46  store_cpu     7.07  final_sort     8.15  watch_start     0.01  frames   9   <fixtures>\tsubame-b1\100k
+repeat 5  entries  100000 (9.8 MB)  first_batch     2.16  first_frame     7.03  done    45.86  final_frame    48.04  worker    38.77  store_cpu     6.63  final_sort     6.25  watch_start     0.01  frames  18   <fixtures>\tsubame-b1\100k
+repeat 6  entries  100000 (9.8 MB)  first_batch     2.72  first_frame     5.41  done    44.25  final_frame    45.85  worker    37.25  store_cpu     5.72  final_sort     6.23  watch_start     0.01  frames  21   <fixtures>\tsubame-b1\100k
+repeat 7  entries  100000 (9.8 MB)  first_batch     0.84  first_frame     3.40  done    42.50  final_frame    43.99  worker    34.77  store_cpu     5.15  final_sort     6.68  watch_start     0.01  frames  24   <fixtures>\tsubame-b1\100k
+repeat 8  entries  100000 (9.8 MB)  first_batch     1.08  first_frame     3.52  done    39.85  final_frame    41.58  worker    33.68  store_cpu     5.37  final_sort     5.86  watch_start     0.01  frames  22   <fixtures>\tsubame-b1\100k
+repeat 9  entries  100000 (9.8 MB)  first_batch     0.94  first_frame     3.30  done    53.39  final_frame    54.85  worker    46.46  store_cpu     5.73  final_sort     5.19  watch_start     0.01  frames  26   <fixtures>\tsubame-b1\100k
 private_bytes_end: 99.8 MB
 ```
 </details>
@@ -6684,10 +6678,10 @@ window_px: 3840x2076 at 168 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 496.7
 private_bytes_first_paint: 17.4 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   258.75  first_frame   422.04  done   422.37  final_frame   423.80  worker     2.21  store_cpu     0.02  final_sort     0.00  watch_start     0.08  frames   2   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries    1004 (0.1 MB)  first_batch   167.02  first_frame   232.13  done   232.43  final_frame   233.83  worker    14.70  store_cpu     0.43  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\small\0001
-first     entries      24 (0.1 MB)  first_batch    14.63  first_frame    16.23  done    16.36  final_frame    18.02  worker     0.26  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (8.1 MB)  first_batch    10.67  first_frame    13.58  done   152.74  final_frame   154.46  worker   142.69  store_cpu     7.78  final_sort     6.92  watch_start     0.01  frames  40   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   258.75  first_frame   422.04  done   422.37  final_frame   423.80  worker     2.21  store_cpu     0.02  final_sort     0.00  watch_start     0.08  frames   2   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries    1004 (0.1 MB)  first_batch   167.02  first_frame   232.13  done   232.43  final_frame   233.83  worker    14.70  store_cpu     0.43  final_sort     0.00  watch_start     0.01  frames   3   <fixtures>\tsubame-b1\gate\small\0001
+first     entries      24 (0.1 MB)  first_batch    14.63  first_frame    16.23  done    16.36  final_frame    18.02  worker     0.26  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (8.1 MB)  first_batch    10.67  first_frame    13.58  done   152.74  final_frame   154.46  worker   142.69  store_cpu     7.78  final_sort     6.92  watch_start     0.01  frames  40   <fixtures>\tsubame-b1\100k
 private_bytes_end: 85.4 MB
 
 # --- cold-timing-02.txt ---
@@ -6696,10 +6690,10 @@ window_px: 3840x2076 at 168 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 304.2
 private_bytes_first_paint: 17.2 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch    98.12  first_frame   237.68  done   237.99  final_frame   239.39  worker     2.66  store_cpu     0.02  final_sort     0.00  watch_start     0.11  frames   2   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries    1004 (0.1 MB)  first_batch    29.75  first_frame    36.25  done    37.00  final_frame    39.91  worker     3.79  store_cpu     0.61  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\small\0001
-first     entries      24 (0.1 MB)  first_batch     2.05  first_frame     4.44  done     4.51  final_frame     6.02  worker     0.31  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (8.1 MB)  first_batch    10.95  first_frame    14.73  done   167.28  final_frame   168.98  worker   149.33  store_cpu     8.12  final_sort     8.17  watch_start     0.01  frames  40   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch    98.12  first_frame   237.68  done   237.99  final_frame   239.39  worker     2.66  store_cpu     0.02  final_sort     0.00  watch_start     0.11  frames   2   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries    1004 (0.1 MB)  first_batch    29.75  first_frame    36.25  done    37.00  final_frame    39.91  worker     3.79  store_cpu     0.61  final_sort     0.00  watch_start     0.01  frames   3   <fixtures>\tsubame-b1\gate\small\0001
+first     entries      24 (0.1 MB)  first_batch     2.05  first_frame     4.44  done     4.51  final_frame     6.02  worker     0.31  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (8.1 MB)  first_batch    10.95  first_frame    14.73  done   167.28  final_frame   168.98  worker   149.33  store_cpu     8.12  final_sort     8.17  watch_start     0.01  frames  40   <fixtures>\tsubame-b1\100k
 private_bytes_end: 84.0 MB
 
 # --- cold-timing-03.txt ---
@@ -6708,10 +6702,10 @@ window_px: 3840x2076 at 168 dpi, paint path hardware
 first_paint_ms (process start to first completed paint): 439.9
 private_bytes_first_paint: 17.3 MB
 all times in ms from the navigation event
-startup   entries      24 (0.0 MB)  first_batch   119.93  first_frame   246.24  done   246.45  final_frame   247.86  worker     4.32  store_cpu     0.03  final_sort     0.00  watch_start     0.09  frames   2   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries    1004 (0.1 MB)  first_batch    36.71  first_frame    43.12  done    43.76  final_frame    66.44  worker     6.28  store_cpu     0.65  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\small\0001
-first     entries      24 (0.1 MB)  first_batch     1.16  first_frame     2.67  done     2.75  final_frame     3.83  worker     0.30  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   G:\rig-bench\tsubame-b1\gate\tiny\0001
-first     entries  100000 (8.1 MB)  first_batch    10.92  first_frame    13.73  done   219.99  final_frame   221.55  worker   214.18  store_cpu     7.95  final_sort     5.19  watch_start     0.01  frames  41   G:\rig-bench\tsubame-b1\100k
+startup   entries      24 (0.0 MB)  first_batch   119.93  first_frame   246.24  done   246.45  final_frame   247.86  worker     4.32  store_cpu     0.03  final_sort     0.00  watch_start     0.09  frames   2   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries    1004 (0.1 MB)  first_batch    36.71  first_frame    43.12  done    43.76  final_frame    66.44  worker     6.28  store_cpu     0.65  final_sort     0.00  watch_start     0.01  frames   3   <fixtures>\tsubame-b1\gate\small\0001
+first     entries      24 (0.1 MB)  first_batch     1.16  first_frame     2.67  done     2.75  final_frame     3.83  worker     0.30  store_cpu     0.01  final_sort     0.00  watch_start     0.01  frames   3   <fixtures>\tsubame-b1\gate\tiny\0001
+first     entries  100000 (8.1 MB)  first_batch    10.92  first_frame    13.73  done   219.99  final_frame   221.55  worker   214.18  store_cpu     7.95  final_sort     5.19  watch_start     0.01  frames  41   <fixtures>\tsubame-b1\100k
 private_bytes_end: 85.1 MB
 ```
 </details>
@@ -6742,7 +6736,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24594
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -6912,7 +6906,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24619
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -7082,7 +7076,7 @@ window_dpi=168
 paint_path=hardware
 start_paint_path=hardware
 paints=24584
-fixture=G:\rig-bench\tsubame-b1\gate
+fixture=<fixtures>\tsubame-b1\gate
 folders=204
 largest_folder_entries=10004
 navigations=10000
@@ -7246,22 +7240,22 @@ exit=0
 
 ## Correction - stale-exe sizes in the U4 and 5b1cafb rows (2026-11-19)
 
-Two `Main exe` figures above measured the wrong binary. `tools/push-to-rig.ps1` mirrored the source
+Two `Main exe` figures above measured the wrong binary. The harness mirrored the source
 with `robocopy`, which preserves each file's LastWriteTime; cargo's fingerprints are mtime-based, so
-in a warm rig slot a synced commit whose files are older than the slot's artifacts made cargo skip
+in a warm build directory a synced commit whose files are older than the build directory's artifacts made cargo skip
 both the rebuild and the relink, and the previous exe was copied into the run dir. Evidence from the
-investigation: five consecutive `-BuildOnRig` runs shipped the same 2,660,352 B exe, one attempt
+investigation: five consecutive runs shipped the same 2,660,352 B exe, one attempt
 failed with 51 compile errors from old sources against newer rlibs, and the exe behind the
 `1742 KB` row was the PERF2-line `11fe5f3` binary (1,783,808 B), not a `5b1cafb` build.
 
-`push-to-rig.ps1` now sets LastWriteTime = now on exactly the files a run copied (unchanged files
+The harness now sets LastWriteTime = now on exactly the files a run copied (unchanged files
 keep theirs, so warm incremental builds stay warm), puts those mtimes back after a successful build
 (so the next sync copies nothing), and refuses to ship an exe that the build did not write; it
 prints the shipped exe's size, SHA-256 prefix and commit. Sections now also carry
 `- Exe: <bytes> B (<KB>), SHA-256 ...`, and `tsubame-bench app` prints a WARNING when the exe size
 moves more than 10% against the previous row (the 6 MB budget still decides PASS/FAIL).
 
-Real release sizes (`-BuildOnRig -Profile release` on rig; rebuilding identical source gives the same
+Real release sizes (release profile on the benchmark machine; rebuilding identical source gives the same
 size, but the PE carries a link timestamp, so two builds of the same commit do not have the same
 sha256 - which is why the staleness guard keys on mtime, not on the hash):
 
