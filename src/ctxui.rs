@@ -13,9 +13,9 @@
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 use tsubame_config::menu::{MenuEntry, Target as Kind};
-use tsubame_ui::widgets::menu::menu;
+use tsubame_ui::widgets::menu::{SubLoad, menu};
 use tsubame_ui::{Canvas, Id, MenuRow, MenuSource, MenuState, MenuStyle, Pt, Rect, RowIcon, RowKind, Ui};
-use tsubame_win::shell::ctxmodel::{self, IconCache, ItemKind, ItemSource, LoadState, MenuBatch, MenuItem, MenuModel, Part, Route, flag};
+use tsubame_win::shell::ctxmodel::{self, IconCache, ItemKind, ItemSource, LoadState, MenuBatch, MenuItem, MenuModel, Part, Route, SubLoads, SubState, flag};
 use tsubame_win::shell::{CtxHandle, CtxOpts, Pool, Request};
 
 pub const ID_CTX: Id = Id::new("ctxmenu");
@@ -102,9 +102,18 @@ pub struct CtxMenu {
     pub open: bool,
     input_at: Instant,
     asked_at: Instant,
-    /// input -> first painted frame / -> first frame with every shell item
+    /// input -> first painted frame / -> first frame with the shell's top
+    /// level / -> first frame with every shell item the worker sends up
+    /// front (lazy: the top level; `TSUBAME_CTX_EAGER=1`: the whole tree)
     pub first_paint: Option<Duration>,
+    pub top_items: Option<Duration>,
     pub all_items: Option<Duration>,
+    /// lazy submenus asked of the worker (CM6)
+    subs: SubLoads,
+    /// the last lazy submenu: request to answer (ms resolution)
+    pub sub_latency: Option<Duration>,
+    /// the menu's clock (submenu hover timing, slow submenus)
+    clock: Instant,
     pub picked: Option<Pick>,
     pub retry: bool,
     /// an app row that runs a shell verb (Properties) picked before the
@@ -203,7 +212,11 @@ impl CtxMenu {
             input_at: take_input(),
             asked_at: Instant::now(),
             first_paint: None,
+            top_items: None,
             all_items: None,
+            subs: SubLoads::default(),
+            sub_latency: None,
+            clock: Instant::now(),
             picked: None,
             retry: false,
             pending_verb: None,
@@ -220,7 +233,17 @@ impl CtxMenu {
 
     fn submit(&mut self, pool: &mut Pool) {
         let handle = CtxHandle::new();
-        let opts = CtxOpts { background: self.target.background, extended: self.target.extended, icon_px: self.icon_px, debug_delay_ms: env_u32("TSUBAME_CTX_DELAY_MS"), ..Default::default() };
+        let opts = CtxOpts {
+            background: self.target.background,
+            extended: self.target.extended,
+            icon_px: self.icon_px,
+            // CM6: submenus are filled when they open; `TSUBAME_CTX_EAGER=1`
+            // walks the whole tree up front (the CM2 behaviour, for A/B runs)
+            submenus: env_u32("TSUBAME_CTX_EAGER") == 1,
+            debug_delay_ms: env_u32("TSUBAME_CTX_DELAY_MS"),
+            debug_sub_delay_ms: env_u32("TSUBAME_CTX_SUB_DELAY_MS"),
+            ..Default::default()
+        };
         let paths = if self.target.background { vec![self.target.folder.clone()] } else { self.target.paths.clone() };
         self.ticket = pool.submit(Request::ctx(paths, self.generation, opts, &handle)).id;
         self.handle = Some(handle);
@@ -235,6 +258,9 @@ impl CtxMenu {
         // an id retained from the previous session.
         self.handle = None;
         self.model = MenuModel::new(self.generation, self.model.tsubame.clone(), self.model.user.clone());
+        // submenu tokens belong to the old worker session too
+        self.subs.clear();
+        self.top_items = None;
         self.all_items = None;
         self.input_at = Instant::now();
         self.dirty = true;
@@ -264,6 +290,11 @@ impl CtxMenu {
                         self.invoke_result = Some(Err(error.clone()));
                     }
                 }
+                if let Part::Submenu { sub, .. } = part
+                    && let Some(at) = self.subs.done(sub)
+                {
+                    self.sub_latency = Some(Duration::from_millis(self.now_ms().saturating_sub(at)));
+                }
                 let native = matches!(part, Part::Native(_));
                 self.model.apply(MenuBatch { part, ..b });
                 self.dirty = true;
@@ -281,6 +312,9 @@ impl CtxMenu {
         self.model.apply(MenuBatch { generation: g, part: Part::Failed("the shell did not answer".into()), timing: [0; 3] });
         self.handle = None;
         self.pending_verb = None;
+        // the worker is gone: its command ids and submenu tokens are dead
+        // (open submenus show the failure row, Retry asks a new worker)
+        self.model.native.clear();
         self.dirty = true;
     }
 
@@ -318,6 +352,36 @@ impl CtxMenu {
         self.open && !self.model.complete && self.shown() != LoadState::Failed
     }
 
+    /// Stress harness: asks for the first lazy submenu, as a hover would.
+    /// True when a request went out.
+    pub fn expand_first(&mut self) -> bool {
+        let now = self.now_ms();
+        let Some(sub) = lazy_subs(&self.model.native).first().copied() else { return false };
+        match &self.handle {
+            Some(h) if self.subs.want(sub, now) => {
+                h.expand(sub);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A lazy submenu is asked for and not answered.
+    pub fn sub_pending(&self) -> bool {
+        self.subs.pending()
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.clock.elapsed().as_millis() as u64
+    }
+
+    /// The menu's tick timer must run: the loading line, a submenu that is
+    /// loading (until it turns into the failure row) or a hover delay.
+    /// False while the menu just sits there: no wake-ups.
+    pub fn ticking(&self) -> bool {
+        self.open && (self.loading() || self.subs.loading(self.now_ms()) || self.state.deadline().is_some())
+    }
+
     /// Draws the menu (after every other widget).
     pub fn paint(&mut self, ui: &mut Ui, g: &mut dyn Canvas, bounds: Rect) {
         if !self.open {
@@ -330,17 +394,31 @@ impl CtxMenu {
         let loading = self.loading();
         let phase = loading.then(|| (self.asked_at.elapsed().as_millis() % SPIN_MS) as f32 / SPIN_MS as f32);
         let alt = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x12) } < 0;
-        let style = MenuStyle { bounds, loading: phase, alt };
-        let src = Rows { items: &self.items, icons: &self.model.icons, failed: self.shown() == LoadState::Failed, paste_ok: self.paste_ok };
+        let now = self.now_ms();
+        let style = MenuStyle { bounds, loading: phase, alt, now_ms: now };
+        let failed = self.shown() == LoadState::Failed;
+        let src = Rows { items: &self.items, icons: &self.model.icons, failed, paste_ok: self.paste_ok, subs: &self.subs, now, can_load: self.handle.is_some() };
         let r = menu(ui, g, ID_CTX, &mut self.state, &src, &style);
         if let Some(path) = r.picked {
             self.picked = src.pick(&path);
         }
+        // CM6: ask the worker for the submenus the menu shows or is about to
+        // open; while filtering, for every submenu (their rows are searched)
+        let want = if self.state.filtering() { lazy_subs(&self.items) } else { self.state.wanted().iter().filter_map(|p| src.item_at(p)).filter(|it| ctxmodel::is_lazy(it)).map(|it| it.sub).collect() };
         if r.retry {
             self.retry = true;
         }
         if r.closed {
             self.open = false;
+        }
+        if self.open
+            && let Some(h) = &self.handle
+        {
+            for sub in want {
+                if self.subs.want(sub, now) {
+                    h.expand(sub);
+                }
+            }
         }
     }
 
@@ -348,6 +426,9 @@ impl CtxMenu {
     pub fn presented(&mut self) {
         if !self.open { return; }
         self.first_paint.get_or_insert_with(|| self.input_at.elapsed());
+        if self.model.state == LoadState::Ready {
+            self.top_items.get_or_insert_with(|| self.input_at.elapsed());
+        }
         if self.model.complete && self.model.error.is_none() {
             self.all_items.get_or_insert_with(|| self.input_at.elapsed());
         }
@@ -356,7 +437,7 @@ impl CtxMenu {
     /// One line for the log / status: the menu's timings.
     pub fn timing_line(&self) -> String {
         let ms = |d: Option<Duration>| d.map_or("-".to_string(), |d| format!("{:.1}", d.as_secs_f64() * 1000.0));
-        format!("own menu: first paint {} ms, all items {} ms, {} rows", ms(self.first_paint), ms(self.all_items), self.items.len())
+        format!("own menu: first paint {} ms, top level {} ms, all items {} ms, {} rows", ms(self.first_paint), ms(self.top_items), ms(self.all_items), self.items.len())
     }
 }
 
@@ -431,7 +512,9 @@ pub fn glyph(action: &str, verb: Option<&str>) -> Option<char> {
         "tab.open-selected" => '\u{E8A7}',
         "x.other-pane" => '\u{E90D}',
         "file.cut" => '\u{E8C6}',
-        "file.copy" | "x.copy-name" => '\u{E8C8}',
+        "file.copy" => '\u{E8C8}',
+        // a tag: the name, not the file (Copy keeps the two-sheet glyph)
+        "x.copy-name" => '\u{E8EC}',
         "file.paste" => '\u{E77F}',
         "file.copy-path" => '\u{E71B}',
         "file.rename" => '\u{E8AC}',
@@ -469,6 +552,24 @@ pub struct Rows<'a> {
     /// add the failure row with Retry
     pub failed: bool,
     pub paste_ok: bool,
+    /// lazy submenus asked of the worker, and the menu's clock
+    pub subs: &'a SubLoads,
+    pub now: u64,
+    /// a worker holds the menu (false: lazy submenus cannot load)
+    pub can_load: bool,
+}
+
+/// Every lazy submenu's token in `items` (the filter searches them all).
+pub fn lazy_subs(items: &[MenuItem]) -> Vec<u32> {
+    let mut v = Vec::new();
+    let mut stack: Vec<&MenuItem> = items.iter().collect();
+    while let Some(it) = stack.pop() {
+        if ctxmodel::is_lazy(it) {
+            v.push(it.sub);
+        }
+        stack.extend(it.children.iter());
+    }
+    v
 }
 
 impl Rows<'_> {
@@ -478,6 +579,12 @@ impl Rows<'_> {
             level = &level.iter().find(|it| it.kind == ItemKind::Submenu && item_key(it) == k)?.children;
         }
         Some(level)
+    }
+
+    /// The item at `path` (row keys from the top).
+    pub fn item_at(&self, path: &[u64]) -> Option<&MenuItem> {
+        let (&last, up) = path.split_last()?;
+        self.level(up)?.iter().find(|it| item_key(it) == last)
     }
 
     /// The pick at `path` (row keys from the top).
@@ -538,6 +645,22 @@ impl MenuSource for Rows<'_> {
     fn icon(&self, key: u64) -> Option<(u32, u32, &[u32])> {
         self.icons.peek(key).map(|b| (b.w, b.h, &b.px[..]))
     }
+    fn sub_state(&self, path: &[u64]) -> SubLoad {
+        match self.item_at(path) {
+            Some(it) if ctxmodel::is_lazy(it) => sub_load(self.can_load, self.subs.state(it.sub, self.now)),
+            _ => SubLoad::Ready,
+        }
+    }
+}
+
+/// An empty lazy submenu: "Loading…" until it is asked and answered, the
+/// failure row once it is slow or nobody can answer.
+pub fn sub_load(can_load: bool, s: SubState) -> SubLoad {
+    match s {
+        _ if !can_load => SubLoad::Failed,
+        SubState::Slow => SubLoad::Failed,
+        SubState::Idle | SubState::Loading => SubLoad::Loading,
+    }
 }
 
 #[cfg(test)]
@@ -567,7 +690,7 @@ mod tests {
         let mut c = CtxMenu {
             generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), entries: vec![],
             handle: None, ticket: 0, state: MenuState::default(), open: false,
-            input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, all_items: None,
+            input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: Some("properties".into()), invoked: false, invoke_result: None,
             items: vec![], dirty: false, paste_ok: false, icon_px: 16,
         };
@@ -620,7 +743,8 @@ mod tests {
         model.native = native;
         let items = model.rows(&e);
         let icons = IconCache::new(4);
-        let src = Rows { items: &items, icons: &icons, failed: true, paste_ok: false };
+        let subs = SubLoads::default();
+        let src = Rows { items: &items, icons: &icons, failed: true, paste_ok: false, subs: &subs, now: 0, can_load: true };
         let mut out = Vec::new();
         src.rows(&[], &mut out);
         assert_eq!(out[0].label, "Open", "no app-name caption before actions");
@@ -652,5 +776,39 @@ mod tests {
         assert_eq!(item_key(&a), item_key(&b));
         let c = MenuItem { id: 6, ..a.clone() };
         assert_ne!(item_key(&a), item_key(&c));
+    }
+
+    #[test]
+    fn copy_and_copy_name_have_different_glyphs() {
+        assert_ne!(glyph("file.copy", None), glyph("x.copy-name", None));
+        assert!(glyph("x.copy-name", None).is_some());
+    }
+
+    #[test]
+    fn lazy_submenus_say_loading_then_fail_when_slow_or_orphaned() {
+        let lazy = MenuItem { kind: ItemKind::Submenu, flags: flag::LAZY, sub: 3, ..MenuItem::command(ItemSource::Native, "Send to", "") };
+        let mut nested = MenuItem { kind: ItemKind::Submenu, ..MenuItem::command(ItemSource::Native, "7-Zip", "") };
+        nested.children.push(MenuItem { kind: ItemKind::Submenu, flags: flag::LAZY, sub: 4, ..MenuItem::command(ItemSource::Native, "More", "") });
+        let items = vec![lazy.clone(), nested];
+        let mut got = lazy_subs(&items);
+        got.sort();
+        assert_eq!(got, [3, 4], "the filter asks for every lazy submenu");
+        let icons = IconCache::new(4);
+        let mut subs = SubLoads::default();
+        let path = [item_key(&lazy)];
+        let rows = |subs: &SubLoads, now: u64, can_load: bool| Rows { items: &items, icons: &icons, failed: false, paste_ok: true, subs, now, can_load }.sub_state(&path);
+        assert_eq!(rows(&subs, 0, true), SubLoad::Loading, "about to be asked");
+        assert!(subs.want(3, 0));
+        assert_eq!(rows(&subs, ctxmodel::SLOW_MS - 1, true), SubLoad::Loading);
+        assert_eq!(rows(&subs, ctxmodel::SLOW_MS, true), SubLoad::Failed, "a hung handler: Retry");
+        assert_eq!(rows(&subs, 0, false), SubLoad::Failed, "the worker is gone");
+        subs.done(3);
+        let filled = Rows { items: &items, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true };
+        assert_eq!(filled.sub_state(&[12345]), SubLoad::Ready, "unknown paths are not loading");
+        let mut eager = lazy.clone();
+        eager.flags = 0;
+        let items2 = [eager.clone()];
+        let r2 = Rows { items: &items2, icons: &icons, failed: false, paste_ok: true, subs: &subs, now: 0, can_load: true };
+        assert_eq!(r2.sub_state(&[item_key(&eager)]), SubLoad::Ready, "a filled submenu is ready (even if empty)");
     }
 }
