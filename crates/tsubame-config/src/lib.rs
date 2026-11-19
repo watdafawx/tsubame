@@ -491,14 +491,30 @@ impl ConfigFile {
             Ok(t) => t,
             Err(e) => return recover(path, len, format!("not valid UTF-8: {e}")),
         };
+        // Problems found while loading that did not make the file unusable.
+        let mut problems: Vec<String> = Vec::new();
         let mut table: toml::Table = match toml::from_str(&text) {
             Ok(t) => t,
-            Err(e) => return recover(path, len, format!("invalid TOML: {e}")),
+            Err(e) => {
+                let why = toml_error_text(&text, &e);
+                // The usual hand-written mistake: a Windows path in a "basic" string
+                // (`path = "D:\work"`). Fix the escapes and carry on.
+                let fixed = repair_windows_paths(&text).and_then(|f| toml::from_str::<toml::Table>(&f).ok());
+                match fixed {
+                    Some(t) => {
+                        problems.push(format!("{why} (backslashes in a quoted string were read as literal; use 'D:\\path' in single quotes or \"D:\\\\path\")"));
+                        t
+                    }
+                    None => return recover(path, len, format!("invalid TOML: {why}")),
+                }
+            }
         };
         let file_version = table.get("version").and_then(|v| v.as_integer()).unwrap_or(VERSION as i64);
         if file_version > VERSION as i64 {
             // best effort: read what we understand, never write it back
-            let config = table.clone().try_into::<Config>().unwrap_or_default();
+            let mut best = table.clone();
+            prune_invalid(&mut best, &text);
+            let config = best.try_into::<Config>().unwrap_or_default();
             return make(ConfigFile { config, origin: table }, LoadStatus::Newer { version: file_version as u32 }, len);
         }
         if file_version < VERSION as i64 {
@@ -506,10 +522,26 @@ impl ConfigFile {
             let to = migrate(&mut table, from, MIGRATIONS);
             table.insert("version".to_string(), toml::Value::Integer(to as i64));
         }
-        match table.clone().try_into::<Config>() {
-            Ok(config) => make(ConfigFile { config, origin: table }, LoadStatus::Loaded, len),
-            Err(e) => recover(path, len, format!("invalid config value: {e}")),
+        if let Err(e) = table.clone().try_into::<Config>() {
+            // A wrong-shaped value must not cost the user the rest of the file:
+            // drop just the failing keys (they use their defaults), keep the
+            // original as `.bad`, and say which key and line failed.
+            let dropped = prune_invalid(&mut table, &text);
+            if dropped.is_empty() || table.clone().try_into::<Config>().is_err() {
+                return recover(path, len, format!("invalid config value: {e}"));
+            }
+            problems.extend(dropped);
         }
+        let config = match table.clone().try_into::<Config>() {
+            Ok(c) => c,
+            Err(e) => return recover(path, len, format!("invalid config value: {e}")),
+        };
+        if problems.is_empty() {
+            return make(ConfigFile { config, origin: table }, LoadStatus::Loaded, len);
+        }
+        let backup = corrupt_path(path);
+        let _ = fs::copy(path, &backup);
+        make(ConfigFile { config, origin: table }, LoadStatus::Partial { backup, problems }, len)
     }
 
     /// The file contents: the typed config first, then every key this version
@@ -596,6 +628,11 @@ pub enum LoadStatus {
     Recovered { backup: PathBuf, error: String },
     /// written by a newer Tsubame: parsed best effort, do not save over it
     Newer { version: u32 },
+    /// parsed, but some keys were wrong (a wrong type, a bad escape): the valid
+    /// settings are kept, the failing keys use their defaults, and the original
+    /// text was copied to `backup`. Each entry of `problems` names the key and
+    /// line. The next save writes a clean file.
+    Partial { backup: PathBuf, problems: Vec<String> },
     /// could not even be read (permissions, a directory in the way)
     Failed(String),
 }
@@ -610,6 +647,7 @@ impl LoadStatus {
             LoadStatus::Recovered { backup, error } => Some(format!("Config was unreadable ({error}); defaults used. The old file is {}.", backup.display())),
             LoadStatus::Failed(e) => Some(format!("Config could not be read: {e}")),
             LoadStatus::Newer { version } => Some(format!("Config schema {version} is newer than this build; it will not be overwritten.")),
+            LoadStatus::Partial { backup, problems } => Some(format!("Config has problems ({}); the other settings were kept and the bad ones use defaults. The original file is {}.", problems.join("; "), backup.display())),
             LoadStatus::Loaded | LoadStatus::Missing => None,
         }
     }
@@ -623,6 +661,220 @@ pub struct Loaded<T> {
     pub path: PathBuf,
     /// bytes read (0 when missing)
     pub bytes: usize,
+}
+
+/// `line 12, column 9: invalid escape sequence` for a TOML syntax error.
+fn toml_error_text(text: &str, e: &toml::de::Error) -> String {
+    match e.span() {
+        Some(span) => {
+            let (line, col) = line_col(text, span.start);
+            format!("line {line}, column {col}: {}", e.message())
+        }
+        None => e.message().to_string(),
+    }
+}
+
+/// 1-based line and column of a byte offset.
+fn line_col(text: &str, offset: usize) -> (usize, usize) {
+    let end = offset.min(text.len());
+    let before = text.get(..end).unwrap_or("");
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    (line, col)
+}
+
+/// Doubles every backslash inside a single-line `"..."` string that is not a
+/// valid TOML escape, so `path = "D:\work"` reads as `D:\work`. `None` when
+/// nothing needed fixing. Multi-line strings, literal `'...'` strings and
+/// comments are left alone.
+fn repair_windows_paths(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut changed = false;
+    for line in text.split_inclusive('\n') {
+        if line.contains("\"\"\"") || line.contains("'''") {
+            out.push_str(line);
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        let (mut in_basic, mut in_literal) = (false, false);
+        while i < chars.len() {
+            let c = chars[i];
+            if in_basic {
+                if c == '\\' {
+                    let next = chars.get(i + 1).copied();
+                    let hex = |from: usize, n: usize| chars.get(from..from + n).is_some_and(|s| s.iter().all(|h| h.is_ascii_hexdigit()));
+                    let valid = match next {
+                        Some('b' | 't' | 'n' | 'f' | 'r' | 'e' | '"' | '\\') => true,
+                        Some('x') => hex(i + 2, 2),
+                        Some('u') => hex(i + 2, 4),
+                        Some('U') => hex(i + 2, 8),
+                        _ => false,
+                    };
+                    if valid {
+                        out.push(c);
+                        out.push(next.unwrap_or('\\'));
+                        i += 2;
+                        continue;
+                    }
+                    out.push_str("\\\\");
+                    changed = true;
+                    i += 1;
+                    continue;
+                }
+                if c == '"' {
+                    in_basic = false;
+                }
+            } else if in_literal {
+                if c == '\'' {
+                    in_literal = false;
+                }
+            } else if c == '#' {
+                out.extend(&chars[i..]);
+                break;
+            } else if c == '"' {
+                in_basic = true;
+            } else if c == '\'' {
+                in_literal = true;
+            }
+            out.push(c);
+            i += 1;
+        }
+    }
+    changed.then_some(out)
+}
+
+/// Removes every value that stops the table from deserializing as [`Config`]
+/// (finest granularity first: a bad array element, then a key, then a
+/// section). Returns one `key (line N): reason` per removed value.
+fn prune_invalid(table: &mut toml::Table, text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if table.clone().try_into::<Config>().is_ok() {
+        return out;
+    }
+    let keys: Vec<String> = table.keys().cloned().collect();
+    for k in keys {
+        let mut path = vec![k.clone()];
+        let Some(v) = table.get_mut(&k) else { continue };
+        if let Some(err) = probe(&path, v) {
+            if prune_value(&mut path, v, err, text, &mut out) {
+                table.remove(&k);
+            }
+        }
+    }
+    out
+}
+
+/// The deserialize error when `v` sits at `path` in an otherwise empty config.
+fn probe(path: &[String], v: &toml::Value) -> Option<String> {
+    let mut cur = v.clone();
+    for seg in path.iter().rev() {
+        let mut t = toml::Table::new();
+        t.insert(seg.clone(), cur);
+        cur = toml::Value::Table(t);
+    }
+    match cur {
+        toml::Value::Table(t) => t.try_into::<Config>().err().map(|e| e.message().to_string()),
+        _ => None,
+    }
+}
+
+/// `v` fails at `path`: removes the failing parts inside it. `true` = remove
+/// `v` itself (it fails as a whole, or is a leaf).
+fn prune_value(path: &mut Vec<String>, v: &mut toml::Value, err: String, text: &str, out: &mut Vec<String>) -> bool {
+    let note = |path: &[String], index: Option<usize>, err: &str, out: &mut Vec<String>| {
+        let mut name = path.join(".");
+        if let Some(i) = index {
+            name.push_str(&format!("[{i}]"));
+        }
+        match find_key_line(text, path, index) {
+            Some(l) => out.push(format!("{name} (line {l}): {err}")),
+            None => out.push(format!("{name}: {err}")),
+        }
+    };
+    match v {
+        toml::Value::Table(t) => {
+            let keys: Vec<String> = t.keys().cloned().collect();
+            let before = out.len();
+            for k in keys {
+                path.push(k.clone());
+                if let Some(child) = t.get_mut(&k) {
+                    if let Some(e) = probe(path, child) {
+                        if prune_value(path, child, e, text, out) {
+                            t.remove(&k);
+                        }
+                    }
+                }
+                path.pop();
+            }
+            if out.len() == before {
+                note(path, None, &err, out);
+                return true;
+            }
+            false
+        }
+        toml::Value::Array(a) => {
+            let before = out.len();
+            let mut i = 0;
+            let mut index = 0;
+            while i < a.len() {
+                let one = toml::Value::Array(vec![a[i].clone()]);
+                match probe(path, &one) {
+                    Some(e) => {
+                        note(path, Some(index), &e, out);
+                        a.remove(i);
+                    }
+                    None => i += 1,
+                }
+                index += 1;
+            }
+            if out.len() == before {
+                note(path, None, &err, out);
+                return true;
+            }
+            false
+        }
+        _ => {
+            note(path, None, &err, out);
+            true
+        }
+    }
+}
+
+/// 1-based line of the key at `path` (and the `index`th `[[table]]` entry),
+/// found by scanning the text. Best effort: `None` when it cannot be placed.
+fn find_key_line(text: &str, path: &[String], index: Option<usize>) -> Option<usize> {
+    let mut header = String::new();
+    let mut seen = 0usize; // `[[header]]` entries seen for the target
+    let full = path.join(".");
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if let Some(h) = line.strip_prefix("[[").and_then(|l| l.split("]]").next()) {
+            header = h.trim().to_string();
+            if header == full {
+                if index.is_none_or(|i| i == seen) {
+                    return Some(n + 1);
+                }
+                seen += 1;
+            }
+            continue;
+        }
+        if let Some(h) = line.strip_prefix('[').and_then(|l| l.split(']').next()) {
+            header = h.trim().to_string();
+            if header == full {
+                return Some(n + 1);
+            }
+            continue;
+        }
+        // `key = value` under the matching header (or a dotted key at the top)
+        let Some((key, _)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        let candidate = if header.is_empty() { key.to_string() } else { format!("{header}.{key}") };
+        if candidate == full {
+            return Some(n + 1);
+        }
+    }
+    None
 }
 
 fn recover<T>(path: &Path, bytes: usize, error: String) -> Loaded<T>
@@ -654,7 +906,7 @@ where
     };
     let table: toml::Table = match toml::from_str(&text) {
         Ok(t) => t,
-        Err(e) => return recover(path, len, format!("invalid TOML: {e}")),
+        Err(e) => return recover(path, len, format!("invalid TOML: {}", toml_error_text(&text, &e))),
     };
     let version = table.get("version").and_then(|v| v.as_integer()).unwrap_or(1);
     match table.try_into::<T>() {
@@ -926,14 +1178,127 @@ names = ["a", "b"]
     }
 
     #[test]
-    fn a_wrongly_typed_value_is_also_corrupt_but_a_marker_keeps_it() {
+    fn a_wrongly_typed_value_drops_only_that_key_and_keeps_a_copy() {
         let d = temp_dir("typed");
         let p = d.join("config.toml");
-        fs::write(&p, b"version = 1\n[general]\nrestore_session = \"yes please\"\n").unwrap();
+        fs::write(&p, b"version = 1\n[general]\nrestore_session = \"yes please\"\nshow_hidden = true\n").unwrap();
         let l = ConfigFile::load(&p);
-        assert!(matches!(l.status, LoadStatus::Recovered { .. }), "{:?}", l.status);
+        match &l.status {
+            LoadStatus::Partial { backup, problems } => {
+                assert!(backup.ends_with("config.toml.bad"));
+                assert_eq!(problems.len(), 1, "{problems:?}");
+                assert!(problems[0].starts_with("general.restore_session (line 3):"), "{problems:?}");
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        assert!(l.value.config.general.show_hidden, "the valid key next to it is kept");
+        assert_eq!(l.value.config.general.restore_session, Config::default().general.restore_session);
+        assert!(p.exists(), "the config is not renamed away");
         assert!(d.join("config.toml.bad").exists());
+        assert!(!l.status.read_only());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    fn load_text(tag: &str, text: &str) -> (Loaded<ConfigFile>, PathBuf) {
+        let d = temp_dir(tag);
+        let p = d.join("config.toml");
+        fs::write(&p, text).unwrap();
+        (ConfigFile::load(&p), d)
+    }
+
+    #[test]
+    fn pinned_entries_load_with_literal_windows_paths() {
+        let (l, d) = load_text("pin-ok", "version = 1\n\n[[sidebar.pinned]]\nname = \"Work\"\npath = 'D:\\work'\n\n[[sidebar.pinned]]\nname = \"Tmp\"\npath = \"C:\\\\temp\"\n");
+        assert_eq!(l.status, LoadStatus::Loaded);
+        assert_eq!(l.value.config.sidebar.pinned, vec![Pinned { name: "Work".into(), path: "D:\\work".into() }, Pinned { name: "Tmp".into(), path: "C:\\temp".into() }]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_windows_path_in_a_basic_string_is_repaired_not_corrupt() {
+        // `\w` and `\p` are not TOML escapes: the whole file used to become `.bad`
+        let (l, d) = load_text("pin-esc", "version = 1\n[general]\nshow_hidden = true\n\n[[sidebar.pinned]]\nname = \"Work\"\npath = \"D:\\work\\proj\"   # mine\n");
+        match &l.status {
+            LoadStatus::Partial { problems, .. } => {
+                assert_eq!(problems.len(), 1);
+                assert!(problems[0].starts_with("line 7, column"), "{problems:?}");
+                assert!(problems[0].contains("single quotes"), "{problems:?}");
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        assert_eq!(l.value.config.sidebar.pinned[0].path, "D:\\work\\proj");
+        assert!(l.value.config.general.show_hidden);
+        assert!(d.join("config.toml").exists());
+        // the next save writes a file that parses cleanly
+        l.value.save(&d.join("config.toml")).unwrap();
+        assert_eq!(ConfigFile::load(&d.join("config.toml")).status, LoadStatus::Loaded);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn real_syntax_errors_still_move_the_file_aside_with_a_line() {
+        let (l, d) = load_text("pin-syntax", "version = 1\n[[sidebar.pinned\nname = 1\n");
+        match &l.status {
+            LoadStatus::Recovered { error, .. } => assert!(error.contains("line 2"), "{error}"),
+            other => panic!("expected Recovered, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn wrong_shaped_pinned_drops_only_the_bad_entries() {
+        // entry 1 has a number for `name`; entries 0 and 2 are fine
+        let text = "version = 1\n[panes]\ndual = true\n\n[[sidebar.pinned]]\nname = \"A\"\npath = 'C:\\a'\n\n[[sidebar.pinned]]\nname = 5\npath = 'C:\\b'\n\n[[sidebar.pinned]]\nname = \"C\"\npath = 'C:\\c'\n";
+        let (l, d) = load_text("pin-shape", text);
+        match &l.status {
+            LoadStatus::Partial { problems, .. } => {
+                assert_eq!(problems.len(), 1, "{problems:?}");
+                assert!(problems[0].starts_with("sidebar.pinned[1] (line 9):"), "{problems:?}");
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        let msg = l.status.message().unwrap();
+        assert!(msg.contains("sidebar.pinned[1] (line 9)") && msg.contains("config.toml.bad"), "{msg}");
+        let names: Vec<&str> = l.value.config.sidebar.pinned.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["A", "C"]);
+        assert!(l.value.config.panes.dual, "other sections survive");
+        assert!(d.join("config.toml").exists() && d.join("config.toml.bad").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn pinned_as_a_plain_string_or_list_of_strings_is_one_problem() {
+        for body in ["pinned = \"D:\\\\work\"\n", "pinned = [\"D:\\\\work\"]\n"] {
+            let (l, d) = load_text("pin-str", &format!("version = 1\n[sidebar]\nclosed = [\"network\"]\n{body}"));
+            match &l.status {
+                LoadStatus::Partial { problems, .. } => {
+                    assert_eq!(problems.len(), 1, "{problems:?}");
+                    assert!(problems[0].starts_with("sidebar.pinned"), "{problems:?}");
+                    assert!(problems[0].contains("line 4"), "{problems:?}");
+                }
+                other => panic!("expected Partial, got {other:?}"),
+            }
+            assert!(l.value.config.sidebar.pinned.is_empty());
+            assert_eq!(l.value.config.sidebar.closed, ["network"]);
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored_and_kept_not_an_error() {
+        let (l, d) = load_text("pin-unknown", "version = 1\nfuture_top = 1\n\n[sidebar]\nfuture_sidebar = true\n\n[[sidebar.pinned]]\nname = \"A\"\npath = 'C:\\a'\nlabel = \"extra\"\nicon = 3\n");
+        assert_eq!(l.status, LoadStatus::Loaded);
+        assert_eq!(l.value.config.sidebar.pinned.len(), 1);
+        let text = l.value.to_toml();
+        assert!(text.contains("future_top") && text.contains("future_sidebar"), "{text}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn repair_leaves_valid_strings_comments_and_literals_alone() {
+        assert_eq!(repair_windows_paths("a = \"x\\ty\"\nb = 'C:\\w'\n# c = \"D:\\w\"\nd = \"\\u00e9\"\n"), None);
+        assert_eq!(repair_windows_paths("a = \"C:\\w\\n\"\n").as_deref(), Some("a = \"C:\\\\w\\n\"\n"));
+        assert_eq!(repair_windows_paths("a = \"\"\"\nC:\\w\n\"\"\"\n"), None, "multi-line strings are not touched");
     }
 
     #[test]
