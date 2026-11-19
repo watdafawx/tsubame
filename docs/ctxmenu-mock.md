@@ -52,3 +52,25 @@ All four defaults accepted, with one change to question 3:
 Follow-up approval: remove the small "Tsubame" group label from every popup,
 including loading/failure states. No app-name captions in context menus; custom
 entries retain their accent dots. Window titles and Settings labels are unchanged.
+
+## Gap states (proposals, not approved)
+
+`mocks/mock-ctxmenu-gaps.html` (same tokens and builders; same URL params plus `?only=rowmenu|refresh|pin|groupname|nss|kinds`). Shots: `mocks/shots/ctxgap-<id>-light|dark.png`, made by `pwsh -NoProfile -File mocks/shoot-ctxmenu-gaps.ps1`. Covers the gaps listed in `docs/u4-settings.md` ("Not done") and `docs/ctxmenu.md` ("Settings editor: what is still not built").
+
+1. **Row "..." menu** (`rowmenu`). One fixed list for every row, here and in the menu-side edit menu: Hide / Show, Rename… (F2), Pin to top / Unpin, Move to group ▸ (current group checked, New group…, Native place), Move up, Move down (Alt+Up / Down), then for custom and imported rows Edit entry… and Delete entry; the menu-side copy adds Edit in Settings…. Rows that do not apply are disabled with a one-line reason (Windows' and apps' items: Move up / down; Tsubame rows: Pin and groups), except Delete, which exists only on custom rows.
+2. **Refresh from last menu** (`refresh`). Stays in the second toolbar row of 6b, between Import and Reset. Idle (with "Last menu: 14:32, 31 items"), running (spinner, 2 px accent line, drawn only after 150 ms), done ("12 items updated"), nothing to do ("Already up to date"), no menu yet (disabled, tooltip).
+3. **Pin in Settings** (`pin`). Pin cell between "Comes from" and "...": empty, hover = dim pin, pinned = accent pin; pinned rows sit first in their group with the grip dimmed; hidden + pinned keeps both marks dimmed; Tsubame rows have no pin cell; optional "Pinned" chip. No pin marker in the real menu.
+4. **User group name in the menu** (`groupname`). A: no header (today). B: 20 px non-interactive label row, 11 px `text_dim`, under the separator. Per group, switch "Name in menu" on the group row.
+5. **Nilesoft selection screen** (`nss`). Inline panel after the file dialog / "Review and import…": parsed entries with checkboxes (submenu tri-state, children indented), importable rows with "shows for", skipped rows with reason and line, Select all / none, All / Importable / Skipped chips, "Placed in group" dropdown (user groups, New group… with a name field, End of the menu), Cancel, "Import N selected". Then the existing report.
+6. **Several items and Drive** (`kinds`). Several items: only entries whose `show_for` covers 2+ items; count header is not a row; count verbs listed under the plain name with a hint; "needs 2" tag on Compare. Drive: Tsubame rows at once, Windows' and apps' rows after the first drive right-click (empty-state note until then). Add custom entry gets "Several items" and "Drive" boxes (`show_for.multiple`, `show_for.drives`).
+
+Open questions (recommendation first):
+
+1. Same list everywhere with disabled rows, or hide inapplicable rows? **Disabled with reason** (stable muscle memory); alternative: hide.
+2. Refresh scope: selected kind or all kinds? **Selected kind** (that is what `LAST_SHOWN` is for); alternative: all kinds at once.
+3. Show the running state? **Only if over 150 ms**; the compare is local and usually instant, so most runs go idle -> done.
+4. Pin on U4 rows (Tsubame's own)? **No**, they have the grip and Move up / down. Order of several pins? **Native order** among themselves.
+5. User group name: **A (no header)** by default, B per group via "Name in menu" (off). Alternative: always B, or never.
+6. Import default placement: **New group named "Nilesoft"** the first time, then the last used group (Undo import removes the empty group). Alternative: "Tools" as in the 6b wording, or end of menu.
+7. Custom entry on several items: **runs once with all paths if it uses `{selection}` / `%*`, otherwise once per item** (ask above 10). Alternative: only allow entries that use `{selection}`.
+8. Del key: Hide in the menu-side edit menu (6a), Delete entry on a custom row in Settings. **Keep**, and give Delete entry no shortcut in the menu.
