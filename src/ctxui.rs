@@ -316,12 +316,6 @@ impl CtxMenu {
         let style = MenuStyle { bounds, loading: phase, alt };
         let src = Rows { items: &self.items, icons: &self.model.icons, failed: self.shown() == LoadState::Failed, paste_ok: self.paste_ok };
         let r = menu(ui, g, ID_CTX, &mut self.state, &src, &style);
-        if self.first_paint.is_none() {
-            self.first_paint = Some(self.input_at.elapsed());
-        }
-        if self.model.complete && self.all_items.is_none() && self.model.error.is_none() {
-            self.all_items = Some(self.input_at.elapsed());
-        }
         if let Some(path) = r.picked {
             self.picked = src.pick(&path);
         }
@@ -330,6 +324,15 @@ impl CtxMenu {
         }
         if r.closed {
             self.open = false;
+        }
+    }
+
+    /// Called after Canvas::end, so timings include submitting the frame.
+    pub fn presented(&mut self) {
+        if !self.open { return; }
+        self.first_paint.get_or_insert_with(|| self.input_at.elapsed());
+        if self.model.complete && self.model.error.is_none() {
+            self.all_items.get_or_insert_with(|| self.input_at.elapsed());
         }
     }
 
@@ -491,7 +494,9 @@ impl Rows<'_> {
             kind: RowKind::Item,
             label: it.label.clone(),
             accel: accel.and_then(|c| accel_index(&it.label, c)),
-            shortcut: if own { own_shortcut(action).to_string() } else { it.shortcut.clone() },
+            shortcut: if own {
+                crate::commands::by_name(action).and_then(|c| crate::keymap::current_label(c.id)).unwrap_or_else(|| own_shortcut(action).to_string())
+            } else { it.shortcut.clone() },
             icon,
             disabled,
             default: it.flags & flag::DEFAULT != 0,
@@ -528,6 +533,17 @@ mod tests {
 
     fn labels(v: &[MenuItem]) -> Vec<&str> {
         v.iter().map(|i| if i.is_separator() { "--" } else { i.label.as_str() }).collect()
+    }
+
+    #[test]
+    fn target_kind_uses_enumerated_metadata() {
+        let mut t = Target { paths: vec![r"\\server\share\folder".into()], folders: vec![r"\\server\share\folder".into()], ..Default::default() };
+        assert_eq!(kind_of(&t), (Kind::Folder, String::new()));
+        t.folders.clear();
+        t.paths = vec![r"C:\missing\file.TXT".into()];
+        assert_eq!(kind_of(&t), (Kind::File, "txt".into()));
+        t.background = true;
+        assert_eq!(kind_of(&t), (Kind::Background, String::new()));
     }
 
     #[test]

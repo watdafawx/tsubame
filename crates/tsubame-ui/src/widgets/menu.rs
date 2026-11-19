@@ -122,6 +122,7 @@ pub struct Level {
     pub parent_row: Rect,
     reveal: bool,
     focus_first: bool,
+    strip: f32,
 }
 
 /// The app keeps this while the menu is open.
@@ -536,6 +537,11 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         let vp = Rect::new(rect.x + m.inset(), rect.y + m.inset() + strip, rect.w - 2.0 * m.inset(), (rect.h - 2.0 * m.inset() - 2.0 * strip).max(0.0));
         // keep the keyboard focus visible
         let mut scroll = st.levels[lv].scroll;
+        if frozen {
+            // Adding chevrons must not shift an existing row under the pointer.
+            scroll += strip - st.levels[lv].strip;
+        }
+        st.levels[lv].strip = strip;
         if st.levels[lv].reveal {
             st.levels[lv].reveal = false;
             if let Some(i) = index_of(&rows, st.levels[lv].focus) {

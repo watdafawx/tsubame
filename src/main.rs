@@ -1038,6 +1038,11 @@ fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32, keyboard: bool) {
     let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0 && !keyboard;
     let (sx, sy) = screen_pt(hwnd, x, y);
     with(|a| {
+        if a.view.tab().shown() == 0 {
+            let s = a.gfx.dpi / 96.0;
+            shellops::open_background_menu(a, a.view.tab().path.clone(), sx, sy, extended, Pt::new(x as f32 / s, y as f32 / s), keyboard);
+            return;
+        }
         let paths = a.view.menu_paths(row);
         let t = a.view.tab();
         let folders = t.store.view().iter().enumerate().filter(|(_, id)| t.sel.contains(**id) || t.store.at(row) == Some(**id)).filter_map(|(i, _)| t.entry_at(i)).filter(|(p, dir)| *dir && paths.contains(p)).map(|(p, _)| p).collect();
@@ -1055,8 +1060,9 @@ fn key_menu(hwnd: HWND) {
     ctxui::note_input();
     let p = with(|a| {
         let s = a.gfx.dpi / 96.0;
+        let grid = a.view.mode.is_grid();
         let t = a.view.tab_mut();
-        let row = t.list.cursor;
+        let row = if grid { t.grid.cursor } else { t.list.cursor };
         if t.shown() > 0 && !t.store.at(row).is_some_and(|id| t.sel.contains(id)) {
             t.sel.single(&t.store, row);
         }

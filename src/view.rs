@@ -1198,6 +1198,7 @@ impl View {
             out.repaint = true;
         }
         g.end();
+        if let Some(c) = self.ctx.as_mut() { c.presented(); }
         Some(out)
     }
 

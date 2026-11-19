@@ -667,6 +667,15 @@ fn open_own(a: &mut App, t: crate::ctxui::Target) {
 }
 
 /// After a frame: a right click on empty space opens the folder's menu.
+pub fn open_background_menu(a: &mut App, folder: String, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
+    if crate::ctxui::own_enabled() {
+        let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor, keyboard, screen: (sx, sy) };
+        open_own(a, t);
+    } else {
+        native_bg_menu(a, folder, sx, sy, extended);
+    }
+}
+
 pub fn after_frame(hwnd: HWND) {
     let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     let want = with(|a| {
