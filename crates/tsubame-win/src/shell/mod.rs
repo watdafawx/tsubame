@@ -291,7 +291,7 @@ impl Pool {
         let lane_thumb = self.thumb_workers > 0 && matches!(req, Request::Thumb { .. });
         // clipboard jobs go to the back: they keep their order (the app submits
         // one at a time) and the in-flight icon limit keeps the queue short
-        let front = matches!(req, Request::Menu { .. } | Request::Thumb { .. }) && !lane_thumb;
+        let front = matches!(req, Request::Menu { .. } | Request::CtxMenu { .. } | Request::Thumb { .. }) && !lane_thumb;
         let job = Job { id, cancel: cancel.clone(), req, queued: Instant::now() };
         if lane_thumb {
             if !self.thumb_started {

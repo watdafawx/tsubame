@@ -55,11 +55,14 @@ pub struct CtxOpts {
     pub linger: Duration,
     /// test only: `Sleep(ms)` before binding, without pumping (a hung handler)
     pub debug_hang_ms: u32,
+    /// debug only: `Sleep(ms)` before binding, then build as usual (the
+    /// loading frame; past the hang limit, the failure frame)
+    pub debug_delay_ms: u32,
 }
 
 impl Default for CtxOpts {
     fn default() -> Self {
-        CtxOpts { background: false, extended: false, can_rename: true, submenus: true, icon_px: 16, linger: Duration::from_secs(600), debug_hang_ms: 0 }
+        CtxOpts { background: false, extended: false, can_rename: true, submenus: true, icon_px: 16, linger: Duration::from_secs(600), debug_hang_ms: 0, debug_delay_ms: 0 }
     }
 }
 
@@ -140,6 +143,9 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
         unsafe { Sleep(opts.debug_hang_ms) };
         return batch(Part::Failed("debug hang".into()), [0; 3]);
     }
+    if opts.debug_delay_ms > 0 {
+        unsafe { Sleep(opts.debug_delay_ms) };
+    }
     let built = match build(host, paths, opts) {
         Ok(b) => b,
         Err(e) => return batch(Part::Failed(e), [0; 3]),
@@ -167,6 +173,10 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
         if icons.len() != before {
             emit(batch(Part::Icons(icons.entries()), timing));
         }
+    }
+    if alive {
+        // every row is in: the UI ends its loading line
+        emit(batch(Part::Complete, timing));
     }
     waiting();
 

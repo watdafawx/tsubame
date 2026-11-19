@@ -249,7 +249,7 @@ pub const APP_VERBS: [&str; 5] = ["delete", "cut", "copy", "paste", "rename"];
 
 /// Tsubame built-in command -> the shell verb it replaces in the native part
 /// (so the menu never shows "Copy" twice).
-pub const BUILTIN_VERBS: [(&str, &str); 7] = [("file.open", "open"), ("file.cut", "cut"), ("file.copy", "copy"), ("file.paste", "paste"), ("file.rename", "rename"), ("file.delete", "delete"), ("file.properties", "properties")];
+pub const BUILTIN_VERBS: [(&str, &str); 8] = [("file.open", "open"), ("file.cut", "cut"), ("file.copy", "copy"), ("file.paste", "paste"), ("file.rename", "rename"), ("file.delete", "delete"), ("file.properties", "properties"), ("file.copy-path", "copyaspath")];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -402,6 +402,9 @@ pub enum Part {
     Failed(String),
     /// result of an invoke
     Invoked { id: u32, verb: Option<String>, result: Result<(), String> },
+    /// the whole tree is walked (submenus settled, icons sent): the loading
+    /// line goes. The worker now waits for a pick.
+    Complete,
     /// the worker released the menu (after an invoke, a close or a timeout)
     Closed,
 }
@@ -433,11 +436,13 @@ pub struct MenuModel {
     pub state: LoadState,
     pub error: Option<String>,
     pub icons: IconCache,
+    /// [`Part::Complete`] arrived: every shell item is in
+    pub complete: bool,
 }
 
 impl MenuModel {
     pub fn new(generation: u64, tsubame: Vec<MenuItem>, user: Vec<MenuItem>) -> MenuModel {
-        MenuModel { generation, tsubame, user, native: Vec::new(), state: LoadState::Loading, error: None, icons: IconCache::new(ICON_CACHE_CAP) }
+        MenuModel { generation, tsubame, user, native: Vec::new(), state: LoadState::Loading, error: None, icons: IconCache::new(ICON_CACHE_CAP), complete: false }
     }
 
     /// Takes a batch. Returns false (and changes nothing) for another
@@ -465,6 +470,13 @@ impl MenuModel {
             Part::Failed(e) => {
                 self.state = LoadState::Failed;
                 self.error = Some(e);
+                self.complete = true;
+            }
+            Part::Complete => {
+                self.complete = true;
+                if self.state == LoadState::Loading {
+                    self.state = LoadState::Ready;
+                }
             }
             Part::Invoked { .. } | Part::Closed => {}
         }
@@ -475,6 +487,72 @@ impl MenuModel {
     pub fn rows(&self, entries: &[MenuEntry]) -> Vec<MenuItem> {
         compose(&self.tsubame, &self.native, &self.user, entries)
     }
+}
+
+// ---- the app's rows and the loading clock (CM2, CM5) -----------------------
+
+/// Label of the `windows.more` escape hatch while the user kept the default
+/// name: there is no Win11 "Show more options" step in the own-drawn menu,
+/// the row opens the native popup (the classic menu, drawn by Windows).
+pub const CLASSIC_LABEL: &str = "Windows menu (classic)";
+/// Action of that row.
+pub const ACTION_CLASSIC: &str = "windows.more";
+
+/// The Tsubame group of the own-drawn menu: the visible built-ins of the U4
+/// list (like [`own_items`]), the `windows.more` escape hatch where the list
+/// puts it, and `extras` (app rows that are not in the U4 list, such as Copy
+/// name) right after `builtin.copy-path`, or at the end of the first group
+/// when that one is hidden.
+pub fn own_rows(entries: &[MenuEntry], target: tsubame_config::menu::Target, ext: &str, extras: &[MenuItem]) -> Vec<MenuItem> {
+    let mut out: Vec<MenuItem> = Vec::new();
+    let mut placed = extras.is_empty();
+    // extras go after Copy as path when it shows, else at the first separator
+    let anchor = entries.iter().any(|e| e.parent.is_empty() && e.id == "builtin.copy-path" && !e.hidden && e.matches(target, ext));
+    for e in entries.iter().filter(|e| e.parent.is_empty()) {
+        match (e.source, e.kind) {
+            (Source::Builtin, EntryKind::Separator) => {
+                if !placed && !anchor {
+                    out.extend(extras.iter().cloned());
+                    placed = true;
+                }
+                if out.last().is_some_and(|l| !l.is_separator()) {
+                    out.push(MenuItem::separator(ItemSource::Tsubame));
+                }
+            }
+            (Source::Builtin, EntryKind::Item) if !e.hidden && e.matches(target, ext) => {
+                let mut it = MenuItem::command(ItemSource::Tsubame, &e.name, &e.command);
+                it.key = e.id.clone();
+                out.push(it);
+                if e.id == "builtin.copy-path" && !placed {
+                    out.extend(extras.iter().cloned());
+                    placed = true;
+                }
+            }
+            (Source::Windows, EntryKind::Item) if e.id == ACTION_CLASSIC && !e.hidden && (e.matches(target, ext) || target == tsubame_config::menu::Target::Background) => {
+                let name = if e.name.trim().is_empty() || e.name == "Show more options" { CLASSIC_LABEL } else { e.name.as_str() };
+                let mut it = MenuItem::command(ItemSource::Tsubame, name, ACTION_CLASSIC);
+                it.key = e.id.clone();
+                out.push(it);
+            }
+            _ => {}
+        }
+    }
+    if !placed {
+        out.extend(extras.iter().cloned());
+    }
+    clean_separators(&mut out);
+    out
+}
+
+/// After this long without the shell's top level the menu shows "Some items
+/// could not load" + Retry (the mock's failure frame). The pool gives the
+/// worker up a second later (`Pool::ctx_hang_after`, 4 s).
+pub const SLOW_MS: u64 = 3_000;
+
+/// The state to draw `elapsed_ms` after the request: a menu still loading
+/// after [`SLOW_MS`] shows the failure row (a late answer still fills it).
+pub fn shown_state(state: LoadState, elapsed_ms: u64) -> LoadState {
+    if state == LoadState::Loading && elapsed_ms >= SLOW_MS { LoadState::Failed } else { state }
 }
 
 // ---- icon cache ------------------------------------------------------------
@@ -805,5 +883,62 @@ mod tests {
         let mut s = String::new();
         dump(&m, &mut s);
         assert_eq!(s, "Open [id 1 verb=open &o]  \\tEnter\n----\nSend to > [id 0] \n  Desktop [id 9] \n");
+    }
+
+    #[test]
+    fn own_rows_keep_the_escape_hatch_and_place_extras() {
+        let entries = default_entries();
+        let extra = MenuItem::command(ItemSource::Tsubame, "Copy name", "x.copy-name");
+        let rows = own_rows(&entries, Target::File, "txt", std::slice::from_ref(&extra));
+        let l = labels(&rows);
+        let cp = l.iter().position(|s| s == "Copy as path").unwrap();
+        assert_eq!(l[cp + 1], "Copy name", "{l:?}");
+        assert!(l.contains(&CLASSIC_LABEL.to_string()), "{l:?}");
+        assert!(!l.iter().any(|s| s == "Show more options" || s == "Open with"), "{l:?}");
+        assert_eq!(rows.iter().find(|r| r.label == CLASSIC_LABEL).unwrap().action, ACTION_CLASSIC);
+        assert!(!rows[0].is_separator() && !rows.last().unwrap().is_separator());
+        // background: no built-in applies, the extras still show; a hidden
+        // escape hatch goes
+        let rows = own_rows(&entries, Target::Background, "", std::slice::from_ref(&extra));
+        assert_eq!(labels(&rows), ["Copy name", "--", CLASSIC_LABEL]);
+        let mut e2 = entries.clone();
+        e2.iter_mut().find(|e| e.id == ACTION_CLASSIC).unwrap().hidden = true;
+        e2.iter_mut().find(|e| e.id == "builtin.copy-path").unwrap().hidden = true;
+        let rows = own_rows(&e2, Target::File, "txt", std::slice::from_ref(&extra));
+        let l = labels(&rows);
+        assert!(!l.contains(&CLASSIC_LABEL.to_string()));
+        assert!(l.contains(&"Copy name".to_string()), "extras land at the end of the first group: {l:?}");
+        // a renamed escape hatch keeps the user's name
+        e2.iter_mut().find(|e| e.id == ACTION_CLASSIC).unwrap().hidden = false;
+        e2.iter_mut().find(|e| e.id == ACTION_CLASSIC).unwrap().name = "Old menu".into();
+        assert!(labels(&own_rows(&e2, Target::Folder, "", &[])).contains(&"Old menu".to_string()));
+    }
+
+    #[test]
+    fn loading_turns_into_the_failure_row_after_3_s_and_complete_ends_it() {
+        assert_eq!(shown_state(LoadState::Loading, 0), LoadState::Loading);
+        assert_eq!(shown_state(LoadState::Loading, SLOW_MS - 1), LoadState::Loading);
+        assert_eq!(shown_state(LoadState::Loading, SLOW_MS), LoadState::Failed);
+        assert_eq!(shown_state(LoadState::Ready, 60_000), LoadState::Ready);
+        let mut m = MenuModel::new(3, vec![], vec![]);
+        assert!(!m.complete);
+        assert!(m.apply(MenuBatch { generation: 3, part: Part::Native(vec![]), timing: [0; 3] }));
+        assert!(!m.complete, "top level only: submenus still filling");
+        assert!(!m.apply(MenuBatch { generation: 2, part: Part::Complete, timing: [0; 3] }));
+        assert!(m.apply(MenuBatch { generation: 3, part: Part::Complete, timing: [0; 3] }));
+        assert!(m.complete && m.state == LoadState::Ready);
+        // a menu with no shell answer at all is complete once it failed
+        let mut m = MenuModel::new(4, vec![], vec![]);
+        m.apply(MenuBatch { generation: 4, part: Part::Failed("x".into()), timing: [0; 3] });
+        assert!(m.complete && m.state == LoadState::Failed);
+    }
+
+    #[test]
+    fn copy_as_path_is_not_shown_twice() {
+        let entries = default_entries();
+        let (ts, _) = own_items(&entries, Target::File, "txt");
+        let native = build_native(&[verb(raw(9, "Copy as path"), "copyaspath"), raw(10, "7-Zip")], &mut IconCache::new(2));
+        let l = labels(&compose(&ts, &native, &[], &entries));
+        assert_eq!(l.iter().filter(|s| *s == "Copy as path").count(), 1, "{l:?}");
     }
 }
