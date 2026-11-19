@@ -630,10 +630,10 @@ fn opts_for(background: bool, paths: &[String]) -> (MenuOpts, Vec<Option<Extra>>
 
 /// The item menu for `paths`: own-drawn at client DIP `anchor` (screen px
 /// `sx, sy` for the shell), or the native popup with `TSUBAME_NATIVE_MENU=1`.
-pub fn open_item_menu(a: &mut App, paths: Vec<String>, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
+pub fn open_item_menu(a: &mut App, paths: Vec<String>, folders: Vec<String>, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
     let folder = a.view.tab().path.clone();
     if crate::ctxui::own_enabled() {
-        open_own(a, crate::ctxui::Target { paths, folder, background: false, extended, anchor, keyboard, screen: (sx, sy) });
+        open_own(a, crate::ctxui::Target { paths, folders, folder, background: false, extended, anchor, keyboard, screen: (sx, sy) });
         return;
     }
     native_item_menu(a, paths, folder, sx, sy, extended);
@@ -658,6 +658,7 @@ fn native_bg_menu(a: &mut App, folder: String, sx: i32, sy: i32, extended: bool)
 /// Opens the own-drawn menu (a newer one replaces an older one: dropping
 /// its handle closes it on its worker, its late batches are dropped).
 fn open_own(a: &mut App, t: crate::ctxui::Target) {
+    a.view.ctx = None;
     let entries = MENU.read().map(|m| m.clone()).unwrap_or_default();
     let icon_px = ((16.0 * a.view.dpi / 96.0 * (a.ui.theme.font_size_sm / 12.0).max(1.0)).round() as u32).clamp(16, 64);
     let dual = a.view.dual();
@@ -679,7 +680,7 @@ pub fn after_frame(hwnd: HWND) {
     let (sx, sy) = crate::screen_pt(hwnd, x, y);
     with(|a| {
         if crate::ctxui::own_enabled() {
-            let t = crate::ctxui::Target { paths: vec![folder.clone()], folder, background: true, extended, anchor: pt, keyboard: false, screen: (sx, sy) };
+            let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor: pt, keyboard: false, screen: (sx, sy) };
             open_own(a, t);
         } else {
             native_bg_menu(a, folder, sx, sy, extended);
@@ -695,10 +696,12 @@ pub fn ctx_after_frame(hwnd: HWND) {
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let ran = with(|a| {
         let c = a.view.ctx.as_mut()?;
-        if std::mem::take(&mut c.retry) {
+        let retry = std::mem::take(&mut c.retry);
+        if retry {
             c.retry_now(&mut a.pool);
         }
         let pick = c.picked.take();
+        let changed = retry || pick.is_some() || c.finished();
         let t = c.target.clone();
         let entries = c.entries.clone();
         match pick {
@@ -718,7 +721,7 @@ pub fn ctx_after_frame(hwnd: HWND) {
         if a.view.ctx.as_ref().is_some_and(|c| c.finished()) {
             a.view.ctx = None;
         }
-        Some(())
+        changed.then_some(())
     })
     .flatten();
     if ran.is_some() {
@@ -729,18 +732,18 @@ pub fn ctx_after_frame(hwnd: HWND) {
 /// An app action picked in the own-drawn menu.
 fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_config::MenuEntry], shift: bool) {
     let paths = if t.background { Vec::new() } else { t.paths.clone() };
-    let one_dir = (paths.len() == 1 && Path::new(&paths[0]).is_dir()).then(|| paths[0].clone());
+    let one_dir = (paths.len() == 1 && t.folders.contains(&paths[0])).then(|| paths[0].clone());
     match act {
         "file.open" => match &one_dir {
             Some(d) => a.view.go(d),
             None => {
                 for p in &paths {
-                    if Path::new(p).is_dir() { a.view.open_in_new_tab(p) } else { a.view.open_paths.push(p.clone()) }
+                    if t.folders.contains(p) { a.view.open_in_new_tab(p) } else { a.view.open_paths.push(p.clone()) }
                 }
             }
         },
         "tab.open-selected" => {
-            for p in paths.iter().filter(|p| Path::new(p).is_dir()) {
+            for p in paths.iter().filter(|p| t.folders.contains(p)) {
                 a.view.open_in_new_tab(p);
             }
         }

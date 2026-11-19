@@ -153,7 +153,8 @@ impl Stress {
 
     /// Timer tick and after every drained batch of replies. `pt` is a screen
     /// point inside the window. Returns (done, repaint).
-    pub fn step(&mut self, tab: &Tab, shell: &mut ShellUi, pool: &mut Pool, pt: (i32, i32)) -> (bool, bool) {
+    pub fn step(&mut self, view: &mut View, shell: &mut ShellUi, pool: &mut Pool, pt: (i32, i32)) -> (bool, bool) {
+        let tab = view.tab();
         self.pt = pt;
         match self.state {
             State::Wait(t) => {
@@ -166,7 +167,7 @@ impl Stress {
                     return (false, false);
                 }
                 match self.mode {
-                    Mode::Menu | Mode::Clip => {
+                    Mode::Menu | Mode::Clip | Mode::CtxMenu => {
                         self.paths = (0..tab.shown()).filter_map(|i| tab.entry_at(i)).filter(|e| !e.1).take(3).map(|e| e.0).collect();
                         if self.paths.is_empty() {
                             self.log.push("no files in the folder".into());
@@ -175,8 +176,12 @@ impl Stress {
                         }
                         self.snap("start (before the first menu)");
                         self.t0 = Instant::now();
-                        self.submit_menu(pool, 0, None);
-                        self.state = if self.mode == Mode::Clip { State::ClipRun { i: 0, clip: 0 } } else { State::MenuRun { i: 0 } };
+                        if self.mode == Mode::CtxMenu {
+                            self.state = State::CtxRun { i: 0 };
+                        } else {
+                            self.submit_menu(pool, 0, None);
+                            self.state = if self.mode == Mode::Clip { State::ClipRun { i: 0, clip: 0 } } else { State::MenuRun { i: 0 } };
+                        }
                     }
                     Mode::Thumbs => {
                         self.paths = (0..tab.shown())
@@ -195,6 +200,27 @@ impl Stress {
                     }
                 }
                 (false, false)
+            }
+            State::CtxRun { i } => {
+                if let Some(c) = view.ctx.as_ref() {
+                    if c.first_paint.is_none() || (!c.model.complete && self.ctx_at.is_some_and(|t| t.elapsed() < Duration::from_secs(6))) {
+                        return (false, false);
+                    }
+                    if let Some(t) = c.first_paint { self.ctx_first_us.push(t.as_micros() as u64); }
+                    if let Some(t) = c.all_items { self.ctx_all_us.push(t.as_micros() as u64); } else { self.ctx_failed += 1; }
+                    self.ctx_rows.push(c.model.native.len() as u64);
+                    view.ctx = None;
+                    let done = i + 1;
+                    if [1, 10, 100, self.menus].contains(&done) { self.snap(&format!("after menu {done}")); }
+                    self.state = if done == self.menus { State::Settle(Instant::now() + SETTLE) } else { State::CtxRun { i: done } };
+                } else {
+                    let n = if i.is_multiple_of(2) { 1 } else { 3.min(self.paths.len()) };
+                    let target = crate::ctxui::Target { paths: self.paths[..n].to_vec(), folder: view.tab().path.clone(), anchor: tsubame_ui::Pt::new(100.0, 100.0), screen: pt, ..Default::default() };
+                    crate::ctxui::note_input();
+                    view.ctx = Some(Box::new(crate::ctxui::CtxMenu::open(target, tsubame_config::menu::default_entries(), view.dual(), false, 32, pool)));
+                    self.ctx_at = Some(Instant::now());
+                }
+                (false, true)
             }
             State::MenuRun { i } => {
                 let Some((m, _)) = shell.last_menu.take() else { return (false, false) };
@@ -427,6 +453,13 @@ impl Stress {
             line(format!("leak gate: {}", if gate { "PASS" } else { "FAIL" }));
         }
         match self.mode {
+            Mode::CtxMenu => {
+                line(format!("own first paint: {}", pcts(&self.ctx_first_us)));
+                line(format!("own all items: {}", pcts(&self.ctx_all_us)));
+                line(format!("own warm first paint: {}", pcts(self.ctx_first_us.get(1..).unwrap_or_default())));
+                line(format!("own warm all items: {}", pcts(self.ctx_all_us.get(1..).unwrap_or_default())));
+                line(format!("own cold first/all us: {:?}/{:?}; failed: {}", self.ctx_first_us.first(), self.ctx_all_us.first(), self.ctx_failed));
+            }
             Mode::Menu | Mode::Clip => {
                 if self.mode == Mode::Clip {
                     line(format!("clipboard jobs (worker time, set + read): {}", pcts(&self.clip_us)));
@@ -475,6 +508,7 @@ impl Mode {
             Mode::Menu => "menu",
             Mode::Thumbs => "thumbs",
             Mode::Clip => "clip",
+            Mode::CtxMenu => "ctxmenu",
         }
     }
     fn label(self) -> &'static str {
@@ -482,6 +516,7 @@ impl Mode {
             Mode::Menu => "context menu",
             Mode::Thumbs => "thumbnails",
             Mode::Clip => "context menu + clipboard (W1)",
+            Mode::CtxMenu => "own-drawn context menu",
         }
     }
 }

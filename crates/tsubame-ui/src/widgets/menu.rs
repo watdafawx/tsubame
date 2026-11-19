@@ -23,6 +23,7 @@ pub enum RowKind {
     #[default]
     Item,
     Separator,
+    Header,
     /// "Some items could not load" + Retry (picking it sets `retry`)
     Status,
 }
@@ -78,7 +79,7 @@ impl MenuRow {
         match self.kind {
             RowKind::Item => !self.disabled,
             RowKind::Status => true,
-            RowKind::Separator => false,
+            RowKind::Separator | RowKind::Header => false,
         }
     }
 }
@@ -131,11 +132,12 @@ pub struct MenuState {
     pub keyboard: bool,
     pub levels: Vec<Level>,
     opened: bool,
+    pointer: Option<Pt>,
 }
 
 impl MenuState {
     pub fn new(anchor: Pt, keyboard: bool) -> MenuState {
-        MenuState { anchor, keyboard, levels: Vec::new(), opened: false }
+        MenuState { anchor, keyboard, levels: Vec::new(), opened: false, pointer: None }
     }
 }
 
@@ -243,7 +245,7 @@ pub fn width(c: &mut dyn Canvas, rows: &[MenuRow], m: &Metrics) -> f32 {
     let (mut lw, mut sw, mut sub, mut st) = (0.0f32, 0.0f32, false, 0.0f32);
     for r in rows {
         match r.kind {
-            RowKind::Separator => {}
+            RowKind::Separator | RowKind::Header => {}
             RowKind::Item => {
                 let font = if r.default { m.font.b() } else { m.font };
                 lw = lw.max(c.measure(&r.label, font));
@@ -368,7 +370,7 @@ fn index_of(rows: &[MenuRow], key: Option<u64>) -> Option<usize> {
 fn activate(st: &MenuState, rows: &[MenuRow], lv: usize, i: usize, kb: bool) -> Option<Act> {
     let r = rows.get(i)?;
     match r.kind {
-        RowKind::Separator => None,
+        RowKind::Separator | RowKind::Header => None,
         RowKind::Status => Some(Act::Retry),
         RowKind::Item if r.disabled => None,
         RowKind::Item if r.submenu => Some(Act::Open(lv, r.key, kb)),
@@ -427,6 +429,9 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     ui.capture_keys = true;
     ui.set_focus(Some(lid(0)));
     let t = ui.theme;
+    let pointer = ui.mouse_in().then(|| ui.mouse());
+    let moved = st.pointer != pointer;
+    st.pointer = pointer;
     let m = Metrics::new(&t);
     let mut rows: Vec<MenuRow> = Vec::new();
 
@@ -577,15 +582,19 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 c.line(r.x + 6.0, y, r.r() - 6.0, y, t.border, 1.0);
                 continue;
             }
+            if row.kind == RowKind::Header {
+                c.text(&row.label, Rect::new(r.x + m.label_x(), r.y, r.w - m.label_x(), r.h), m.small, t.text_dim);
+                continue;
+            }
             let it = ui.interact(lid(lv).with(row.key ^ 0x5eed), r.intersect(&vp), Sense::click());
             let lvl = &st.levels[lv];
-            if it.hovered && row.focusable() && (lvl.focus != Some(row.key) || lvl.kb) {
+            if it.hovered && row.focusable() && (moved || !lvl.kb) && (lvl.focus != Some(row.key) || lvl.kb) {
                 let l = &mut st.levels[lv];
                 l.focus = Some(row.key);
                 l.kb = false;
                 ui.request_repaint();
             }
-            if it.hovered && row.focusable() {
+            if it.hovered && row.focusable() && (moved || !st.levels[lv].kb) {
                 // CM4: hover delay and safe triangle go here
                 if row.submenu {
                     if st.levels[lv].open != Some(row.key) {
@@ -966,6 +975,19 @@ mod tests {
         assert_eq!(r.picked, Some(vec![9, 92]));
         assert!(r.closed);
         assert_eq!(h.ui.popups_open(), 0);
+    }
+
+    #[test]
+    fn stationary_pointer_does_not_steal_keyboard_focus() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        h.ui.push(Event::MouseMove { pos: h.row_rect(0, 0).center() });
+        h.frame();
+        h.key(Key::Down);
+        assert_eq!(h.st.levels[0].focus, Some(2));
+        h.frame();
+        assert_eq!(h.st.levels[0].focus, Some(2));
+        assert!(h.st.levels[0].kb);
     }
 
     #[test]

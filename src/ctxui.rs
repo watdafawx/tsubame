@@ -63,6 +63,8 @@ pub fn own_enabled() -> bool {
 #[derive(Clone, Debug, Default)]
 pub struct Target {
     pub paths: Vec<String>,
+    /// Folder paths from the enumerated store; never probe disk on UI thread.
+    pub folders: Vec<String>,
     /// the folder shown (background menus: the same as `paths[0]`)
     pub folder: String,
     pub background: bool,
@@ -119,13 +121,12 @@ pub struct CtxMenu {
 }
 
 /// The right-clicked kind and extension for the U4 rules.
-pub fn kind_of(background: bool, paths: &[String]) -> (Kind, String) {
-    if background {
+pub fn kind_of(target: &Target) -> (Kind, String) {
+    if target.background {
         return (Kind::Background, String::new());
     }
-    let first = paths.first().map(String::as_str).unwrap_or("");
-    // a network path is not probed on the UI thread
-    if !first.starts_with("\\\\") && std::path::Path::new(first).is_dir() {
+    let first = target.paths.first().map(String::as_str).unwrap_or("");
+    if target.folders.iter().any(|p| p == first) {
         return (Kind::Folder, String::new());
     }
     (Kind::File, std::path::Path::new(first).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default())
@@ -174,7 +175,7 @@ pub fn clipboard_has_files() -> bool {
 impl CtxMenu {
     /// Builds the menu (own rows now) and asks a worker for the shell's.
     pub fn open(target: Target, entries: Vec<MenuEntry>, dual: bool, paste_ok: bool, icon_px: u32, pool: &mut Pool) -> CtxMenu {
-        let (kind, ext) = kind_of(target.background, &target.paths);
+        let (kind, ext) = kind_of(&target);
         let tsubame = tsubame_rows(&entries, kind, &ext, target.paths.len(), dual);
         let user = ctxmodel::own_items(&entries, kind, &ext).1;
         let generation = next_gen();
@@ -219,10 +220,10 @@ impl CtxMenu {
     /// one are dropped), the own rows stay.
     pub fn retry_now(&mut self, pool: &mut Pool) {
         self.generation = next_gen();
-        self.model.generation = self.generation;
-        self.model.state = LoadState::Loading;
-        self.model.error = None;
-        self.model.complete = false;
+        // Command ids belong to one worker session. Never let Retry invoke
+        // an id retained from the previous session.
+        self.handle = None;
+        self.model = MenuModel::new(self.generation, self.model.tsubame.clone(), self.model.user.clone());
         self.all_items = None;
         self.input_at = Instant::now();
         self.dirty = true;
@@ -242,6 +243,7 @@ impl CtxMenu {
             Part::Closed => {
                 self.handle = None;
                 self.invoked = false;
+                self.pending_verb = None;
                 return false;
             }
             part => {
@@ -327,9 +329,6 @@ impl CtxMenu {
         }
         if r.closed {
             self.open = false;
-        }
-        if loading {
-            ui.request_repaint();
         }
     }
 
@@ -507,6 +506,9 @@ impl Rows<'_> {
 impl MenuSource for Rows<'_> {
     fn rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
         let Some(level) = self.level(path) else { return };
+        if path.is_empty() && level.first().is_some_and(|r| r.source == ItemSource::Tsubame) {
+            out.push(MenuRow { kind: RowKind::Header, label: "Tsubame".into(), ..Default::default() });
+        }
         out.extend(level.iter().map(|it| self.row(it)));
         if path.is_empty() && self.failed {
             out.push(MenuRow::separator());

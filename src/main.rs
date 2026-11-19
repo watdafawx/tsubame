@@ -294,6 +294,7 @@ fn main() {
     let stress_mode = arg_value(&args, "--stress").map(|m| match m.as_str() {
         "thumbs" => stress::Mode::Thumbs,
         "clip" => stress::Mode::Clip,
+        "ctxmenu" => stress::Mode::CtxMenu,
         _ => stress::Mode::Menu,
     });
     let workers = arg_value(&args, "--workers").and_then(|v| v.parse().ok()).unwrap_or(shellui::ICON_WORKERS);
@@ -1018,7 +1019,7 @@ unsafe fn on_stress_tick(hwnd: HWND) {
     let pt = window_center(hwnd);
     let r = with(|a| {
         let App { view, shell, pool, stress, .. } = a;
-        stress.as_mut().map(|s| s.step(view.tab(), shell, pool, pt))
+        stress.as_mut().map(|s| s.step(view, shell, pool, pt))
     })
     .flatten();
     match r {
@@ -1038,11 +1039,13 @@ fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32, keyboard: bool) {
     let (sx, sy) = screen_pt(hwnd, x, y);
     with(|a| {
         let paths = a.view.menu_paths(row);
+        let t = a.view.tab();
+        let folders = t.store.view().iter().enumerate().filter(|(_, id)| t.sel.contains(**id) || t.store.at(row) == Some(**id)).filter_map(|(i, _)| t.entry_at(i)).filter(|(p, dir)| *dir && paths.contains(p)).map(|(p, _)| p).collect();
         if paths.is_empty() {
             return;
         }
         let s = a.gfx.dpi / 96.0;
-        shellops::open_item_menu(a, paths, sx, sy, extended, Pt::new(x as f32 / s, y as f32 / s), keyboard);
+        shellops::open_item_menu(a, paths, folders, sx, sy, extended, Pt::new(x as f32 / s, y as f32 / s), keyboard);
     });
     invalidate(hwnd);
 }
@@ -1307,7 +1310,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     a.shell.refill(&mut a.pool);
                     let st = {
                         let App { view, shell, pool, stress, .. } = &mut *a;
-                        stress.as_mut().map(|s| s.step(view.tab(), shell, pool, pt))
+                        stress.as_mut().map(|s| s.step(view, shell, pool, pt))
                     };
                     arm_watch(hwnd, a);
                     (repaint, st)
