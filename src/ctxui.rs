@@ -523,9 +523,6 @@ impl Rows<'_> {
 impl MenuSource for Rows<'_> {
     fn rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
         let Some(level) = self.level(path) else { return };
-        if path.is_empty() && level.first().is_some_and(|r| r.source == ItemSource::Tsubame) {
-            out.push(MenuRow { kind: RowKind::Header, label: "Tsubame".into(), ..Default::default() });
-        }
         out.extend(level.iter().map(|it| self.row(it)));
         if path.is_empty() && self.failed {
             out.push(MenuRow::separator());
@@ -602,6 +599,8 @@ mod tests {
         let src = Rows { items: &items, icons: &icons, failed: true, paste_ok: false };
         let mut out = Vec::new();
         src.rows(&[], &mut out);
+        assert_eq!(out[0].label, "Open", "no app-name caption before actions");
+        assert!(!out.iter().any(|r| r.label == "Tsubame"));
         let by = |l: &str| out.iter().find(|r| r.label == l).unwrap().clone();
         assert!(by("Open").default && by("Open").accel == Some(0));
         assert!(by("Paste").disabled, "no files on the clipboard");

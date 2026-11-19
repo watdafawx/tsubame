@@ -23,7 +23,6 @@ pub enum RowKind {
     #[default]
     Item,
     Separator,
-    Header,
     /// "Some items could not load" + Retry (picking it sets `retry`)
     Status,
 }
@@ -79,7 +78,7 @@ impl MenuRow {
         match self.kind {
             RowKind::Item => !self.disabled,
             RowKind::Status => true,
-            RowKind::Separator | RowKind::Header => false,
+            RowKind::Separator => false,
         }
     }
 }
@@ -248,7 +247,7 @@ pub fn width(c: &mut dyn Canvas, rows: &[MenuRow], m: &Metrics) -> f32 {
     let (mut lw, mut sw, mut sub, mut st) = (0.0f32, 0.0f32, false, 0.0f32);
     for r in rows {
         match r.kind {
-            RowKind::Separator | RowKind::Header => {}
+            RowKind::Separator => {}
             RowKind::Item => {
                 let font = if r.default { m.font.b() } else { m.font };
                 lw = lw.max(c.measure(&r.label, font));
@@ -373,7 +372,7 @@ fn index_of(rows: &[MenuRow], key: Option<u64>) -> Option<usize> {
 fn activate(st: &MenuState, rows: &[MenuRow], lv: usize, i: usize, kb: bool) -> Option<Act> {
     let r = rows.get(i)?;
     match r.kind {
-        RowKind::Separator | RowKind::Header => None,
+        RowKind::Separator => None,
         RowKind::Status => Some(Act::Retry),
         RowKind::Item if r.disabled => None,
         RowKind::Item if r.submenu => Some(Act::Open(lv, r.key, kb)),
@@ -590,10 +589,6 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 c.line(r.x + 6.0, y, r.r() - 6.0, y, t.border, 1.0);
                 continue;
             }
-            if row.kind == RowKind::Header {
-                c.text(&row.label, Rect::new(r.x + m.label_x(), r.y, r.w - m.label_x(), r.h), m.small, t.text_dim);
-                continue;
-            }
             let it = ui.interact(lid(lv).with(row.key ^ 0x5eed), r.intersect(&vp), Sense::click());
             let lvl = &st.levels[lv];
             if it.hovered && row.focusable() && (moved || !lvl.kb) && (lvl.focus != Some(row.key) || lvl.kb) {
@@ -613,7 +608,8 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 }
                 st.levels[lv + 1..].iter_mut().for_each(|l| l.kb = false);
             }
-            if matches!(it.clicked, Some(Button::Left | Button::Right)) {
+            // Right-click is reserved for CM8 editing, never invocation.
+            if it.clicked == Some(Button::Left) {
                 act = activate(st, &rows, lv, i, false).or(act);
             }
             let lvl = &st.levels[lv];
@@ -1043,6 +1039,17 @@ mod tests {
         h.frame();
         let r = h.click(Pt::new(700.0, 500.0));
         assert!(r.closed && r.picked.is_none());
+    }
+
+    #[test]
+    fn right_click_on_an_entry_never_invokes_it() {
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.frame();
+        let pos = h.row_rect(0, 0).center();
+        h.ui.push(Event::MouseDown { pos, button: Button::Right, mods: Mods::NONE, double: false });
+        h.frame();
+        h.ui.push(Event::MouseUp { pos, button: Button::Right, mods: Mods::NONE });
+        assert!(h.frame().picked.is_none());
     }
 
     #[test]

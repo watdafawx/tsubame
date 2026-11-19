@@ -6,6 +6,11 @@ file-operation queue, clipboard worker and inline rename handle app verbs;
 other shell ids invoke on the STA that retains the original IContextMenu.
 `windows.more` opens the native popup. Sidebar pin menus remain their existing
 app-only popup (they did not use the shell menu).
+Popups have no app-name header/caption rows, including loading and failure frames.
+App-owned actions and group separators remain; custom entries use an accent dot.
+Sidebar drive right-clicks use the shell-menu path. Drive/share roots cannot be
+cut, renamed or deleted through app rows; dispatch also rejects those actions.
+Keyboard anchors follow the active pane and grid cell.
 
 Own rows require no COM or disk access. Folder classification comes from the
 enumerated entry store. The first frame draws those rows and a thin loading

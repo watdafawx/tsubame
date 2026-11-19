@@ -1208,6 +1208,14 @@ fn button_event(hwnd: HWND, msg: u32, lp: LPARAM) {
         WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => {
             // the own-drawn menu measures right-click -> first paint from here
             ctxui::note_input();
+            // Let a new right-click outside the old menu reach the view in
+            // this same gesture, instead of popup dismissal eating it.
+            with(|a| {
+                if a.view.ctx.as_ref().is_some_and(|c| c.open && !c.state.levels.iter().any(|l| l.rect.contains_pt(pos))) {
+                    a.view.ctx = None;
+                    a.ui.close_popup(ctxui::ID_CTX.with(0));
+                }
+            });
             down(Button::Right, false)
         }
         WM_MBUTTONDOWN | WM_MBUTTONDBLCLK => down(Button::Middle, false),

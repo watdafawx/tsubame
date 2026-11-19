@@ -22,7 +22,7 @@ Screenshots: `mocks/shots/ctx-<id>-light|dark.png` (ids: look, full, kinds, quic
 - Popup look: `popup` fill, 1 px `popup_border`, radius 8, padding 4, no shadow, no gradient. Menu width 232 to 360.
 - Row height = max(density, round(text x 1.75)); icons scale 16 to 20 at 125 %.
 - Icons: Tsubame mono glyphs for known verbs, the shell's HMENU bitmap in colour for unknown items. Icon column is always reserved.
-- Groups: Tsubame group has a header, Windows items keep native order inside their group, user entries carry an accent dot.
+- Groups: no app-name header or caption rows in popups. App-owned items and group separators remain; Windows items keep native order inside their group, and user entries carry an accent dot.
 - Edit by right-clicking an entry (no separate mode). Hidden items are not listed in the menu, only in Settings, with Undo in a strip.
 - Items are identified by verb + handler CLSID, not label, so hide and rename survive updates and translations. New items show up visible, tagged New.
 - Nothing native is removed from Windows, and the editor says so.
@@ -48,3 +48,7 @@ All four defaults accepted, with one change to question 3:
 2. Submenu delay: 150 ms open, 250 ms close, safe triangle.
 3. Menu taller than the screen: first try the Windows 11 trick. When the menu does not fit, fold the common actions (Cut, Copy, Paste, Rename, Delete, Share) from their text rows into one icon-only row at the top (variant A in state 4), which frees about 5 rows. Only if it still does not fit, scroll with chevron strips. Rows never shrink.
 4. Typing filters the open menu; accelerators become Alt + letter.
+
+Follow-up approval: remove the small "Tsubame" group label from every popup,
+including loading/failure states. No app-name captions in context menus; custom
+entries retain their accent dots. Window titles and Settings labels are unchanged.
