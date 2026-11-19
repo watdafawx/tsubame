@@ -242,6 +242,10 @@ impl CtxMenu {
             submenus: env_u32("TSUBAME_CTX_EAGER") == 1,
             debug_delay_ms: env_u32("TSUBAME_CTX_DELAY_MS"),
             debug_sub_delay_ms: env_u32("TSUBAME_CTX_SUB_DELAY_MS"),
+            // CM7: Win11 packaged commands after the classic rows;
+            // `TSUBAME_CTX_PACKAGED=0` leaves them out (A/B timing runs)
+            packaged: std::env::var("TSUBAME_CTX_PACKAGED").map(|v| v.trim() != "0").unwrap_or(true),
+            debug_pkg_delay_ms: env_u32("TSUBAME_CTX_PKG_DELAY_MS"),
             ..Default::default()
         };
         let paths = if self.target.background { vec![self.target.folder.clone()] } else { self.target.paths.clone() };
@@ -315,6 +319,7 @@ impl CtxMenu {
         // the worker is gone: its command ids and submenu tokens are dead
         // (open submenus show the failure row, Retry asks a new worker)
         self.model.native.clear();
+        self.model.packaged.clear();
         self.dirty = true;
     }
 
@@ -529,7 +534,7 @@ pub fn glyph(action: &str, verb: Option<&str>) -> Option<char> {
             "open" => '\u{E8E5}',
             "openas" | "openwith" => '\u{E7AC}',
             "runas" => '\u{E7EF}',
-            "share" | "windows.share" => '\u{E72D}',
+            "share" | "windows.share" | "windows.modernshare" => '\u{E72D}',
             "properties" => '\u{E946}',
             "delete" => '\u{E74D}',
             "cut" => '\u{E8C6}',
@@ -629,8 +634,16 @@ impl Rows<'_> {
             checked: it.flags & flag::CHECKED != 0 && it.flags & flag::RADIO == 0,
             radio: it.flags & flag::CHECKED != 0 && it.flags & flag::RADIO != 0,
             submenu: it.kind == ItemKind::Submenu,
+            quick: it.kind == ItemKind::Command && is_quick(action, it.verb.as_deref()),
         }
     }
+}
+
+/// The common actions that fold into the icon row of a menu taller than the
+/// window (CM9, the mock's state 4 variant A): Cut, Copy, Paste, Rename,
+/// Delete (the app's rows) and the shell's Share.
+pub fn is_quick(action: &str, verb: Option<&str>) -> bool {
+    matches!(action, "file.cut" | "file.copy" | "file.paste" | "file.rename" | "file.delete") || matches!(verb, Some("share" | "windows.share" | "windows.modernshare"))
 }
 
 impl MenuSource for Rows<'_> {
@@ -670,6 +683,17 @@ mod tests {
 
     fn labels(v: &[MenuItem]) -> Vec<&str> {
         v.iter().map(|i| if i.is_separator() { "--" } else { i.label.as_str() }).collect()
+    }
+
+    #[test]
+    fn common_actions_fold_into_the_icon_row() {
+        for a in ["file.cut", "file.copy", "file.paste", "file.rename", "file.delete"] {
+            assert!(is_quick(a, None), "{a}");
+        }
+        assert!(is_quick("", Some("windows.modernshare")));
+        assert!(is_quick("", Some("share")));
+        assert!(!is_quick("file.properties", None));
+        assert!(!is_quick("", Some("open")));
     }
 
     #[test]

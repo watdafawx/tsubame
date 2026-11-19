@@ -92,6 +92,9 @@ pub struct Stress {
     ctx_top_us: Vec<u64>,
     ctx_all_us: Vec<u64>,
     ctx_rows: Vec<u64>,
+    /// packaged (IExplorerCommand) worker time per menu and its row count (CM7)
+    ctx_pkg_us: Vec<u64>,
+    ctx_pkg_rows: Vec<u64>,
     ctx_failed: usize,
     ctx_at: Option<Instant>,
     /// lazy submenus filled (CM6: one per menu, like a hover) and their
@@ -108,6 +111,8 @@ impl Stress {
             ctx_top_us: Vec::new(),
             ctx_all_us: Vec::new(),
             ctx_rows: Vec::new(),
+            ctx_pkg_us: Vec::new(),
+            ctx_pkg_rows: Vec::new(),
             ctx_failed: 0,
             ctx_at: None,
             ctx_sub_us: Vec::new(),
@@ -238,6 +243,8 @@ impl Stress {
                     if let Some(t) = c.top_items { self.ctx_top_us.push(t.as_micros() as u64); }
                     if let Some(t) = c.all_items { self.ctx_all_us.push(t.as_micros() as u64); } else { self.ctx_failed += 1; }
                     self.ctx_rows.push(c.model.native.len() as u64);
+                    if let Some(t) = c.model.packaged_us { self.ctx_pkg_us.push(t); }
+                    self.ctx_pkg_rows.push(c.model.packaged.iter().filter(|i| !i.is_separator()).count() as u64);
                     view.ctx = None;
                     let done = i + 1;
                     if [1, 10, 100, self.menus].contains(&done) { self.snap(&format!("after menu {done}")); }
@@ -489,6 +496,7 @@ impl Stress {
                 line(format!("own warm first paint: {}", pcts(self.ctx_first_us.get(1..).unwrap_or_default())));
                 line(format!("own warm top level: {}", pcts(self.ctx_top_us.get(1..).unwrap_or_default())));
                 line(format!("own warm all items: {}", pcts(self.ctx_all_us.get(1..).unwrap_or_default())));
+                line(format!("own packaged commands (worker us, {} menus, rows max {}): {}; warm: {}", self.ctx_pkg_us.len(), self.ctx_pkg_rows.iter().max().unwrap_or(&0), pcts(&self.ctx_pkg_us), pcts(self.ctx_pkg_us.get(1..).unwrap_or_default())));
                 line(format!("own lazy submenu (request to answer, {} filled): {}", self.ctx_sub_us.len(), pcts(&self.ctx_sub_us)));
                 line(format!("own cold first/top/all us: {:?}/{:?}/{:?}; failed: {}", self.ctx_first_us.first(), self.ctx_top_us.first(), self.ctx_all_us.first(), self.ctx_failed));
             }

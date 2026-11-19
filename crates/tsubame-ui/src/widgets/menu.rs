@@ -71,6 +71,9 @@ pub struct MenuRow {
     /// opens a submenu (its rows come from `MenuSource::rows` with this key
     /// appended to the path)
     pub submenu: bool,
+    /// a common action (Cut, Copy, Paste, Rename, Delete, Share) that folds
+    /// into the icon-only row at the top when the menu is too tall (CM9)
+    pub quick: bool,
 }
 
 impl MenuRow {
@@ -274,6 +277,11 @@ pub struct Level {
     reveal: bool,
     focus_first: bool,
     strip: f32,
+    /// the top level folded its common actions into the icon row (CM9);
+    /// once folded it stays folded while the menu is open
+    folded: bool,
+    /// height above the scroll viewport (filter field or icon row)
+    hdr: f32,
 }
 
 /// The app keeps this while the menu is open.
@@ -409,6 +417,14 @@ impl Metrics {
     }
     fn header(&self) -> f32 {
         self.field_h() + self.pad
+    }
+    /// The icon row's height (CM9): a little taller than a row, like Win11.
+    pub fn quick_h(&self) -> f32 {
+        (self.row + 8.0 * self.sc).round()
+    }
+    /// One icon button's width.
+    pub fn quick_w(&self) -> f32 {
+        (self.row * 1.5).round()
     }
 }
 
@@ -642,6 +658,76 @@ pub fn filter_rows(src: &dyn MenuSource, q: &str, rows: &mut Vec<MenuRow>, found
     walk(src, q, &mut Vec::new(), "", rows, found);
 }
 
+// ---- tall menus: the icon row (CM9) -----------------------------------------
+
+/// The top level does not fit in `avail` DIPs (the bounds minus the
+/// keep-out) as a plain list, and at least two rows can fold: fold them into
+/// the icon row (the Windows 11 trick, `docs/ctxmenu-mock.md` question 3).
+pub fn should_fold(rows: &[MenuRow], m: &Metrics, avail: f32) -> bool {
+    let n = rows.iter().filter(|r| r.quick && r.kind == RowKind::Item).count();
+    let mut ys = Vec::new();
+    n >= 2 && layout(rows, m, &mut ys) + 2.0 * m.inset() > avail + 0.5
+}
+
+/// Splits the top level into the icon row (the foldable rows, in menu order)
+/// and the list without them (no leading, trailing or doubled separators).
+pub fn fold_quick(rows: &[MenuRow]) -> (Vec<MenuRow>, Vec<MenuRow>) {
+    let mut quick = Vec::new();
+    let mut rest: Vec<MenuRow> = Vec::with_capacity(rows.len());
+    for r in rows {
+        if r.quick && r.kind == RowKind::Item {
+            quick.push(r.clone());
+        } else if r.kind != RowKind::Separator || rest.last().is_some_and(|l| l.kind != RowKind::Separator) {
+            rest.push(r.clone());
+        }
+    }
+    while rest.last().is_some_and(|l| l.kind == RowKind::Separator) {
+        rest.pop();
+    }
+    (quick, rest)
+}
+
+/// The icon buttons inside `area`, left to right (Win11: left-aligned,
+/// a fixed width each; narrower when they would not fit).
+pub fn quick_rects(area: Rect, n: usize, m: &Metrics) -> Vec<Rect> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let w = m.quick_w().min(area.w / n as f32);
+    (0..n).map(|i| Rect::new(area.x + i as f32 * w, area.y, w, area.h)).collect()
+}
+
+/// The icon button under `p`.
+pub fn quick_hit(rects: &[Rect], p: Pt) -> Option<usize> {
+    rects.iter().position(|r| r.contains_pt(p))
+}
+
+/// Keys that move between the icon row and the list (the row is a
+/// horizontal strip above the list): Left / Right within the row (wrapping),
+/// Down from it to the first list row, Up from it to the last one (the menu
+/// wraps), Up from the first list row and Down from the last one into the
+/// row, Home to its first button. Returns the new focus, None when the key
+/// is the list's business (or there is no row).
+pub fn quick_nav(quick: &[MenuRow], rows: &[MenuRow], focus: Option<u64>, key: Key) -> Option<u64> {
+    if quick.iter().all(|q| !q.focusable()) {
+        return None;
+    }
+    let qi = index_of(quick, focus);
+    let li = index_of(rows, focus);
+    let key_of = |v: &[MenuRow], i: Option<usize>| i.map(|i| v[i].key);
+    match (key, qi) {
+        (Key::Left, Some(i)) => key_of(quick, next_focus(quick, Some(i), false)),
+        (Key::Right, Some(i)) => key_of(quick, next_focus(quick, Some(i), true)),
+        (Key::Down | Key::PageDown, Some(_)) => key_of(rows, edge_focus(rows, true)).or(focus),
+        (Key::Up, Some(_)) => key_of(rows, edge_focus(rows, false)).or(focus),
+        (Key::PageUp, Some(_)) => focus,
+        (Key::Home, _) => key_of(quick, edge_focus(quick, true)),
+        (Key::Up, None) if li.is_some() && li == edge_focus(rows, true) => key_of(quick, edge_focus(quick, true)),
+        (Key::Down, None) if li.is_some() && li == edge_focus(rows, false) => key_of(quick, edge_focus(quick, true)),
+        _ => None,
+    }
+}
+
 // ---- the widget ----------------------------------------------------------
 
 enum Act {
@@ -770,7 +856,7 @@ fn set_filter(ui: &mut Ui, id: Id, st: &mut MenuState, f: impl FnOnce(&mut Strin
 
 /// Rows a page of level `lv` holds (from its last rect).
 fn page_rows(st: &MenuState, lv: usize, m: &Metrics) -> usize {
-    let h = st.levels[lv].rect.h - 2.0 * m.inset() - 2.0 * st.levels[lv].strip;
+    let h = st.levels[lv].rect.h - 2.0 * m.inset() - st.levels[lv].hdr - 2.0 * st.levels[lv].strip;
     if h <= 0.0 { usize::MAX } else { ((h / m.row).floor() as usize).max(1) }
 }
 
@@ -825,18 +911,34 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             _ => continue,
         };
         level_rows(src, st, lv, &mut rows, &mut found);
+        // CM9: the folded top level (its common actions are the icon row)
+        let mut quick: Vec<MenuRow> = Vec::new();
+        if lv == 0 && !filtering && st.levels[0].folded {
+            (quick, rows) = fold_quick(&rows);
+        }
         let cur = index_of(&rows, st.levels[lv].focus);
+        let qcur = index_of(&quick, st.levels[lv].focus);
         let mut act = None;
         let mut to = None;
+        let mut to_key = None;
+        if !key.1.alt
+            && let Some(k) = quick_nav(&quick, &rows, st.levels[lv].focus, key.0)
+        {
+            to_key = Some(k);
+        } else {
         match key {
             (Key::Char(ch), mods) if mods.alt && !mods.ctrl => {
-                if let Some((i, run)) = accel_target(&rows, cur, ch) {
-                    to = Some(i);
+                // the icon row's accelerators work too (Alt+T cuts)
+                let all: Vec<MenuRow> = quick.iter().chain(rows.iter()).cloned().collect();
+                let from = qcur.or(cur.map(|i| i + quick.len()));
+                if let Some((i, run)) = accel_target(&all, from, ch) {
+                    to_key = Some(all[i].key);
                     if run {
-                        act = activate(st, &rows, &found, lv, i, true);
+                        act = activate(st, &all, &found, lv, i, true);
                     }
                 }
             }
+            (Key::Enter | Key::Space, _) if qcur.is_some() => act = qcur.and_then(|i| activate(st, &quick, &[], lv, i, true)),
             (Key::Backspace, _) if filtering => set_filter(ui, id, st, |s| {
                 s.pop();
             }),
@@ -877,9 +979,13 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             (Key::Space, _) if !filtering => act = cur.and_then(|i| activate(st, &rows, &found, lv, i, true)),
             _ => {}
         }
+        }
         if let Some(i) = to {
+            to_key = Some(rows[i].key);
+        }
+        if let Some(k) = to_key {
             let l = &mut st.levels[lv];
-            l.focus = Some(rows[i].key);
+            l.focus = Some(k);
             l.kb = true;
             l.reveal = true;
             ui.request_repaint();
@@ -921,9 +1027,29 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
                 st.levels[0].reveal = true;
             }
         }
+        // CM9: a top level taller than the bounds folds its common actions
+        // into the icon row first; only if it still does not fit, it scrolls
+        let mut quick: Vec<MenuRow> = Vec::new();
+        let mut w = if filtering { filtered_width(c, &rows, &found, &m).max(st.filter_w).min(m.max_w) } else { width(c, &rows, &m) };
+        if lv == 0 && !filtering {
+            if !st.levels[0].folded && should_fold(&rows, &m, style.bounds.h - 2.0 * m.keep) {
+                st.levels[0].folded = true;
+            }
+            if st.levels[0].folded {
+                (quick, rows) = fold_quick(&rows);
+                // the width the plain list had, wide enough for the buttons
+                w = w.max(quick.len() as f32 * m.quick_w() + 2.0 * m.inset()).min(m.max_w);
+            }
+        }
         let content = layout(&rows, &m, &mut ys);
-        let hdr = if filtering { m.header() } else { 0.0 };
-        let w = if filtering { filtered_width(c, &rows, &found, &m).max(st.filter_w).min(m.max_w) } else { width(c, &rows, &m) };
+        let hdr = if filtering {
+            m.header()
+        } else if !quick.is_empty() {
+            m.quick_h() + m.pad
+        } else {
+            0.0
+        };
+        st.levels[lv].hdr = hdr;
         let full_h = content + hdr + 2.0 * m.inset();
         let last = st.levels[lv].rect;
         let frozen = lv == 0 && last.w > 0.0 && ((ui.mouse_in() && last.contains_pt(ui.mouse())) || st.filtering());
@@ -951,7 +1077,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         }
         // the keyboard's row went away (a submenu that failed to load): the
         // keyboard lands on the first row left
-        if st.levels[lv].kb && st.levels[lv].focus.is_some() && index_of(&rows, st.levels[lv].focus).is_none() {
+        if st.levels[lv].kb && st.levels[lv].focus.is_some() && index_of(&rows, st.levels[lv].focus).is_none() && index_of(&quick, st.levels[lv].focus).is_none() {
             st.levels[lv].focus = edge_focus(&rows, true).map(|i| rows[i].key);
         }
         if !ui.popup_begin_r(c, lid(lv), rect, m.radius) {
@@ -965,6 +1091,13 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         if filtering {
             let n = found.iter().filter(|f| !f.path.is_empty()).count();
             paint_field(c, &t, &m, Rect::new(rect.x + m.inset(), rect.y + m.inset(), rect.w - 2.0 * m.inset(), m.field_h()), &st.filter, n);
+        }
+        let qarea = Rect::new(rect.x + m.inset(), rect.y + m.inset(), rect.w - 2.0 * m.inset(), m.quick_h());
+        let qrects = quick_rects(qarea, quick.len(), &m);
+        if !quick.is_empty() {
+            // the line between the icon row and the list
+            let y = (qarea.b() + m.pad / 2.0).floor() + 0.5;
+            c.line(qarea.x + 6.0, y, qarea.r() - 6.0, y, t.border, 1.0);
         }
         // the wheel over the menu scrolls it (and never reaches the list)
         let wheel = ui.interact(lid(lv).child("wheel"), rect, Sense::hover().wheel()).wheel.1;
@@ -1021,6 +1154,9 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         // a stationary pointer cannot take the keyboard's focus
         let fresh = moved || !st.levels[lv].kb;
         let hovered = under.filter(|&i| fresh && rows[i].focusable()).map(|i| (rows[i].key, rows[i].submenu && !rows[i].disabled && !filtering));
+        // the icon row (CM9): its buttons are rows that never open submenus
+        let qunder = pointer.filter(|_| !over_deeper).and_then(|p| quick_hit(&qrects, p));
+        let hovered = hovered.or_else(|| qunder.filter(|&i| fresh && quick[i].focusable()).map(|i| (quick[i].key, false)));
         let child = st.levels.get(lv + 1).map(|l| l.rect);
         let open = st.levels[lv].open;
         let (hact, aiming) = st.levels[lv].timer.step(&HoverIn { now, moved, prev, pointer, hovered, open, child });
@@ -1045,8 +1181,24 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             None => {}
         }
 
-        c.clip(vp);
         let kb_ring = st.levels[lv].kb;
+        let mut tip: Option<(Rect, String)> = None;
+        for (i, (row, r)) in quick.iter().zip(qrects.iter()).enumerate() {
+            let it = ui.interact(lid(lv).with(row.key ^ 0x9a1c), *r, Sense::click());
+            if it.clicked == Some(Button::Left) {
+                act = activate(st, &quick, &[], lv, i, false).or(act);
+            }
+            let lvl = &st.levels[lv];
+            let focused = lvl.focus == Some(row.key) && row.focusable();
+            let state = RowPaint { focused, ring: kb_ring && focused, pressed: it.active && !row.disabled, ..Default::default() };
+            paint_quick(c, &t, &m, *r, row, state, src);
+            // icon-only: the label (and its keys) as a tooltip
+            if focused || it.hovered {
+                let text = if row.shortcut.is_empty() { row.label.clone() } else { format!("{}  {}", row.label, row.shortcut) };
+                tip = Some((*r, text));
+            }
+        }
+        c.clip(vp);
         let underline = (st.keyboard && !st.filtering()) || style.alt;
         for (i, row) in rows.iter().enumerate() {
             let r = Rect::new(vp.x, vp.y + ys[i] - scroll, vp.w, m.row_h(row));
@@ -1082,6 +1234,9 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         }
         c.unclip();
         ui.popup_end(c);
+        if let Some((b, text)) = tip {
+            paint_tip(c, &t, &m, b, &text, rect, style.bounds);
+        }
         match act {
             Some(Act::Pick(p)) => {
                 ui.close_all_popups();
@@ -1280,6 +1435,68 @@ fn paint_row(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow,
             c.line(x0, y, x1, y, fg, 1.0);
         }
     }
+}
+
+/// One icon-only button of the folded row (CM9): the row's states, its icon
+/// centred (a glyph, the shell bitmap, or the label's first letter when it
+/// has neither), danger and disabled colours like the text row.
+fn paint_quick(c: &mut dyn Canvas, t: &Theme, m: &Metrics, r: Rect, row: &MenuRow, s: RowPaint, src: &dyn MenuSource) {
+    let b = r.inset(2.0, 2.0);
+    let rr = m.row_radius;
+    if s.pressed {
+        c.round(b, rr, t.accent);
+    } else if s.focused {
+        c.round(b, rr, t.selected);
+        if s.ring {
+            c.round_stroke(b, rr, t.focus, t.layout_focus_ring_width.max(1.0));
+        }
+    }
+    let mut col = if s.focused { t.text } else { t.text_dim };
+    if row.danger {
+        col = t.danger;
+    }
+    if row.disabled {
+        col = t.text_disabled;
+    }
+    if s.pressed {
+        col = t.on_accent;
+    }
+    let side = (m.icon * 1.125).round();
+    let ir = Rect::new((b.center().x - side / 2.0).round(), (b.center().y - side / 2.0).round(), side, side);
+    let drawn = match row.icon {
+        RowIcon::Glyph(g) => {
+            c.text(&g.to_string(), ir, f(side).icon().c(), col);
+            true
+        }
+        RowIcon::Image(k) => match src.icon(k) {
+            Some((w, h, px)) => {
+                c.image(&image_key(k), w, h, px, ir.inset(((side - m.icon) / 2.0).max(0.0), ((side - m.icon) / 2.0).max(0.0)));
+                true
+            }
+            None => false,
+        },
+        RowIcon::None => false,
+    };
+    if !drawn && let Some(ch) = row.label.chars().next() {
+        c.text(&ch.to_string(), ir, m.font.b().c(), col);
+    }
+}
+
+/// The icon button's label, a tooltip under button `b` (above it when there
+/// is no room), kept inside `menu`'s width and the bounds. No delay, so no
+/// timer: it shows while the button is hovered or has the keyboard focus.
+fn paint_tip(c: &mut dyn Canvas, t: &Theme, m: &Metrics, b: Rect, text: &str, menu: Rect, bounds: Rect) {
+    let w = (c.measure(text, m.small).ceil() + 14.0 * m.sc).min(bounds.w - 2.0 * m.keep);
+    let h = (m.row * 0.8).round();
+    let x = (b.center().x - w / 2.0).max(menu.x + 2.0).min(menu.r() - 2.0 - w).max(bounds.x + 2.0).min(bounds.r() - 2.0 - w);
+    let mut y = b.b() + 4.0;
+    if y + h > bounds.b() - 2.0 {
+        y = b.y - 4.0 - h;
+    }
+    let r = Rect::new(x.round(), y.round(), w, h);
+    c.round(r, t.radius_sm, t.popup);
+    c.round_stroke(r, t.radius_sm, t.popup_border, 1.0);
+    c.text(text, r, m.small.c(), t.text);
 }
 
 /// The canvas cache key of image icon `k` (the backend keeps one device
@@ -2007,5 +2224,139 @@ mod tests {
         h.key(Key::Escape);
         assert_eq!(h.st.levels.len(), 1);
         assert!(h.key(Key::Escape).closed);
+    }
+
+    // ---- CM9: the icon row
+
+    fn q(key: u64, label: &str) -> MenuRow {
+        MenuRow { quick: true, ..MenuRow::item(key, label) }
+    }
+
+    fn tall_src(n: u64) -> Vec<MenuRow> {
+        let mut v = vec![MenuRow::item(1, "Open"), MenuRow::separator(), q(51, "Cut"), q(52, "Copy"), q(53, "Paste"), q(54, "Rename"), MenuRow { accel: Some(0), ..q(55, "Delete") }, MenuRow::separator()];
+        v.extend((0..n).map(|k| MenuRow::item(1000 + k, "Row")));
+        v
+    }
+
+    #[test]
+    fn fold_only_when_too_tall_and_two_rows_can_fold() {
+        let m = m();
+        let rows = tall_src(5);
+        let mut ys = Vec::new();
+        let h = layout(&rows, &m, &mut ys) + 2.0 * m.inset();
+        assert!(!should_fold(&rows, &m, h), "fits exactly");
+        assert!(should_fold(&rows, &m, h - 1.0));
+        let one = [MenuRow::item(1, "a"), q(2, "Cut"), MenuRow::item(3, "b")];
+        assert!(!should_fold(&one, &m, 1.0), "one foldable row is not worth a row");
+        let off = [MenuRow::item(1, "a"), MenuRow { kind: RowKind::Separator, quick: true, ..MenuRow::separator() }, MenuRow::item(3, "b")];
+        assert!(!should_fold(&off, &m, 1.0), "only items fold");
+    }
+
+    #[test]
+    fn folding_keeps_order_and_cleans_separators() {
+        let (quick, rest) = fold_quick(&tall_src(2));
+        assert_eq!(quick.iter().map(|r| r.key).collect::<Vec<_>>(), [51, 52, 53, 54, 55]);
+        let kinds: Vec<_> = rest.iter().map(|r| (r.key, r.kind == RowKind::Separator)).collect();
+        assert_eq!(kinds.len(), 4, "{kinds:?}");
+        assert_eq!(rest[0].key, 1);
+        assert_eq!(rest[1].kind, RowKind::Separator, "one separator, not two");
+        assert_eq!((rest[2].key, rest[3].key), (1000, 1001));
+        // a foldable row at the very end leaves no trailing separator
+        let (_, rest) = fold_quick(&[MenuRow::item(1, "a"), MenuRow::separator(), q(2, "Cut"), q(3, "Copy")]);
+        assert_eq!(rest.len(), 1);
+    }
+
+    #[test]
+    fn icon_buttons_are_left_aligned_and_hit_tested() {
+        let m = m();
+        let area = Rect::new(10.0, 20.0, 300.0, m.quick_h());
+        let r = quick_rects(area, 5, &m);
+        assert_eq!(r.len(), 5);
+        assert_eq!(r[0].x, 10.0);
+        assert_eq!(r[1].x, 10.0 + m.quick_w());
+        assert!(r.iter().all(|b| b.w == m.quick_w() && b.h == m.quick_h()));
+        assert_eq!(quick_hit(&r, Pt::new(11.0, 21.0)), Some(0));
+        assert_eq!(quick_hit(&r, r[3].center()), Some(3));
+        assert_eq!(quick_hit(&r, Pt::new(r[4].r() + 1.0, 21.0)), None, "right of the buttons");
+        assert_eq!(quick_hit(&r, Pt::new(11.0, area.b() + 1.0)), None, "below the row");
+        // narrow menu: the buttons shrink to fit
+        let r = quick_rects(Rect::new(0.0, 0.0, 100.0, 30.0), 5, &m);
+        assert!(r[4].r() <= 100.0 + 0.01);
+        assert!(quick_rects(area, 0, &m).is_empty());
+    }
+
+    #[test]
+    fn arrows_move_between_the_icon_row_and_the_list() {
+        let (quick, rows) = fold_quick(&tall_src(3));
+        let nav = |f: u64, k: Key| quick_nav(&quick, &rows, Some(f), k);
+        assert_eq!(nav(51, Key::Right), Some(52));
+        assert_eq!(nav(55, Key::Right), Some(51), "wraps");
+        assert_eq!(nav(51, Key::Left), Some(55), "wraps left");
+        assert_eq!(nav(53, Key::Down), Some(1), "down into the list");
+        assert_eq!(nav(53, Key::Up), Some(1002), "up wraps to the last list row");
+        assert_eq!(nav(1, Key::Up), Some(51), "up from the first list row");
+        assert_eq!(nav(1002, Key::Down), Some(51), "down from the last list row");
+        assert_eq!(nav(1000, Key::Down), None, "the list's business");
+        assert_eq!(nav(1000, Key::Home), Some(51));
+        assert_eq!(quick_nav(&[], &rows, Some(1), Key::Up), None, "no row");
+        let dis: Vec<MenuRow> = quick.iter().map(|r| MenuRow { disabled: true, ..r.clone() }).collect();
+        assert_eq!(quick_nav(&dis, &rows, Some(1), Key::Up), None, "all disabled");
+    }
+
+    fn quick_button(h: &H, i: usize) -> Rect {
+        let m = m();
+        let r = h.st.levels[0].rect;
+        let area = Rect::new(r.x + m.inset(), r.y + m.inset(), r.w - 2.0 * m.inset(), m.quick_h());
+        quick_rects(area, 5, &m)[i]
+    }
+
+    #[test]
+    fn tall_menu_folds_and_the_icon_row_works_by_keyboard_and_mouse() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.src.top = tall_src(60);
+        h.frame();
+        assert!(h.st.levels[0].folded);
+        assert!(h.st.levels[0].hdr >= m().quick_h());
+        assert_eq!(h.st.levels[0].focus, Some(1), "keyboard open focuses the first list row");
+        h.key(Key::Up);
+        assert_eq!(h.st.levels[0].focus, Some(51));
+        h.key(Key::Right);
+        assert_eq!(h.st.levels[0].focus, Some(52));
+        assert_eq!(h.key(Key::Enter).picked, Some(vec![52]));
+
+        // accelerators reach the folded rows
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.src.top = tall_src(60);
+        h.frame();
+        assert_eq!(h.alt_key('d').picked, Some(vec![55]));
+
+        // a click on an icon button picks it; hovering shows its label
+        let mut h = H::new(Pt::new(100.0, 100.0), false);
+        h.src.top = tall_src(60);
+        h.frame();
+        let b = quick_button(&h, 1);
+        h.hover(b.center());
+        assert!(h.c.has_text("Copy"), "tooltip");
+        assert_eq!(h.click(quick_button(&h, 3).center()).picked, Some(vec![54]));
+
+        // still too tall: the list scrolls under the row with chevron strips
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.src.top = tall_src(60);
+        h.frame();
+        assert!(h.c.has_text("\u{E70D}"), "down strip");
+        h.key(Key::End);
+        assert!(h.st.levels[0].scroll > 0.0);
+        assert_eq!(h.st.levels[0].focus, Some(1059));
+        h.key(Key::Down);
+        assert_eq!(h.st.levels[0].focus, Some(51), "down from the last row enters the icon row");
+    }
+
+    #[test]
+    fn short_menu_does_not_fold() {
+        let mut h = H::new(Pt::new(100.0, 100.0), true);
+        h.src.top = tall_src(3);
+        h.frame();
+        assert!(!h.st.levels[0].folded);
+        assert!(h.c.has_text("Cut") && h.c.has_text("Rename"));
     }
 }
