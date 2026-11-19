@@ -51,6 +51,7 @@ mod cols;
 mod custom_cmd;
 mod commands;
 mod ctxui;
+mod rowmenu;
 mod data;
 mod dnd;
 mod editing;

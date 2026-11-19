@@ -8,9 +8,12 @@
 use super::lay::{Look, Pg, button, fit, wrap};
 use super::{C_MENU, Cx, nss_pick};
 use crate::keymap::KeyMap;
+use crate::{ctxui, rowmenu};
+use std::time::{Duration, Instant};
 use tsubame_config::menu::{self, EntryKind, MenuEntry, ShowFor, Source};
 use tsubame_config::nss;
-use tsubame_ui::{Button, Cursor, Event, Id, Key, Mods, Rect, Sense, TextInput, f, text_input};
+use tsubame_ui::widgets::menu::{EDIT_DELETE, EDIT_DOWN, EDIT_ENTRY, EDIT_GROUP, EDIT_GROUP_BASE, EDIT_GROUP_NATIVE, EDIT_GROUP_NEW, EDIT_HIDE, EDIT_PIN, EDIT_RENAME, EDIT_UP, edit_only};
+use tsubame_ui::{Button, Cursor, Event, Id, Key, MenuRow, MenuSource, MenuState, MenuStyle, Mods, Pt, Rect, Sense, TextInput, f, text_input};
 
 const ID_GRIP: Id = Id::new("menu-grip");
 const ID_ROW: Id = Id::new("menu-row");
@@ -31,6 +34,9 @@ const ID_GDEL: Id = Id::new("menu-group-del");
 const ID_GEDIT: Id = Id::new("menu-group-rename");
 const ID_IGRIP: Id = Id::new("menu-item-grip");
 const ID_HDR: Id = Id::new("menu-item-hdr");
+const ID_DOTS: Id = Id::new("menu-dots");
+const ID_PIN: Id = Id::new("menu-pin");
+const ID_POP: Id = Id::new("menu-rowpop");
 
 /// The filter chips (mock 6b). "3rd party" = a packaged (Win11) item whose
 /// package family is not Microsoft's (`menu::is_third_party`): the classic menu
@@ -79,6 +85,18 @@ pub struct State {
     new_shown: Option<Vec<String>>,
     /// `focus_item`: select this key and search for it
     focus: Option<String>,
+    /// the open row "..." popup
+    pop: Option<RowPop>,
+    /// a key on a focused "..." button: run this action on that row this frame
+    act: Option<(RowTarget, u64)>,
+    /// "Refresh from last menu"
+    refresh: Refresh,
+    /// "Edit entry…" from the menu: open this entry's form once the list is known
+    edit_entry: Option<String>,
+    /// the last Delete entry (the Undo line)
+    deleted: Option<Deleted>,
+    /// a tooltip drawn last: (pointer, text)
+    tip: Option<(Pt, String)>,
 }
 
 impl State {
@@ -95,6 +113,8 @@ struct AddForm {
     args: TextInput,
     ext: TextInput,
     err: Option<String>,
+    /// Edit entry: the id of the entry the form changes (None: a new one)
+    edit: Option<String>,
 }
 
 impl State {
@@ -106,6 +126,12 @@ impl State {
     pub fn focus_item(&mut self, key: &str) {
         *self = State::default();
         self.focus = Some(key.to_string());
+    }
+
+    /// "Edit entry…" from the menu: the row is selected and its form is open.
+    pub fn focus_edit(&mut self, key: &str) {
+        self.focus_item(key);
+        self.edit_entry = Some(key.to_string());
     }
 }
 
@@ -365,7 +391,424 @@ fn tag(pg: &mut Pg, right: f32, y: f32, h: f32, label: &str, accent: bool, solid
     tr
 }
 
+// ---- the row "..." menu, the pin cell and "Refresh from last menu" (mocks `ctxgap-*`)
+
+/// The last Delete entry: the list before and after, and the entry's name.
+struct Deleted {
+    before: Vec<MenuEntry>,
+    after: Vec<MenuEntry>,
+    name: String,
+}
+
+/// The add form filled with `e`, saving into it.
+fn edit_form(e: &MenuEntry) -> AddForm {
+    AddForm { name: TextInput::new(&e.name), cmd: TextInput::new(&e.command), args: TextInput::new(&e.args), ext: TextInput::new(&e.extensions.join(", ")), err: None, edit: Some(e.id.clone()) }
+}
+
+/// What a row "..." menu is for.
+#[derive(Clone, Debug, PartialEq)]
+enum RowTarget {
+    /// a list entry (its id)
+    Entry(String),
+    /// a learned item (its key)
+    Item(String),
+}
+
+impl RowTarget {
+    fn key(&self) -> &str {
+        match self {
+            RowTarget::Entry(k) | RowTarget::Item(k) => k,
+        }
+    }
+}
+
+/// An open row popup: its target, the kit's menu state and the button it came from.
+struct RowPop {
+    target: RowTarget,
+    st: MenuState,
+    btn: Rect,
+    btn_id: Id,
+}
+
+/// The kit's edit menu opens against one row: this is the row.
+struct RowSrc {
+    name: String,
+    facts: rowmenu::Facts,
+}
+
+const ROW_KEY: u64 = 1;
+
+impl MenuSource for RowSrc {
+    fn rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
+        if path.is_empty() {
+            out.push(MenuRow::item(ROW_KEY, &self.name));
+        }
+    }
+    fn icon(&self, _key: u64) -> Option<(u32, u32, &[u32])> {
+        None
+    }
+    fn edit_rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
+        match path.split_last() {
+            Some((&EDIT_GROUP, _)) => out.extend(rowmenu::group_rows(&self.facts)),
+            Some(_) => out.extend(rowmenu::rows(&self.facts)),
+            None => {}
+        }
+    }
+}
+
+/// A stable number for a row's id (a moved row keeps its button, so the keyboard focus follows it).
+fn seed(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
+}
+
+/// The action a key runs on a row whose "..." button has the focus (F2, Del, Alt+Up / Down); None:
+/// not a row key, or the action is off for that row.
+pub fn button_key(key: Key, mods: Mods, f: &rowmenu::Facts) -> Option<rowmenu::Act> {
+    use rowmenu::Act;
+    let act = match key {
+        Key::F(2) if mods.none() => Act::Rename,
+        // Settings: Del deletes a custom row (Hide is the eye); Hide has no key here
+        Key::Delete if mods.none() => Act::DeleteEntry,
+        Key::Up if mods == Mods::ALT => Act::Up,
+        Key::Down if mods == Mods::ALT => Act::Down,
+        _ => return None,
+    };
+    (rowmenu::present(f, act) && rowmenu::state(f, act).0).then_some(act)
+}
+
+/// The facts of the row `t` stands for, from the data as it is now. None: the row is gone.
+fn facts_for(t: &RowTarget, list: &[MenuEntry], m: &tsubame_config::ContextMenu) -> Option<rowmenu::Facts> {
+    match t {
+        RowTarget::Entry(id) => {
+            let e = list.iter().find(|e| e.id == *id)?;
+            let shown: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
+            Some(rowmenu::Facts::entry(e, ctxui::can_move(list, id, true, &shown), ctxui::can_move(list, id, false, &shown), false))
+        }
+        RowTarget::Item(key) => Some(rowmenu::Facts::learned(menu::item(&m.items, key)?, &m.user_groups, false, false)),
+    }
+}
+
+/// The learned rows of each group in drawing order: pinned rows first, each part in its native order.
+fn order_rows(items: &[menu::ItemPref], shown: &[usize], users: &[menu::UserGroup], order: &[menu::GroupRef]) -> Vec<(menu::GroupRef, Vec<usize>)> {
+    order
+        .iter()
+        .map(|g| {
+            let mine: Vec<usize> = shown.iter().copied().filter(|&i| item_group(&items[i], users) == *g).collect();
+            (g.clone(), rowmenu::pinned_first(&mine, |i| items[i].pin))
+        })
+        .collect()
+}
+
+/// "Refresh from last menu": what the button and its status line are doing.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Refresh {
+    #[default]
+    Idle,
+    /// working since `since`; `wait` is a test aid (`TSUBAME_REFRESH_DELAY_MS`), zero normally
+    Running { since: Instant, wait: Duration },
+    /// this many rows left the list
+    Done(usize),
+    UpToDate,
+}
+
+/// The running state is drawn only when the work takes longer than this.
+const RUNNING_AFTER: Duration = Duration::from_millis(150);
+
+fn refresh_outcome(n: usize) -> Refresh {
+    if n == 0 { Refresh::UpToDate } else { Refresh::Done(n) }
+}
+
+fn running_visible(since: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(since) >= RUNNING_AFTER
+}
+
+/// The kind switch's entry as the menu's target kind.
+fn kind_target(i: usize) -> Option<menu::Target> {
+    match i {
+        0 => Some(menu::Target::File),
+        1 => Some(menu::Target::Folder),
+        2 => Some(menu::Target::Background),
+        _ => None,
+    }
+}
+
+/// Is the button on? A menu was shown, and for the kind the switch picks (no pick: any).
+fn refresh_enabled(last: Option<&ctxui::LastMenu>, kind: Option<usize>) -> bool {
+    match (last, kind) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(l), Some(i)) => kind_target(i) == Some(l.kind),
+    }
+}
+
+/// What the button row shows.
+#[derive(Clone, Debug, PartialEq)]
+struct RefreshView {
+    label: &'static str,
+    status: String,
+    /// dim second line next to the status ("The list is shorter by 12 rows")
+    extra: String,
+    /// the status is the green-ish "done" one
+    ok: bool,
+    /// the check icon in front of the status
+    check: bool,
+    busy: bool,
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn refresh_view(r: &Refresh, last: Option<&ctxui::LastMenu>, now: Instant) -> RefreshView {
+    const LABEL: &str = "Refresh from last menu";
+    let idle = |status: String| RefreshView { label: LABEL, status, extra: String::new(), ok: false, check: false, busy: false };
+    match r {
+        Refresh::Running { since, .. } if running_visible(*since, now) => RefreshView { label: "Refreshing\u{2026}", status: "Comparing with the last menu\u{2026}".into(), extra: String::new(), ok: false, check: false, busy: true },
+        Refresh::Done(n) => RefreshView { status: format!("{} updated", plural(*n, "item", "items")), extra: format!("The list is shorter by {}", plural(*n, "row", "rows")), ok: true, check: true, ..idle(String::new()) },
+        Refresh::UpToDate => RefreshView { check: true, ..idle("Already up to date".into()) },
+        _ => idle(last.map(|l| format!("Last menu: {}, {}", l.at, plural(l.items, "item", "items"))).unwrap_or_default()),
+    }
+}
+
+/// The disabled button's tooltip.
+fn refresh_tip(last: Option<&ctxui::LastMenu>) -> &'static str {
+    if last.is_none() { "Right-click a file in Tsubame first. The button compares with that menu." } else { "The last menu was for another kind of right-click. Pick that kind (or none) to compare." }
+}
+
+/// Runs the compare now.
+fn run_refresh(st: &mut State, cx: &mut Cx) {
+    let n = ctxui::refresh_learned(&mut cx.prefs.context_menu);
+    if n > 0 {
+        cx.changed |= C_MENU;
+    }
+    st.refresh = refresh_outcome(n);
+}
+
+/// The second toolbar row's Refresh button, its status and the busy line. `x` is where the
+/// button goes, `limit` the right end of the status text.
+fn refresh_row(pg: &mut Pg, st: &mut State, cx: &mut Cx, ty: f32, x: f32, limit: f32) {
+    let t = pg.t;
+    let now = Instant::now();
+    let last = ctxui::last_menu();
+    let on = refresh_enabled(last.as_ref(), st.kind);
+    if let Refresh::Running { since, wait } = st.refresh
+        && now.saturating_duration_since(since) >= wait
+    {
+        run_refresh(st, cx);
+    }
+    let view = refresh_view(&st.refresh, last.as_ref(), now);
+    let (hit, r) = button(pg.ui, pg.g, ID_TB.with(10), x, ty, view.label, Look::Normal, on && !view.busy, false);
+    if hit {
+        let wait = std::env::var("TSUBAME_REFRESH_DELAY_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or_default();
+        st.refresh = Refresh::Running { since: now, wait };
+        if wait.is_zero() {
+            run_refresh(st, cx);
+        }
+    }
+    if matches!(st.refresh, Refresh::Running { .. }) {
+        pg.ui.request_repaint();
+    }
+    let view = refresh_view(&st.refresh, last.as_ref(), now);
+    let mut sx = r.r() + 12.0;
+    let w = (limit - sx).max(0.0);
+    if view.check {
+        pg.g.text("\u{E73E}", Rect::new(sx, ty, 16.0, t.height_button), f(13.0).icon().c(), if view.ok { t.accent } else { t.text_dim });
+        sx += 20.0;
+    }
+    if view.ok {
+        let tw = pg.g.measure(&view.status, t.font_small().b());
+        pg.g.text(&view.status, Rect::new(sx, ty, tw + 4.0, t.height_button), t.font_small().b(), t.accent);
+        let ex = fit(pg.g, &view.extra, t.font_small(), (w - tw - 28.0).max(0.0));
+        pg.g.text(&ex, Rect::new(sx + tw + 12.0, ty, (w - tw - 12.0).max(0.0), t.height_button), t.font_small(), t.text_dim);
+    } else {
+        let s = fit(pg.g, &view.status, t.font_small(), w);
+        pg.g.text(&s, Rect::new(sx, ty, w, t.height_button), t.font_small(), t.text_dim);
+    }
+    if view.busy {
+        // the 2 px line: a bar sliding along the row
+        let ly = ty + t.height_button + 3.0;
+        pg.g.fill(Rect::new(pg.x, ly, pg.w, 2.0), t.border);
+        let ms = if let Refresh::Running { since, .. } = st.refresh { now.saturating_duration_since(since).as_millis() as f32 } else { 0.0 };
+        let phase = ms % 1400.0 / 1400.0;
+        let bw = pg.w * 0.36;
+        let x0 = (pg.x + (pg.w + bw) * phase - bw).max(pg.x);
+        let x1 = (pg.x + (pg.w + bw) * phase).min(pg.x + pg.w);
+        pg.g.fill(Rect::new(x0, ly, (x1 - x0).max(0.0), 2.0), t.accent);
+    }
+    if !on && r.contains_pt(pg.ui.mouse()) && pg.ui.mouse_in() {
+        st.tip = Some((pg.ui.mouse(), refresh_tip(last.as_ref()).into()));
+    }
+}
+
+/// The row "..." button: Tab-focusable, Enter / Space / Shift+F10 open the popup, F2 / Del /
+/// Alt+Up / Down on it run the action at once. `facts` is only asked when a key needs it.
+fn dots_row(pg: &mut Pg, st: &mut State, r: Rect, target: &RowTarget, facts: &dyn Fn() -> rowmenu::Facts) {
+    let t = pg.t;
+    let id = ID_DOTS.with(seed(target.key()));
+    let it = pg.ui.interact(id, r, Sense::click().focusable().cursor(Cursor::Hand));
+    let open_here = st.pop.as_ref().is_some_and(|p| p.btn_id == id);
+    let focused = pg.ui.has_focus(id) && pg.ui.window_focused();
+    if open_here {
+        pg.g.round(r, t.radius_sm, t.selected);
+    } else if it.hovered {
+        pg.g.round(r, t.radius_sm, t.hover);
+    }
+    if focused {
+        pg.g.round_stroke(r.pad(-1.0), t.radius_sm, t.focus, 1.0);
+        // Alt+Up / Alt+Down move the row here, not "Up one folder"
+        pg.ui.claimed.extend([(Key::Up, Mods::ALT), (Key::Down, Mods::ALT)]);
+    }
+    pg.g.text("\u{E712}", r, f(14.0).icon().c(), if it.hovered || open_here || focused { t.text } else { t.text_dim });
+    let mut open = (it.clicked == Some(Button::Left)).then_some(false);
+    for (qi, ev) in pg.ui.key_input(id) {
+        if let Event::KeyDown { key, mods, .. } = ev {
+            if (matches!(key, Key::Enter | Key::Space) && mods.none()) || (key == Key::F(10) && mods == Mods::SHIFT) {
+                pg.ui.consume(qi);
+                open = Some(true);
+            } else if let Some(a) = button_key(key, mods, &facts()) {
+                pg.ui.consume(qi);
+                pg.ui.request_repaint();
+                st.act = Some((target.clone(), a.key()));
+            }
+        }
+    }
+    if let Some(kb) = open {
+        if open_here {
+            // the button toggles its popup
+            st.pop = None;
+            pg.ui.close_all_popups();
+        } else {
+            let mut ms = MenuState::new(Pt { x: r.x, y: r.y }, kb);
+            ms.del_deletes = true;
+            ms.external_rename = true;
+            st.pop = Some(RowPop { target: target.clone(), st: ms, btn: r, btn_id: id });
+        }
+        pg.ui.request_repaint();
+    }
+}
+
+/// The pin cell of a learned row: empty, dim on hover, accent when pinned. True: toggled.
+fn pin_cell(pg: &mut Pg, st: &mut State, r: Rect, key: &str, pinned: bool, hidden: bool, group: &str) -> bool {
+    let t = pg.t;
+    let id = ID_PIN.with(seed(key));
+    let it = pg.ui.interact(id, r, Sense::click().focusable().cursor(Cursor::Hand));
+    let focused = pg.ui.has_focus(id) && pg.ui.window_focused();
+    let mut hit = it.clicked == Some(Button::Left);
+    for (qi, ev) in pg.ui.key_input(id) {
+        if let Event::KeyDown { key: Key::Enter | Key::Space, mods, .. } = ev
+            && mods.none()
+        {
+            pg.ui.consume(qi);
+            hit = true;
+        }
+    }
+    if it.hovered {
+        pg.g.round(r, t.radius_sm, t.hover);
+    }
+    if focused {
+        pg.g.round_stroke(r.pad(-1.0), t.radius_sm, t.focus, 1.0);
+    }
+    let col = match (pinned, hidden) {
+        (true, true) => Some(t.text_disabled),
+        (true, false) => Some(t.accent),
+        (false, _) if it.hovered || focused => Some(t.text_dim),
+        _ => None,
+    };
+    if let Some(c) = col {
+        pg.g.text("\u{E718}", r, f(13.0).icon().c(), c);
+    }
+    if it.hovered {
+        st.tip = Some((pg.ui.mouse(), if pinned { "Unpin".into() } else { format!("Pin to top of \u{201c}{group}\u{201d}") }));
+    }
+    if hit {
+        pg.ui.request_repaint();
+    }
+    hit
+}
+
+/// Runs the popup row `k` on `target`. True: the entry list changed.
+fn apply(st: &mut State, cx: &mut Cx, list: &mut Vec<MenuEntry>, f: &rowmenu::Facts, target: &RowTarget, k: u64) -> bool {
+    match target {
+        RowTarget::Entry(id) => {
+            let Some(i) = list.iter().position(|e| e.id == *id) else { return false };
+            match k {
+                EDIT_HIDE => {
+                    list[i].hidden = !list[i].hidden;
+                    true
+                }
+                EDIT_RENAME => {
+                    st.edit = Some((id.clone(), TextInput::new(&list[i].name)));
+                    st.edit_fresh = true;
+                    st.sel = Some(id.clone());
+                    false
+                }
+                EDIT_UP | EDIT_DOWN => {
+                    let shown: Vec<String> = list.iter().map(|e| e.id.clone()).collect();
+                    let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
+                    ctxui::move_entry_by(list, id, k == EDIT_UP, &shown)
+                }
+                EDIT_ENTRY if rowmenu::present(f, rowmenu::Act::EditEntry) => {
+                    st.add = Some(Box::new(edit_form(&list[i])));
+                    st.msg = None;
+                    st.sel = Some(id.clone());
+                    false
+                }
+                EDIT_DELETE if rowmenu::present(f, rowmenu::Act::DeleteEntry) => {
+                    let before = list.clone();
+                    let name = list[i].name.clone();
+                    let gone = menu::delete_entry(list, i);
+                    if gone {
+                        st.deleted = Some(Deleted { before, after: list.clone(), name });
+                    }
+                    gone
+                }
+                _ => false,
+            }
+        }
+        RowTarget::Item(key) => {
+            let m = &mut cx.prefs.context_menu;
+            let Some(p) = menu::item(&m.items, key).cloned() else { return false };
+            match k {
+                EDIT_HIDE => {
+                    ctxui::set_hidden(m, key, &p.label, !p.hidden);
+                    cx.changed |= C_MENU;
+                }
+                EDIT_RENAME => {
+                    st.iedit = Some((key.clone(), TextInput::new(if p.name.is_empty() { &p.label } else { &p.name })));
+                    st.edit_fresh = true;
+                    st.sel = Some(key.clone());
+                }
+                EDIT_PIN => {
+                    if ctxui::set_pin(m, key, &p.label, !p.pin) {
+                        cx.changed |= C_MENU;
+                    }
+                }
+                k if k == EDIT_GROUP_NEW || k == EDIT_GROUP_NATIVE || k >= EDIT_GROUP_BASE => {
+                    if let Some(pick) = rowmenu::group_pick(f, k) {
+                        let (gid, fresh) = match pick {
+                            rowmenu::GroupPick::Group(id) => (id, false),
+                            rowmenu::GroupPick::Native => (String::new(), false),
+                            rowmenu::GroupPick::New => {
+                                let id = menu::add_group(&mut m.user_groups, &m.groups, "");
+                                st.gedit = Some((id.clone(), TextInput::new("New group")));
+                                st.edit_fresh = true;
+                                (id, true)
+                            }
+                        };
+                        if menu::move_item_to_group(&mut m.items, &m.user_groups, key, &gid) || fresh {
+                            cx.changed |= C_MENU;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            false
+        }
+    }
+}
+
 pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
+    st.tip = None;
     pg.heading("Context menu", "");
     let t = pg.t;
     for l in wrap(pg.g, "The menu that opens when you right-click in Tsubame. It lists everything the right-click can contain: Tsubame\u{2019}s own entries, Windows\u{2019} items and the entries added by installed programs. Hide, rename, reorder and group them.", t.font(), pg.w) {
@@ -395,6 +838,11 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             st.search.set_text(&l);
         }
         st.sel = Some(key);
+    }
+    if let Some(id) = st.edit_entry.take()
+        && let Some(e) = list.iter().find(|e| e.id == id && e.source.runs_program() && !e.is_submenu() && !e.is_separator())
+    {
+        st.add = Some(Box::new(edit_form(e)));
     }
 
     // kind switch: the list for one kind of right-click (click again = every kind)
@@ -451,12 +899,18 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     x = r.r() + 8.0;
     let (sep, r) = button(pg.ui, pg.g, ID_TB.with(3), x, ty, "Add separator", Look::Normal, true, false);
     x = r.r() + 8.0;
-    let (newg, r) = button(pg.ui, pg.g, ID_TB.with(6), x, ty, "New group", Look::Normal, true, false);
-    x = r.r() + 8.0;
-    let (imp, _) = button(pg.ui, pg.g, ID_TB.with(4), x, ty, "Import from Nilesoft Shell\u{2026}", Look::Normal, true, false);
+    let (newg, _) = button(pg.ui, pg.g, ID_TB.with(6), x, ty, "New group", Look::Normal, true, false);
+    // row 2: import, refresh from the last menu, reset
+    let ty2 = ty + t.height_button + 8.0;
+    let (imp, ir) = button(pg.ui, pg.g, ID_TB.with(4), pg.x, ty2, "Import from Nilesoft Shell\u{2026}", Look::Normal, true, false);
     let reset_label = if st.confirm_reset { "Click again to reset" } else { "Reset to defaults" };
-    let (reset, _) = button(pg.ui, pg.g, ID_TB.with(5), pg.x + pg.w, ty, reset_label, if st.confirm_reset { Look::DangerFill } else { Look::Danger }, menu_changed(&cx.prefs.context_menu), true);
-    pg.y += t.height_button + 12.0;
+    let reset_w = pg.g.measure(reset_label, t.font().b()) + 28.0;
+    refresh_row(pg, st, cx, ty2, ir.r() + 8.0, pg.x + pg.w - reset_w - 12.0);
+    let (reset, _) = button(pg.ui, pg.g, ID_TB.with(5), pg.x + pg.w, ty2, reset_label, if st.confirm_reset { Look::DangerFill } else { Look::Danger }, menu_changed(&cx.prefs.context_menu), true);
+    pg.y = ty2 + t.height_button + 14.0;
+    if (add || sub || sep || newg || imp || reset) && !matches!(st.refresh, Refresh::Running { .. }) {
+        st.refresh = Refresh::Idle;
+    }
     if add {
         st.add = if st.add.is_some() { None } else { Some(Box::default()) };
         st.msg = None;
@@ -526,7 +980,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         y += 36.0;
         pg.g.text("{path} first selected item   {selection} every selected item   {dir} this folder   {name} {ext} {parent}", Rect::new(fx, y - 2.0, r.w - 32.0, 16.0), t.font_small(), t.text_dim);
         y += 20.0;
-        let (ok, rr) = button(pg.ui, pg.g, ID_FORM.with(10), fx, y, "Add to menu", Look::Primary, true, false);
+        let (ok, rr) = button(pg.ui, pg.g, ID_FORM.with(10), fx, y, if form.edit.is_some() { "Save" } else { "Add to menu" }, Look::Primary, true, false);
         let (cancel, _) = button(pg.ui, pg.g, ID_FORM.with(11), rr.r() + 8.0, y, "Cancel", Look::Normal, true, false);
         if let Some(e) = &form.err {
             pg.g.text(e, Rect::new(rr.r() + 100.0, y, r.w - 240.0, t.height_button), t.font_small(), t.danger);
@@ -534,12 +988,22 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         let mut done = false;
         if ok {
             let args = if form.args.text.trim().is_empty() { "\"{path}\"".to_string() } else { form.args.text.clone() };
-            match new_entry(&list, &form.name.text, &form.cmd.text, &args, &form.ext.text) {
+            match new_entry(if form.edit.is_some() { &[] } else { &list }, &form.name.text, &form.cmd.text, &args, &form.ext.text) {
                 Ok(e) => {
-                    list.push(e);
+                    if let Some(eid) = &form.edit {
+                        if let Some(old) = list.iter_mut().find(|o| o.id == *eid) {
+                            old.name = e.name;
+                            old.command = e.command;
+                            old.args = e.args;
+                            old.extensions = e.extensions;
+                        }
+                        st.msg = Some(("Saved.".into(), false));
+                    } else {
+                        list.push(e);
+                        st.msg = Some(("Added. It shows at the end of the menu.".into(), false));
+                    }
                     modified = true;
                     done = true;
-                    st.msg = Some(("Added. It shows at the end of the menu.".into(), false));
                 }
                 Err(e) => form.err = Some(e),
             }
@@ -628,6 +1092,21 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             pg.y += 16.0;
         }
         pg.y += 6.0;
+    }
+    // Undo for Delete entry (only while nothing else changed the list)
+    if st.deleted.as_ref().is_some_and(|d| d.after != list) {
+        st.deleted = None;
+    }
+    if let Some(d) = &st.deleted {
+        let msg = format!("Deleted \u{201c}{}\u{201d}.", d.name);
+        let w = pg.g.measure(&msg, t.font_small());
+        pg.g.text(&msg, Rect::new(pg.x + 2.0, pg.y, w + 4.0, t.height_button), t.font_small(), t.text_dim);
+        let (undo, _) = button(pg.ui, pg.g, ID_TB.with(12), pg.x + w + 16.0, pg.y, "Undo", Look::Normal, true, false);
+        pg.y += t.height_button + 6.0;
+        if undo && let Some(d) = st.deleted.take() {
+            list = d.before;
+            modified = true;
+        }
     }
 
     let rh = t.height_menu_edit_row;
@@ -850,6 +1329,12 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         }
         // right side, from the right edge inwards
         let mut rx = r.r() - 10.0;
+        if !e.is_separator() {
+            let dr = Rect::new(rx - 24.0, r.y + 3.0, 24.0, r.h - 6.0);
+            let target = RowTarget::Entry(e.id.clone());
+            dots_row(pg, st, dr, &target, &|| facts_for(&target, &list, &cx.prefs.context_menu).unwrap_or_else(|| rowmenu::Facts::entry(e, false, false, false)));
+            rx -= 28.0;
+        }
         if e.source != Source::Builtin || e.is_separator() {
             let dr = Rect::new(rx - 22.0, r.y + 3.0, 22.0, r.h - 6.0);
             let di = pg.ui.interact(ID_DEL.with(i as u64), dr, Sense::click().cursor(Cursor::Hand));
@@ -1061,6 +1546,43 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     let note = "How the list is filled. Items are learned from real right-clicks: right-click a file once and the entries of every installed shell extension show up here. Each item is remembered by its verb and its handler, not by its label, so a hidden item stays hidden when the program updates or is translated. The eye hides an item, double-clicking a name renames it (an empty name restores the original), and the \u{00d7} on a custom row deletes it.";
     pg.note("\u{E946}", note, false);
 
+    // the row "..." popup (drawn last, over everything) and the keys of a focused "..." button
+    let mut done: Option<(RowTarget, u64)> = st.act.take();
+    if let Some(mut pop) = st.pop.take() {
+        match facts_for(&pop.target, &list, &cx.prefs.context_menu) {
+            Some(f) => {
+                let src = RowSrc { name: f.name.clone(), facts: f };
+                let style = MenuStyle { alt: false, bounds: pg.vis, loading: None, now_ms: 0, a11y: false };
+                let resp = edit_only(pg.ui, pg.g, ID_POP, &mut pop.st, &src, &style, ROW_KEY, pop.btn);
+                if let Some((_, k)) = resp.edit {
+                    done = Some((pop.target.clone(), k));
+                }
+                if resp.closed || resp.edit.is_some() {
+                    // the menu is done: the keyboard goes back to the button it came from
+                    pg.ui.close_all_popups();
+                    if pop.st.keyboard {
+                        pg.ui.set_focus(Some(pop.btn_id));
+                    }
+                } else {
+                    st.pop = Some(pop);
+                }
+            }
+            // the row went away under the popup
+            None => pg.ui.close_all_popups(),
+        }
+    }
+    if let Some((target, k)) = done
+        && let Some(f) = facts_for(&target, &list, &cx.prefs.context_menu)
+    {
+        modified |= apply(st, cx, &mut list, &f, &target, k);
+    }
+    if st.pop.is_none() && pg.ui.popups_open() > 0 {
+        pg.ui.close_all_popups();
+    }
+    if let Some((at, text)) = st.tip.take() {
+        crate::overlay::tooltip(pg.g, &t, pg.ui.size(), at, &text, &[]);
+    }
+
     if modified {
         // keep an unchanged default menu out of the file
         cx.prefs.context_menu.entries = if list == menu::default_entries() { Vec::new() } else { list };
@@ -1077,16 +1599,11 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
     let rh = t.height_menu_edit_row;
     let order = menu::full_order(&cx.prefs.context_menu.groups, &cx.prefs.context_menu.user_groups);
     let users = cx.prefs.context_menu.user_groups.clone();
-    let mut shown: Vec<usize> = (0..cx.prefs.context_menu.items.len()).filter(|&i| !filtered || item_shown(&cx.prefs.context_menu.items[i], q, st.chip)).collect();
-    // grouped like the menu (stable inside a group: first seen first)
-    shown.sort_by_key(|&i| {
-        let g = item_group(&cx.prefs.context_menu.items[i], &users);
-        order.iter().position(|x| *x == g).unwrap_or(usize::MAX)
-    });
+    let shown: Vec<usize> = (0..cx.prefs.context_menu.items.len()).filter(|&i| !filtered || item_shown(&cx.prefs.context_menu.items[i], q, st.chip)).collect();
     // rows: a header per group (unfiltered: the user's groups always, a built-in one when it has items), then its items
+    // (grouped like the menu: pinned first, then first seen first)
     let mut rows: Vec<(Option<usize>, menu::GroupRef)> = Vec::new();
-    for g in &order {
-        let mine: Vec<usize> = shown.iter().copied().filter(|&i| item_group(&cx.prefs.context_menu.items[i], &users) == *g).collect();
+    for (g, mine) in order_rows(&cx.prefs.context_menu.items, &shown, &users, &order) {
         let user = matches!(g, menu::GroupRef::User(_));
         if !filtered && (user || !mine.is_empty()) {
             rows.push((None, g.clone()));
@@ -1102,6 +1619,7 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
     }
     let new_keys = st.new_shown.clone().unwrap_or_default();
     let mut toggle = None;
+    let mut pin_toggle: Option<usize> = None;
     let mut start = None;
     let mut grip = None;
     let mut commit: Option<(String, String)> = None;
@@ -1143,8 +1661,9 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
         }
         let gr = Rect::new(r.x + 6.0, r.y, 18.0, r.h);
         let gi = pg.ui.interact(ID_IGRIP.with(i as u64), gr, Sense::click().cursor(Cursor::Hand));
+        // a pinned row keeps its place at the top of the group: its grip is dimmed
         for (dx, dy) in [(0.0, -4.0), (4.0, -4.0), (0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (4.0, 4.0)] {
-            pg.g.circle(gr.x + 7.0 + dx, r.y + r.h / 2.0 + dy, 1.0, if gi.hovered { t.text } else { t.text_disabled });
+            pg.g.circle(gr.x + 7.0 + dx, r.y + r.h / 2.0 + dy, 1.0, if p.pin { t.border } else if gi.hovered { t.text } else { t.text_disabled });
         }
         if gi.pressed.is_some() {
             grip = Some(i);
@@ -1158,8 +1677,20 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
         if ei.clicked == Some(Button::Left) {
             toggle = Some(i);
         }
-        // right: where it comes from, New
+        // right: "...", the pin cell, where it comes from, New
         let mut rx = r.r() - 10.0;
+        let dr = Rect::new(rx - 24.0, r.y + 3.0, 24.0, r.h - 6.0);
+        let target = RowTarget::Item(p.key.clone());
+        dots_row(pg, st, dr, &target, &|| rowmenu::Facts::learned(p, &users, false, false));
+        rx -= 28.0;
+        let gname: String = match grp {
+            menu::GroupRef::Builtin(b) => b.label().to_string(),
+            menu::GroupRef::User(id) => users.iter().find(|u| u.id == *id).map(|u| u.name.clone()).unwrap_or_default(),
+        };
+        if pin_cell(pg, st, Rect::new(rx - 22.0, r.y + 3.0, 22.0, r.h - 6.0), &p.key, p.pin, p.hidden, &gname) {
+            pin_toggle = Some(i);
+        }
+        rx -= 28.0;
         if new_keys.iter().any(|n| n.eq_ignore_ascii_case(&p.key)) {
             rx = tag(pg, rx, r.y + 5.0, r.h - 10.0, "New", false, true).x - 4.0;
         }
@@ -1234,6 +1765,15 @@ fn paint_items(pg: &mut Pg, st: &mut State, cx: &mut Cx, q: &str, filtered: bool
     } else {
         st.idrag = None;
     }
+    if let Some(i) = pin_toggle {
+        let (key, label, pin) = {
+            let p = &cx.prefs.context_menu.items[i];
+            (p.key.clone(), p.label.clone(), p.pin)
+        };
+        if ctxui::set_pin(&mut cx.prefs.context_menu, &key, &label, !pin) {
+            cx.changed |= C_MENU;
+        }
+    }
     let items = &mut cx.prefs.context_menu.items;
     if let Some(i) = toggle {
         items[i].hidden = !items[i].hidden;
@@ -1284,6 +1824,186 @@ fn run_import(st: &mut State, list: &mut Vec<MenuEntry>, path: &std::path::Path)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cx_parts() -> (tsubame_config::Config, KeyMap, super::super::Env) {
+        (tsubame_config::Config::default(), KeyMap::defaults(), super::super::Env::default())
+    }
+
+    fn ipref(key: &str, label: &str, pin: bool) -> menu::ItemPref {
+        menu::ItemPref { key: key.into(), label: label.into(), from: "Windows".into(), pin, ..Default::default() }
+    }
+
+    fn last(kind: menu::Target) -> ctxui::LastMenu {
+        ctxui::LastMenu { kind, at: "14:32".into(), items: 31 }
+    }
+
+    fn cx_of<'a>(prefs: &'a mut tsubame_config::Config, km: &'a mut KeyMap, env: &'a super::super::Env) -> Cx<'a> {
+        Cx { prefs, keymap: km, env, changed: 0, open: vec![], reset_all: false, restart: false, rollback: false, message: None, private_bytes: 0 }
+    }
+
+    #[test]
+    fn keys_on_a_focused_dots_button_map_to_actions() {
+        use rowmenu::Act;
+        let custom = MenuEntry::custom("custom.1", "Open in VS Code", "code.exe", "");
+        let f = rowmenu::Facts::entry(&custom, true, true, false);
+        assert_eq!(button_key(Key::F(2), Mods::default(), &f), Some(Act::Rename));
+        assert_eq!(button_key(Key::Delete, Mods::default(), &f), Some(Act::DeleteEntry));
+        assert_eq!(button_key(Key::Up, Mods::ALT, &f), Some(Act::Up));
+        assert_eq!(button_key(Key::Down, Mods::ALT, &f), Some(Act::Down));
+        assert_eq!(button_key(Key::Down, Mods::default(), &f), None, "a plain arrow is not a row key");
+        // the first row cannot move up; Delete is only for custom rows
+        let first = rowmenu::Facts::entry(&custom, false, true, false);
+        assert_eq!(button_key(Key::Up, Mods::ALT, &first), None);
+        let own = rowmenu::Facts::entry(&MenuEntry::builtin("builtin.copy", "Copy", "file.copy"), true, true, false);
+        assert_eq!(button_key(Key::Delete, Mods::default(), &own), None);
+        // a Windows row never moves, whatever the key
+        let win = rowmenu::Facts::learned(&ipref("windows.verb:share", "Share", false), &[], false, false);
+        assert_eq!(button_key(Key::Up, Mods::ALT, &win), None);
+        assert_eq!(button_key(Key::F(2), Mods::default(), &win), Some(Act::Rename));
+    }
+
+    #[test]
+    fn refresh_states_follow_the_mock() {
+        let t0 = Instant::now();
+        // idle: the last menu's time and count
+        let idle = refresh_view(&Refresh::Idle, Some(&last(menu::Target::File)), t0);
+        assert_eq!((idle.label, idle.status.as_str(), idle.busy, idle.ok), ("Refresh from last menu", "Last menu: 14:32, 31 items", false, false));
+        // running is drawn only after 150 ms
+        let run = Refresh::Running { since: t0, wait: Duration::from_millis(900) };
+        assert_eq!(refresh_view(&run, Some(&last(menu::Target::File)), t0 + Duration::from_millis(100)), idle, "under 150 ms: still idle");
+        let busy = refresh_view(&run, None, t0 + Duration::from_millis(200));
+        assert!(busy.busy && busy.label == "Refreshing\u{2026}" && busy.status == "Comparing with the last menu\u{2026}");
+        // done and nothing to do
+        assert_eq!(refresh_outcome(12), Refresh::Done(12));
+        assert_eq!(refresh_outcome(0), Refresh::UpToDate);
+        let done = refresh_view(&Refresh::Done(12), None, t0);
+        assert!(done.ok && done.check && done.status == "12 items updated" && done.extra == "The list is shorter by 12 rows");
+        assert_eq!(refresh_view(&Refresh::Done(1), None, t0).status, "1 item updated");
+        let up = refresh_view(&Refresh::UpToDate, None, t0);
+        assert!(!up.ok && up.check && up.status == "Already up to date");
+    }
+
+    #[test]
+    fn refresh_needs_a_menu_of_the_selected_kind() {
+        assert!(!refresh_enabled(None, None), "no menu yet: disabled");
+        assert!(refresh_tip(None).starts_with("Right-click a file in Tsubame first"));
+        let l = last(menu::Target::Folder);
+        assert!(refresh_enabled(Some(&l), None), "every kind: any menu");
+        assert!(refresh_enabled(Some(&l), Some(1)), "Folder switch, folder menu");
+        assert!(!refresh_enabled(Some(&l), Some(0)), "File switch, folder menu");
+        assert!(!refresh_enabled(Some(&l), Some(2)));
+    }
+
+    #[test]
+    fn refresh_runs_the_compare_and_reports_the_count() {
+        // no menu was shown in a unit test run: nothing to compare with, nothing changes
+        let (mut prefs, mut km, env) = cx_parts();
+        prefs.context_menu.items = vec![ipref("windows.verb:share", "Share", false)];
+        let mut cx = cx_of(&mut prefs, &mut km, &env);
+        let mut st = State::default();
+        run_refresh(&mut st, &mut cx);
+        assert_eq!(st.refresh, Refresh::UpToDate);
+        assert_eq!(cx.changed, 0);
+        assert_eq!(cx.prefs.context_menu.items.len(), 1);
+    }
+
+    #[test]
+    fn pinned_rows_lead_their_group_in_native_order() {
+        let items = vec![ipref("a", "A", false), ipref("b", "B", true), ipref("c", "C", false), ipref("d", "D", true)];
+        let order = menu::full_order(&[], &[]);
+        let all: Vec<usize> = (0..items.len()).collect();
+        let win = |rows: Vec<(menu::GroupRef, Vec<usize>)>| rows.into_iter().find(|(g, _)| matches!(g, menu::GroupRef::Builtin(menu::Group::Windows))).unwrap().1;
+        // every item here comes from Windows: one group, pins first, each part in its order
+        assert_eq!(win(order_rows(&items, &all, &[], &order)), vec![1, 3, 0, 2]);
+        // a filter keeps the order of what is left
+        assert_eq!(win(order_rows(&items, &[2, 3], &[], &order)), vec![3, 2]);
+    }
+
+    #[test]
+    fn the_popup_actions_edit_the_right_data() {
+        let (mut prefs, mut km, env) = cx_parts();
+        let mut cx = cx_of(&mut prefs, &mut km, &env);
+        let mut st = State::default();
+        let mut list = menu::default_entries();
+        list.push(MenuEntry::custom("custom.1", "Open in VS Code", "code.exe", "\"{path}\""));
+        let facts = |t: &RowTarget, list: &[MenuEntry], cx: &Cx| facts_for(t, list, &cx.prefs.context_menu).unwrap();
+        // Hide / Show on a list entry
+        let t = RowTarget::Entry("custom.1".into());
+        let f = facts(&t, &list, &cx);
+        assert!(apply(&mut st, &mut cx, &mut list, &f, &t, EDIT_HIDE) && list.last().unwrap().hidden);
+        let f = facts(&t, &list, &cx);
+        assert!(apply(&mut st, &mut cx, &mut list, &f, &t, EDIT_HIDE) && !list.last().unwrap().hidden);
+        // Move up passes the custom row before it; the first custom row cannot go up
+        list.push(MenuEntry::custom("custom.2", "Second", "b.exe", ""));
+        let t2 = RowTarget::Entry("custom.2".into());
+        let f = facts(&t2, &list, &cx);
+        assert!(apply(&mut st, &mut cx, &mut list, &f, &t2, EDIT_UP));
+        let pos = |list: &[MenuEntry], id: &str| list.iter().position(|e| e.id == id).unwrap();
+        assert!(pos(&list, "custom.2") < pos(&list, "custom.1"));
+        let f = facts(&t2, &list, &cx);
+        assert!(!apply(&mut st, &mut cx, &mut list, &f, &t2, EDIT_UP) || pos(&list, "custom.2") < pos(&list, "custom.1"));
+        // Rename starts the inline field
+        let f = facts(&t, &list, &cx);
+        assert!(!apply(&mut st, &mut cx, &mut list, &f, &t, EDIT_RENAME));
+        assert_eq!(st.edit.as_ref().map(|(id, _)| id.as_str()), Some("custom.1"));
+        // Edit entry opens the form filled in, Delete entry removes the row and keeps the Undo
+        assert!(!apply(&mut st, &mut cx, &mut list, &f, &t, EDIT_ENTRY));
+        let form = st.add.as_ref().unwrap();
+        assert_eq!((form.edit.as_deref(), form.name.text.as_str(), form.cmd.text.as_str()), (Some("custom.1"), "Open in VS Code", "code.exe"));
+        let before = list.len();
+        assert!(apply(&mut st, &mut cx, &mut list, &f, &t, EDIT_DELETE));
+        assert_eq!(list.len(), before - 1);
+        let d = st.deleted.as_ref().unwrap();
+        assert_eq!((d.before.len(), d.after == list), (before, true));
+        // a built-in has no Delete entry
+        let own = RowTarget::Entry("builtin.copy".into());
+        let f = facts(&own, &list, &cx);
+        let n = list.len();
+        assert!(!apply(&mut st, &mut cx, &mut list, &f, &own, EDIT_DELETE) && list.len() == n);
+    }
+
+    #[test]
+    fn the_popup_pins_hides_and_groups_a_learned_row() {
+        let (mut prefs, mut km, env) = cx_parts();
+        prefs.context_menu.items = vec![ipref("windows.verb:share", "Share", false)];
+        let mut cx = cx_of(&mut prefs, &mut km, &env);
+        let mut st = State::default();
+        let mut list = menu::default_entries();
+        let t = RowTarget::Item("windows.verb:share".into());
+        let mut run = |cx: &mut Cx, st: &mut State, k: u64| {
+            let f = facts_for(&t, &[], &cx.prefs.context_menu).unwrap();
+            apply(st, cx, &mut list, &f, &t, k)
+        };
+        // Pin / Unpin write ItemPref.pin
+        assert!(!run(&mut cx, &mut st, EDIT_PIN));
+        assert!(cx.prefs.context_menu.items[0].pin && cx.changed & C_MENU != 0);
+        run(&mut cx, &mut st, EDIT_PIN);
+        assert!(!cx.prefs.context_menu.items[0].pin);
+        // Hide
+        run(&mut cx, &mut st, EDIT_HIDE);
+        assert!(cx.prefs.context_menu.items[0].hidden);
+        // Move to group > New group makes a group, moves the row in and starts the name field
+        run(&mut cx, &mut st, EDIT_GROUP_NEW);
+        assert_eq!(cx.prefs.context_menu.user_groups.len(), 1);
+        let gid = cx.prefs.context_menu.user_groups[0].id.clone();
+        assert_eq!(cx.prefs.context_menu.items[0].group, gid);
+        assert_eq!(st.gedit.as_ref().map(|(id, _)| id.clone()), Some(gid.clone()));
+        // Native place sends the row home, the flyout's first row brings it back
+        run(&mut cx, &mut st, EDIT_GROUP_NATIVE);
+        assert!(cx.prefs.context_menu.items[0].group.is_empty());
+        run(&mut cx, &mut st, EDIT_GROUP_BASE);
+        assert_eq!(cx.prefs.context_menu.items[0].group, gid);
+        // Rename starts the item's field
+        run(&mut cx, &mut st, EDIT_RENAME);
+        assert_eq!(st.iedit.as_ref().map(|(k, _)| k.as_str()), Some("windows.verb:share"));
+    }
+
+    #[test]
+    fn dots_buttons_keep_their_id_when_a_row_moves() {
+        assert_eq!(seed("custom.1"), seed("custom.1"));
+        assert_ne!(seed("custom.1"), seed("custom.2"));
+        assert_ne!(ID_DOTS.with(seed("a")), ID_DOTS.with(seed("b")));
+    }
 
     #[test]
     fn extensions_are_cleaned() {

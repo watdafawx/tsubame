@@ -152,6 +152,18 @@ pub const EDIT_DOWN: u64 = 0xed17_0004;
 pub const EDIT_SETTINGS: u64 = 0xed17_0005;
 /// Pin to top / Unpin: like Move up, the row moves under the open edit menu.
 pub const EDIT_PIN: u64 = 0xed17_0006;
+/// "Move to group": a submenu row of the edit menu; its rows come from
+/// `edit_rows(path + [EDIT_GROUP])` (flyout to the right).
+pub const EDIT_GROUP: u64 = 0xed17_0007;
+/// Edit entry... (custom and imported rows).
+pub const EDIT_ENTRY: u64 = 0xed17_0008;
+/// Delete entry (custom and imported rows): the Undo strip says "Deleted".
+pub const EDIT_DELETE: u64 = 0xed17_0009;
+/// In the group flyout: New group... and Native place (no group).
+pub const EDIT_GROUP_NEW: u64 = 0xed17_0010;
+pub const EDIT_GROUP_NATIVE: u64 = 0xed17_0011;
+/// In the group flyout: group `n` is `EDIT_GROUP_BASE + n`.
+pub const EDIT_GROUP_BASE: u64 = 0xed17_0100;
 /// The Undo strip's row key.
 pub const KEY_STRIP: u64 = 0xed17_00ff;
 /// The edit menu's popup id is `id.with(EDIT_POPUP)` (above every level).
@@ -171,6 +183,18 @@ pub struct EditMenu {
     pub kb: bool,
     /// the edited row's rect (the popup is placed against it, like a submenu)
     pub row: Rect,
+    pub rect: Rect,
+    /// the "Move to group" flyout, when open
+    pub sub: Option<EditSub>,
+    /// last frame's rect of the [`EDIT_GROUP`] row (the flyout is placed against it)
+    pub sub_row: Rect,
+}
+
+/// The open flyout of the edit menu.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditSub {
+    pub focus: Option<u64>,
+    pub kb: bool,
     pub rect: Rect,
 }
 
@@ -426,6 +450,13 @@ pub struct MenuState {
     pub strip: Option<String>,
     /// the strip's keyboard part: false Undo, true Manage
     strip_manage: bool,
+    /// the strip says "Deleted" (a custom entry) instead of "Hid"
+    pub strip_deleted: bool,
+    /// Del in the edit menu deletes the entry instead of hiding the row (Settings)
+    pub del_deletes: bool,
+    /// Rename in the edit menu is reported in [`MenuResponse::edit`] (the app has
+    /// its own field) instead of turning a menu row into one (Settings)
+    pub external_rename: bool,
     /// the edit menu closed on a press in the menu: that click must not
     /// run the row under it
     eat_click: bool,
@@ -958,7 +989,7 @@ fn level_rows(src: &dyn MenuSource, st: &MenuState, lv: usize, rows: &mut Vec<Me
         && let Some(name) = &st.strip
     {
         rows.push(MenuRow::separator());
-        rows.push(MenuRow { kind: RowKind::Strip, icon: RowIcon::Glyph(G_EYE_OFF), ..MenuRow::item(KEY_STRIP, &format!("Hid \u{201c}{name}\u{201d}")) });
+        rows.push(MenuRow { kind: RowKind::Strip, icon: RowIcon::Glyph(G_EYE_OFF), ..MenuRow::item(KEY_STRIP, &format!("{} \u{201c}{name}\u{201d}", if st.strip_deleted { "Deleted" } else { "Hid" })) });
     }
 }
 
@@ -1060,16 +1091,56 @@ fn open_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, lv: 
     let l = &mut st.levels[lv];
     l.focus = Some(key);
     l.kb = kb;
-    st.edit = Some(EditMenu { lv, path, focus: if kb { edge_focus(&er, true).map(|i| er[i].key) } else { None }, kb, row, rect: Rect::ZERO });
+    st.edit = Some(EditMenu { lv, path, focus: if kb { edge_focus(&er, true).map(|i| er[i].key) } else { None }, kb, row, rect: Rect::ZERO, sub: None, sub_row: Rect::ZERO });
     ui.open_popup(eid);
     ui.request_repaint();
     true
 }
 
+fn sub_id(id: Id) -> Id {
+    edit_id(id).with(1)
+}
+
 fn close_edit(ui: &mut Ui, id: Id, st: &mut MenuState) {
     if st.edit.take().is_some() {
+        ui.close_popup(sub_id(id));
         ui.close_popup(edit_id(id));
     }
+}
+
+/// The flyout of "Move to group" closes; the edit menu stays.
+fn close_sub(ui: &mut Ui, id: Id, st: &mut MenuState) {
+    if let Some(e) = st.edit.as_mut()
+        && e.sub.take().is_some()
+    {
+        ui.close_popup(sub_id(id));
+        ui.request_repaint();
+    }
+}
+
+/// The flyout rows of the edit menu `e`.
+fn sub_rows_of(src: &dyn MenuSource, e: &EditMenu, out: &mut Vec<MenuRow>) {
+    let mut p = e.path.clone();
+    p.push(EDIT_GROUP);
+    out.clear();
+    src.edit_rows(&p, out);
+}
+
+/// Opens the "Move to group" flyout of the open edit menu (keyboard: its first row has the focus).
+fn open_sub(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, kb: bool) {
+    let Some(e) = st.edit.as_mut() else { return };
+    if e.sub.is_some() {
+        return;
+    }
+    let mut sr = Vec::new();
+    sub_rows_of(src, e, &mut sr);
+    if sr.is_empty() {
+        return;
+    }
+    let focus = if kb { edge_focus(&sr, true).map(|i| sr[i].key) } else { None };
+    e.sub = Some(EditSub { focus, kb, rect: Rect::ZERO });
+    ui.open_popup(sub_id(id));
+    ui.request_repaint();
 }
 
 /// Runs edit row `k` of the open edit menu. True: the menu closed.
@@ -1086,6 +1157,10 @@ fn run_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, k: u6
     let label = rows.iter().find(|r| r.key == key).map(|r| r.label.clone()).unwrap_or_default();
     ui.request_repaint();
     match k {
+        EDIT_RENAME if st.external_rename => {
+            close_edit(ui, id, st);
+            resp.edit = Some((e.path, k));
+        }
         EDIT_RENAME => {
             close_edit(ui, id, st);
             let mut input = crate::widgets::text_input::TextInput::new(&label);
@@ -1094,6 +1169,7 @@ fn run_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, k: u6
         }
         // the row moves under the open edit menu
         EDIT_UP | EDIT_DOWN | EDIT_PIN => resp.edit = Some((e.path, k)),
+        EDIT_GROUP => open_sub(ui, id, st, src, e.kb),
         EDIT_SETTINGS => {
             st.edit = None;
             ui.close_all_popups();
@@ -1101,7 +1177,7 @@ fn run_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, k: u6
             resp.closed = true;
             return true;
         }
-        EDIT_HIDE => {
+        EDIT_HIDE | EDIT_DELETE => {
             // the keyboard moves on to a neighbour of the row that goes
             if let Some(i) = rows.iter().position(|r| r.key == key) {
                 let next = (i + 1..rows.len()).chain((0..i).rev()).find(|&j| rows[j].kind == RowKind::Item && rows[j].focusable());
@@ -1109,6 +1185,7 @@ fn run_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, k: u6
             }
             close_edit(ui, id, st);
             st.strip = Some(label);
+            st.strip_deleted = k == EDIT_DELETE;
             st.strip_manage = false;
             resp.edit = Some((e.path, k));
         }
@@ -1120,10 +1197,54 @@ fn run_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, k: u6
     false
 }
 
+/// Runs row `k` of the "Move to group" flyout (the edit menu closes).
+fn run_edit_sub(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, k: u64, resp: &mut MenuResponse) -> bool {
+    let Some(e) = st.edit.clone() else { return false };
+    let mut sr = Vec::new();
+    sub_rows_of(src, &e, &mut sr);
+    if !sr.iter().any(|r| r.key == k && r.focusable()) {
+        return false;
+    }
+    close_edit(ui, id, st);
+    resp.edit = Some((e.path, k));
+    ui.request_repaint();
+    false
+}
+
 /// A key while the edit menu is open (it takes every key). True: the menu
 /// closed.
 fn edit_key(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, key: Key, mods: Mods, resp: &mut MenuResponse) -> bool {
     let Some(e) = st.edit.clone() else { return false };
+    // the flyout has the keys while it is open
+    if let Some(sub) = &e.sub {
+        let mut sr = Vec::new();
+        sub_rows_of(src, &e, &mut sr);
+        let cur = index_of(&sr, sub.focus);
+        let to = match key {
+            Key::Down => next_focus(&sr, cur, true),
+            Key::Up => next_focus(&sr, cur, false),
+            Key::Home => edge_focus(&sr, true),
+            Key::End => edge_focus(&sr, false),
+            _ => None,
+        };
+        match key {
+            Key::Enter | Key::Space => {
+                if let Some(i) = cur {
+                    return run_edit_sub(ui, id, st, src, sr[i].key, resp);
+                }
+            }
+            Key::Escape | Key::Left => close_sub(ui, id, st),
+            _ => {}
+        }
+        if let Some(i) = to
+            && let Some(s) = st.edit.as_mut().and_then(|ed| ed.sub.as_mut())
+        {
+            s.focus = Some(sr[i].key);
+            s.kb = true;
+            ui.request_repaint();
+        }
+        return false;
+    }
     let mut er = Vec::new();
     src.edit_rows(&e.path, &mut er);
     let cur = index_of(&er, e.focus);
@@ -1137,7 +1258,8 @@ fn edit_key(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, key: 
         Key::Home => to = edge_focus(&er, true),
         Key::End => to = edge_focus(&er, false),
         Key::Enter | Key::Space => run = cur.map(|i| er[i].key),
-        Key::Delete if mods.none() => run = Some(EDIT_HIDE),
+        Key::Right if e.focus == Some(EDIT_GROUP) => run = Some(EDIT_GROUP),
+        Key::Delete if mods.none() => run = Some(if st.del_deletes { EDIT_DELETE } else { EDIT_HIDE }),
         Key::F(2) if mods.none() => run = Some(EDIT_RENAME),
         Key::Escape | Key::Left => {
             close_edit(ui, id, st);
@@ -1154,7 +1276,15 @@ fn edit_key(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, key: 
         ui.request_repaint();
     }
     match run {
-        Some(k) => run_edit(ui, id, st, src, k, resp),
+        Some(k) => {
+            // the flyout opened by a key is a keyboard flyout
+            if k == EDIT_GROUP
+                && let Some(ed) = st.edit.as_mut()
+            {
+                ed.kb = true;
+            }
+            run_edit(ui, id, st, src, k, resp)
+        }
         None => false,
     }
 }
@@ -1230,6 +1360,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     // only dismisses it
     if st.edit.is_some() && !ui.is_popup_open(edit_id(id)) {
         st.edit = None;
+        ui.close_popup(sub_id(id));
         st.eat_click = true;
     }
     if st.edit.as_ref().is_some_and(|e| e.lv >= st.levels.len()) {
@@ -1593,7 +1724,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         }
 
         // hover: the row under the pointer (not under a deeper level)
-        let over_deeper = pointer.is_some_and(|p| st.levels[lv + 1..].iter().any(|l| l.rect.contains_pt(p)) || st.edit.as_ref().is_some_and(|e| e.rect.contains_pt(p)));
+        let over_deeper = pointer.is_some_and(|p| st.levels[lv + 1..].iter().any(|l| l.rect.contains_pt(p)) || st.edit.as_ref().is_some_and(|e| e.rect.contains_pt(p) || e.sub.as_ref().is_some_and(|s| s.rect.contains_pt(p))));
         let under = pointer.filter(|p| !over_deeper && vp.contains_pt(*p)).and_then(|p| (0..rows.len()).find(|&i| rows[i].kind != RowKind::Separator && p.y >= vp.y + ys[i] - scroll && p.y < vp.y + ys[i] - scroll + m.row_h(&rows[i])));
         // a stationary pointer cannot take the keyboard's focus
         let fresh = moved || !st.levels[lv].kb;
@@ -1811,38 +1942,41 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
     resp
 }
 
-/// The edit menu (CM8, the mock's state 6a): placed against the edited row
-/// like a submenu. True: the menu closed.
-#[allow(clippy::too_many_arguments)]
-fn paint_edit(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &dyn MenuSource, style: &MenuStyle, m: &Metrics, moved: bool, resp: &mut MenuResponse) -> bool {
-    let t = ui.theme;
-    let Some(e) = st.edit.clone() else { return false };
-    let mut er = Vec::new();
-    src.edit_rows(&e.path, &mut er);
-    let mut rows = Vec::new();
-    rows_at(src, st, e.lv, &mut rows);
-    // the edited row went away (rows replaced, a submenu closed)
-    if er.is_empty() || !rows.iter().any(|r| e.path.last() == Some(&r.key)) {
-        close_edit(ui, id, st);
-        return false;
-    }
-    let w = width(c, &er, m);
+/// What one painted edit-menu list reports.
+struct EditList {
+    /// a row was clicked
+    run: Option<u64>,
+    /// the pointer moved onto this row
+    hover: Option<u64>,
+    /// the rect of the [`EDIT_GROUP`] row
+    group: Option<Rect>,
+}
+
+/// Width, row heights, wrapped notes, note line height and total height of an edit list.
+type EditSizes = (f32, Vec<f32>, Vec<Vec<String>>, f32, f32);
+
+fn edit_sizes(c: &mut dyn Canvas, er: &[MenuRow], m: &Metrics) -> EditSizes {
+    let w = width(c, er, m);
     let text_w = w - 2.0 * m.inset() - 16.0;
     let line_h = (m.small.size() * 1.4).round();
     let notes: Vec<Vec<String>> = er.iter().map(|r| if r.kind == RowKind::Note { wrap_text(c, &r.label, m.small, text_w) } else { Vec::new() }).collect();
     let hs: Vec<f32> = er.iter().zip(&notes).map(|(r, n)| if r.kind == RowKind::Note { n.len() as f32 * line_h + 10.0 } else { m.row_h(r) }).collect();
     let full_h = hs.iter().sum::<f32>() + 2.0 * m.inset();
-    let rect = place_sub(e.row, w, full_h, style.bounds, m.keep);
-    if let Some(ed) = st.edit.as_mut() {
-        ed.rect = rect;
+    (w, hs, notes, line_h, full_h)
+}
+
+/// Paints one edit list (the menu or its flyout) as the popup `pid`. None: the popup is not open.
+#[allow(clippy::too_many_arguments)]
+fn paint_edit_list(ui: &mut Ui, c: &mut dyn Canvas, pid: Id, rect: Rect, er: &[MenuRow], sizes: &EditSizes, focus: Option<u64>, kb: bool, moved: bool, m: &Metrics, src: &dyn MenuSource) -> Option<EditList> {
+    let t = ui.theme;
+    let (_, hs, notes, line_h, _) = sizes;
+    let text_w = rect.w - 2.0 * m.inset() - 16.0;
+    if !ui.popup_begin_r(c, pid, rect, m.radius) {
+        return None;
     }
-    let eid = edit_id(id);
-    if !ui.popup_begin_r(c, eid, rect, m.radius) {
-        return false;
-    }
+    let mut out = EditList { run: None, hover: None, group: None };
     let (x, rw) = (rect.x + m.inset(), rect.w - 2.0 * m.inset());
     let mut y = rect.y + m.inset();
-    let mut run = None;
     for (i, row) in er.iter().enumerate() {
         let r = Rect::new(x, y, rw, hs[i]);
         y += hs[i];
@@ -1865,34 +1999,167 @@ fn paint_edit(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: 
             }
             RowKind::Note => {
                 for (k, l) in notes[i].iter().enumerate() {
-                    c.text(l, Rect::new(r.x + 8.0, r.y + 5.0 + k as f32 * line_h, text_w, line_h), m.small, t.text_dim);
+                    c.text(l, Rect::new(r.x + 8.0, r.y + 5.0 + k as f32 * line_h, text_w, *line_h), m.small, t.text_dim);
                 }
             }
             _ => {
-                let it = ui.interact(eid.with(row.key), r, Sense::click());
-                if it.hovered && row.focusable() && (moved || !e.kb)
-                    && let Some(ed) = st.edit.as_mut()
-                    && ed.focus != Some(row.key)
-                {
-                    ed.focus = Some(row.key);
-                    ed.kb = false;
-                    ui.request_repaint();
+                let it = ui.interact(pid.with(row.key), r, Sense::click());
+                if row.key == EDIT_GROUP {
+                    out.group = Some(r);
+                }
+                if it.hovered && row.focusable() && (moved || !kb) {
+                    out.hover = Some(row.key);
                 }
                 if it.clicked == Some(Button::Left) && row.focusable() {
-                    run = Some(row.key);
+                    out.run = Some(row.key);
                 }
-                let ed = st.edit.as_ref();
-                let focused = ed.is_some_and(|ed| ed.focus == Some(row.key)) && row.focusable();
-                let state = RowPaint { focused, ring: focused && ed.is_some_and(|ed| ed.kb), pressed: it.active && !row.disabled, ..Default::default() };
+                let focused = focus == Some(row.key) && row.focusable();
+                let state = RowPaint { focused, ring: focused && kb, pressed: it.active && !row.disabled, ..Default::default() };
                 paint_row(c, &t, m, r, row, state, src);
             }
         }
     }
     ui.popup_end(c);
-    match run {
+    Some(out)
+}
+
+/// The edit menu (CM8, the mock's state 6a): placed against the edited row
+/// like a submenu, with the "Move to group" flyout. True: the menu closed.
+#[allow(clippy::too_many_arguments)]
+fn paint_edit(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &dyn MenuSource, style: &MenuStyle, m: &Metrics, moved: bool, resp: &mut MenuResponse) -> bool {
+    let Some(e) = st.edit.clone() else { return false };
+    let mut er = Vec::new();
+    src.edit_rows(&e.path, &mut er);
+    let mut rows = Vec::new();
+    rows_at(src, st, e.lv, &mut rows);
+    // the edited row went away (rows replaced, a submenu closed)
+    if er.is_empty() || !rows.iter().any(|r| e.path.last() == Some(&r.key)) {
+        close_edit(ui, id, st);
+        return false;
+    }
+    // a click elsewhere closed the flyout's popup
+    if e.sub.is_some()
+        && !ui.is_popup_open(sub_id(id))
+        && let Some(ed) = st.edit.as_mut()
+    {
+        ed.sub = None;
+    }
+    let sizes = edit_sizes(c, &er, m);
+    let rect = place_sub(e.row, sizes.0, sizes.4, style.bounds, m.keep);
+    if let Some(ed) = st.edit.as_mut() {
+        ed.rect = rect;
+    }
+    let focus = st.edit.as_ref().and_then(|x| x.focus);
+    let Some(out) = paint_edit_list(ui, c, edit_id(id), rect, &er, &sizes, focus, e.kb, moved, m, src) else { return false };
+    if let Some(r) = out.group
+        && let Some(ed) = st.edit.as_mut()
+    {
+        ed.sub_row = r;
+    }
+    if let Some(k) = out.hover {
+        if let Some(ed) = st.edit.as_mut()
+            && ed.focus != Some(k)
+        {
+            ed.focus = Some(k);
+            ed.kb = false;
+            ui.request_repaint();
+        }
+        if k == EDIT_GROUP {
+            open_sub(ui, id, st, src, false);
+        } else {
+            close_sub(ui, id, st);
+        }
+    }
+    // the flyout
+    let mut run_sub = None;
+    if let Some(ed) = st.edit.clone()
+        && let Some(sub) = ed.sub.clone()
+    {
+        let mut sr = Vec::new();
+        sub_rows_of(src, &ed, &mut sr);
+        if sr.is_empty() {
+            close_sub(ui, id, st);
+        } else {
+            let ss = edit_sizes(c, &sr, m);
+            let srect = place_sub(ed.sub_row, ss.0, ss.4, style.bounds, m.keep);
+            if let Some(s) = st.edit.as_mut().and_then(|x| x.sub.as_mut()) {
+                s.rect = srect;
+            }
+            match paint_edit_list(ui, c, sub_id(id), srect, &sr, &ss, sub.focus, sub.kb, moved, m, src) {
+                Some(o) => {
+                    if let Some(k) = o.hover
+                        && let Some(s) = st.edit.as_mut().and_then(|x| x.sub.as_mut())
+                        && s.focus != Some(k)
+                    {
+                        s.focus = Some(k);
+                        s.kb = false;
+                        ui.request_repaint();
+                    }
+                    run_sub = o.run;
+                }
+                None => {
+                    if let Some(x) = st.edit.as_mut() {
+                        x.sub = None;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(k) = run_sub {
+        return run_edit_sub(ui, id, st, src, k, resp);
+    }
+    match out.run {
         Some(k) => run_edit(ui, id, st, src, k, resp),
         None => false,
     }
+}
+
+/// Settings' row "..." menu: the edit menu of one row on its own (no menu
+/// levels). `key` is the row `src.rows(&[])` returns, `rect` the button it
+/// opens from. `resp.closed` once it has closed.
+#[allow(clippy::too_many_arguments)]
+pub fn edit_only(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &dyn MenuSource, style: &MenuStyle, key: u64, rect: Rect) -> MenuResponse {
+    let mut resp = MenuResponse::default();
+    if !st.opened {
+        st.opened = true;
+        st.levels = vec![Level { kb: st.keyboard, ..Default::default() }];
+        if !open_edit(ui, id, st, src, 0, key, st.keyboard, Some(rect)) {
+            resp.closed = true;
+            return resp;
+        }
+    }
+    if st.edit.is_some() && !ui.is_popup_open(edit_id(id)) {
+        close_edit(ui, id, st);
+    }
+    if st.edit.is_none() {
+        resp.closed = true;
+        return resp;
+    }
+    ui.capture_keys = true;
+    ui.set_focus(Some(id.with(0)));
+    let pointer = ui.mouse_in().then(|| ui.mouse());
+    let moved = st.pointer != pointer;
+    st.pointer = pointer;
+    for (qi, ev) in ui.key_input(id.with(0)) {
+        ui.consume(qi);
+        if let Event::KeyDown { key, mods, .. } = ev
+            && edit_key(ui, id, st, src, key, mods, &mut resp)
+        {
+            return resp;
+        }
+    }
+    if st.edit.is_none() {
+        resp.closed = true;
+        return resp;
+    }
+    let m = Metrics::new(&ui.theme);
+    if paint_edit(ui, c, id, st, src, style, &m, moved, &mut resp) {
+        return resp;
+    }
+    if st.edit.is_none() {
+        resp.closed = true;
+    }
+    resp
 }
 
 /// The Undo strip (CM8, after Hide): eye-off glyph, "Hid "Share"", then the
@@ -3335,5 +3602,148 @@ mod tests {
         h.st.request(1, 92, A11yReq::Invoke);
         let r = h.frame();
         assert_eq!(r.picked, Some(vec![9, 92]));
+    }
+
+    // ---- Settings' row menu: `edit_only` and the "Move to group" flyout
+
+    struct Row1 {
+        /// the row has Delete entry
+        custom: bool,
+    }
+    impl MenuSource for Row1 {
+        fn rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
+            if path.is_empty() {
+                out.push(MenuRow::item(1, "Share"));
+            }
+        }
+        fn icon(&self, _: u64) -> Option<(u32, u32, &[u32])> {
+            None
+        }
+        fn edit_rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
+            match path {
+                [1] => {
+                    out.extend([
+                        MenuRow::item(EDIT_HIDE, "Hide"),
+                        MenuRow::item(EDIT_RENAME, "Rename\u{2026}"),
+                        MenuRow { disabled: true, ..MenuRow::item(EDIT_UP, "Move up") },
+                        MenuRow { submenu: true, ..MenuRow::item(EDIT_GROUP, "Move to group") },
+                    ]);
+                    if self.custom {
+                        out.push(MenuRow { danger: true, ..MenuRow::item(EDIT_DELETE, "Delete entry") });
+                    }
+                    out.push(MenuRow { kind: RowKind::Note, ..MenuRow::item(0, "why") });
+                }
+                [1, EDIT_GROUP] => out.extend([MenuRow { radio: true, ..MenuRow::item(EDIT_GROUP_BASE, "Tools") }, MenuRow::item(EDIT_GROUP_NEW, "New group\u{2026}")]),
+                _ => {}
+            }
+        }
+    }
+
+    struct E {
+        ui: Ui,
+        c: TestCanvas,
+        st: MenuState,
+        src: Row1,
+    }
+    impl E {
+        fn new(custom: bool, keyboard: bool) -> E {
+            let mut st = MenuState::new(Pt::new(300.0, 100.0), keyboard);
+            st.del_deletes = true;
+            st.external_rename = true;
+            E { ui: Ui::default(), c: TestCanvas::new(800.0, 600.0), st, src: Row1 { custom } }
+        }
+        fn frame(&mut self) -> MenuResponse {
+            self.c.clear();
+            assert!(self.c.begin(0));
+            self.ui.begin_frame((800.0, 600.0));
+            let style = MenuStyle { bounds: Rect::new(0.0, 0.0, 800.0, 600.0), loading: None, alt: false, now_ms: 1000, a11y: false };
+            let r = edit_only(&mut self.ui, &mut self.c, ID, &mut self.st, &self.src, &style, 1, Rect::new(760.0, 90.0, 24.0, 22.0));
+            self.ui.end_frame();
+            self.c.end();
+            r
+        }
+        fn key(&mut self, k: Key) -> MenuResponse {
+            self.ui.push(Event::KeyDown { key: k, mods: Mods::NONE, repeat: false });
+            self.frame()
+        }
+    }
+
+    #[test]
+    fn edit_only_opens_with_the_first_row_focused_and_skips_disabled_rows() {
+        let mut e = E::new(false, true);
+        assert_eq!(e.frame(), MenuResponse::default());
+        assert_eq!(e.st.edit.as_ref().and_then(|x| x.focus), Some(EDIT_HIDE));
+        e.key(Key::Down);
+        e.key(Key::Down);
+        // Move up is disabled: the focus goes from Rename to Move to group
+        assert_eq!(e.st.edit.as_ref().and_then(|x| x.focus), Some(EDIT_GROUP));
+        e.key(Key::Up);
+        e.key(Key::Up);
+        assert_eq!(e.st.edit.as_ref().and_then(|x| x.focus), Some(EDIT_HIDE));
+        // Enter runs the focused row
+        let r = e.key(Key::Enter);
+        assert_eq!(r.edit, Some((vec![1], EDIT_HIDE)));
+    }
+
+    #[test]
+    fn edit_only_escape_closes_and_rename_is_reported_not_inlined() {
+        let mut e = E::new(false, true);
+        e.frame();
+        let r = e.key(Key::F(2));
+        assert_eq!(r.edit, Some((vec![1], EDIT_RENAME)), "the app has its own field");
+        assert!(e.st.rename.is_none());
+        let mut e = E::new(false, true);
+        e.frame();
+        assert!(e.key(Key::Escape).closed);
+    }
+
+    #[test]
+    fn edit_only_del_deletes_a_custom_row_and_does_nothing_on_the_others() {
+        let mut e = E::new(true, true);
+        e.frame();
+        assert_eq!(e.key(Key::Delete).edit, Some((vec![1], EDIT_DELETE)));
+        // no Delete entry row: Del is not a hide either
+        let mut e = E::new(false, true);
+        e.frame();
+        let r = e.key(Key::Delete);
+        assert_eq!(r.edit, None);
+        assert!(e.st.edit.is_some(), "the menu stays open");
+    }
+
+    #[test]
+    fn the_move_to_group_flyout_opens_with_right_and_picks_with_enter() {
+        let mut e = E::new(false, true);
+        e.frame();
+        e.key(Key::Down);
+        e.key(Key::Down);
+        assert_eq!(e.st.edit.as_ref().and_then(|x| x.focus), Some(EDIT_GROUP));
+        e.key(Key::Right);
+        assert!(e.st.edit.as_ref().is_some_and(|x| x.sub.is_some()), "the flyout is open");
+        // Left closes only the flyout
+        e.key(Key::Left);
+        assert!(e.st.edit.as_ref().is_some_and(|x| x.sub.is_none()));
+        e.key(Key::Right);
+        e.key(Key::Down);
+        let r = e.key(Key::Enter);
+        assert_eq!(r.edit, Some((vec![1], EDIT_GROUP_NEW)));
+        assert!(e.st.edit.is_none(), "a pick closes the menu");
+        // Esc in the flyout closes it, the menu stays
+        let mut e = E::new(false, true);
+        e.frame();
+        e.key(Key::Down);
+        e.key(Key::Down);
+        e.key(Key::Right);
+        e.key(Key::Escape);
+        assert!(e.st.edit.as_ref().is_some_and(|x| x.sub.is_none()));
+    }
+
+    #[test]
+    fn a_disabled_row_cannot_be_run() {
+        let mut e = E::new(false, true);
+        e.frame();
+        // jump the focus onto the disabled row by hand: Enter still does nothing
+        e.st.edit.as_mut().unwrap().focus = Some(EDIT_UP);
+        let r = e.key(Key::Enter);
+        assert_eq!(r.edit, None);
     }
 }
