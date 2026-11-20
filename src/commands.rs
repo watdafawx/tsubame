@@ -1,11 +1,14 @@
-//! The one table of named commands. Every action the app can do from the
-//! keyboard (or, later, from the command palette and the key settings) is a
-//! row here: a stable number the shortcut table carries, a dotted name for
-//! config files and the palette, a title, and the default keys.
+//! The built-in commands. Every action the app can do from the keyboard, the
+//! palette and the key settings is a row of `BUILTIN`: a stable number the
+//! shortcut table carries, a dotted name for config files and the palette, a
+//! title, the default keys and flags. The core extension (`crate::ext`)
+//! registers the table; lookups go through the extension registry, so a
+//! disabled or pack-provided command is seen the same way.
 //!
-//! `bind_all` is the only place keys are bound. `View::run_command` is the
-//! only place commands run.
+//! `KeyMap::bind_all` is the only place keys are bound. `View::run_command` is
+//! the only place commands run (it dispatches through the registry).
 
+use tsubame_ext_api::{CmdFlags, CommandSpec};
 use tsubame_ui::{Key, Mods, Ui};
 
 pub const CMD_NEW_TAB: u32 = 1;
@@ -57,91 +60,84 @@ pub const CMD_SETTINGS_UPDATES: u32 = 53;
 pub const CMD_SETTINGS_DEFAULT_FM: u32 = 54;
 pub const CMD_RESET_KEYS: u32 = 55;
 
-pub struct Command {
-    pub id: u32,
-    /// dotted name: `group.action`
-    pub name: &'static str,
-    pub title: &'static str,
-    pub keys: &'static [(Key, Mods)],
-    /// global keys run even while a text field has the focus
-    pub global: bool,
-}
+/// What the rest of the app reads about a command: id, dotted name, title,
+/// default chords (text) and flags. Lives in the extension registry.
+pub type Command = CommandSpec;
 
-const fn c(id: u32, name: &'static str, title: &'static str, keys: &'static [(Key, Mods)], global: bool) -> Command {
-    Command { id, name, title, keys, global }
-}
+const G: CmdFlags = CmdFlags::GLOBAL;
+const F: CmdFlags = CmdFlags::NEEDS_FOLDER;
+const GF: CmdFlags = CmdFlags::GLOBAL.with(CmdFlags::NEEDS_FOLDER);
+const NO: CmdFlags = CmdFlags::NONE;
 
-const CS: Mods = Mods::CTRL_SHIFT;
-const CT: Mods = Mods::CTRL;
-const NO: Mods = Mods::NONE;
-const AL: Mods = Mods::ALT;
+use tsubame_ext_api::builtin_command as cmd;
 
-pub static COMMANDS: &[Command] = &[
-    c(CMD_NEW_TAB, "tab.new", "New tab", &[(Key::Char('T'), CT)], true),
-    c(CMD_CLOSE_TAB, "tab.close", "Close tab", &[(Key::Char('W'), CT), (Key::F(4), CT)], true),
-    c(CMD_NEXT_TAB, "tab.next", "Next tab", &[(Key::Tab, CT)], true),
-    c(CMD_PREV_TAB, "tab.prev", "Previous tab", &[(Key::Tab, CS)], true),
-    c(CMD_FOCUS_PATH, "nav.focus-path", "Edit the path", &[(Key::Char('L'), CT), (Key::F(4), NO), (Key::Char('D'), AL)], true),
-    c(CMD_FIND, "nav.find", "Filter this folder", &[(Key::Char('F'), CT)], true),
-    c(CMD_BACK, "nav.back", "Back", &[(Key::Left, AL)], true),
-    c(CMD_FORWARD, "nav.forward", "Forward", &[(Key::Right, AL)], true),
-    c(CMD_UP, "nav.up", "Up one folder", &[(Key::Up, AL)], true),
-    c(CMD_THEME, "view.theme", "Switch dark / light", &[(Key::Char('L'), CS)], true),
-    c(CMD_DENSITY, "view.density", "Next row density", &[(Key::Char('D'), CS)], true),
-    c(CMD_ZEBRA, "view.zebra", "Toggle striped rows", &[(Key::Char('Z'), CS)], true),
-    c(CMD_REFRESH, "nav.refresh", "Refresh", &[(Key::Char('R'), CT)], true),
-    c(CMD_VIEW_DETAILS, "view.details", "Details view", &[(Key::Char('1'), CS)], true),
-    c(CMD_VIEW_GRID_SMALL, "view.grid-small", "Small thumbnails", &[(Key::Char('2'), CS)], true),
-    c(CMD_VIEW_GRID_LARGE, "view.grid-large", "Large thumbnails", &[(Key::Char('3'), CS)], true),
-    c(CMD_SELECT_ALL, "select.all", "Select all", &[(Key::Char('A'), CT)], false),
-    c(CMD_ESCAPE, "select.escape", "Clear filter, then selection", &[(Key::Escape, NO)], false),
-    c(CMD_BACKSPACE_UP, "nav.backspace-up", "Up one folder (Backspace)", &[(Key::Backspace, NO)], false),
-    c(CMD_RENAME, "file.rename", "Rename (several items: batch rename)", &[(Key::F(2), NO)], false),
-    c(CMD_SIDEBAR, "sidebar.toggle", "Collapse or expand the sidebar", &[(Key::Char('B'), CT)], true),
-    c(CMD_SPLIT, "pane.split", "Split the window in two panes", &[(Key::Char('\\'), CT)], true),
-    c(CMD_SPLIT_ORIENTATION, "pane.orientation", "Panes side by side or stacked", &[(Key::Char('\\'), CS)], true),
-    c(CMD_SWITCH_PANE, "pane.switch", "Switch to the other pane", &[(Key::Tab, NO)], false),
+/// The built-in commands, registered by the core extension (`crate::ext`) in
+/// this order. `GLOBAL` keys run even while a text field has the focus;
+/// `NEEDS_FOLDER` commands do nothing with the Settings tab in front.
+pub static BUILTIN: &[CommandSpec] = &[
+    cmd!(CMD_NEW_TAB, "tab.new", "New tab", ["Ctrl+T"], G),
+    cmd!(CMD_CLOSE_TAB, "tab.close", "Close tab", ["Ctrl+W", "Ctrl+F4"], G),
+    cmd!(CMD_NEXT_TAB, "tab.next", "Next tab", ["Ctrl+Tab"], G),
+    cmd!(CMD_PREV_TAB, "tab.prev", "Previous tab", ["Ctrl+Shift+Tab"], G),
+    cmd!(CMD_FOCUS_PATH, "nav.focus-path", "Edit the path", ["Ctrl+L", "F4", "Alt+D"], GF),
+    cmd!(CMD_FIND, "nav.find", "Filter this folder", ["Ctrl+F"], G),
+    cmd!(CMD_BACK, "nav.back", "Back", ["Alt+Left"], GF),
+    cmd!(CMD_FORWARD, "nav.forward", "Forward", ["Alt+Right"], GF),
+    cmd!(CMD_UP, "nav.up", "Up one folder", ["Alt+Up"], GF),
+    cmd!(CMD_THEME, "view.theme", "Switch dark / light", ["Ctrl+Shift+L"], G),
+    cmd!(CMD_DENSITY, "view.density", "Next row density", ["Ctrl+Shift+D"], G),
+    cmd!(CMD_ZEBRA, "view.zebra", "Toggle striped rows", ["Ctrl+Shift+Z"], G),
+    cmd!(CMD_REFRESH, "nav.refresh", "Refresh", ["Ctrl+R"], GF),
+    cmd!(CMD_VIEW_DETAILS, "view.details", "Details view", ["Ctrl+Shift+1"], GF),
+    cmd!(CMD_VIEW_GRID_SMALL, "view.grid-small", "Small thumbnails", ["Ctrl+Shift+2"], GF),
+    cmd!(CMD_VIEW_GRID_LARGE, "view.grid-large", "Large thumbnails", ["Ctrl+Shift+3"], GF),
+    cmd!(CMD_SELECT_ALL, "select.all", "Select all", ["Ctrl+A"], F),
+    cmd!(CMD_ESCAPE, "select.escape", "Clear filter, then selection", ["Esc"], F),
+    cmd!(CMD_BACKSPACE_UP, "nav.backspace-up", "Up one folder (Backspace)", ["Backspace"], F),
+    cmd!(CMD_RENAME, "file.rename", "Rename (several items: batch rename)", ["F2"], F),
+    cmd!(CMD_SIDEBAR, "sidebar.toggle", "Collapse or expand the sidebar", ["Ctrl+B"], GF),
+    cmd!(CMD_SPLIT, "pane.split", "Split the window in two panes", ["Ctrl+\\"], G),
+    cmd!(CMD_SPLIT_ORIENTATION, "pane.orientation", "Panes side by side or stacked", ["Ctrl+Shift+\\"], G),
+    cmd!(CMD_SWITCH_PANE, "pane.switch", "Switch to the other pane", ["Tab"], NO),
     // F5 / F6 refresh and do nothing when there is one pane
-    c(CMD_COPY_OTHER, "pane.copy-to-other", "Copy the selection to the other pane (F5 refreshes with one pane)", &[(Key::F(5), NO)], false),
-    c(CMD_MOVE_OTHER, "pane.move-to-other", "Move the selection to the other pane", &[(Key::F(6), NO)], false),
-    c(CMD_UNDO, "file.undo", "Undo the last file operation", &[(Key::Char('Z'), CT)], false),
-    c(CMD_REDO, "file.redo", "Redo", &[(Key::Char('Y'), CT)], false),
-    c(CMD_PIN_FOLDER, "sidebar.pin-folder", "Pin this folder to the sidebar", &[(Key::Char('D'), CT)], false),
-    c(CMD_OPEN_OTHER, "pane.open-in-other", "Open the selected folder in the other pane", &[(Key::Enter, CS)], false),
-    c(CMD_OPEN_NEW_TAB, "tab.open-selected", "Open the selected folder in a new tab", &[(Key::Enter, CT)], false),
-    c(CMD_TAB_TO_OTHER, "pane.move-tab", "Move this tab to the other pane", &[], false),
-    c(CMD_SYNC_OTHER, "pane.sync-folders", "Show this folder in the other pane", &[], false),
-    c(CMD_PALETTE, "palette.open", "Command palette", &[(Key::Char('P'), CS), (Key::Char('K'), CT)], true),
-    c(CMD_SETTINGS, "settings.open", "Open settings", &[(Key::Char(','), CT)], true),
-    c(CMD_HIDDEN, "view.hidden", "Show hidden files", &[(Key::Char('H'), CT)], true),
-    c(CMD_SYSTEM, "view.system", "Show protected system files", &[], true),
-    c(CMD_CHECK_UPDATES, "app.check-updates", "Check for updates", &[], true),
-    c(CMD_OPEN_CONFIG, "app.open-config-folder", "Open the settings folder", &[], true),
-    c(CMD_SETTINGS_KEYS, "settings.keys", "Settings: keyboard shortcuts", &[], true),
-    c(CMD_SETTINGS_APPEARANCE, "settings.appearance", "Settings: themes and appearance", &[], true),
-    c(CMD_SETTINGS_MENU, "settings.context-menu", "Settings: context menu editor", &[], true),
-    c(CMD_SETTINGS_UPDATES, "settings.updates", "Settings: updates", &[], true),
-    c(CMD_SETTINGS_DEFAULT_FM, "settings.default-file-manager", "Settings: default file manager", &[], true),
-    c(CMD_RESET_KEYS, "settings.reset-keys", "Reset all keyboard shortcuts", &[], true),
+    cmd!(CMD_COPY_OTHER, "pane.copy-to-other", "Copy the selection to the other pane (F5 refreshes with one pane)", ["F5"], F),
+    cmd!(CMD_MOVE_OTHER, "pane.move-to-other", "Move the selection to the other pane", ["F6"], F),
+    cmd!(CMD_UNDO, "file.undo", "Undo the last file operation", ["Ctrl+Z"], F),
+    cmd!(CMD_REDO, "file.redo", "Redo", ["Ctrl+Y"], F),
+    cmd!(CMD_PIN_FOLDER, "sidebar.pin-folder", "Pin this folder to the sidebar", ["Ctrl+D"], F),
+    cmd!(CMD_OPEN_OTHER, "pane.open-in-other", "Open the selected folder in the other pane", ["Ctrl+Shift+Enter"], F),
+    cmd!(CMD_OPEN_NEW_TAB, "tab.open-selected", "Open the selected folder in a new tab", ["Ctrl+Enter"], F),
+    cmd!(CMD_TAB_TO_OTHER, "pane.move-tab", "Move this tab to the other pane", [], NO),
+    cmd!(CMD_SYNC_OTHER, "pane.sync-folders", "Show this folder in the other pane", [], F),
+    cmd!(CMD_PALETTE, "palette.open", "Command palette", ["Ctrl+Shift+P", "Ctrl+K"], G),
+    cmd!(CMD_SETTINGS, "settings.open", "Open settings", ["Ctrl+,"], G),
+    cmd!(CMD_HIDDEN, "view.hidden", "Show hidden files", ["Ctrl+H"], G),
+    cmd!(CMD_SYSTEM, "view.system", "Show protected system files", [], G),
+    cmd!(CMD_CHECK_UPDATES, "app.check-updates", "Check for updates", [], G),
+    cmd!(CMD_OPEN_CONFIG, "app.open-config-folder", "Open the settings folder", [], G),
+    cmd!(CMD_SETTINGS_KEYS, "settings.keys", "Settings: keyboard shortcuts", [], G),
+    cmd!(CMD_SETTINGS_APPEARANCE, "settings.appearance", "Settings: themes and appearance", [], G),
+    cmd!(CMD_SETTINGS_MENU, "settings.context-menu", "Settings: context menu editor", [], G),
+    cmd!(CMD_SETTINGS_UPDATES, "settings.updates", "Settings: updates", [], G),
+    cmd!(CMD_SETTINGS_DEFAULT_FM, "settings.default-file-manager", "Settings: default file manager", [], G),
+    cmd!(CMD_RESET_KEYS, "settings.reset-keys", "Reset all keyboard shortcuts", [], G),
 ];
 
 /// Binds every default key (tests and the bench; the app binds its key map,
 /// `KeyMap::bind_all`, which starts from the same defaults).
 #[allow(dead_code)]
 pub fn bind_all(ui: &mut Ui) {
-    for cmd in COMMANDS {
-        for (key, mods) in cmd.keys {
-            ui.shortcuts.bind(*key, *mods, cmd.id, cmd.global);
-        }
-    }
+    crate::keymap::KeyMap::defaults().bind_all(ui);
 }
 
-pub fn by_id(id: u32) -> Option<&'static Command> {
-    COMMANDS.iter().find(|c| c.id == id)
+/// The enabled command with this id (a copy; built-in text is borrowed, so no allocation).
+pub fn by_id(id: u32) -> Option<Command> {
+    crate::ext::read(|r| r.command(id).map(|c| c.spec.clone()))
 }
 
-pub fn by_name(name: &str) -> Option<&'static Command> {
-    COMMANDS.iter().find(|c| c.name == name)
+/// The enabled command with this dotted name.
+pub fn by_name(name: &str) -> Option<Command> {
+    crate::ext::read(|r| r.command_named(name).map(|c| c.spec.clone()))
 }
 
 /// "Ctrl+Shift+\" for tooltips and menus.
@@ -180,17 +176,98 @@ pub fn first_key_label(id: u32) -> String {
     if let Some(l) = crate::keymap::current_label(id) {
         return l;
     }
-    by_id(id).and_then(|c| c.keys.first()).map(|(k, m)| key_label(*k, *m)).unwrap_or_default()
+    by_id(id).and_then(|c| c.keys.first().and_then(|t| crate::keymap::parse_chord(t))).map(|c| key_label(c.key, c.mods)).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::parse_chord;
+
+    const CS: Mods = Mods::CTRL_SHIFT;
+    const CT: Mods = Mods::CTRL;
+    const NM: Mods = Mods::NONE;
+    const AL: Mods = Mods::ALT;
+
+    /// The table before the registry (X1): every id's keys and global flag, so
+    /// the move is proven to change no binding.
+    const BEFORE: &[(u32, &[(Key, Mods)], bool)] = &[
+        (CMD_NEW_TAB, &[(Key::Char('T'), CT)], true),
+        (CMD_CLOSE_TAB, &[(Key::Char('W'), CT), (Key::F(4), CT)], true),
+        (CMD_NEXT_TAB, &[(Key::Tab, CT)], true),
+        (CMD_PREV_TAB, &[(Key::Tab, CS)], true),
+        (CMD_FOCUS_PATH, &[(Key::Char('L'), CT), (Key::F(4), NM), (Key::Char('D'), AL)], true),
+        (CMD_FIND, &[(Key::Char('F'), CT)], true),
+        (CMD_BACK, &[(Key::Left, AL)], true),
+        (CMD_FORWARD, &[(Key::Right, AL)], true),
+        (CMD_UP, &[(Key::Up, AL)], true),
+        (CMD_THEME, &[(Key::Char('L'), CS)], true),
+        (CMD_DENSITY, &[(Key::Char('D'), CS)], true),
+        (CMD_ZEBRA, &[(Key::Char('Z'), CS)], true),
+        (CMD_REFRESH, &[(Key::Char('R'), CT)], true),
+        (CMD_VIEW_DETAILS, &[(Key::Char('1'), CS)], true),
+        (CMD_VIEW_GRID_SMALL, &[(Key::Char('2'), CS)], true),
+        (CMD_VIEW_GRID_LARGE, &[(Key::Char('3'), CS)], true),
+        (CMD_SELECT_ALL, &[(Key::Char('A'), CT)], false),
+        (CMD_ESCAPE, &[(Key::Escape, NM)], false),
+        (CMD_BACKSPACE_UP, &[(Key::Backspace, NM)], false),
+        (CMD_RENAME, &[(Key::F(2), NM)], false),
+        (CMD_SIDEBAR, &[(Key::Char('B'), CT)], true),
+        (CMD_SPLIT, &[(Key::Char('\\'), CT)], true),
+        (CMD_SPLIT_ORIENTATION, &[(Key::Char('\\'), CS)], true),
+        (CMD_SWITCH_PANE, &[(Key::Tab, NM)], false),
+        (CMD_COPY_OTHER, &[(Key::F(5), NM)], false),
+        (CMD_MOVE_OTHER, &[(Key::F(6), NM)], false),
+        (CMD_UNDO, &[(Key::Char('Z'), CT)], false),
+        (CMD_REDO, &[(Key::Char('Y'), CT)], false),
+        (CMD_PIN_FOLDER, &[(Key::Char('D'), CT)], false),
+        (CMD_OPEN_OTHER, &[(Key::Enter, CS)], false),
+        (CMD_OPEN_NEW_TAB, &[(Key::Enter, CT)], false),
+        (CMD_TAB_TO_OTHER, &[], false),
+        (CMD_SYNC_OTHER, &[], false),
+        (CMD_PALETTE, &[(Key::Char('P'), CS), (Key::Char('K'), CT)], true),
+        (CMD_SETTINGS, &[(Key::Char(','), CT)], true),
+        (CMD_HIDDEN, &[(Key::Char('H'), CT)], true),
+        (CMD_SYSTEM, &[], true),
+        (CMD_CHECK_UPDATES, &[], true),
+        (CMD_OPEN_CONFIG, &[], true),
+        (CMD_SETTINGS_KEYS, &[], true),
+        (CMD_SETTINGS_APPEARANCE, &[], true),
+        (CMD_SETTINGS_MENU, &[], true),
+        (CMD_SETTINGS_UPDATES, &[], true),
+        (CMD_SETTINGS_DEFAULT_FM, &[], true),
+        (CMD_RESET_KEYS, &[], true),
+    ];
+
+    /// What ran with the Settings tab in front before the registry.
+    fn settings_tab_allowed_before(cmd: u32) -> bool {
+        matches!(
+            cmd,
+            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER
+        ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
+    }
+
+    #[test]
+    fn the_table_keeps_every_id_key_and_flag_and_order() {
+        assert_eq!(BUILTIN.len(), BEFORE.len());
+        for (spec, (id, keys, global)) in BUILTIN.iter().zip(BEFORE) {
+            assert_eq!(spec.id, *id, "same order");
+            let parsed: Vec<(Key, Mods)> = spec.keys.iter().map(|t| parse_chord(t).map(|c| (c.key, c.mods)).unwrap_or_else(|| panic!("{t}"))).collect();
+            assert_eq!(parsed, *keys, "{}", spec.name);
+            assert_eq!(spec.flags.has(CmdFlags::GLOBAL), *global, "{}", spec.name);
+            assert_eq!(!spec.flags.has(CmdFlags::NEEDS_FOLDER), settings_tab_allowed_before(spec.id), "{}", spec.name);
+            // the text is the canonical label, so menus show it unchanged
+            for t in spec.keys.iter() {
+                let c = parse_chord(t).unwrap();
+                assert_eq!(key_label(c.key, c.mods), *t);
+            }
+        }
+    }
 
     #[test]
     fn ids_and_names_are_unique() {
-        for (i, a) in COMMANDS.iter().enumerate() {
-            for b in &COMMANDS[i + 1..] {
+        for (i, a) in BUILTIN.iter().enumerate() {
+            for b in &BUILTIN[i + 1..] {
                 assert_ne!(a.id, b.id, "{} / {}", a.name, b.name);
                 assert_ne!(a.name, b.name);
             }
@@ -202,12 +279,13 @@ mod tests {
     #[test]
     fn no_key_is_bound_twice() {
         let mut seen: Vec<(Key, Mods, u32)> = Vec::new();
-        for cmd in COMMANDS {
-            for (k, m) in cmd.keys {
-                if let Some((_, _, other)) = seen.iter().find(|(k2, m2, _)| k2 == k && m2 == m) {
-                    panic!("{:?}+{k:?} is bound to {} and {}", m, other, cmd.id);
+        for cmd in BUILTIN {
+            for t in cmd.keys.iter() {
+                let c = parse_chord(t).unwrap();
+                if let Some((_, _, other)) = seen.iter().find(|(k2, m2, _)| *k2 == c.key && *m2 == c.mods) {
+                    panic!("{t} is bound to {} and {}", other, cmd.id);
                 }
-                seen.push((*k, *m, cmd.id));
+                seen.push((c.key, c.mods, cmd.id));
             }
         }
     }
@@ -215,7 +293,7 @@ mod tests {
     #[test]
     fn lookup_and_labels() {
         assert_eq!(by_name("pane.split").map(|c| c.id), Some(CMD_SPLIT));
-        assert_eq!(by_id(CMD_RENAME).map(|c| c.name), Some("file.rename"));
+        assert_eq!(by_id(CMD_RENAME).map(|c| c.name), Some("file.rename".into()));
         assert_eq!(key_label(Key::Char('\\'), Mods::CTRL_SHIFT), "Ctrl+Shift+\\");
         assert_eq!(first_key_label(CMD_SIDEBAR), "Ctrl+B");
         assert_eq!(first_key_label(CMD_RENAME), "F2");
@@ -225,11 +303,11 @@ mod tests {
 
     #[test]
     fn the_brief_s_keys_are_there() {
-        let has = |id: u32, k: Key, m: Mods| by_id(id).unwrap().keys.contains(&(k, m));
-        assert!(has(CMD_RENAME, Key::F(2), Mods::NONE));
-        assert!(has(CMD_SIDEBAR, Key::Char('B'), Mods::CTRL));
-        assert!(has(CMD_SWITCH_PANE, Key::Tab, Mods::NONE));
-        assert!(has(CMD_SPLIT, Key::Char('\\'), Mods::CTRL));
-        assert!(has(CMD_COPY_OTHER, Key::F(5), Mods::NONE));
+        let has = |id: u32, t: &str| by_id(id).unwrap().keys.iter().any(|k| k == t);
+        assert!(has(CMD_RENAME, "F2"));
+        assert!(has(CMD_SIDEBAR, "Ctrl+B"));
+        assert!(has(CMD_SWITCH_PANE, "Tab"));
+        assert!(has(CMD_SPLIT, "Ctrl+\\"));
+        assert!(has(CMD_COPY_OTHER, "F5"));
     }
 }

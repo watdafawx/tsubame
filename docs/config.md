@@ -133,6 +133,9 @@ new = false                   # appeared since Settings > Context menu was last 
 [advanced]
 diagnostics = false          # persists; the log writer is not wired yet
 
+[extensions]                 # docs/extensions.md
+disabled = ["tsubame.column.type"]   # extension ids switched off; unknown ids are kept
+
 [window]
 x = 100
 y = 100

@@ -13,14 +13,6 @@ use crate::settings::{C_APPEARANCE, C_HIDE, C_KEYS, C_MENU, C_UPDATES, C_ZEBRA, 
 use std::time::{Duration, Instant};
 use tsubame_ui::themes;
 
-/// Commands that make sense with the Settings tab in front (the rest are about a folder).
-pub(super) fn settings_tab_allows(cmd: u32) -> bool {
-    matches!(
-        cmd,
-        CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER
-    ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
-}
-
 impl View {
     // ---- theme and preferences -------------------------------------------------------
 
@@ -51,6 +43,8 @@ impl View {
             self.dark = p.dark;
         }
         self.pull_appearance();
+        // switched-off extensions first: the key map holds only enabled commands
+        crate::ext::apply_disabled(&cfg.extensions.disabled);
         let (km, _unknown) = KeyMap::from_overrides(&cfg.keys.overrides);
         self.keymap = km;
         keymap::set_current(&self.keymap);
@@ -110,6 +104,7 @@ impl View {
     /// After "Reset all settings": every setting back to the default, live.
     pub fn reset_prefs(&mut self, ui: &mut Ui, cfg: &tsubame_config::Config) {
         self.prefs = cfg.clone();
+        crate::ext::apply_disabled(&cfg.extensions.disabled);
         self.keymap = KeyMap::defaults();
         self.apply_prefs(ui, C_APPEARANCE | C_ZEBRA | C_HIDE | C_KEYS | C_UPDATES | C_MENU);
     }
@@ -337,7 +332,7 @@ impl View {
             Action::ShowShortcut(id) => {
                 self.open_settings(Some(Page::Keys));
                 if let (Some(st), Some(c)) = (self.settings.as_deref_mut(), crate::commands::by_id(id)) {
-                    st.keys.focus_command(c.title);
+                    st.keys.focus_command(&c.title);
                 }
                 false
             }

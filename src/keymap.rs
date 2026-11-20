@@ -1,13 +1,14 @@
 //! The key map (U4): which chords run which command. Defaults come from the
-//! `COMMANDS` table; the user's changes live in `[keys.overrides]` of the
+//! enabled commands of the extension registry (`CmdList`); the user's changes live in `[keys.overrides]` of the
 //! config (`"tab.new" = ["Ctrl+N", "Ctrl+T"]`, an empty list = unbound), are
 //! loaded at startup and applied live from Settings > Keys.
 //!
 //! Pure data and logic: no window, no files. `chord_text` / `parse_chord`
 //! round-trip, `KeyMap::conflict` finds the command a chord already runs.
 
-use crate::commands::{self, COMMANDS, Command};
+use crate::commands::{self, Command};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use tsubame_ui::{Key, Mods, Ui};
 
 /// At most this many chords per command (the Keys page shows two slots).
@@ -138,9 +139,54 @@ pub struct Conflict {
     pub command: u32,
 }
 
+/// The enabled commands in registry order, with their default chords parsed
+/// once. Every `KeyMap` shares one; it is rebuilt when the registry changes.
+#[derive(Debug, PartialEq)]
+pub struct CmdList {
+    cmds: Vec<Command>,
+    defaults: Vec<Vec<Chord>>,
+}
+
+impl CmdList {
+    pub fn from_registry(r: &crate::ext::Registry) -> CmdList {
+        let cmds: Vec<Command> = r.commands.iter().map(|c| c.spec.clone()).collect();
+        let defaults = cmds.iter().map(|c| c.keys.iter().filter_map(|t| parse_chord(t)).collect()).collect();
+        CmdList { cmds, defaults }
+    }
+
+    pub fn commands(&self) -> &[Command] {
+        &self.cmds
+    }
+
+    fn index_of(&self, id: u32) -> Option<usize> {
+        self.cmds.iter().position(|c| c.id == id)
+    }
+
+    fn index_named(&self, name: &str) -> Option<usize> {
+        self.cmds.iter().position(|c| c.name == name)
+    }
+}
+
+/// The current registry's command list (cached by registry generation).
+pub fn command_list() -> Arc<CmdList> {
+    static CACHE: Mutex<Option<(u64, Arc<CmdList>)>> = Mutex::new(None);
+    let g = crate::ext::generation();
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((seen, l)) = c.as_ref()
+        && *seen == g
+    {
+        return l.clone();
+    }
+    let l = Arc::new(crate::ext::read(CmdList::from_registry));
+    *c = Some((g, l.clone()));
+    l
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyMap {
-    /// one entry per `COMMANDS` row, same order
+    /// the commands this map is for
+    list: Arc<CmdList>,
+    /// one entry per `list` command, same order
     chords: Vec<Vec<Chord>>,
 }
 
@@ -150,17 +196,24 @@ impl Default for KeyMap {
     }
 }
 
-fn default_chords(c: &Command) -> Vec<Chord> {
-    c.keys.iter().map(|(k, m)| Chord::new(*k, *m)).collect()
-}
-
-fn index_of(id: u32) -> Option<usize> {
-    COMMANDS.iter().position(|c| c.id == id)
-}
-
 impl KeyMap {
     pub fn defaults() -> KeyMap {
-        KeyMap { chords: COMMANDS.iter().map(default_chords).collect() }
+        KeyMap::defaults_for(command_list())
+    }
+
+    /// The default chords of `list` (tests use their own registry).
+    pub fn defaults_for(list: Arc<CmdList>) -> KeyMap {
+        let chords = list.defaults.clone();
+        KeyMap { list, chords }
+    }
+
+    /// The commands, in the order the Keys page and the palette list them.
+    pub fn commands(&self) -> &[Command] {
+        &self.list.cmds
+    }
+
+    fn index_of(&self, id: u32) -> Option<usize> {
+        self.list.index_of(id)
     }
 
     /// The defaults with `overrides` applied. Unknown command names and
@@ -168,24 +221,30 @@ impl KeyMap {
     /// by an earlier override is skipped too (the file never makes two
     /// commands share a key); `warnings` says what was dropped.
     pub fn from_overrides(overrides: &BTreeMap<String, Vec<String>>) -> (KeyMap, Vec<String>) {
-        let mut map = KeyMap::defaults();
+        KeyMap::from_overrides_for(command_list(), overrides)
+    }
+
+    pub fn from_overrides_for(list: Arc<CmdList>, overrides: &BTreeMap<String, Vec<String>>) -> (KeyMap, Vec<String>) {
+        let mut map = KeyMap::defaults_for(list);
         let mut warnings = Vec::new();
         // overridden commands start empty; the others are set aside, so an
         // override wins over a default chord and never conflicts with one
-        let mut kept: Vec<Option<Vec<Chord>>> = Vec::with_capacity(COMMANDS.len());
-        for (i, cmd) in COMMANDS.iter().enumerate() {
-            let overridden = overrides.contains_key(cmd.name);
+        let n = map.list.cmds.len();
+        let mut kept: Vec<Option<Vec<Chord>>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let overridden = overrides.contains_key(&*map.list.cmds[i].name);
             let old = std::mem::take(&mut map.chords[i]);
             kept.push((!overridden).then_some(old));
         }
         for name in overrides.keys() {
-            if commands::by_name(name).is_none() {
+            // a switched-off extension's command is known, just not bound now
+            if map.list.index_named(name).is_none() && !crate::ext::read(|r| r.knows_command(name)) {
                 warnings.push(format!("keys.overrides: unknown command \"{name}\""));
             }
         }
         for (name, list) in overrides {
-            let Some(cmd) = commands::by_name(name) else { continue };
-            let i = index_of(cmd.id).unwrap_or(0);
+            let Some(i) = map.list.index_named(name) else { continue };
+            let cmd_id = map.list.cmds[i].id;
             for text in list.iter().take(MAX_CHORDS) {
                 let Some(ch) = parse_chord(text) else {
                     warnings.push(format!("keys.overrides.{name}: cannot read \"{text}\""));
@@ -195,8 +254,8 @@ impl KeyMap {
                     warnings.push(format!("keys.overrides.{name}: \"{text}\" cannot be bound ({why:?})"));
                     continue;
                 }
-                if let Some(c) = map.conflict(ch, cmd.id) {
-                    let other = commands::by_id(c.command).map(|c| c.name).unwrap_or("?");
+                if let Some(c) = map.conflict(ch, cmd_id) {
+                    let other = map.index_of(c.command).map(|k| map.list.cmds[k].name.clone()).unwrap_or("?".into());
                     warnings.push(format!("keys.overrides.{name}: \"{text}\" is already used by {other}"));
                     continue;
                 }
@@ -208,7 +267,7 @@ impl KeyMap {
         // the other commands keep the defaults no override took
         for (i, old) in kept.into_iter().enumerate() {
             if let Some(old) = old {
-                let id = COMMANDS[i].id;
+                let id = map.list.cmds[i].id;
                 map.chords[i] = old.into_iter().filter(|c| map.conflict(*c, id).is_none()).collect();
             }
         }
@@ -216,7 +275,7 @@ impl KeyMap {
     }
 
     pub fn chords(&self, id: u32) -> &[Chord] {
-        index_of(id).map(|i| self.chords[i].as_slice()).unwrap_or(&[])
+        self.index_of(id).map(|i| self.chords[i].as_slice()).unwrap_or(&[])
     }
 
     /// The first chord as text ("" when unbound): what menus and the palette show.
@@ -225,20 +284,20 @@ impl KeyMap {
     }
 
     pub fn is_default(&self, id: u32) -> bool {
-        match (index_of(id), commands::by_id(id)) {
-            (Some(i), Some(c)) => self.chords[i] == default_chords(c),
-            _ => true,
+        match self.index_of(id) {
+            Some(i) => self.chords[i] == self.list.defaults[i],
+            None => true,
         }
     }
 
     /// Commands whose chords differ from the defaults.
     pub fn changed(&self) -> usize {
-        COMMANDS.iter().filter(|c| !self.is_default(c.id)).count()
+        (0..self.chords.len()).filter(|&i| self.chords[i] != self.list.defaults[i]).count()
     }
 
     /// The command that runs `c` now, other than `except`.
     pub fn conflict(&self, c: Chord, except: u32) -> Option<Conflict> {
-        COMMANDS.iter().enumerate().find(|(i, cmd)| cmd.id != except && self.chords[*i].contains(&c)).map(|(_, cmd)| Conflict { command: cmd.id })
+        self.list.cmds.iter().enumerate().find(|(i, cmd)| cmd.id != except && self.chords[*i].contains(&c)).map(|(_, cmd)| Conflict { command: cmd.id })
     }
 
     /// Puts `c` in slot `slot` (0 or 1; a slot past the end appends) of `id`.
@@ -246,9 +305,9 @@ impl KeyMap {
     /// there"); callers show the conflict first. Returns the command that lost it.
     pub fn assign(&mut self, id: u32, slot: usize, c: Chord) -> Result<Option<u32>, Reject> {
         bindable(c)?;
-        let Some(i) = index_of(id) else { return Ok(None) };
+        let Some(i) = self.index_of(id) else { return Ok(None) };
         let lost = self.conflict(c, id).map(|k| k.command);
-        if let Some(l) = lost.and_then(index_of) {
+        if let Some(l) = lost.and_then(|l| self.index_of(l)) {
             self.chords[l].retain(|x| *x != c);
         }
         let list = &mut self.chords[i];
@@ -264,7 +323,7 @@ impl KeyMap {
 
     /// Removes the chord in `slot` of `id`.
     pub fn clear_slot(&mut self, id: u32, slot: usize) {
-        if let Some(i) = index_of(id)
+        if let Some(i) = self.index_of(id)
             && slot < self.chords[i].len()
         {
             self.chords[i].remove(slot);
@@ -272,24 +331,24 @@ impl KeyMap {
     }
 
     pub fn reset(&mut self, id: u32) {
-        let Some(i) = index_of(id) else { return };
-        let defaults = default_chords(&COMMANDS[i]);
+        let Some(i) = self.index_of(id) else { return };
+        let defaults = self.list.defaults[i].clone();
         // a default another command now holds stays with that one
         let free: Vec<Chord> = defaults.into_iter().filter(|c| self.conflict(*c, id).is_none()).collect();
         self.chords[i] = free;
     }
 
     pub fn reset_all(&mut self) {
-        *self = KeyMap::defaults();
+        self.chords = self.list.defaults.clone();
     }
 
     /// `[keys.overrides]` for the config: only commands that differ from the
     /// defaults. Entries of `keep` for names this build does not know stay
     /// (a newer version's file is not trimmed by an older one).
     pub fn to_overrides(&self, keep: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
-        let mut out: BTreeMap<String, Vec<String>> = keep.iter().filter(|(k, _)| commands::by_name(k).is_none()).map(|(k, v)| (k.clone(), v.clone())).collect();
-        for (i, cmd) in COMMANDS.iter().enumerate() {
-            if self.chords[i] != default_chords(cmd) {
+        let mut out: BTreeMap<String, Vec<String>> = keep.iter().filter(|(k, _)| self.list.index_named(k).is_none()).map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (i, cmd) in self.list.cmds.iter().enumerate() {
+            if self.chords[i] != self.list.defaults[i] {
                 out.insert(cmd.name.to_string(), self.chords[i].iter().map(|c| chord_text(*c)).collect());
             }
         }
@@ -299,9 +358,9 @@ impl KeyMap {
     /// Fills the kit's shortcut table (replaces whatever was bound).
     pub fn bind_all(&self, ui: &mut Ui) {
         ui.shortcuts.list.clear();
-        for (i, cmd) in COMMANDS.iter().enumerate() {
+        for (i, cmd) in self.list.cmds.iter().enumerate() {
             for c in &self.chords[i] {
-                ui.shortcuts.bind(c.key, c.mods, cmd.id, cmd.global);
+                ui.shortcuts.bind(c.key, c.mods, cmd.id, cmd.flags.has(tsubame_ext_api::CmdFlags::GLOBAL));
             }
         }
     }
@@ -309,7 +368,7 @@ impl KeyMap {
     /// The command a chord runs (global or not).
     #[cfg(test)]
     pub fn lookup(&self, c: Chord) -> Option<u32> {
-        COMMANDS.iter().enumerate().find(|(i, _)| self.chords[*i].contains(&c)).map(|(_, cmd)| cmd.id)
+        self.list.cmds.iter().enumerate().find(|(i, _)| self.chords[*i].contains(&c)).map(|(_, cmd)| cmd.id)
     }
 }
 
@@ -375,9 +434,9 @@ mod tests {
 
     #[test]
     fn every_default_chord_round_trips() {
-        for cmd in COMMANDS {
-            for (k, m) in cmd.keys {
-                let c = Chord::new(*k, *m);
+        for cmd in BUILTIN {
+            for t in cmd.keys.iter() {
+                let c = parse_chord(t).unwrap_or_else(|| panic!("{} {t}", cmd.name));
                 assert_eq!(parse_chord(&chord_text(c)), Some(c), "{}", cmd.name);
             }
         }
@@ -402,7 +461,7 @@ mod tests {
         assert_eq!(m.label(CMD_SIDEBAR), "Ctrl+B");
         assert_eq!(m.label(CMD_TAB_TO_OTHER), "");
         assert_eq!(m.lookup(Chord::new(Key::F(2), Mods::NONE)), Some(CMD_RENAME));
-        for cmd in COMMANDS {
+        for cmd in BUILTIN {
             for c in m.chords(cmd.id) {
                 assert_eq!(m.conflict(*c, cmd.id), None, "{} {}", cmd.name, chord_text(*c));
             }
@@ -439,7 +498,7 @@ mod tests {
         assert!(warn.is_empty(), "{warn:?}");
         assert_eq!(m.label(CMD_CLOSE_TAB), "Ctrl+T");
         assert!(m.chords(CMD_NEW_TAB).is_empty(), "new tab lost its chord to close tab");
-        for cmd in COMMANDS {
+        for cmd in BUILTIN {
             for c in m.chords(cmd.id) {
                 assert_eq!(m.conflict(*c, cmd.id), None);
             }
@@ -510,8 +569,38 @@ mod tests {
 
     #[test]
     fn categories_cover_every_command() {
-        for cmd in COMMANDS {
-            assert!(CATEGORIES.contains(&category(cmd.name)), "{}", cmd.name);
+        for cmd in BUILTIN {
+            assert!(CATEGORIES.contains(&category(&cmd.name)), "{}", cmd.name);
         }
+    }
+
+    /// A registry with one extension switched off: its commands are not in
+    /// the map, their keys are free, and their overrides survive a save.
+    #[test]
+    fn a_switched_off_extension_s_commands_leave_the_map() {
+        use tsubame_ext_api::{CmdFlags, CommandSpec, Contributions, Extension, ExtensionInfo, builtin_command};
+        struct Extra;
+        static EXTRA: &[CommandSpec] = &[builtin_command!(9000, "extra.tool", "Extra tool", ["Ctrl+Alt+E"], CmdFlags::GLOBAL)];
+        impl Extension<crate::ext::App> for Extra {
+            fn info(&self) -> ExtensionInfo {
+                ExtensionInfo::builtin("test.extra", "Extra", false)
+            }
+            fn contribute(&self, c: &mut Contributions<crate::ext::App>) {
+                c.command(EXTRA[0].clone(), crate::view::View::run_builtin);
+            }
+        }
+        let mut r = crate::ext::builtin();
+        r.add(&Extra).unwrap();
+        let on = KeyMap::defaults_for(Arc::new(CmdList::from_registry(&r)));
+        assert_eq!(on.label(9000), "Ctrl+Alt+E");
+        assert_eq!(on.commands().len(), BUILTIN.len() + 1);
+        r.set_enabled("test.extra", false).unwrap();
+        let list = Arc::new(CmdList::from_registry(&r));
+        let o = ov(&[("extra.tool", &["Ctrl+Alt+X"])]);
+        let (off, _) = KeyMap::from_overrides_for(list, &o);
+        assert_eq!(off.commands().len(), BUILTIN.len());
+        assert_eq!(off.label(9000), "");
+        assert_eq!(off.lookup(Chord::new(Key::Char('E'), Mods { ctrl: true, shift: false, alt: true })), None);
+        assert!(off.to_overrides(&o).contains_key("extra.tool"), "kept for when it is back on");
     }
 }

@@ -877,10 +877,18 @@ impl View {
         self.with_pane(slot, |v| v.go(path));
     }
 
+    /// Runs command `cmd` through the extension registry: unknown or switched-off
+    /// commands do nothing, `NEEDS_FOLDER` ones do nothing on the Settings tab.
     pub(crate) fn run_command(&mut self, ui: &mut Ui, cmd: u32) {
-        if self.tab().settings && !u4::settings_tab_allows(cmd) {
+        let Some((run, flags)) = crate::ext::command(cmd) else { return };
+        if self.tab().settings && flags.has(tsubame_ext_api::CmdFlags::NEEDS_FOLDER) {
             return;
         }
+        run(self, ui, cmd);
+    }
+
+    /// The core extension's handler: every built-in command (`commands::BUILTIN`).
+    pub(crate) fn run_builtin(&mut self, ui: &mut Ui, cmd: u32) {
         if self.run_u4(ui, cmd) {
             ui.request_repaint();
             return;

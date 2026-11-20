@@ -98,7 +98,7 @@ pub struct Data {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
     Section { title: String, count: Option<usize> },
-    Cmd { id: u32, title: &'static str, cat: &'static str, keys: String, hl: Vec<usize> },
+    Cmd { id: u32, title: tsubame_ext_api::Text, cat: &'static str, keys: String, hl: Vec<usize> },
     Folder { path: String, hint: String, hl: Vec<usize>, recent: bool },
     Tab { t: TabRow, num: usize, hl: Vec<usize> },
     /// the "Filter <folder> by “q”" line
@@ -114,8 +114,9 @@ impl Row {
 
 /// Commands matching `query`. Empty query: the recent ones, then every other command.
 pub fn command_rows(query: &str, recents: &[u32], keys: &dyn Fn(u32) -> String) -> Vec<Row> {
-    let all: Vec<&'static crate::commands::Command> = crate::commands::COMMANDS.iter().filter(|c| c.id != crate::commands::CMD_PALETTE).collect();
-    let mk = |c: &'static crate::commands::Command, hl: Vec<usize>| Row::Cmd { id: c.id, title: c.title, cat: crate::keymap::category(c.name), keys: keys(c.id), hl };
+    let list = crate::keymap::command_list();
+    let all: Vec<&crate::commands::Command> = list.commands().iter().filter(|c| c.id != crate::commands::CMD_PALETTE).collect();
+    let mk = |c: &crate::commands::Command, hl: Vec<usize>| Row::Cmd { id: c.id, title: c.title.clone(), cat: crate::keymap::category(&c.name), keys: keys(c.id), hl };
     let mut out = Vec::new();
     if query.trim().is_empty() {
         let recent: Vec<&&crate::commands::Command> = recents.iter().filter_map(|id| all.iter().find(|c| c.id == *id)).take(5).collect();
@@ -132,7 +133,7 @@ pub fn command_rows(query: &str, recents: &[u32], keys: &dyn Fn(u32) -> String) 
         }
         return out;
     }
-    let ranked = fuzzy::rank(query, &all, |c| c.title);
+    let ranked = fuzzy::rank(query, &all, |c| &c.title);
     out.push(Row::Section { title: "Best matches".into(), count: Some(ranked.len()) });
     for (i, m) in ranked {
         out.push(mk(all[i], m.positions));
@@ -852,7 +853,7 @@ mod tests {
         assert_eq!(all, 3);
         let n = rows.iter().filter(|r| matches!(r, Row::Cmd { .. })).count();
         // every command except the palette's own, once
-        assert_eq!(n, COMMANDS.len() - 1);
+        assert_eq!(n, BUILTIN.len() - 1);
         let mut ids: Vec<u32> = rows.iter().filter_map(|r| if let Row::Cmd { id, .. } = r { Some(*id) } else { None }).collect();
         ids.sort();
         ids.dedup();

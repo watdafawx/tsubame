@@ -4,7 +4,7 @@
 
 use super::lay::{Look, Pg, button, fit, wrap};
 use super::{C_KEYS, Cx};
-use crate::commands::{self, COMMANDS};
+use crate::commands;
 use crate::keymap::{self, CATEGORIES, Chord, KeyMap, Reject, chord_text, is_modifier_key};
 use tsubame_ui::{Button, Cursor, Event, Id, Key, Mods, Rect, Sense, TextInput, f, keycap, text_input};
 
@@ -140,7 +140,7 @@ fn matches(q: &str, km: &KeyMap, i: usize) -> bool {
     if q.is_empty() {
         return true;
     }
-    let c = &COMMANDS[i];
+    let c = &km.commands()[i];
     c.title.to_lowercase().contains(q) || c.name.contains(q) || km.chords(c.id).iter().any(|ch| chord_text(*ch).to_lowercase().contains(q))
 }
 
@@ -181,7 +181,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     let q = st.search.text.trim().to_lowercase();
     let mut items = Vec::new();
     for cat in CATEGORIES {
-        let rows: Vec<usize> = (0..COMMANDS.len()).filter(|&i| keymap::category(COMMANDS[i].name) == *cat && matches(&q, cx.keymap, i)).collect();
+        let cmds = cx.keymap.commands();
+        let rows: Vec<usize> = (0..cmds.len()).filter(|&i| keymap::category(&cmds[i].name) == *cat && matches(&q, cx.keymap, i)).collect();
         if !rows.is_empty() {
             items.push(Item::Head(cat, rows.len()));
             items.extend(rows.into_iter().map(Item::Row));
@@ -197,7 +198,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         .iter()
         .map(|it| match it {
             Item::Head(..) => HEAD_H,
-            Item::Row(i) => t.height_key_row + if rec_id == Some(COMMANDS[*i].id) { rec_height(st.rec.as_ref().unwrap()) } else { 0.0 },
+            Item::Row(i) => t.height_key_row + if rec_id == Some(cx.keymap.commands()[*i].id) { rec_height(st.rec.as_ref().unwrap()) } else { 0.0 },
         })
         .sum();
     let card = pg.card_h(total, t.height_key_row);
@@ -218,7 +219,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
                 y += HEAD_H;
             }
             Item::Row(i) => {
-                let cmd = &COMMANDS[*i];
+                let cmd = cx.keymap.commands()[*i].clone();
                 let open = rec_id == Some(cmd.id);
                 let r = Rect::new(card.r.x, y, card.r.w, t.height_key_row);
                 let h = t.height_key_row + if open { rec_height(st.rec.as_ref().unwrap()) } else { 0.0 };
@@ -234,7 +235,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
                         pg.g.fill(Rect::new(r.x + 1.0, r.y, r.w - 2.0, r.h), t.hover);
                     }
                     pg.g.fill(Rect::new(r.x + 1.0, r.y, r.w - 2.0, 1.0), t.border);
-                    let title = fit(pg.g, cmd.title, t.font_md(), col_x - r.x - 32.0);
+                    let title = fit(pg.g, &cmd.title, t.font_md(), col_x - r.x - 32.0);
                     pg.g.text(&title, Rect::new(r.x + 16.0, r.y, col_x - r.x - 24.0, r.h), t.font_md(), t.text);
                     // chords
                     let cy = r.y + r.h / 2.0;
@@ -372,8 +373,8 @@ fn recorder(pg: &mut Pg, km: &mut KeyMap, rec: &mut Rec, p: Rect) -> RecOut {
     // conflict
     if let (Some(c), Some(owner)) = (rec.pending, rec.conflict) {
         let o = commands::by_id(owner);
-        let name = o.map(|o| o.title).unwrap_or("another command");
-        let cat = o.map(|o| keymap::category(o.name)).unwrap_or("");
+        let name = o.as_ref().map(|o| &*o.title).unwrap_or("another command");
+        let cat = o.as_ref().map(|o| keymap::category(&o.name)).unwrap_or("");
         let only = km.chords(owner).len() <= 1;
         let tail = if only { format!("so {name} will have no shortcut.") } else { format!("so {name} loses this shortcut.") };
         let text = format!("{} is already used by {name} ({cat}). If you assign it here it is removed from there, {tail}", chord_text(c));
@@ -496,7 +497,7 @@ mod tests {
     #[test]
     fn rows_are_found_by_name_or_chord() {
         let km = KeyMap::defaults();
-        let i = COMMANDS.iter().position(|c| c.id == CMD_NEW_TAB).unwrap();
+        let i = km.commands().iter().position(|c| c.id == CMD_NEW_TAB).unwrap();
         assert!(matches("new tab", &km, i));
         assert!(matches("ctrl+t", &km, i));
         assert!(!matches("zebra", &km, i));
