@@ -63,7 +63,7 @@ fn theme_grid(pg: &mut Pg, cx: &mut Cx, group: Group, label: &str, st: &mut Stat
     let pitch = cw + 8.0;
     let per_row = (((pg.w - 32.0 + 8.0) / pitch).floor() as usize).max(1);
     let cur_id = themes::find(&cx.prefs.appearance.theme).map(|p| p.id).unwrap_or("tsubame-dark");
-    let list: Vec<&Palette> = themes::THEMES.iter().filter(|p| p.group() == group).collect();
+    let list: Vec<&Palette> = themes::all().into_iter().filter(|p| p.group() == group).collect();
     for (n, p) in list.iter().enumerate() {
         let (col, row) = (n % per_row, n / per_row);
         let r = Rect::new(pg.x + 16.0 + col as f32 * pitch, pg.y + row as f32 * (ch + 28.0), cw, ch);
@@ -96,7 +96,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     pg.section("Theme");
     // the card is as tall as the three groups need: header row + 3 groups
     let per_row = (((pg.w - 32.0 + 8.0) / (t.layout_theme_card_width + 8.0)).floor() as usize).max(1);
-    let rows_of = |g: Group| themes::THEMES.iter().filter(|p| p.group() == g).count().div_ceil(per_row);
+    let all = themes::all();
+    let rows_of = |g: Group| all.iter().filter(|p| p.group() == g).count().div_ceil(per_row);
     let group_h = |g: Group| 20.0 + rows_of(g) as f32 * (t.layout_theme_card_height + 28.0) + 2.0;
     let h = 56.0 + 8.0 + group_h(Group::Tsubame) + group_h(Group::Dark) + group_h(Group::Light) + 8.0;
     let mut c = pg.card_h(h, 56.0);

@@ -31,6 +31,7 @@ mod debounce;
 mod locate;
 pub mod menu;
 pub mod nss;
+pub mod packs;
 pub mod session;
 
 pub use atomic::{corrupt_path, write_atomic, write_atomic_with};

@@ -131,6 +131,8 @@ pub struct Cx<'a> {
     pub restart: bool,
     /// "Roll back" on the Updates page was confirmed
     pub rollback: bool,
+    /// "Reload packs" on the Advanced page was pressed
+    pub reload_packs: bool,
     /// a message for the status bar
     pub message: Option<String>,
     /// private bytes of the process, for the Advanced page (the view reads it once a second)

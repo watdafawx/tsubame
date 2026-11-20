@@ -30,6 +30,8 @@ pub enum Source {
     Windows,
     /// imported from a Nilesoft Shell `shell.nss`
     Nilesoft,
+    /// from a declarative extension pack (`packs\*.toml`); never saved in the config
+    Pack,
     /// added by the user (also what an unknown value reads as)
     #[default]
     #[serde(other)]
@@ -43,11 +45,12 @@ impl Source {
             Source::Windows => "Windows",
             Source::Custom => "Custom",
             Source::Nilesoft => "From Nilesoft",
+            Source::Pack => "Pack",
         }
     }
     /// Entries of these sources run a program and are appended to the shell menu.
     pub fn runs_program(self) -> bool {
-        matches!(self, Source::Custom | Source::Nilesoft)
+        matches!(self, Source::Custom | Source::Nilesoft | Source::Pack)
     }
 }
 

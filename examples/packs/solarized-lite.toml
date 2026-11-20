@@ -1,0 +1,55 @@
+# Solarized Lite: a light theme and name colours for common file types.
+# Copy this file to <settings folder>\packs\, press "Reload packs" (Settings >
+# Advanced), then pick "Solarized Lite" under Settings > Appearance.
+# Format reference: docs/extension-packs.md
+
+[pack]
+title = "Solarized Lite"
+version = "1.0"
+description = "A warm light theme, and Solarized colours for file names by type."
+author = "Tsubame"
+
+# A theme gives up to six colours as #rrggbb. A colour left out comes from the
+# Tsubame theme of the same brightness (`dark`).
+[[theme]]
+id = "lite"
+name = "Solarized Lite"
+dark = false
+bg = "#fbf3dc"
+panel = "#eee8d5"
+surface = "#fdf6e3"
+text = "#073642"
+muted = "#586e75"
+accent = "#cb4b16"
+
+# A file-type rule colours the name of every file with one of these extensions
+# (first rule wins when two packs name the same one). Folders are not touched.
+[[file_type]]
+id = "code"
+extensions = ["rs", "py", "js", "ts", "c", "cpp", "h", "go", "java"]
+color = "#268bd2"
+
+[[file_type]]
+id = "data"
+extensions = ["toml", "json", "yaml", "yml", "ini", "xml", "csv"]
+color = "#b58900"
+
+[[file_type]]
+id = "docs"
+extensions = ["md", "txt", "pdf", "docx"]
+color = "#2aa198"
+
+[[file_type]]
+id = "pictures"
+extensions = ["png", "jpg", "jpeg", "gif", "webp", "svg"]
+color = "#6c71c4"
+
+[[file_type]]
+id = "archives"
+extensions = ["zip", "7z", "rar", "tar", "gz"]
+color = "#d33682"
+
+[[file_type]]
+id = "programs"
+extensions = ["exe", "dll", "msi", "bat", "ps1"]
+color = "#dc322f"
