@@ -8,7 +8,8 @@
 
 use crate::commands::{self, Command};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::sync::Arc;
 use tsubame_ui::{Key, Mods, Ui};
 
 /// At most this many chords per command (the Keys page shows two slots).
@@ -169,17 +170,21 @@ impl CmdList {
 
 /// The current registry's command list (cached by registry generation).
 pub fn command_list() -> Arc<CmdList> {
-    static CACHE: Mutex<Option<(u64, Arc<CmdList>)>> = Mutex::new(None);
-    let g = crate::ext::generation();
-    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((seen, l)) = c.as_ref()
-        && *seen == g
-    {
-        return l.clone();
+    thread_local! {
+        static CACHE: RefCell<Option<(u64, Arc<CmdList>)>> = const { RefCell::new(None) };
     }
-    let l = Arc::new(crate::ext::read(CmdList::from_registry));
-    *c = Some((g, l.clone()));
-    l
+    let g = crate::ext::generation();
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some((seen, l)) = c.as_ref()
+            && *seen == g
+        {
+            return l.clone();
+        }
+        let l = Arc::new(crate::ext::read(CmdList::from_registry));
+        *c = Some((g, l.clone()));
+        l
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]

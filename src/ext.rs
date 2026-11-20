@@ -2,14 +2,13 @@
 //!
 //! Built-in features are the first extensions: at start-up they register here
 //! exactly like a pack or a plugin will, and the view dispatches through the
-//! registry (`View::run_command`). One registry per process, built on first use;
-//! only the UI thread changes it. Readers that run every frame or key press
-//! copy what they need under a short read lock (no allocation) or cache it
-//! against `generation()`.
+//! registry (`View::run_command`). The registry belongs to the UI thread (one
+//! per process in practice; each test thread gets its own), built on first
+//! use. Readers that run every frame or key press copy what they need out of
+//! a short borrow (no allocation) or cache it against `generation()`.
 
 use crate::view::View;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, RwLock};
+use std::cell::RefCell;
 use tsubame_ext_api::{self as api, CmdFlags, Contributions, Extension, ExtensionInfo};
 use tsubame_ui::Ui;
 
@@ -24,7 +23,8 @@ impl api::Host for App {
 
 pub type Registry = api::Registry<App>;
 
-/// The core extension: every built-in command. Required (can not be switched off).
+/// The core extension: every built-in command and the Name column. Required
+/// (can not be switched off).
 pub const CORE: &str = "tsubame.core";
 
 struct Core;
@@ -37,6 +37,22 @@ impl Extension<App> for Core {
         for spec in crate::commands::BUILTIN {
             c.command(spec.clone(), View::run_builtin);
         }
+        for b in crate::cols::BUILTIN.iter().filter(|b| b.ext == CORE) {
+            c.order(b.order).column(b.spec.clone(), b.source());
+        }
+    }
+}
+
+/// One optional built-in column (Date modified, Type, Size): an extension of
+/// its own, so `[extensions] disabled` can switch it off.
+struct Column(&'static crate::cols::Builtin);
+
+impl Extension<App> for Column {
+    fn info(&self) -> ExtensionInfo {
+        ExtensionInfo::builtin(self.0.ext, self.0.title, self.0.required)
+    }
+    fn contribute(&self, c: &mut Contributions<App>) {
+        c.order(self.0.order).column(self.0.spec.clone(), self.0.source());
     }
 }
 
@@ -45,33 +61,29 @@ pub fn builtin() -> Registry {
     let mut r = Registry::new();
     // the built-in tables are checked by the tests; a clash is a programming error
     r.add(&Core).expect("built-in commands register");
+    for b in crate::cols::BUILTIN.iter().filter(|b| b.ext != CORE) {
+        r.add(&Column(b)).expect("built-in columns register");
+    }
     r
 }
 
-static REG: LazyLock<RwLock<Registry>> = LazyLock::new(|| {
-    let r = builtin();
-    GEN.store(r.generation(), Ordering::Release);
-    RwLock::new(r)
-});
-static GEN: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static REG: RefCell<Registry> = RefCell::new(builtin());
+}
 
-/// Reads the registry. Keep `f` short: no command runs while it is held.
+/// Reads the registry. Keep `f` short: never run a command inside it.
 pub fn read<R>(f: impl FnOnce(&Registry) -> R) -> R {
-    f(&REG.read().unwrap_or_else(|e| e.into_inner()))
+    REG.with(|r| f(&r.borrow()))
 }
 
-/// Changes the registry (UI thread).
+/// Changes the registry.
 pub fn write<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
-    let mut g = REG.write().unwrap_or_else(|e| e.into_inner());
-    let out = f(&mut g);
-    GEN.store(g.generation(), Ordering::Release);
-    out
+    REG.with(|r| f(&mut r.borrow_mut()))
 }
 
-/// The registry's generation without taking the lock: caches compare it.
+/// Caches of registry-derived data compare this to know when to rebuild.
 pub fn generation() -> u64 {
-    LazyLock::force(&REG);
-    GEN.load(Ordering::Acquire)
+    read(|r| r.generation())
 }
 
 /// How to run command `id`, when it is registered and enabled.

@@ -12,7 +12,7 @@
 //! `paint` takes `&mut dyn Canvas`, so the tests drive whole frames on the
 //! kit's `TestCanvas`.
 
-use crate::cols::{Col, Columns};
+use crate::cols::{Col, ColSet, Columns};
 use crate::commands::*;
 use crate::data::{self, RowBuf};
 use crate::nav::{self, Crumb};
@@ -208,6 +208,8 @@ pub struct View {
     /// a typed path is being opened: (tab id, folder before, typed path)
     edit_nav: Option<(u64, String, String)>,
     pub cols: Columns,
+    /// which columns show, from the extension registry (`sync_cols`)
+    colset: ColSet,
     pub density: Density,
     pub dark: bool,
     pub zebra: bool,
@@ -340,6 +342,7 @@ impl View {
             path_error: None,
             edit_nav: None,
             cols: Columns::default(),
+            colset: ColSet::current(),
             density,
             dark,
             zebra: false,
@@ -885,6 +888,28 @@ impl View {
             return;
         }
         run(self, ui, cmd);
+    }
+
+    /// Picks up a registry change (an extension switched on or off) for the columns.
+    fn sync_cols(&mut self) {
+        let g = crate::ext::generation();
+        if self.colset.generation != g {
+            self.colset = ColSet::current();
+        }
+    }
+
+    /// Switches extension `id` on or off, live, and records it in the config
+    /// (`[extensions] disabled`). Its commands leave or rejoin the key map.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_extension_enabled(&mut self, ui: &mut Ui, id: &str, on: bool) -> Result<bool, tsubame_ext_api::Error> {
+        let changed = crate::ext::write(|r| r.set_enabled(id, on))?;
+        self.prefs.extensions.disabled = crate::ext::read(|r| r.disabled());
+        if changed {
+            self.keymap = crate::keymap::KeyMap::from_overrides(&self.prefs.keys.overrides).0;
+        }
+        // rebinds the keys, publishes the map and marks the config for saving
+        self.apply_prefs(ui, crate::settings::C_KEYS);
+        Ok(changed)
     }
 
     /// The core extension's handler: every built-in command (`commands::BUILTIN`).
@@ -1576,26 +1601,40 @@ impl View {
         let total = main.w - t.layout_scrollbar_width;
         // a narrow pane of two drops the Type column
         let hide_type = self.other.is_some() && panes::hide_type_column(main.w);
-        let spans = self.cols.spans_pane(total, hide_type);
+        // the registry's columns, in its order (fixed arrays: nothing allocated per frame)
+        self.sync_cols();
+        let set = &self.colset;
+        let mut shown = [Col::Name; 4];
+        let mut n = 0;
+        for &c in set.order() {
+            if !(hide_type && c == Col::Type) {
+                shown[n] = c;
+                n += 1;
+            }
+        }
+        let shown = &shown[..n];
+        let spans = self.cols.spans(total, shown);
 
         // header: sort and resize
-        let all = Col::ALL.map(|c| tsubame_ui::HeaderCol { label: c.label(), right: c.right_aligned() });
-        let shown: Vec<usize> = (0..all.len()).filter(|&i| !(hide_type && Col::ALL[i] == Col::Type)).collect();
-        let hc: Vec<HeaderCol> = shown.iter().map(|&i| all[i]).collect();
-        let hspans: Vec<(f32, f32)> = shown.iter().map(|&i| spans[i]).collect();
+        let mut hc = [HeaderCol { label: "", right: false }; 4];
+        let mut hspans = [(0.0, 0.0); 4];
+        for (i, &c) in shown.iter().enumerate() {
+            hc[i] = HeaderCol { label: set.label(c), right: set.right_aligned(c) };
+            hspans[i] = spans[c.slot()];
+        }
         let tab = &mut self.tabs.items[self.tabs.active];
-        let sorted = shown.iter().position(|&i| Col::ALL[i].sort_column() == tab.sort.column).map(|i| (i, tab.sort.descending));
-        let hr = column_header(ui, g, pid(self.live, ID_HEADER), header_r, &hc, &hspans, sorted);
+        let sorted = shown.iter().position(|c| c.sort_column() == tab.sort.column).map(|i| (i, tab.sort.descending));
+        let hr = column_header(ui, g, pid(self.live, ID_HEADER), header_r, &hc[..n], &hspans[..n], sorted);
         if let Some(i) = hr.sort {
-            tab.sort_by(Col::ALL[shown[i]].sort_column());
+            tab.sort_by(shown[i].sort_column());
         }
         if !hide_type
             && let Some((i, x)) = hr.resize
-            && let Some(&col) = Col::ALL.get(i)
+            && let Some(&col) = shown.get(i)
         {
-            self.cols.drag_left_edge(col, x, total);
+            self.cols.drag_left_edge(col, x, total, shown);
         }
-        let spans = self.cols.spans_pane(total, hide_type);
+        let spans = self.cols.spans(total, shown);
 
         // the list
         g.fill(list_r, t.row);
@@ -1705,16 +1744,18 @@ impl View {
             (tab.sort.column, tab.sort.descending)
         };
         let mut clicked = None;
-        for (i, col) in Col::ALL.iter().enumerate() {
+        self.sync_cols();
+        for (i, col) in self.colset.order().iter().enumerate() {
+            let label = self.colset.label(*col);
             let is_sorted = col.sort_column() == sorted_col;
-            let w = g.measure(col.label(), font) + 16.0 + if is_sorted { 14.0 } else { 0.0 };
+            let w = g.measure(label, font) + 16.0 + if is_sorted { 14.0 } else { 0.0 };
             let cell = Rect::new(x, r.y + 3.0, w, r.h - 7.0);
             let it = ui.interact(pid(self.live, ID_HEADER).with(i as u64), cell, Sense::click());
             if it.hovered {
                 g.round(cell, t.radius_sm, t.hover);
             }
             let color = if is_sorted || it.hovered { t.text } else { t.text_dim };
-            g.text(col.label(), Rect::new(cell.x + 8.0, cell.y, w - 8.0, cell.h), font, color);
+            g.text(label, Rect::new(cell.x + 8.0, cell.y, w - 8.0, cell.h), font, color);
             if is_sorted {
                 let glyph = if desc { "\u{E70D}" } else { "\u{E70E}" };
                 g.text(glyph, Rect::new(cell.r() - 18.0, cell.y, 12.0, cell.h), f(9.0).icon().c(), t.text);
@@ -1936,11 +1977,16 @@ impl ListSource for Rows<'_> {
         }
         let name_c = if row.hidden { t.text_dim } else { t.text };
         g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, (sp[0].1 - 32.0 - 8.0).max(0.0), r.h), t.font(), name_c);
-        data::fmt_date(row.mtime, self.text);
-        g.text(self.text, Rect::new(x + sp[1].0 + 8.0, r.y, (sp[1].1 - 12.0).max(0.0), r.h), t.font(), t.text_dim);
-        row.type_text(self.text);
-        g.text(self.text, Rect::new(x + sp[2].0 + 8.0, r.y, (sp[2].1 - 12.0).max(0.0), r.h), t.font(), t.text_dim);
-        if !row.is_dir() {
+        // a column not shown has no width: nothing to format or draw
+        if sp[1].1 > 0.0 {
+            data::fmt_date(row.mtime, self.text);
+            g.text(self.text, Rect::new(x + sp[1].0 + 8.0, r.y, (sp[1].1 - 12.0).max(0.0), r.h), t.font(), t.text_dim);
+        }
+        if sp[2].1 > 0.0 {
+            row.type_text(self.text);
+            g.text(self.text, Rect::new(x + sp[2].0 + 8.0, r.y, (sp[2].1 - 12.0).max(0.0), r.h), t.font(), t.text_dim);
+        }
+        if !row.is_dir() && sp[3].1 > 0.0 {
             data::fmt_size(row.size, self.text);
             g.text(self.text, Rect::new(x + sp[3].0, r.y, (sp[3].1 - 8.0).max(0.0), r.h), t.font().r(), t.text_dim);
         }
@@ -2157,6 +2203,25 @@ mod tests {
         assert!(r.c.has_text("Name") && r.c.has_text("Date modified") && r.c.has_text("Type") && r.c.has_text("Size"));
         assert!(r.c.texts().iter().any(|t| t.starts_with("tsubame-u2-view-frame")), "crumb of the folder: {:?}", r.c.texts());
         assert_eq!(r.c.clip_depth(), 0);
+    }
+
+    #[test]
+    fn switching_off_a_column_extension_hides_it_live_and_records_it() {
+        let mut r = Rig::new("x1-cols");
+        assert!(r.c.has_text("Type"));
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, "tsubame.column.type", false), Ok(true));
+        r.frame();
+        assert!(!r.c.has_text("Type"), "{:?}", r.c.texts());
+        assert!(r.c.has_text("Name") && r.c.has_text("Date modified") && r.c.has_text("Size"));
+        assert_eq!(r.v.prefs.extensions.disabled, ["tsubame.column.type"]);
+        // the core can not be switched off; nothing changes
+        assert!(r.v.set_extension_enabled(&mut r.ui, crate::ext::CORE, false).is_err());
+        assert!(crate::ext::command(CMD_NEW_TAB).is_some());
+        // back on, back in its place
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, "tsubame.column.type", true), Ok(true));
+        r.frame();
+        assert!(r.c.has_text("Type"));
+        assert!(r.v.prefs.extensions.disabled.is_empty());
     }
 
     #[test]

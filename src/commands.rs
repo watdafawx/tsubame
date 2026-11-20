@@ -191,7 +191,8 @@ mod tests {
 
     /// The table before the registry (X1): every id's keys and global flag, so
     /// the move is proven to change no binding.
-    const BEFORE: &[(u32, &[(Key, Mods)], bool)] = &[
+    type Before = (u32, &'static [(Key, Mods)], bool);
+    const BEFORE: &[Before] = &[
         (CMD_NEW_TAB, &[(Key::Char('T'), CT)], true),
         (CMD_CLOSE_TAB, &[(Key::Char('W'), CT), (Key::F(4), CT)], true),
         (CMD_NEXT_TAB, &[(Key::Tab, CT)], true),
