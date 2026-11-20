@@ -19,7 +19,8 @@
 use super::ctxmodel::RawItem;
 use crate::bitmap;
 use crate::wide;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Command ids of packaged items: never inside the HMENU's `ID_FIRST..=ID_LAST`
@@ -29,8 +30,9 @@ pub const ID_LAST: u32 = 0xBFFF;
 /// Submenu tokens of packaged items (classic tokens are 1..=512).
 pub const SUB_FIRST: u32 = 0x0001_0000;
 pub const SUB_LAST: u32 = 0x0001_FFFF;
-/// Re-read the manifests after this long (apps get installed while the app runs).
-pub const SCAN_TTL: Duration = Duration::from_secs(60);
+/// Re-read the manifests in the background after this long (apps get installed
+/// while the app runs); stale reads still return the cached list immediately.
+pub const SCAN_TTL: Duration = Duration::from_secs(300);
 /// Upper bound of packaged commands per menu (a broken handler must not make it huge).
 pub const MAX_COMMANDS: usize = 64;
 
@@ -234,19 +236,109 @@ fn scan() -> Vec<Handler> {
     out
 }
 
-static CACHE: Mutex<Option<(Instant, Arc<Vec<Handler>>)>> = Mutex::new(None);
+struct CacheState {
+    slot: Mutex<Option<(Instant, Arc<Vec<Handler>>)>>,
+    refreshing: AtomicBool,
+}
 
-/// The cached scan (refreshed after [`SCAN_TTL`]); true when it scanned now.
-pub fn handlers() -> (Arc<Vec<Handler>>, bool) {
-    if let Some((at, h)) = CACHE.lock().unwrap().as_ref()
-        && at.elapsed() < SCAN_TTL
-    {
-        return (h.clone(), false);
+impl CacheState {
+    fn new() -> Arc<Self> {
+        Arc::new(CacheState { slot: Mutex::new(None), refreshing: AtomicBool::new(false) })
     }
-    // scan outside the lock: two workers may both scan once, that is fine
-    let h = Arc::new(scan());
-    *CACHE.lock().unwrap() = Some((Instant::now(), h.clone()));
+}
+
+struct RefreshGuard(Arc<CacheState>);
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        self.0.refreshing.store(false, Ordering::Release);
+    }
+}
+
+fn global_cache() -> Arc<CacheState> {
+    static CACHE: OnceLock<Arc<CacheState>> = OnceLock::new();
+    CACHE.get_or_init(CacheState::new).clone()
+}
+
+fn spawn_refresh<F>(cache: Arc<CacheState>, delay: Duration, ttl: Duration, scan_fn: F) -> bool
+where
+    F: FnOnce() -> Vec<Handler> + Send + 'static,
+{
+    if cache.refreshing.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    let bg = cache.clone();
+    let res = std::thread::Builder::new().name("tsubame-pkg-scan".into()).spawn(move || {
+        let _guard = RefreshGuard(bg.clone());
+        unsafe {
+            let _ = windows::Win32::System::Threading::SetThreadPriority(
+                windows::Win32::System::Threading::GetCurrentThread(),
+                windows::Win32::System::Threading::THREAD_PRIORITY_BELOW_NORMAL,
+            );
+        }
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+            if bg.slot.lock().unwrap().as_ref().is_some_and(|(at, _)| at.elapsed() < ttl) {
+                return;
+            }
+        }
+        let h = Arc::new(scan_fn());
+        *bg.slot.lock().unwrap() = Some((Instant::now(), h));
+    });
+    if res.is_err() {
+        cache.refreshing.store(false, Ordering::Release);
+        return false;
+    }
+    true
+}
+
+fn handlers_with<F>(cache: &Arc<CacheState>, ttl: Duration, scan_fn: F) -> (Arc<Vec<Handler>>, bool)
+where
+    F: FnOnce() -> Vec<Handler> + Send + 'static,
+{
+    let cached = cache.slot.lock().unwrap().clone();
+    if let Some((at, h)) = cached {
+        if at.elapsed() >= ttl {
+            // Never block a live right-click on manifest disk I/O: return the
+            // stale cache immediately and refresh once on a background thread.
+            spawn_refresh(cache.clone(), Duration::ZERO, ttl, scan_fn);
+        }
+        return (h, false);
+    }
+    // Cold cache (e.g. click before pre-warm finished): scan once outside the lock.
+    let h = Arc::new(scan_fn());
+    *cache.slot.lock().unwrap() = Some((Instant::now(), h.clone()));
     (h, true)
+}
+
+fn prewarm_with<F>(cache: &Arc<CacheState>, delay: Duration, ttl: Duration, scan_fn: F) -> bool
+where
+    F: FnOnce() -> Vec<Handler> + Send + 'static,
+{
+    if cache.slot.lock().unwrap().as_ref().is_some_and(|(at, _)| at.elapsed() < ttl) {
+        return false;
+    }
+    spawn_refresh(cache.clone(), delay, ttl, scan_fn)
+}
+
+/// Starts populating the packaged-handler cache on a low-priority background
+/// thread (no-op if already fresh or a scan is already running).
+pub fn prewarm() {
+    prewarm_after(Duration::ZERO);
+}
+
+/// Like [`prewarm`], waiting `delay` on the background thread before scanning
+/// so cold start and initial folder load stay uncontended.
+pub fn prewarm_after(delay: Duration) {
+    let cache = global_cache();
+    prewarm_with(&cache, delay, SCAN_TTL, scan);
+}
+
+/// The cached scan (refreshed in the background after [`SCAN_TTL`]); true only
+/// on a cold synchronous scan.
+pub fn handlers() -> (Arc<Vec<Handler>>, bool) {
+    let cache = global_cache();
+    handlers_with(&cache, SCAN_TTL, scan)
 }
 
 // ---- one menu's packaged commands (worker side) ----------------------------
@@ -282,8 +374,15 @@ fn take(p: windows::core::Result<PWSTR>) -> Option<String> {
 
 impl Session {
     /// The shell item array for `paths` (background: the folder itself).
+    #[allow(dead_code)]
     pub fn new(paths: &[String], icon_px: u32) -> Option<Session> {
         let pidls = super::ctxmenu::parse(paths).ok()?;
+        Session::from_pidls(&pidls, icon_px)
+    }
+
+    /// Reuses already-parsed `pidls` from the classic menu build to avoid a
+    /// second `SHParseDisplayName` round-trip per path.
+    pub fn from_pidls(pidls: &super::menu::Pidls, icon_px: u32) -> Option<Session> {
         let ptrs: Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST> = pidls.0.iter().map(|p| *p as *const _).collect();
         let arr = unsafe { SHCreateShellItemArrayFromIDLists(&ptrs) }.ok()?;
         Some(Session { arr, icon_px, cmds: Vec::new(), subs: Vec::new(), skipped: 0 })
@@ -335,7 +434,9 @@ impl Session {
             return None;
         }
         let text = take(unsafe { cmd.GetTitle(&self.arr) })?;
-        let help = take(unsafe { cmd.GetToolTip(&self.arr) });
+        // Tooltips are not displayed in the menu and `text` is already non-empty,
+        // so skip an extra COM call per packaged handler.
+        let help = None;
         let icon = take(unsafe { cmd.GetIcon(&self.arr) }).and_then(|loc| load_icon(&loc, self.icon_px)).map(Arc::new);
         // the CLSID is the stable identity (with the package family, set by
         // `top`, it keys the user's edits: `windows.pkg:<family>/{clsid}`);
@@ -491,6 +592,80 @@ mod tests {
         assert!(!is_sub(super::super::ctxmodel::MAX_ITEMS as u32) && is_sub(SUB_FIRST));
         assert_eq!(class_of(r"C:\").0, ItemClass::Drive);
         assert_eq!(class_of(r"Z:\no\such\file.TXT"), (ItemClass::File, "txt".into()));
+    }
+
+    #[test]
+    fn stale_cache_returns_immediately_and_refreshes_once_in_background() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::mpsc;
+
+        let cache = CacheState::new();
+        let old = vec![Handler { package: "old".into(), ty: "*".into(), clsid: TERM.into() }];
+        let fresh = vec![Handler { package: "fresh".into(), ty: "*".into(), clsid: TERM.into() }];
+        let ttl = Duration::from_secs(5);
+        *cache.slot.lock().unwrap() = Some((Instant::now() - Duration::from_secs(10), Arc::new(old.clone())));
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // First stale read returns old cache immediately and triggers 1 background refresh.
+        let calls1 = calls.clone();
+        let fresh1 = fresh.clone();
+        let t0 = Instant::now();
+        let (got1, scanned1) = handlers_with(&cache, ttl, move || {
+            calls1.fetch_add(1, Ordering::SeqCst);
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            fresh1
+        });
+        assert!(t0.elapsed() < Duration::from_millis(200), "must not block on slow scan");
+        assert!(!scanned1);
+        assert_eq!(*got1, old);
+
+        started_rx.recv_timeout(Duration::from_secs(2)).expect("background scan started");
+
+        // Second stale read while refreshing also returns immediately and spawns NO second scan.
+        let calls2 = calls.clone();
+        let (got2, scanned2) = handlers_with(&cache, ttl, move || {
+            calls2.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        });
+        assert!(!scanned2);
+        assert_eq!(*got2, old);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only one concurrent refresh allowed");
+
+        // Unblock background refresh and verify cache updates cleanly.
+        let _ = release_tx.send(());
+        let wait = Instant::now();
+        while cache.refreshing.load(Ordering::Acquire) && wait.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!cache.refreshing.load(Ordering::Acquire));
+
+        let calls3 = calls.clone();
+        let (got3, scanned3) = handlers_with(&cache, ttl, move || {
+            calls3.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        });
+        assert!(!scanned3);
+        assert_eq!(*got3, fresh);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "fresh cache does not re-scan");
+    }
+
+    #[test]
+    fn prewarm_populates_cache_in_background() {
+        let cache = CacheState::new();
+        let expected = vec![Handler { package: "warm".into(), ty: "directory".into(), clsid: TERM.into() }];
+        let expected_bg = expected.clone();
+        assert!(prewarm_with(&cache, Duration::ZERO, SCAN_TTL, move || expected_bg));
+        let wait = Instant::now();
+        while cache.slot.lock().unwrap().is_none() && wait.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (got, scanned) = handlers_with(&cache, SCAN_TTL, || panic!("should hit pre-warmed cache"));
+        assert!(!scanned);
+        assert_eq!(*got, expected);
     }
 
     /// Manual probe: `TSUBAME_PKG_PROBE=<path> cargo test -p tsubame-win probe -- --ignored --nocapture`.

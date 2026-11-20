@@ -170,8 +170,8 @@ struct App {
     stress: Option<stress::Stress>,
     hang_bench: bool,
     watch_armed: bool,
-    /// the own-drawn menu's loading-line timer runs (only while it loads)
-    ctx_timer: bool,
+    /// the own-drawn menu's reveal-grace / loading-line / hover timer interval
+    ctx_timer: Option<u32>,
     /// the GPU park timer is armed
     park_timer: bool,
     /// the blink timer exists
@@ -572,7 +572,7 @@ fn main() {
                 stress: stress_mode.map(stress::Stress::new),
                 hang_bench: flag("--hang"),
                 watch_armed: false,
-                ctx_timer: false,
+                ctx_timer: None,
                 park_timer: false,
                 caret_timer: false,
                 caret_idle: false,
@@ -650,17 +650,22 @@ fn arm_watch(hwnd: HWND, a: &mut App) {
     }
 }
 
-/// The own-drawn menu ticks only while shell items or a submenu are still
-/// coming (until the 3 s failure switch) or a hover delay runs; an idle menu
-/// and no menu: no timer.
-fn arm_ctx(hwnd: HWND, a: &mut App) {
-    let want = a.view.ctx.as_ref().is_some_and(|c| c.ticking());
-    if want && !a.ctx_timer {
-        unsafe { SetTimer(Some(hwnd), ctxui::TIMER_ID, ctxui::TICK_MS, None) };
-        a.ctx_timer = true;
-    } else if !want && a.ctx_timer {
-        let _ = unsafe { KillTimer(Some(hwnd), ctxui::TIMER_ID) };
-        a.ctx_timer = false;
+/// The own-drawn menu ticks only while holding for the reveal grace window
+/// (single one-shot), while shell items or a submenu are still loading (100 ms,
+/// ~10 FPS), or while a submenu hover delay is pending. An idle menu and no
+/// menu: no timer (0 wake-ups).
+pub(crate) fn arm_ctx(hwnd: HWND, a: &mut App) {
+    let want = a.view.ctx.as_ref().and_then(|c| c.next_tick_ms());
+    match want {
+        Some(ms) if a.ctx_timer != Some(ms) => {
+            unsafe { SetTimer(Some(hwnd), ctxui::TIMER_ID, ms, None) };
+            a.ctx_timer = Some(ms);
+        }
+        None if a.ctx_timer.is_some() => {
+            let _ = unsafe { KillTimer(Some(hwnd), ctxui::TIMER_ID) };
+            a.ctx_timer = None;
+        }
+        _ => {}
     }
 }
 
@@ -869,6 +874,14 @@ unsafe fn on_paint(hwnd: HWND) {
     let info = with(|a| {
         let t0 = Instant::now();
         a.last_paint = t0;
+        // If the GPU device was parked while idle, clear the parked state via
+        // `release()` before `Gfx::begin()` so the first frame paints on the
+        // software stand-in (~13 ms) without racing a concurrent hardware
+        // D3D11CreateDevice (~170 ms UI-thread stall). `Gfx::end()` starts the
+        // background GPU warm-up right after presenting this frame.
+        if a.gfx.parked() {
+            a.gfx.release();
+        }
         a.shell.begin_frame();
         a.view.cur_mods = mods();
         let out = a.view.paint(&mut a.ui, &mut a.gfx, &mut a.shell);
@@ -924,6 +937,13 @@ unsafe fn on_paint(hwnd: HWND) {
     })
     .flatten();
     if first.is_some() {
+        // Pre-warm Win11 packaged context-menu manifest scan on a low-priority
+        // background thread 250 ms after first paint, keeping the <100 ms cold
+        // start and initial folder load untouched while eliminating the ~167 ms
+        // manifest scan on the first right-click.
+        if with(|a| a.bench.is_none() && a.timing.is_none() && a.gate.is_none()).unwrap_or(false) {
+            tsubame_win::shell::packaged::prewarm_after(Duration::from_millis(250));
+        }
         // the update (if any) took: end its trial; then the once-a-day background check
         // (a worker; a no-op in a dev run, a portable copy, or with the setting off)
         updates::on_ready();
@@ -1105,22 +1125,28 @@ unsafe fn on_stress_tick(hwnd: HWND) {
 fn open_menu(hwnd: HWND, row: usize, x: i32, y: i32, keyboard: bool) {
     let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0 && !keyboard;
     let (sx, sy) = screen_pt(hwnd, x, y);
-    with(|a| {
+    let paint_now = with(|a| {
         if a.view.tab().shown() == 0 {
             let s = a.gfx.dpi / 96.0;
             shellops::open_background_menu(a, a.view.tab().path.clone(), sx, sy, extended, Pt::new(x as f32 / s, y as f32 / s), keyboard);
-            return;
+            arm_ctx(hwnd, a);
+            return !a.view.ctx.as_ref().is_some_and(|c| c.open && !c.is_revealed());
         }
         let paths = a.view.menu_paths(row);
         let t = a.view.tab();
         let folders = t.store.view().iter().enumerate().filter(|(_, id)| t.sel.contains(**id) || t.store.at(row) == Some(**id)).filter_map(|(i, _)| t.entry_at(i)).filter(|(p, dir)| *dir && paths.contains(p)).map(|(p, _)| p).collect();
         if paths.is_empty() {
-            return;
+            return false;
         }
         let s = a.gfx.dpi / 96.0;
         shellops::open_item_menu(a, paths, folders, sx, sy, extended, Pt::new(x as f32 / s, y as f32 / s), keyboard);
-    });
-    invalidate(hwnd);
+        arm_ctx(hwnd, a);
+        !a.view.ctx.as_ref().is_some_and(|c| c.open && !c.is_revealed())
+    })
+    .unwrap_or(false);
+    if paint_now {
+        invalidate(hwnd);
+    }
 }
 
 /// Keyboard-invoked menu, at the cursor row.
@@ -1275,8 +1301,16 @@ fn button_event(hwnd: HWND, msg: u32, lp: LPARAM) {
     let mods = mods();
     let down = |button, double| Event::MouseDown { pos, button, mods, double };
     let ev = match msg {
-        WM_LBUTTONDOWN => down(Button::Left, false),
-        WM_LBUTTONDBLCLK => down(Button::Left, true),
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+            // Cancel a context menu still hidden inside its reveal grace window.
+            with(|a| {
+                if a.view.ctx.as_ref().is_some_and(|c| c.open && !c.is_revealed()) {
+                    a.view.ctx = None;
+                    arm_ctx(hwnd, a);
+                }
+            });
+            down(Button::Left, msg == WM_LBUTTONDBLCLK)
+        }
         WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => {
             // the own-drawn menu measures right-click -> first paint from here
             ctxui::note_input();
@@ -1286,11 +1320,20 @@ fn button_event(hwnd: HWND, msg: u32, lp: LPARAM) {
                 if a.view.ctx.as_ref().is_some_and(|c| c.open && !c.state.levels.iter().any(|l| l.rect.contains_pt(pos))) {
                     a.view.ctx = None;
                     a.ui.close_popup(ctxui::ID_CTX.with(0));
+                    arm_ctx(hwnd, a);
                 }
             });
             down(Button::Right, false)
         }
-        WM_MBUTTONDOWN | WM_MBUTTONDBLCLK => down(Button::Middle, false),
+        WM_MBUTTONDOWN | WM_MBUTTONDBLCLK => {
+            with(|a| {
+                if a.view.ctx.as_ref().is_some_and(|c| c.open && !c.is_revealed()) {
+                    a.view.ctx = None;
+                    arm_ctx(hwnd, a);
+                }
+            });
+            down(Button::Middle, false)
+        }
         WM_LBUTTONUP => Event::MouseUp { pos, button: Button::Left, mods },
         WM_RBUTTONUP => Event::MouseUp { pos, button: Button::Right, mods },
         _ => Event::MouseUp { pos, button: Button::Middle, mods },
@@ -1337,17 +1380,10 @@ fn hit_test(hwnd: HWND, lp: LPARAM) -> LRESULT {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     wakelog::note(msg, wp.0);
-    // input (not a repaint the system asked for) warms a parked GPU again; a
-    // WM_MOUSEMOVE at the old position is the system's (a window above went away)
-    static LAST_MOVE: AtomicIsize = AtomicIsize::new(-1);
-    let moved = msg == WM_MOUSEMOVE && LAST_MOVE.swap(lp.0, Ordering::Relaxed) != lp.0;
-    if moved || matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_MOUSEWHEEL | WM_MOUSEHWHEEL | WM_KEYDOWN | WM_SYSKEYDOWN | WM_SIZE) {
-        with(|a| {
-            if a.gfx.parked() {
-                a.gfx.unpark();
-            }
-        });
-    }
+    // Note: a parked GPU is unparked lazily in `on_paint` (software stand-in
+    // first, hardware warm-up in `Gfx::end()` after presenting), so input such
+    // as right-click never races a synchronous D3D11 hardware init (~170 ms)
+    // against the first software frame.
     unsafe {
         match msg {
             WM_PAINT => {
@@ -1403,9 +1439,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let r = with(|a| {
                     let mut repaint = false;
                     for r in a.pool.drain() {
-                        match shellops::on_reply(a, r) {
-                            Some(r) => repaint |= a.shell.apply(r),
-                            None => repaint = true,
+                        let (rest, need) = shellops::on_reply(a, r);
+                        repaint |= need;
+                        if let Some(r) = rest {
+                            repaint |= a.shell.apply(r);
                         }
                     }
                     // replies free lane slots: the queued misses go out now
@@ -1415,6 +1452,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         stress.as_mut().map(|s| s.step(view, shell, pool, pt))
                     };
                     arm_watch(hwnd, a);
+                    arm_ctx(hwnd, a);
                     (repaint, st)
                 });
                 if let Some((repaint, st)) = r {
@@ -1569,6 +1607,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 let repeat = lp.0 & (1 << 30) != 0;
                 let key = map_key(wp.0 as u16);
+                // Escape while a context menu is still inside its reveal grace window cancels it.
+                if key == Key::Escape
+                    && with(|a| {
+                        if a.view.ctx.as_ref().is_some_and(|c| c.open && !c.is_revealed()) {
+                            a.view.ctx = None;
+                            arm_ctx(hwnd, a);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false)
+                {
+                    return LRESULT(0);
+                }
                 // bare Alt (menu activation) is ignored; every other Alt combo goes to the kit
                 if matches!(VIRTUAL_KEY(wp.0 as u16), VK_MENU | VK_LMENU | VK_RMENU) {
                     invalidate(hwnd);
@@ -1624,7 +1677,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == ctxui::TIMER_ID => {
-                // the loading line's next step; after_paint stops the timer
+                // One-shot grace/hover deadline or 10 FPS loading tick;
+                // `after_paint` re-arms with the next interval or leaves it off.
+                let _ = KillTimer(Some(hwnd), ctxui::TIMER_ID);
+                with(|a| a.ctx_timer = None);
                 invalidate(hwnd);
                 LRESULT(0)
             }

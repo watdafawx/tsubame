@@ -23,9 +23,16 @@ use tsubame_win::uia;
 use crate::rowmenu;
 
 pub const ID_CTX: Id = Id::new("ctxmenu");
-/// The loading line's animation tick (only while a menu is loading).
+/// The loading line's animation / reveal-grace timer (only while a menu is
+/// holding for grace, loading, or waiting on a submenu hover delay).
 pub const TIMER_ID: usize = 11;
-pub const TICK_MS: u32 = 33;
+/// Loading spinner repaint interval (~10 FPS; avoids 30 FPS full-window
+/// repaints while waiting on a slow shell handler).
+pub const TICK_MS: u32 = 100;
+/// Hold painting a fresh menu briefly so a normal warm shell query (~25 ms)
+/// paints complete in one crisp frame with zero "Loading…" flash or jump.
+/// `TSUBAME_CTX_GRACE_MS=0` disables the grace window (immediate reveal).
+pub const REVEAL_GRACE_MS: u64 = 60;
 const SPIN_MS: u128 = 1200;
 pub const FAIL_TEXT: &str = "Some items could not load";
 const STATUS_KEY: u64 = 0x0057_a7a5_0001;
@@ -55,6 +62,13 @@ fn next_gen() -> u64 {
 
 fn env_u32(name: &str) -> u32 {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Reveal grace duration (`TSUBAME_CTX_GRACE_MS`, default [`REVEAL_GRACE_MS`];
+/// `0` reveals immediately with the loading line).
+pub fn grace_duration() -> Duration {
+    let ms = std::env::var("TSUBAME_CTX_GRACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(REVEAL_GRACE_MS).min(2000);
+    Duration::from_millis(ms)
 }
 
 /// `TSUBAME_NATIVE_MENU=1` keeps the Windows popup menu (the fallback).
@@ -125,6 +139,10 @@ pub struct CtxMenu {
     pub open: bool,
     input_at: Instant,
     asked_at: Instant,
+    /// hold painting until `Part::Complete` / error or this grace elapses
+    grace: Duration,
+    /// latched once the popup has been revealed (stays true across Retry)
+    revealed: bool,
     /// input -> first painted frame / -> first frame with the shell's top
     /// level / -> first frame with every shell item the worker sends up
     /// front (lazy: the top level; `TSUBAME_CTX_EAGER=1`: the whole tree)
@@ -388,6 +406,7 @@ impl CtxMenu {
         let generation = next_gen();
         let state = MenuState::new(target.anchor, target.keyboard);
         let tag_new = !menu.items.is_empty();
+        let grace = grace_duration();
         let mut m = CtxMenu {
             generation,
             tag_new,
@@ -407,6 +426,8 @@ impl CtxMenu {
             open: true,
             input_at: take_input(),
             asked_at: Instant::now(),
+            grace,
+            revealed: grace.is_zero(),
             first_paint: None,
             top_items: None,
             all_items: None,
@@ -615,6 +636,7 @@ impl CtxMenu {
             part => {
                 if let Part::Failed(ref error) = part {
                     self.handle = None;
+                    self.revealed = true;
                     if self.pending_verb.take().is_some() {
                         self.invoke_result = Some(Err(error.clone()));
                     }
@@ -627,6 +649,9 @@ impl CtxMenu {
                 let complete = matches!(part, Part::Complete);
                 let native = matches!(part, Part::Native(_));
                 let packaged = matches!(part, Part::Packaged(_));
+                if complete {
+                    self.revealed = true;
+                }
                 self.model.apply(MenuBatch { part, ..b });
                 self.dirty = true;
                 // CM8: Settings lists what real menus showed
@@ -635,7 +660,7 @@ impl CtxMenu {
                 } else if packaged {
                     self.learn_from(&self.model.packaged.clone());
                 }
-                if complete && self.model.error.is_none() {
+                if complete && self.model.error.is_none() && self.handle.is_some() {
                     let keys: Vec<String> = [&self.model.tsubame, &self.model.native, &self.model.packaged].into_iter().flat_map(|l| l.iter()).filter(|it| !it.is_separator() && !it.key.is_empty()).map(|it| it.key.clone()).collect();
                     let n = keys.len();
                     if let Ok(mut g) = LAST_SHOWN.lock() {
@@ -650,7 +675,7 @@ impl CtxMenu {
                 }
             }
         }
-        self.open
+        self.open && self.is_revealed()
     }
 
     /// The watchdog gave the worker up.
@@ -659,6 +684,7 @@ impl CtxMenu {
         self.model.apply(MenuBatch { generation: g, part: Part::Failed("the shell did not answer".into()), timing: [0; 3] });
         self.handle = None;
         self.pending_verb = None;
+        self.revealed = true;
         // the worker is gone: its command ids and submenu tokens are dead
         // (open submenus show the failure row, Retry asks a new worker)
         self.model.native.clear();
@@ -723,18 +749,47 @@ impl CtxMenu {
         self.clock.elapsed().as_millis() as u64
     }
 
-    /// The menu's tick timer must run: the loading line, a submenu that is
-    /// loading (until it turns into the failure row) or a hover delay.
-    /// False while the menu just sits there: no wake-ups.
+    /// True once the menu should draw: complete, failed, grace elapsed, or
+    /// previously revealed.
+    pub fn is_revealed(&self) -> bool {
+        self.revealed || self.model.complete || self.model.error.is_some() || self.shown() == LoadState::Failed || self.asked_at.elapsed() >= self.grace
+    }
+
+    /// Milliseconds until the next timer wake, or `None` when idle (0 wake-ups).
+    /// - During the reveal grace window: a single one-shot for the remaining grace.
+    /// - While loading (or a lazy submenu is loading): `TICK_MS` (100 ms, 10 FPS),
+    ///   clamped to any sooner submenu hover deadline.
+    /// - While only a submenu hover delay is pending: exact remaining delay.
+    pub fn next_tick_ms(&self) -> Option<u32> {
+        if !self.open {
+            return None;
+        }
+        if !self.is_revealed() {
+            let left = self.grace.saturating_sub(self.asked_at.elapsed());
+            return Some((left.as_millis() as u32).max(1));
+        }
+        let now = self.now_ms();
+        let hover = self.state.deadline().map(|dl| dl.saturating_sub(now).clamp(1, 1000) as u32);
+        if self.loading() || self.subs.loading(now) {
+            return Some(hover.map_or(TICK_MS, |h| h.min(TICK_MS)));
+        }
+        hover
+    }
+
+    /// The menu's tick timer must run: the reveal grace window, loading line,
+    /// a submenu that is loading (until it turns into the failure row) or a
+    /// hover delay. False while the menu just sits there: no wake-ups.
+    #[allow(dead_code)]
     pub fn ticking(&self) -> bool {
-        self.open && (self.loading() || self.subs.loading(self.now_ms()) || self.state.deadline().is_some())
+        self.next_tick_ms().is_some()
     }
 
     /// Draws the menu (after every other widget).
     pub fn paint(&mut self, ui: &mut Ui, g: &mut dyn Canvas, bounds: Rect) {
-        if !self.open {
+        if !self.open || !self.is_revealed() {
             return;
         }
+        self.revealed = true;
         if self.dirty {
             self.items = self.model.rows(&self.menu);
             self.dirty = false;
@@ -835,7 +890,7 @@ impl CtxMenu {
 
     /// Called after Canvas::end, so timings include submitting the frame.
     pub fn presented(&mut self) {
-        if !self.open { return; }
+        if !self.open || !self.revealed { return; }
         self.first_paint.get_or_insert_with(|| self.input_at.elapsed());
         if self.model.state == LoadState::Ready {
             self.top_items.get_or_insert_with(|| self.input_at.elapsed());
@@ -1300,7 +1355,7 @@ mod tests {
         let mut c = CtxMenu {
             generation: 2, target: Target::default(), model: MenuModel::new(2, vec![], vec![]), menu: ContextMenu::default(), edited: false, learned: false, tag_new: false, settings_key: None, undo: None, undo_entries: None, settings_edit: false, dual: false,
             handle: None, ticket: 0, state: MenuState::default(), open: false,
-            input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
+            input_at: Instant::now(), asked_at: Instant::now(), grace: Duration::ZERO, revealed: true, first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: Some("properties".into()), invoked: false, invoke_result: None,
             items: vec![], dirty: false, paste_ok: false, icon_px: 16, a11y: A11yOut::default(), hc: None,
         };
@@ -1407,7 +1462,7 @@ mod tests {
         let mut c = CtxMenu {
             generation: 2, target, model, menu, edited: false, learned: false, tag_new: false, settings_key: None, undo: None, undo_entries: None, settings_edit: false, dual: false,
             handle: None, ticket: 0, state: MenuState::default(), open: true,
-            input_at: Instant::now(), asked_at: Instant::now(), first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
+            input_at: Instant::now(), asked_at: Instant::now(), grace: Duration::ZERO, revealed: true, first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: None, invoked: false, invoke_result: None,
             items: vec![], dirty: true, paste_ok: true, icon_px: 16, a11y: A11yOut::default(), hc: None,
         };
@@ -1737,5 +1792,96 @@ mod tests {
             assert_eq!(t.selected, t.accent, "the widget takes on_accent text on an accent fill");
             assert_eq!(t.text_dim, t.text, "no dim text");
         }
+    }
+
+    #[test]
+    fn grace_window_paints_complete_menu_in_one_frame_without_loading_flash() {
+        let mut c = test_menu(vec![]);
+        c.grace = Duration::from_millis(200);
+        c.revealed = false;
+        c.asked_at = Instant::now();
+        c.input_at = c.asked_at;
+        c.model.complete = false;
+        c.model.state = LoadState::Loading;
+
+        let mut ui = Ui::new(tsubame_ui::DARK);
+        let mut g = tsubame_ui::TestCanvas::new(800.0, 600.0);
+        let bounds = Rect::new(0.0, 0.0, 800.0, 600.0);
+
+        // Inside the grace window: held back, one-shot timer for remaining grace.
+        assert!(!c.is_revealed());
+        let tick = c.next_tick_ms().expect("one-shot grace timer armed");
+        assert!((1..=200).contains(&tick), "unexpected grace timer: {tick}");
+        ui.begin_frame((800.0, 600.0));
+        c.paint(&mut ui, &mut g, bounds);
+        let _ = ui.end_frame();
+        c.presented();
+        assert!(g.ops.is_empty(), "menu must not paint while waiting in grace window");
+        assert!(c.first_paint.is_none());
+
+        // Intermediate Native batch inside grace updates model without forcing a partial paint.
+        let generation = c.generation;
+        let share = MenuItem { id: 9, key: "windows.verb:share".into(), verb: Some("share".into()), ..MenuItem::command(ItemSource::Native, "Share", "") };
+        assert!(!c.apply(MenuBatch { generation, part: Part::Native(vec![share]), timing: [0; 3] }));
+        assert!(!c.is_revealed());
+
+        // Complete arrives within grace: reveals immediately, no loading line, no timer.
+        assert!(c.apply(MenuBatch { generation, part: Part::Complete, timing: [0; 3] }));
+        assert!(c.is_revealed());
+        assert!(!c.loading());
+        assert_eq!(c.next_tick_ms(), None, "complete menu arms zero timers");
+
+        ui.begin_frame((800.0, 600.0));
+        c.paint(&mut ui, &mut g, bounds);
+        let _ = ui.end_frame();
+        c.presented();
+        assert!(!g.ops.is_empty(), "complete menu paints in one crisp frame");
+        assert!(c.first_paint.is_some() && c.top_items.is_some() && c.all_items.is_some());
+    }
+
+    #[test]
+    fn grace_window_falls_back_to_loading_at_10fps_when_shell_is_slow() {
+        let mut c = test_menu(vec![]);
+        c.grace = Duration::from_millis(60);
+        c.revealed = false;
+        c.asked_at = Instant::now() - Duration::from_millis(80);
+        c.input_at = c.asked_at;
+        c.model.complete = false;
+        c.model.state = LoadState::Loading;
+
+        // Grace expired while shell is still loading -> reveal own rows + 10 FPS spinner.
+        assert!(c.is_revealed());
+        assert!(c.loading());
+        assert_eq!(c.next_tick_ms(), Some(TICK_MS));
+        assert_eq!(TICK_MS, 100);
+
+        let mut ui = Ui::new(tsubame_ui::DARK);
+        let mut g = tsubame_ui::TestCanvas::new(800.0, 600.0);
+        ui.begin_frame((800.0, 600.0));
+        c.paint(&mut ui, &mut g, Rect::new(0.0, 0.0, 800.0, 600.0));
+        let _ = ui.end_frame();
+        c.presented();
+        assert!(!g.ops.is_empty(), "own rows + loading indicator paint after grace expires");
+        assert!(c.first_paint.is_some());
+        assert!(c.all_items.is_none());
+
+        // Once Complete arrives later, spinner stops and zero timers remain.
+        let generation = c.generation;
+        assert!(c.apply(MenuBatch { generation, part: Part::Complete, timing: [0; 3] }));
+        assert!(!c.loading());
+        assert_eq!(c.next_tick_ms(), None);
+    }
+
+    #[test]
+    fn zero_grace_reveals_immediately_with_loading_tick() {
+        let mut c = test_menu(vec![]);
+        c.grace = Duration::ZERO;
+        c.revealed = true;
+        c.model.complete = false;
+        c.model.state = LoadState::Loading;
+
+        assert!(c.is_revealed());
+        assert!(c.loading());
+        assert_eq!(c.next_tick_ms(), Some(TICK_MS));
     }
 }
