@@ -70,3 +70,21 @@ pub trait Extension<H: Host> {
     fn info(&self) -> ExtensionInfo;
     fn contribute(&self, c: &mut Contributions<H>);
 }
+
+/// A built-in [`CommandSpec`] for a `static` table: id, dotted name, title,
+/// default chords as text, flags.
+///
+/// ```
+/// use tsubame_ext_api::{builtin_command, CmdFlags, CommandSpec};
+/// static TABLE: &[CommandSpec] = &[builtin_command!(1, "tab.new", "New tab", ["Ctrl+T"], CmdFlags::GLOBAL)];
+/// assert_eq!(TABLE[0].keys[0], "Ctrl+T");
+/// ```
+#[macro_export]
+macro_rules! builtin_command {
+    ($id:expr, $name:expr, $title:expr, [$($key:literal),* $(,)?], $flags:expr) => {
+        $crate::CommandSpec::builtin($id, $name, $title, {
+            const KEYS: &[$crate::Text] = &[$($crate::text($key)),*];
+            KEYS
+        }, $flags)
+    };
+}
