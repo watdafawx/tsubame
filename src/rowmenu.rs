@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn pinned_rows_go_first_in_native_order() {
-        let items = vec![pref("a", "A", false), pref("b", "B", true), pref("c", "C", false), pref("d", "D", true)];
+        let items = [pref("a", "A", false), pref("b", "B", true), pref("c", "C", false), pref("d", "D", true)];
         let order = pinned_first(&[0, 1, 2, 3], |i| items[i].pin);
         assert_eq!(order, vec![1, 3, 0, 2], "pins first, each part keeps its order");
         assert_eq!(pinned_first(&[2, 0], |i| items[i].pin), vec![2, 0], "no pins: unchanged");

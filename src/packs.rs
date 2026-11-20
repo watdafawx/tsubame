@@ -17,19 +17,26 @@
 
 use crate::custom_cmd::{self, Argv, Ctx};
 use crate::ext::{self, App};
+use crate::lru::Lru;
 use crate::view::View;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tsubame_config::menu::{MenuEntry, ShowFor, Source};
 use tsubame_config::packs::{self as cfg, Checks, Pack};
 use tsubame_ext_api::{CmdFlags, CommandSpec, Contributions, Extension, ExtensionInfo, FileTypeRule, MenuItemSpec, MenuWhen, Text, ThemeSpec, Tier};
-use tsubame_ui::{Ui, themes};
+use tsubame_ui::{Canvas, Rect, Theme, Ui, f, themes};
 
 /// The folder inside the data directory.
 pub const DIR_NAME: &str = "packs";
 /// Packs read; more are reported and ignored.
 pub const MAX_PACKS: usize = 32;
+/// Hard caps on decoded pack icon bitmaps (PLAN.md §3 rule 5).
+pub const PACK_ICON_CAP_ITEMS: usize = 64;
+pub const PACK_ICON_CAP_BYTES: usize = 1 << 20;
+/// Maximum edge length (px) kept for a pack icon bitmap.
+pub const PACK_ICON_MAX_PX: u32 = 64;
 
 /// What the Settings page shows for one loaded pack.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,15 +72,45 @@ struct Run {
     args: String,
 }
 
-#[derive(Default)]
+struct PackBitmap {
+    /// Device cache key (includes reload sequence so Reload packs refreshes D2D).
+    key: Arc<str>,
+    w: u32,
+    h: u32,
+    px: Vec<u32>,
+}
+
+impl PackBitmap {
+    fn bytes(&self) -> usize {
+        self.px.len() * 4 + self.key.len() + 48
+    }
+}
+
 struct State {
     report: Report,
     /// command id -> what to run, sorted by id
     cmds: Vec<(u32, Run)>,
     /// registry menu item id -> the entry the shell menu gets
     menus: Vec<(String, MenuEntry)>,
+    /// bounded cache of decoded pack icon bitmaps, keyed by the rule's `icon` text
+    icon_cache: Lru<Arc<str>, Arc<PackBitmap>>,
+    /// bumped on every `load()` so D2D bitmap keys never collide across reloads
+    load_seq: u64,
     /// registry generation the theme list and the menu were last published for
     synced: Option<u64>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State {
+            report: Report::default(),
+            cmds: Vec::new(),
+            menus: Vec::new(),
+            icon_cache: Lru::new(PACK_ICON_CAP_ITEMS, PACK_ICON_CAP_BYTES),
+            load_seq: 0,
+            synced: None,
+        }
+    }
 }
 
 thread_local! {
@@ -168,7 +205,11 @@ fn unload() {
             r.compact();
         });
     }
-    STATE.with(|s| *s.borrow_mut() = State::default());
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let next_seq = s.load_seq.wrapping_add(1);
+        *s = State { load_seq: next_seq, ..State::default() };
+    });
 }
 
 /// Reads `<data_dir>\packs\*.toml` and registers every good pack. Replaces what an earlier
@@ -198,7 +239,7 @@ pub fn load(data_dir: &Path) {
                     continue;
                 }
                 match read_pack(&name, &path) {
-                    Ok(pack) => register(&name, pack, &mut report),
+                    Ok(pack) => register(&dir, &name, pack, &mut report),
                     Err(e) => report.errors.push(e),
                 }
             }
@@ -224,7 +265,24 @@ fn read_pack(file: &str, path: &Path) -> Result<Pack, String> {
     checks_run(|c| cfg::parse(file, stem, &text, c)).map_err(|e| e.to_string())
 }
 
-fn register(file: &str, mut pack: Pack, report: &mut Report) {
+fn is_icon_path(spec: &str) -> bool {
+    let s = spec.trim();
+    let lower = s.to_ascii_lowercase();
+    s.contains(['/', '\\']) || lower.ends_with(".ico") || lower.ends_with(".png")
+}
+
+fn resolve_icon_path(packs_dir: &Path, spec: &str) -> Option<PathBuf> {
+    let p = Path::new(spec.trim());
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_) | std::path::Component::RootDir)) {
+        return None;
+    }
+    Some(packs_dir.join(p))
+}
+
+fn register(packs_dir: &Path, file: &str, mut pack: Pack, report: &mut Report) {
     // a default chord another command already owns is dropped (the pack still loads)
     let taken = crate::keymap::KeyMap::defaults();
     let mut mine: Vec<crate::keymap::Chord> = Vec::new();
@@ -260,6 +318,32 @@ fn register(file: &str, mut pack: Pack, report: &mut Report) {
             let show_for = ShowFor { files: m.files, folders: m.folders, background: m.background, multiple: m.multiple, drives: m.drives };
             let e = MenuEntry { id: pid(&p.name, &m.id), source: Source::Pack, name: m.label.clone(), command: m.program.clone(), args: m.args.clone(), extensions: m.types.clone(), show_for, ..Default::default() };
             s.menus.push((e.id.clone(), e));
+        }
+        let seq = s.load_seq;
+        for f in &p.file_types {
+            let Some(spec) = f.icon.as_deref() else { continue };
+            if !is_icon_path(spec) || s.icon_cache.contains(spec) {
+                continue;
+            }
+            let Some(resolved) = resolve_icon_path(packs_dir, spec) else {
+                report.warnings.push(format!("{file}: file_type {}: icon path \"{spec}\" must not use \"..\"", f.id));
+                continue;
+            };
+            match tsubame_win::bitmap::load_file(&resolved, PACK_ICON_MAX_PX) {
+                Some(bmp) => {
+                    let img = Arc::new(PackBitmap {
+                        key: Arc::from(format!("pack-icon:{seq}:{spec}")),
+                        w: bmp.w,
+                        h: bmp.h,
+                        px: bmp.px,
+                    });
+                    let bytes = img.bytes();
+                    s.icon_cache.insert(Arc::from(spec), img, bytes);
+                }
+                None => {
+                    report.warnings.push(format!("{file}: file_type {}: could not load icon \"{spec}\"", f.id));
+                }
+            }
         }
     });
     report.packs.push(PackInfo {
@@ -359,13 +443,107 @@ pub fn run_command(v: &mut View, _ui: &mut Ui, id: u32) {
 
 // ---- file-type rules -------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
+enum CompiledIcon {
+    /// Index into `FtCache::bitmaps`.
+    Bitmap(usize),
+    /// UTF-8 icon-font glyph (Segoe Fluent Icons) + optional rule colour.
+    Glyph { buf: [u8; 4], len: u8, color: Option<u32> },
+    /// Short uppercase ASCII badge (1-3 chars) + optional rule colour.
+    Badge { buf: [u8; 3], len: u8, color: Option<u32> },
+}
+
+fn builtin_glyph(spec: &str) -> Option<&'static str> {
+    match spec.trim().to_ascii_lowercase().as_str() {
+        "code" => Some("\u{E943}"),
+        "doc" | "document" | "text" => Some("\u{E8A5}"),
+        "image" | "picture" | "photo" => Some("\u{EB9F}"),
+        "archive" | "zip" => Some("\u{F012}"),
+        "audio" | "music" => Some("\u{E8D6}"),
+        "video" | "film" => Some("\u{E714}"),
+        "terminal" | "shell" => Some("\u{E756}"),
+        "config" | "gear" | "settings" => Some("\u{E713}"),
+        "data" | "table" => Some("\u{E9D2}"),
+        "book" | "markdown" => Some("\u{E82D}"),
+        "lock" | "key" => Some("\u{E72E}"),
+        "web" | "globe" => Some("\u{E774}"),
+        "link" => Some("\u{E71B}"),
+        "star" => Some("\u{E734}"),
+        "tag" => Some("\u{E8EC}"),
+        "font" => Some("\u{E8D2}"),
+        "app" | "program" => Some("\u{E737}"),
+        "pdf" => Some("\u{EA90}"),
+        "bug" => Some("\u{EBE8}"),
+        "tool" | "wrench" => Some("\u{EC7A}"),
+        "file" => Some("\u{E7C3}"),
+        "folder" => Some("\u{E8B7}"),
+        _ => None,
+    }
+}
+
+fn compile_icon(spec: &str, color: Option<u32>, bitmaps: &mut Vec<Arc<PackBitmap>>) -> Option<CompiledIcon> {
+    let s = spec.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if is_icon_path(s) {
+        let bmp = STATE.with(|st| st.borrow_mut().icon_cache.get(s).cloned())?;
+        let idx = match bitmaps.iter().position(|b| Arc::ptr_eq(b, &bmp)) {
+            Some(i) => i,
+            None => {
+                let i = bitmaps.len();
+                bitmaps.push(bmp);
+                i
+            }
+        };
+        return Some(CompiledIcon::Bitmap(idx));
+    }
+    if let Some(g) = builtin_glyph(s) {
+        let mut buf = [0u8; 4];
+        let len = g.len().min(4);
+        buf[..len].copy_from_slice(&g.as_bytes()[..len]);
+        return Some(CompiledIcon::Glyph { buf, len: len as u8, color });
+    }
+    if let Some(hex) = s.strip_prefix("u+").or_else(|| s.strip_prefix("U+"))
+        && let Ok(cp) = u32::from_str_radix(hex, 16)
+        && (0xE000..=0xF8FF).contains(&cp)
+        && let Some(ch) = char::from_u32(cp)
+    {
+        let mut buf = [0u8; 4];
+        let enc = ch.encode_utf8(&mut buf);
+        let len = enc.len() as u8;
+        return Some(CompiledIcon::Glyph { buf, len, color });
+    }
+    // Crisp 1-3 char badge (`badge:RS` or a short plain name like `rust`, `py`, `zig`)
+    let explicit = s.strip_prefix("badge:").or_else(|| s.strip_prefix("BADGE:"));
+    let raw = explicit.unwrap_or(s);
+    let max_len = if explicit.is_some() || raw.len() <= 3 { 3 } else { 2 };
+    let mut buf = [0u8; 3];
+    let mut len = 0usize;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            buf[len] = ch.to_ascii_uppercase() as u8;
+            len += 1;
+            if len == max_len {
+                break;
+            }
+        }
+    }
+    (len > 0).then_some(CompiledIcon::Badge { buf, len: len as u8, color })
+}
+
 #[derive(Default)]
 struct FtCache {
     generation: Option<u64>,
+    load_seq: u64,
     /// extension -> name colour, first rule wins
     colors: Vec<(String, u32)>,
     /// extension -> program and arguments
     opens: Vec<(String, String, String)>,
+    /// extension -> compiled icon, first rule wins
+    icons: Vec<(String, CompiledIcon)>,
+    /// decoded bitmaps referenced by `CompiledIcon::Bitmap`
+    bitmaps: Vec<Arc<PackBitmap>>,
 }
 
 thread_local! {
@@ -374,13 +552,17 @@ thread_local! {
 
 fn with_rules<R>(f: impl FnOnce(&FtCache) -> R) -> R {
     let g = ext::generation();
+    let seq = STATE.with(|s| s.borrow().load_seq);
     FT.with(|c| {
         let mut c = c.borrow_mut();
-        if c.generation != Some(g) {
+        if c.generation != Some(g) || c.load_seq != seq {
             c.colors.clear();
             c.opens.clear();
+            c.icons.clear();
+            c.bitmaps.clear();
             ext::read(|r| {
                 for rule in r.file_types.iter() {
+                    let compiled_icon = rule.icon.as_deref().and_then(|spec| compile_icon(spec, rule.color, &mut c.bitmaps));
                     for e in rule.extensions.iter() {
                         if let Some(col) = rule.color
                             && !c.colors.iter().any(|(x, _)| x == &**e)
@@ -392,10 +574,16 @@ fn with_rules<R>(f: impl FnOnce(&FtCache) -> R) -> R {
                         {
                             c.opens.push((e.to_string(), prog, args));
                         }
+                        if let Some(ic) = compiled_icon
+                            && !c.icons.iter().any(|(x, _)| x == &**e)
+                        {
+                            c.icons.push((e.to_string(), ic));
+                        }
                     }
                 }
             });
             c.generation = Some(g);
+            c.load_seq = seq;
         }
         f(&c)
     })
@@ -420,12 +608,74 @@ pub fn name_color(name: &str, dir: bool) -> Option<u32> {
     })
 }
 
+/// Whether an enabled pack file-type rule draws an icon for `name`. Zero allocation on the hot path.
+pub fn has_icon(name: &str, dir: bool) -> bool {
+    if dir {
+        return false;
+    }
+    with_rules(|c| {
+        if c.icons.is_empty() {
+            return false;
+        }
+        let Some(e) = ext_of(name) else { return false };
+        c.icons.iter().any(|(x, _)| x.eq_ignore_ascii_case(e))
+    })
+}
+
+/// Draws a pack file-type icon for `name` inside `r` when a rule defines one. Returns `true` if
+/// drawn (the caller skips the shell icon). Zero heap allocation and zero disk I/O per row draw.
+pub fn draw_icon(g: &mut dyn Canvas, t: &Theme, name: &str, dir: bool, hidden: bool, r: Rect) -> bool {
+    if dir {
+        return false;
+    }
+    with_rules(|c| {
+        if c.icons.is_empty() {
+            return false;
+        }
+        let Some(e) = ext_of(name) else { return false };
+        let Some((_, icon)) = c.icons.iter().find(|(x, _)| x.eq_ignore_ascii_case(e)) else {
+            return false;
+        };
+        match icon {
+            CompiledIcon::Bitmap(idx) => {
+                let bmp = &c.bitmaps[*idx];
+                if hidden {
+                    g.image_a(&bmp.key, bmp.w, bmp.h, &bmp.px, r, 0.55);
+                } else {
+                    g.image(&bmp.key, bmp.w, bmp.h, &bmp.px, r);
+                }
+            }
+            CompiledIcon::Glyph { buf, len, color } => {
+                let s = std::str::from_utf8(&buf[..*len as usize]).unwrap_or("");
+                let col = if hidden { t.text_dim } else { color.unwrap_or(t.accent) };
+                let sz = (r.h * 0.88).max(12.0);
+                g.text(s, r, f(sz).icon().c(), col);
+            }
+            CompiledIcon::Badge { buf, len, color } => {
+                let s = std::str::from_utf8(&buf[..*len as usize]).unwrap_or("");
+                let col = if hidden { t.text_dim } else { color.unwrap_or(t.accent) };
+                let rad = (r.h * 0.22).clamp(2.5, 6.0);
+                g.round_a(r, rad, col, 0.18);
+                g.round_stroke(r, rad, col, 1.0);
+                let scale = if *len >= 3 { 0.42 } else { 0.50 };
+                let sz = (r.h * scale).max(7.0);
+                g.text(s, r, f(sz).b().c(), col);
+            }
+        }
+        true
+    })
+}
+
 /// The programs to open file `path` with when a rule says so (None: use the shell's default).
 pub fn open_with(path: &str) -> Option<Result<Vec<Argv>, String>> {
     let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
     let ext = ext_of(name)?;
     let (prog, args) = with_rules(|c| c.opens.iter().find(|(x, _, _)| x.eq_ignore_ascii_case(ext)).map(|(_, p, a)| (p.clone(), a.clone())))?;
-    let dir = path.rfind(['\\', '/']).map(|i| &path[..i]).unwrap_or("");
+    let dir = match path.rfind(['\\', '/']) {
+        Some(2) if path.as_bytes().get(1) == Some(&b':') => &path[..3],
+        Some(i) => &path[..i],
+        None => "",
+    };
     let e = MenuEntry::custom("pack.open", "Open", &prog, &args);
     Some(custom_cmd::build_all(&e, &Ctx { paths: std::slice::from_ref(&path.to_string()), dir }))
 }
@@ -710,6 +960,139 @@ open_with = "code.exe --goto {path}"
         assert_eq!(name_color("x.rs", false), Some(0x111111));
         assert_eq!(name_color("x.py", false), Some(0x222222));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn tiny_ico_bytes() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
+        out.extend_from_slice(&[1, 1, 0, 0, 1, 0, 32, 0]);
+        out.extend_from_slice(&48u32.to_le_bytes());
+        out.extend_from_slice(&22u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&1i32.to_le_bytes());
+        out.extend_from_slice(&2i32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&32u16.to_le_bytes());
+        out.extend_from_slice(&[0u8; 24]);
+        out.extend_from_slice(&[0x10, 0x80, 0xf0, 0xff, 0, 0, 0, 0]);
+        out
+    }
+
+    #[test]
+    fn pack_icons_draw_glyphs_badges_and_image_files_and_respect_disable() {
+        use tsubame_ui::testcanvas::Op;
+        use tsubame_ui::{TestCanvas, Theme};
+        let d = scratch("icons");
+        let icons_dir = d.join(DIR_NAME).join("icons");
+        std::fs::create_dir_all(&icons_dir).unwrap();
+        std::fs::write(icons_dir.join("custom.ico"), tiny_ico_bytes()).unwrap();
+        put(
+            &d,
+            "icons.toml",
+            r##"
+[[file_type]]
+id = "glyph"
+extensions = ["rs"]
+color = "#268bd2"
+icon = "code"
+
+[[file_type]]
+id = "codepoint"
+extensions = ["toml"]
+icon = "U+E713"
+
+[[file_type]]
+id = "badge"
+extensions = ["zig"]
+color = "#f7a41d"
+icon = "badge:ZIG"
+
+[[file_type]]
+id = "plain"
+extensions = ["py"]
+icon = "rust"
+
+[[file_type]]
+id = "bmp"
+extensions = ["foo"]
+icon = "icons/custom.ico"
+
+[[file_type]]
+id = "missing"
+extensions = ["bar"]
+icon = "icons/nope.ico"
+
+[[file_type]]
+id = "escape"
+extensions = ["baz"]
+icon = "../outside.ico"
+"##,
+        );
+        load(&d);
+        let r = report();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(r.warnings.len(), 2, "missing and traversal icons warn: {:?}", r.warnings);
+
+        let mut c = TestCanvas::new(200.0, 200.0);
+        let t = Theme::dark();
+        let rect = Rect::new(8.0, 4.0, 16.0, 16.0);
+
+        // built-in glyph
+        assert!(has_icon("main.rs", false));
+        assert!(!has_icon("main.rs", true), "folders never get pack icons");
+        assert!(draw_icon(&mut c, &t, "main.rs", false, false, rect));
+        assert!(c.ops.iter().any(|o| matches!(o, Op::Text(s, _, _, col) if s == "\u{E943}" && *col == 0x268bd2)), "{:?}", c.ops);
+
+        // explicit U+ codepoint
+        c.clear();
+        assert!(draw_icon(&mut c, &t, "Cargo.TOML", false, false, rect));
+        assert!(c.ops.iter().any(|o| matches!(o, Op::Text(s, _, _, _) if s == "\u{E713}")), "{:?}", c.ops);
+
+        // explicit badge
+        c.clear();
+        assert!(draw_icon(&mut c, &t, "a.zig", false, false, rect));
+        assert!(c.ops.iter().any(|o| matches!(o, Op::Round(_, _, col, _) if *col == 0xf7a41d)));
+        assert!(c.ops.iter().any(|o| matches!(o, Op::Text(s, _, _, col) if s == "ZIG" && *col == 0xf7a41d)));
+
+        // plain name badge
+        c.clear();
+        assert!(draw_icon(&mut c, &t, "script.py", false, false, rect));
+        assert!(c.ops.iter().any(|o| matches!(o, Op::Text(s, _, _, _) if s == "RU")));
+
+        // decoded .ico bitmap
+        c.clear();
+        assert!(draw_icon(&mut c, &t, "test.foo", false, false, rect));
+        assert_eq!(c.images().len(), 1);
+        assert!(c.images()[0].starts_with("pack-icon:"));
+
+        // missing or blocked file falls back to false (shell icon)
+        assert!(!has_icon("x.bar", false));
+        assert!(!draw_icon(&mut c, &t, "x.bar", false, false, rect));
+        assert!(!has_icon("x.baz", false));
+
+        // disabling the pack turns off its icons live
+        ext::apply_disabled(&["pack.icons".to_string()]);
+        assert!(!has_icon("main.rs", false));
+        assert!(!has_icon("test.foo", false));
+        ext::apply_disabled(&[]);
+        assert!(has_icon("test.foo", false), "re-enabling brings the cached bitmap back");
+
+        let _ = std::fs::remove_dir_all(&d);
+        load(&d);
+    }
+
+    #[test]
+    fn pack_icon_cache_is_bounded_and_evicts() {
+        let mut cache: Lru<Arc<str>, Arc<PackBitmap>> = Lru::new(PACK_ICON_CAP_ITEMS, PACK_ICON_CAP_BYTES);
+        for i in 0..(PACK_ICON_CAP_ITEMS + 10) {
+            let key: Arc<str> = Arc::from(format!("icon-{i}.ico"));
+            let bmp = Arc::new(PackBitmap { key: key.clone(), w: 16, h: 16, px: vec![0xffff_ffff; 256] });
+            let b = bmp.bytes();
+            cache.insert(key, bmp, b);
+        }
+        assert!(cache.len() <= PACK_ICON_CAP_ITEMS);
+        assert!(cache.bytes() <= PACK_ICON_CAP_BYTES);
+        assert!(cache.evictions >= 10, "oldest entries evicted past cap");
     }
 }
 

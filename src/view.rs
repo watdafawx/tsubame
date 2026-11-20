@@ -126,7 +126,7 @@ const PANE_STRIP_H: f32 = 30.0;
 /// Widget id of pane `slot` (0 = left / top, 1 = right / bottom): the second
 /// pane gets its own copy of every id.
 pub fn pid(slot: usize, base: Id) -> Id {
-    if slot == 0 { base } else { base.with(0x70_616e_65) }
+    if slot == 0 { base } else { base.with(0x7061_6e65) }
 }
 
 /// Where a drop lands: into a folder, or pinned at a place of the sidebar.
@@ -282,6 +282,9 @@ pub struct View {
     pub ratio: f32,
     /// a widget was held last frame (a press that starts on another pane makes it active)
     ptr_was_active: bool,
+    /// a double-click activated a row while the button is still held: do not
+    /// treat that hold as a fresh press (which would wipe status messages or drag)
+    ignore_press: bool,
     /// where the two panes were drawn last frame (a press there activates the pane)
     pane_rects: [Rect; 2],
     /// file operations (copy, move, rename, undo)
@@ -385,6 +388,7 @@ impl View {
             orient: tsubame_config::Split::Vertical,
             ratio: 0.5,
             ptr_was_active: false,
+            ignore_press: false,
             pane_rects: [Rect::new(0.0, 0.0, 0.0, 0.0); 2],
             ops: Ops::default(),
             rename: None,
@@ -572,11 +576,7 @@ impl View {
     /// Ctrl+Shift+\ : side by side <-> stacked (opens the second pane if needed).
     pub fn flip_split(&mut self) {
         let o = crate::panes::flip(self.orient);
-        if self.dual() {
-            self.set_layout(true, o);
-        } else {
-            self.set_layout(true, o);
-        }
+        self.set_layout(true, o);
     }
 
     // ---- navigation ------------------------------------------------------
@@ -714,20 +714,25 @@ impl View {
         self.focus_list = true;
     }
 
+    /// Opens a file: uses an enabled pack's `open_with` rule when one matches
+    /// the extension, otherwise queues the shell default handler.
+    pub(crate) fn open_file(&mut self, path: String) {
+        match crate::packs::open_with(&path) {
+            Some(Ok(argvs)) => self.pack_runs.push(argvs),
+            Some(Err(m)) => self.ops.message = Some(m),
+            None => self.open_paths.push(path),
+        }
+    }
+
     /// Enter / double click on view row `pos`: a folder opens in this tab, a
-    /// file goes to the shell on a worker.
+    /// file runs its pack `open_with` rule or goes to the shell on a worker.
     pub fn activate(&mut self, pos: usize) {
         self.press = None;
         if let Some((path, dir)) = self.tab().entry_at(pos) {
             if dir {
                 self.go(&path);
             } else {
-                // a file-type rule of a pack may name the program
-                match crate::packs::open_with(&path) {
-                    Some(Ok(argvs)) => self.pack_runs.push(argvs),
-                    Some(Err(m)) => self.ops.message = Some(m),
-                    None => self.open_paths.push(path),
-                }
+                self.open_file(path);
             }
         }
     }
@@ -1028,12 +1033,10 @@ impl View {
                 }
             }
             CMD_TAB_TO_OTHER => self.move_tab_to_other(),
-            CMD_SYNC_OTHER => {
-                if self.other.is_some() {
-                    let p = self.folder_path();
-                    let slot = panes::other(self.active);
-                    self.with_pane(slot, |v| v.go(&p));
-                }
+            CMD_SYNC_OTHER if self.other.is_some() => {
+                let p = self.folder_path();
+                let slot = panes::other(self.active);
+                self.with_pane(slot, |v| v.go(&p));
             }
             _ => {}
         }
@@ -1676,6 +1679,9 @@ impl View {
         self.paint_empty(g, list_r, t);
         self.paint_rename(ui, g, t, &spans);
         if let Some(pos) = activated {
+            if ui.active() == Some(pid(self.live, ID_LIST)) {
+                self.ignore_press = true;
+            }
             self.activate(pos);
             ui.request_repaint();
         }
@@ -1737,6 +1743,9 @@ impl View {
         }
         self.paint_empty(g, grid_r, t);
         if let Some(pos) = activated {
+            if ui.active() == Some(pid(self.live, ID_LIST)) {
+                self.ignore_press = true;
+            }
             self.activate(pos);
             ui.request_repaint();
         }
@@ -1950,6 +1959,9 @@ impl Rows<'_> {
         for j in (a.saturating_sub(page)..a).chain(b..(b + page).min(len)) {
             let Some(id) = self.store.at(j) else { continue };
             self.row.fill(self.store, id);
+            if crate::packs::has_icon(self.row.name_str(), self.row.is_dir()) {
+                continue;
+            }
             let dist = if j < a { a - j } else { j - b + 1 };
             self.shell.want_row(self.row, self.root, dist as f32);
         }
@@ -1978,13 +1990,15 @@ impl ListSource for Rows<'_> {
         row.fill(self.store, id);
         let sp = &self.spans;
         let x = r.x;
-        // icon: the shell's, else a placeholder until it arrives
+        // icon: a pack rule's icon if set, else the shell's, else a placeholder
         let ir = Rect::new(x + 8.0, r.y + (r.h - ICON_DIP) / 2.0, ICON_DIP, ICON_DIP);
-        match self.shell.row_icon(row, self.root) {
-            Some(img) => g.image(&img.key, img.w, img.h, &img.px, ir),
-            None => {
-                let (ic, col) = if row.is_dir() { (Rect::new(ir.x, ir.y + 3.0, 16.0, 11.0), t.folder) } else { (Rect::new(ir.x + 2.0, ir.y, 12.0, 16.0), t.text_dim) };
-                g.round_a(ic, 2.0, col, 0.35);
+        if !crate::packs::draw_icon(g, t, row.name_str(), row.is_dir(), row.hidden, ir) {
+            match self.shell.row_icon(row, self.root) {
+                Some(img) => g.image(&img.key, img.w, img.h, &img.px, ir),
+                None => {
+                    let (ic, col) = if row.is_dir() { (Rect::new(ir.x, ir.y + 3.0, 16.0, 11.0), t.folder) } else { (Rect::new(ir.x + 2.0, ir.y, 12.0, 16.0), t.text_dim) };
+                    g.round_a(ic, 2.0, col, 0.35);
+                }
             }
         }
         let name_c = if row.hidden { t.text_dim } else { crate::packs::name_color(row.name_str(), row.is_dir()).unwrap_or(t.text) };
@@ -2796,5 +2810,96 @@ mod tests {
         assert!(!r.v.settings_open());
         assert_eq!(settings_tabs(&mut r.v), 0);
         assert_eq!(r.v.tabs.items.len(), 1);
+    }
+
+    #[test]
+    fn pack_open_with_runs_on_double_click_and_enter_in_details_and_grid() {
+        let mut r = Rig::new("pack-dbl");
+        std::fs::write(r.dir.join("main.rs"), b"fn main() {}").unwrap();
+        r.v.go(r.dir.to_str().unwrap());
+        r.settle();
+
+        let pack_data = std::env::temp_dir().join(format!("tsubame-view-pack-dbl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&pack_data);
+        std::fs::create_dir_all(pack_data.join(crate::packs::DIR_NAME)).unwrap();
+        std::fs::write(
+            pack_data.join(crate::packs::DIR_NAME).join("rust-open.toml"),
+            "[[file_type]]\nid = \"rust\"\nextensions = [\"rs\"]\ncolor = \"#268bd2\"\nicon = \"code\"\nopen_with = \"code.exe --goto {path}\"\n",
+        )
+        .unwrap();
+        crate::packs::load(&pack_data);
+        r.frame();
+
+        // pack icon draws in details view
+        assert!(r.c.has_text("\u{E943}"), "pack glyph drawn in details view: {:?}", r.c.texts());
+
+        // find main.rs row (Docs=0, alpha.txt=1, beta.txt=2, main.rs=3)
+        let rs_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("main.rs"))).unwrap();
+        let txt_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("alpha.txt"))).unwrap();
+        let (list_r, rh) = r.list_of(0);
+
+        // double-click on main.rs in Details view runs pack open_with
+        let pos = Pt::new(list_r.x + 60.0, list_r.y + (rs_row as f32 + 0.5) * rh);
+        r.move_to(pos.x, pos.y);
+        r.ui.push(Event::MouseDown { pos, button: Button::Left, mods: Mods::NONE, double: true });
+        r.frame();
+        r.ui.push(Event::MouseUp { pos, button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert_eq!(r.v.pack_runs.len(), 1, "double-click triggers pack open_with");
+        assert_eq!(r.v.pack_runs[0][0].program, "code.exe");
+        assert_eq!(r.v.pack_runs[0][0].args[0], "--goto");
+        assert!(r.v.pack_runs[0][0].args[1].ends_with("main.rs"));
+        assert!(r.v.open_paths.is_empty(), "shell open_paths stays empty");
+        r.v.pack_runs.clear();
+
+        // double-click on alpha.txt (no pack rule) uses shell open_paths
+        let pos_txt = Pt::new(list_r.x + 60.0, list_r.y + (txt_row as f32 + 0.5) * rh);
+        r.move_to(pos_txt.x, pos_txt.y);
+        r.ui.push(Event::MouseDown { pos: pos_txt, button: Button::Left, mods: Mods::NONE, double: true });
+        r.frame();
+        r.ui.push(Event::MouseUp { pos: pos_txt, button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert!(r.v.pack_runs.is_empty());
+        assert_eq!(r.v.open_paths.len(), 1);
+        assert!(r.v.open_paths[0].ends_with("alpha.txt"));
+        r.v.open_paths.clear();
+
+        // Enter on main.rs also triggers pack open_with
+        r.v.tab_mut().list.cursor = rs_row;
+        r.key(Key::Enter, Mods::NONE);
+        assert_eq!(r.v.pack_runs.len(), 1, "Enter triggers pack open_with");
+        assert!(r.v.open_paths.is_empty());
+        r.v.pack_runs.clear();
+
+        // Grid view: pack icon draws and double-click triggers pack open_with
+        r.v.set_mode(ViewMode::GridSmall);
+        r.frame();
+        assert!(r.c.has_text("\u{E943}"), "pack glyph drawn in grid view");
+        let (ox, oy) = r.v.tab().grid.cell_origin(rs_row);
+        let gpos = Pt::new(r.v.list_r.x + ox + 40.0, r.v.list_r.y + oy + 40.0);
+        r.move_to(gpos.x, gpos.y);
+        r.ui.push(Event::MouseDown { pos: gpos, button: Button::Left, mods: Mods::NONE, double: true });
+        r.frame();
+        r.ui.push(Event::MouseUp { pos: gpos, button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert_eq!(r.v.pack_runs.len(), 1, "grid double-click triggers pack open_with");
+        assert!(r.v.open_paths.is_empty());
+        r.v.pack_runs.clear();
+
+        // Disabling the pack makes double-click fall back to open_paths
+        crate::ext::apply_disabled(&["pack.rust-open".to_string()]);
+        r.frame();
+        assert!(!r.c.has_text("\u{E943}"), "disabled pack icon stops drawing");
+        r.ui.push(Event::MouseDown { pos: gpos, button: Button::Left, mods: Mods::NONE, double: true });
+        r.frame();
+        r.ui.push(Event::MouseUp { pos: gpos, button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert!(r.v.pack_runs.is_empty());
+        assert_eq!(r.v.open_paths.len(), 1);
+
+        // clean up global/thread-local pack state
+        crate::ext::apply_disabled(&[]);
+        let _ = std::fs::remove_dir_all(&pack_data);
+        crate::packs::load(&pack_data);
     }
 }

@@ -273,8 +273,7 @@ pub fn parse_cold_nav(text: &str) -> Result<Timing, String> {
     let (row, line) = text
         .lines()
         .filter_map(|l| parse_timing_row(l).map(|r| (r, l)))
-        .filter(|(r, _)| r.label != "startup")
-        .last()
+        .rfind(|(r, _)| r.label != "startup")
         .ok_or("no navigation after the warm-up in the cold --timing report")?;
     let entries = line.split_whitespace().skip_while(|t| *t != "entries").nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
     Ok(Timing {
@@ -481,7 +480,7 @@ fn ms_cell(s: &Series) -> String {
 
 /// `1714 KB` -> 1755136, the "Measured" cell of a `| Main exe |` table row.
 fn kb_cell(cell: &str) -> Option<u64> {
-    let n: f64 = cell.trim().split_whitespace().next()?.parse().ok()?;
+    let n: f64 = cell.split_whitespace().next()?.parse().ok()?;
     (n > 0.0).then_some((n * 1024.0).round() as u64)
 }
 
@@ -688,6 +687,7 @@ impl Run {
 
 /// The markdown section for one run: heading, machine line, table, leak-gate
 /// evidence, raw output.
+#[cfg(test)]
 pub fn section(run: &Run, commit: &str) -> String {
     section_with(run, commit, None)
 }

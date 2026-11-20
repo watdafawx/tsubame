@@ -787,10 +787,7 @@ fn settings_requests(hwnd: HWND) {
             let old = a.saver.config.config.clone();
             // the old file stays as config.toml.bak
             let _ = std::fs::copy(&a.saver.loc.config, a.saver.loc.config.with_file_name("config.toml.bak"));
-            let mut def = tsubame_config::Config::default();
-            def.window = old.window;
-            def.panes = old.panes;
-            def.sidebar = old.sidebar;
+            let def = tsubame_config::Config { window: old.window, panes: old.panes, sidebar: old.sidebar, ..Default::default() };
             let App { view, ui, .. } = a;
             view.reset_prefs(ui, &def);
             view.ops.message = Some("All settings are back to the defaults. The old file is config.toml.bak.".to_string());
@@ -1344,7 +1341,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     // WM_MOUSEMOVE at the old position is the system's (a window above went away)
     static LAST_MOVE: AtomicIsize = AtomicIsize::new(-1);
     let moved = msg == WM_MOUSEMOVE && LAST_MOVE.swap(lp.0, Ordering::Relaxed) != lp.0;
-    if moved || matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_MOUSEWHEEL | WM_MOUSEHWHEEL | WM_KEYDOWN | WM_SYSKEYDOWN | WM_SIZE) {
+    if moved || matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_MOUSEWHEEL | WM_MOUSEHWHEEL | WM_KEYDOWN | WM_SYSKEYDOWN | WM_SIZE) {
         with(|a| {
             if a.gfx.parked() {
                 a.gfx.unpark();

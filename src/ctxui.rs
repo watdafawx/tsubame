@@ -846,6 +846,7 @@ impl CtxMenu {
     }
 
     /// One line for the log / status: the menu's timings.
+    #[allow(dead_code)]
     pub fn timing_line(&self) -> String {
         let ms = |d: Option<Duration>| d.map_or("-".to_string(), |d| format!("{:.1}", d.as_secs_f64() * 1000.0));
         format!("own menu: first paint {} ms, top level {} ms, all items {} ms, {} rows", ms(self.first_paint), ms(self.top_items), ms(self.all_items), self.items.len())
@@ -1494,12 +1495,14 @@ mod tests {
 
     #[test]
     fn refresh_forgets_untouched_items_the_last_menu_did_not_show() {
-        let mut m = ContextMenu::default();
-        m.items = vec![
-            menu::ItemPref { key: "windows.verb:gone".into(), ..Default::default() },
-            menu::ItemPref { key: "windows.verb:kept".into(), ..Default::default() },
-            menu::ItemPref { key: "windows.verb:hid".into(), hidden: true, ..Default::default() },
-        ];
+        let mut m = ContextMenu {
+            items: vec![
+                menu::ItemPref { key: "windows.verb:gone".into(), ..Default::default() },
+                menu::ItemPref { key: "windows.verb:kept".into(), ..Default::default() },
+                menu::ItemPref { key: "windows.verb:hid".into(), hidden: true, ..Default::default() },
+            ],
+            ..Default::default()
+        };
         // no menu shown yet: nothing changes
         assert_eq!(refresh_learned(&mut m), 0);
         *LAST_SHOWN.lock().unwrap() = vec!["windows.verb:kept".to_string()];

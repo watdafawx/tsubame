@@ -229,6 +229,7 @@ pub fn drop_parent(list: &[MenuEntry], from: usize, to: usize, onto_submenu: Opt
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn label_field(pg: &mut Pg, id: Id, label: &str, input: &mut TextInput, x: f32, y: f32, w: f32, ph: &str) {
     let t = pg.t;
     pg.g.text(label, Rect::new(x, y, 90.0, t.height_field), t.font_small(), t.text_dim);
@@ -240,6 +241,7 @@ fn label_field(pg: &mut Pg, id: Id, label: &str, input: &mut TextInput, x: f32, 
 }
 
 /// Does a learned item pass the search `q` (lower-case) and the chip?
+#[cfg(test)]
 pub fn item_shown(p: &menu::ItemPref, q: &str, chip: usize) -> bool {
     item_shown_for(p, q, chip, None)
 }
@@ -1351,19 +1353,20 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         cx.changed |= C_MENU;
         gfocus = Some(k.saturating_add_signed(d));
     }
-    if let Some(id) = gstart {
-        if let Some(u) = cx.prefs.context_menu.user_groups.iter().find(|u| u.id == id) {
-            st.gedit = Some((id, TextInput::new(&u.name)));
-            st.edit_fresh = true;
-        }
+    if let Some(id) = gstart
+        && let Some(u) = cx.prefs.context_menu.user_groups.iter().find(|u| u.id == id)
+    {
+        st.gedit = Some((id, TextInput::new(&u.name)));
+        st.edit_fresh = true;
     }
     if let Some((id, text)) = gcommit.take() {
         // an empty name keeps the old one
-        if let Some(u) = cx.prefs.context_menu.user_groups.iter_mut().find(|u| u.id == id) {
-            if !text.is_empty() && u.name != text {
-                u.name = text;
-                cx.changed |= C_MENU;
-            }
+        if let Some(u) = cx.prefs.context_menu.user_groups.iter_mut().find(|u| u.id == id)
+            && !text.is_empty()
+            && u.name != text
+        {
+            u.name = text;
+            cx.changed |= C_MENU;
         }
         st.gedit = None;
     }
@@ -1926,7 +1929,7 @@ fn kind_empty_note(drive: bool) -> &'static str {
 
 /// Reads `path` (never writes it) and opens the selection screen for what Tsubame can run. A file
 /// with nothing to import goes straight to the report (it lists why). Returns whether `list` changed.
-fn run_import(st: &mut State, list: &mut Vec<MenuEntry>, path: &std::path::Path, m: &tsubame_config::ContextMenu) -> bool {
+fn run_import(st: &mut State, list: &mut [MenuEntry], path: &std::path::Path, m: &tsubame_config::ContextMenu) -> bool {
     match nss::read_file(path) {
         Ok(src) => {
             let imp = nss::import(&src, list, "");

@@ -507,7 +507,7 @@ mod tests {
         }
         let class = class_of(&path);
         let types = types_for(class.0, &class.1);
-        println!("class {class:?} types {types:?} applicable {:?}", applicable(&all, &[types.clone()], &[]));
+        println!("class {class:?} types {types:?} applicable {:?}", applicable(&all, std::slice::from_ref(&types), &[]));
         let mut s = Session::new(std::slice::from_ref(&path), 32).expect("session");
         for clsid in applicable(&all, &[types], &[]) {
             let w = wide(&clsid);

@@ -384,7 +384,7 @@ impl View {
                     });
                     match dir {
                         Some(true) => self.go(&path),
-                        Some(false) => self.open_paths.push(path),
+                        Some(false) => self.open_file(path),
                         None => {}
                     }
                 }

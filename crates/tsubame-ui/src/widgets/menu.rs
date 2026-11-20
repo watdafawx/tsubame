@@ -1084,6 +1084,7 @@ fn edit_id(id: Id) -> Id {
 
 /// Opens the edit menu of row `key` at level `lv`. False: the row has no
 /// edit menu (the app gave no rows).
+#[allow(clippy::too_many_arguments)]
 fn open_edit(ui: &mut Ui, id: Id, st: &mut MenuState, src: &dyn MenuSource, lv: usize, key: u64, kb: bool, row: Option<Rect>) -> bool {
     let mut path = path_to(st, lv);
     path.push(key);

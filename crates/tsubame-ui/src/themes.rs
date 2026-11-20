@@ -24,6 +24,7 @@ pub struct Palette {
     pub accent: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 const fn p(id: &'static str, name: &'static str, dark: bool, bg: u32, panel: u32, surface: u32, text: u32, muted: u32, accent: u32) -> Palette {
     Palette { id, name, dark, bg, panel, surface, text, muted, accent }
 }
