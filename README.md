@@ -6,7 +6,7 @@ Tsubame (燕, "swallow") is a file browser for Windows written in Rust. It has o
 
 ## Status
 
-Pre-release, version 0.0.1. There is no stable release yet, so there is nothing to download: build it from source (below). The installer, the signed update manifest and the release workflow exist in the repository but have only been exercised as dry runs. Expect missing features and rough edges.
+Pre-release, version 0.1.0. There is no stable release yet, so there is nothing to download: build it from source (below). The installer, the signed update manifest and the release workflow exist in the repository but have only been exercised as dry runs. Expect missing features and rough edges.
 
 ## Features
 

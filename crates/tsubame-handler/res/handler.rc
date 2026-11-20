@@ -17,12 +17,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Tsubame"
             VALUE "FileDescription",  "Tsubame folder handler (opens folders in Tsubame, falls back to File Explorer)"
-            VALUE "FileVersion",      "0.0.1.0"
+            VALUE "FileVersion",      "0.1.0.0"
             VALUE "InternalName",     "tsubame-handler"
             VALUE "LegalCopyright",   "Personal build"
             VALUE "OriginalFilename", "tsubame-handler.exe"
             VALUE "ProductName",      "Tsubame"
-            VALUE "ProductVersion",   "0.0.1.0"
+            VALUE "ProductVersion",   "0.1.0.0"
         END
     END
     BLOCK "VarFileInfo"

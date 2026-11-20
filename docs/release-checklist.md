@@ -4,7 +4,7 @@ What is still between the current tree and a published 0.1.0, who does each step
 already proven without a code-signing certificate. How-to for the release itself:
 `docs\release.md`. Updater design: `docs\updater.md`. Folder handler: `docs\default-file-manager.md`.
 
-Status: 2026-11-19, workspace version `0.0.1` (the bump to `0.1.0` is step 9).
+Status: 2026-11-20, workspace version `0.1.0` (the bump, step 9, is done).
 
 ## Proven already (no certificate involved)
 
@@ -31,7 +31,7 @@ the next one.
 | 6 | SmartScreen wording | maintainer: decided, covered by the README | The 0.1.0 installers stay unsigned, so the first run on a clean machine shows "Windows protected your PC" (More info > Run anyway), and Defender may submit the exe for scanning. The README "Installing" section carries that wording; use the same sentence on the release page. Publish `SHA256SUMS` and say how to check it. Do not promise "no warning". |
 | 7 | Defender and VM test matrix | maintainer | Run the release installer and the portable zip on a clean VM per row, all with Defender and SmartScreen at default: Windows 11 24H2 and 25H2 (x64), Windows 10 22H2 x64 (consumer support has ended, so only if it is still a stated target), Windows Server 2022 or later (the folder handler must fail safe there). Per machine: per-user install as a non-admin user (no UAC prompt), launch, "Default file manager" on then off, uninstall (also while running), and the N -> N+1 update plus rollback. Submit `tsubame.exe`, `tsubame-handler.exe`, `tsubame-plughost.exe` and the installer to the Microsoft file-submission portal and record the submission ids (see `docs\default-file-manager.md`). |
 | 8 | Repeat the installer test with the shipped build | maintainer | `tools\release-installer-test.ps1` uses stand-in exes; the running-exe case should be repeated once with the real `tsubame.exe` (start it, uninstall, confirm one window closes and the folder goes). |
-| 9 | Bump the version to 0.1.0 | maintainer | Every place in "Version bump" below. `tools\release.ps1 -Bump` rewrites only `[workspace.package] version` in `Cargo.toml`, so the `.rc`/`.manifest` copies are by hand and `Cargo.lock` follows from the next build. |
+| 9 | Bump the version to 0.1.0 | **done** (2026-11-20) | Every place in "Version bump" below. `tools\release.ps1 -Bump` rewrites only `[workspace.package] version` in `Cargo.toml`, so the `.rc`/`.manifest` copies are by hand and `Cargo.lock` follows from the next build. |
 | 10 | Tag and push the tag | maintainer | `git tag v0.1.0`; `git push origin v0.1.0`. The workflow refuses a tag that differs from the workspace version, runs the updater tests, builds, signs the manifest, and publishes the Release with five files. |
 | 11 | Post-release smoke test | maintainer | Install the published 0.1.0 on the test machine, then confirm the in-app update path against the next build (release N+1 dry run or a local `dist\` build served by the test server). Rollback must restore the previous exe. |
 | 12 | Publish the source and the updater docs with the release | maintainer | `README` must say what `tsubame-handler.exe` is and that "Default file manager" is opt-in, so the shim is not mistaken for a hijacker. |
