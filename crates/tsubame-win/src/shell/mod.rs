@@ -281,18 +281,17 @@ impl Pool {
         Slot { state, lane }
     }
 
-    /// Queues a request. Never blocks on a worker. Context menus go to the
-    /// front of the icon queue, icons to its back. Thumbnails go to the back
-    /// of the thumbnail lane (FIFO: the caller orders them, nearest first); if
-    /// the pool has no thumbnail lane they take the front of the icon queue.
+    /// Queues a request. Never blocks on a worker. Context menus (`CtxMenu`
+    /// and `Menu`) go to the very front of the icon queue so right-click always
+    /// preempts queued icon fetches immediately; icons and clipboard jobs go to
+    /// its back. Thumbnails go to the back of the thumbnail lane (FIFO: the
+    /// caller orders them, nearest first); if the pool has no thumbnail lane
+    /// they queue behind any pending context menus and ahead of icons.
     pub fn submit(&mut self, req: Request) -> Ticket {
         let id = self.next_id;
         self.next_id += 1;
         let cancel = Arc::new(AtomicBool::new(false));
         let lane_thumb = self.thumb_workers > 0 && matches!(req, Request::Thumb { .. });
-        // clipboard jobs go to the back: they keep their order (the app submits
-        // one at a time) and the in-flight icon limit keeps the queue short
-        let front = matches!(req, Request::Menu { .. } | Request::CtxMenu { .. } | Request::Thumb { .. }) && !lane_thumb;
         let job = Job { id, cancel: cancel.clone(), req, queued: Instant::now() };
         if lane_thumb {
             if !self.thumb_started {
@@ -309,7 +308,7 @@ impl Pool {
         } else {
             {
                 let mut q = self.shared.queue.lock().unwrap();
-                if front { q.push_front(job) } else { q.push_back(job) }
+                enqueue_icon_lane(&mut q, job);
             }
             unsafe {
                 let _ = ReleaseSemaphore(self.shared.sem.0, 1, None);
@@ -491,3 +490,68 @@ fn run(req: Request, host: Option<HWND>, ui: HWND, emit: &dyn Fn(Payload) -> boo
 /// The icon call itself, for tests and benches on an STA thread of their own.
 /// The app never calls this: it goes through [`Pool`].
 pub use icon::get as icon_on_this_thread;
+
+/// Priority inside `LANE_ICON`: context menus (`CtxMenu` / `Menu`) always go
+/// to the very front, fallback thumbnails (when no thumbnail lane exists) go
+/// after any pending menus and before icons, and icons/clipboard/hang go to
+/// the back.
+fn enqueue_icon_lane(q: &mut VecDeque<Job>, job: Job) {
+    match job.req {
+        Request::CtxMenu { .. } | Request::Menu { .. } => q.push_front(job),
+        Request::Thumb { .. } => {
+            let pos = q.iter().position(|j| !matches!(j.req, Request::CtxMenu { .. } | Request::Menu { .. })).unwrap_or(q.len());
+            q.insert(pos, job);
+        }
+        _ => q.push_back(job),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_job(id: u64, req: Request) -> Job {
+        Job { id, cancel: Arc::new(AtomicBool::new(false)), req, queued: Instant::now() }
+    }
+
+    #[test]
+    fn enqueue_icon_lane_prioritizes_ctxmenu_and_menu_ahead_of_icons_and_thumbs() {
+        let mut q = VecDeque::new();
+        let h = CtxHandle::new();
+        enqueue_icon_lane(&mut q, fake_job(1, Request::Icon { src: IconSource::Folder, size: 16 }));
+        enqueue_icon_lane(&mut q, fake_job(2, Request::Icon { src: IconSource::Ext(".txt".into()), size: 16 }));
+        enqueue_icon_lane(&mut q, fake_job(3, Request::Thumb { path: "a.png".into(), size: 64, cache_only: true }));
+        enqueue_icon_lane(&mut q, fake_job(4, Request::ctx(vec![], 1, CtxOpts::default(), &h)));
+        // A later thumbnail on the shared lane must not jump ahead of the queued CtxMenu
+        enqueue_icon_lane(&mut q, fake_job(5, Request::Thumb { path: "b.png".into(), size: 64, cache_only: true }));
+        enqueue_icon_lane(&mut q, fake_job(6, Request::Menu { paths: vec![], x: 0, y: 0, extended: false, auto_close: Some(0), owner: None, opts: MenuOpts::default() }));
+        let order: Vec<u64> = q.into_iter().map(|j| j.id).collect();
+        assert_eq!(order, vec![6, 4, 5, 3, 1, 2]);
+    }
+
+    #[test]
+    fn pool_ctxmenu_preempts_queued_icons() {
+        let mut pool = Pool::new(1, 0, 0x8001);
+        // Hold the single worker so subsequent jobs accumulate in the queue.
+        let hold = pool.submit(Request::Hang { ms: 200 });
+        std::thread::sleep(Duration::from_millis(40));
+        let mut icons = Vec::new();
+        for ext in [".txt", ".rs", ".md", ".json"] {
+            icons.push(pool.submit(Request::Icon { src: IconSource::Ext(ext.into()), size: 16 }).id);
+        }
+        let h = CtxHandle::new();
+        let ctx = pool.submit(Request::ctx(vec![], 77, CtxOpts::default(), &h));
+
+        let mut order = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while order.len() < 1 + icons.len() + 1 && Instant::now() < deadline {
+            for r in pool.drain() {
+                order.push(r.id);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(order.len(), 6, "all jobs finished: {order:?}");
+        assert_eq!(order[0], hold.id, "in-flight job finishes first");
+        assert_eq!(order[1], ctx.id, "CtxMenu preempts all queued Icon jobs: {order:?}");
+    }
+}

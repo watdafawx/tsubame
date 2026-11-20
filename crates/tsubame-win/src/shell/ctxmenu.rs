@@ -174,7 +174,7 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
         Ok(b) => b,
         Err(e) => return batch(Part::Failed(e), [0; 3]),
     };
-    let Built { cm, hmenu, host, bind_us, query_us } = built;
+    let Built { cm, hmenu, host, pidls, bind_us, query_us } = built;
     menu::set_handlers(Some(&cm));
     let mut icons = IconCache::new(super::ctxmodel::ICON_CACHE_CAP);
     let t = Instant::now();
@@ -206,7 +206,7 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
             unsafe { Sleep(opts.debug_pkg_delay_ms) };
         }
         let t = Instant::now();
-        if let Some(mut s) = packaged::Session::new(paths, opts.icon_px.clamp(8, 64)) {
+        if let Some(mut s) = packaged::Session::from_pidls(&pidls, opts.icon_px.clamp(8, 64)) {
             let classes: Vec<(packaged::ItemClass, String)> = if opts.background { vec![(packaged::ItemClass::Background, String::new())] } else { paths.iter().map(|p| packaged::class_of(p)).collect() };
             // a CLSID the classic menu already lists as a verb is not made again
             let skip: Vec<String> = top.iter().filter_map(|r| r.verb.as_deref()).filter(|v| v.starts_with('{')).map(packaged::norm_clsid).collect();
@@ -225,6 +225,8 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
             pkg = Some(s);
         }
     }
+    // Free PIDLs before waiting for the user's pick.
+    drop(pidls);
     if alive {
         // every row is in: the UI ends its loading line
         emit(batch(Part::Complete, timing));
@@ -338,6 +340,7 @@ struct Built {
     cm: IContextMenu,
     hmenu: HMENU,
     host: HWND,
+    pidls: Pidls,
     bind_us: u64,
     query_us: u64,
 }
@@ -379,7 +382,7 @@ fn build(host: Option<HWND>, paths: &[String], opts: &CtxOpts) -> Result<Built, 
         }
         return Err(format!("QueryContextMenu {hr:?}"));
     }
-    Ok(Built { cm, hmenu, host, bind_us, query_us })
+    Ok(Built { cm, hmenu, host, pidls, bind_us, query_us })
 }
 
 pub(super) fn parse(paths: &[String]) -> Result<Pidls, String> {
@@ -532,7 +535,10 @@ impl Walk<'_> {
         if sub.is_none() && (ID_FIRST..=ID_LAST).contains(&r.id) && !r.separator {
             let off = (r.id - ID_FIRST) as usize;
             r.verb = command_string(self.cm, off, GCS_VERBW);
-            r.help = command_string(self.cm, off, GCS_HELPTEXTW);
+            // Help text is only used as a fallback label when both text and verb are empty.
+            if r.text.is_empty() && r.verb.is_none() {
+                r.help = command_string(self.cm, off, GCS_HELPTEXTW);
+            }
         }
         Some((r, sub, bmp, mii.dwItemData))
     }

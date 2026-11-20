@@ -761,8 +761,15 @@ pub fn after_frame(hwnd: HWND) {
     if let Some((path, anchor)) = drive {
         let s = with(|a| a.gfx.dpi / 96.0).unwrap_or(1.0);
         let (sx, sy) = crate::screen_pt(hwnd, (anchor.x * s) as i32, (anchor.y * s) as i32);
-        with(|a| open_item_menu(a, vec![path.clone()], vec![path], sx, sy, extended, anchor, false));
-        invalidate(hwnd);
+        let paint_now = with(|a| {
+            open_item_menu(a, vec![path.clone()], vec![path], sx, sy, extended, anchor, false);
+            crate::arm_ctx(hwnd, a);
+            !a.view.ctx.as_ref().is_some_and(|c| c.open && !c.is_revealed())
+        })
+        .unwrap_or(true);
+        if paint_now {
+            invalidate(hwnd);
+        }
         return;
     }
     let want = with(|a| {
@@ -774,15 +781,20 @@ pub fn after_frame(hwnd: HWND) {
     .flatten();
     let Some((folder, pt, x, y)) = want else { return };
     let (sx, sy) = crate::screen_pt(hwnd, x, y);
-    with(|a| {
+    let paint_now = with(|a| {
         if crate::ctxui::own_enabled() {
             let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor: pt, keyboard: false, screen: (sx, sy) };
             open_own(a, t);
         } else {
             native_bg_menu(a, folder, sx, sy, extended);
         }
-    });
-    invalidate(hwnd);
+        crate::arm_ctx(hwnd, a);
+        !a.view.ctx.as_ref().is_some_and(|c| c.open && !c.is_revealed())
+    })
+    .unwrap_or(true);
+    if paint_now {
+        invalidate(hwnd);
+    }
 }
 
 /// After a frame: runs the own-drawn menu's pick or Retry, and drops a menu
@@ -917,32 +929,38 @@ fn on_menu(a: &mut App, m: &MenuResult, ctx: MenuCtx) {
 
 /// A pool reply, before ShellUi sees it: clipboard replies are ours; a menu
 /// reply runs our entries / intercepted verbs and still goes on for stats.
-pub fn on_reply(a: &mut App, r: Reply) -> Option<Reply> {
+/// Returns `(unconsumed_reply, needs_repaint)`.
+pub fn on_reply(a: &mut App, r: Reply) -> (Option<Reply>, bool) {
     match r.payload {
         Payload::Clip(c) if a.ops.clip_busy.as_ref().is_some_and(|b| b.0 == r.id) => {
             on_clip(a, r.id, c);
-            None
+            (None, true)
         }
         Payload::Menu(ref m) => {
             if let Some(ctx) = a.ops.menu.take_if(|c| c.id == r.id) {
                 on_menu(a, m, ctx);
             }
-            Some(r)
+            (Some(r), false)
         }
-        // own-drawn menu batches: this menu's generation only (stale ones drop)
+        // own-drawn menu batches: this menu's generation only (stale ones drop);
+        // batches arriving inside the reveal grace window hold repainting until
+        // `Part::Complete` / `Part::Failed` or grace expiry.
         Payload::Ctx(b) => {
+            let mut repaint = false;
             if let Some(c) = a.view.ctx.as_mut() {
-                c.apply(b);
+                repaint = c.apply(b);
                 if let Some(Err(e)) = c.invoke_result.take() {
                     status(a, format!("The command failed: {e}"));
+                    repaint = true;
                 }
                 if a.view.ctx.as_ref().is_some_and(|c| c.finished()) {
                     a.view.ctx = None;
+                    repaint = true;
                 }
             }
-            None
+            (None, repaint)
         }
-        _ => Some(r),
+        _ => (Some(r), false),
     }
 }
 
