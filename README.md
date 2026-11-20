@@ -88,6 +88,14 @@ Tsubame's own rows appear at once and the shell extensions fill in as they answe
 - **Entries are stored as flat arrays,** only the visible rows are drawn, and every cache (icons, thumbnails, text layouts) has a byte or count cap.
 - **Small workspace:** `core`, `win`, `ui`, `d2d`, `config`, `update`, `handler`, `ext-api`, `plughost` and `bench` crates under `crates/`. The design, budgets and architecture rules are in [docs/PLAN.md](docs/PLAN.md); topic notes are in [docs/](docs/).
 
+## Installing
+
+The 0.1.0 installers are not code-signed (there is no Authenticode certificate yet), so Windows
+SmartScreen shows "Windows protected your PC" the first time you run the setup or the app. Choose
+More info > Run anyway. That warning only covers the first run of an unsigned file: updates are
+checked against a signing key built into the app, so they are verified either way. A `SHA256SUMS`
+file is published with each release if you want to check a download yourself.
+
 ## Building from source
 
 You need Windows 10 or 11, a recent stable Rust toolchain with the MSVC target (edition 2024), and the Visual Studio Build Tools (MSVC and a Windows SDK). From the repository root:
