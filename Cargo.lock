@@ -969,6 +969,7 @@ dependencies = [
  "tsubame-config",
  "tsubame-core",
  "tsubame-d2d",
+ "tsubame-ext-api",
  "tsubame-ui",
  "tsubame-update",
  "tsubame-win",

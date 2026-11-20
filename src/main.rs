@@ -56,6 +56,7 @@ mod data;
 mod dnd;
 mod editing;
 mod fuzzy;
+mod ext;
 mod keymap;
 mod leak;
 mod lru;

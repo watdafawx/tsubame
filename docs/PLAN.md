@@ -161,7 +161,7 @@ Work outside the original plan that has landed: the memory work (MEM1: flip-mode
 
 | ID | Task | Status |
 |---|---|---|
-| X1 | `tsubame-ext-api`: traits for every extension point in section 4, registry, enable/disable; move P2's commands and columns onto it | Not done |
+| X1 | `tsubame-ext-api`: traits for every extension point in section 4, registry, enable/disable; move P2's commands and columns onto it | Done (`docs/extensions.md`) |
 | X2 | Tier 1 loader: TOML packs for commands, menu entries, keybinds, themes, file-type rules; two example packs; docs | Not done |
 
 ### P4. Features as built-in extensions

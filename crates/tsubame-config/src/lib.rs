@@ -338,6 +338,15 @@ pub struct Advanced {
     pub diagnostics: bool,
 }
 
+/// `[extensions]`: which extensions are switched off (`docs/extensions.md`).
+/// Ids of extensions this build does not have are kept, so a pack installed
+/// later starts off and an older build never drops the entry.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Extensions {
+    pub disabled: Vec<String>,
+}
+
 /// `[context_menu]`: the editable right-click menu (`docs/u4-settings.md`).
 /// Empty `entries` means the built-in default menu.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -430,6 +439,7 @@ pub struct Config {
     pub keys: Keys,
     pub context_menu: ContextMenu,
     pub advanced: Advanced,
+    pub extensions: Extensions,
     pub window: WindowState,
 }
 
@@ -445,6 +455,7 @@ impl Default for Config {
             keys: Keys::default(),
             context_menu: ContextMenu::default(),
             advanced: Advanced::default(),
+            extensions: Extensions::default(),
             window: WindowState::default(),
         }
     }
@@ -1015,8 +1026,19 @@ maximized = true
         assert!(c.updates.auto_check && c.updates.channel == "stable");
         assert_eq!(c.keys.profile, "default");
         assert!(c.keys.overrides.is_empty());
+        assert!(c.extensions.disabled.is_empty());
         assert_eq!(c.window, WindowState { x: 0, y: 0, w: 1120, h: 720, maximized: false });
         assert_eq!(c.start_folder(), StartFolder::Last);
+    }
+
+    #[test]
+    fn the_extensions_section_loads_and_round_trips() {
+        let c: Config = toml::from_str("[extensions]
+disabled = [\"tsubame.column.type\", \"pack.later\"]
+").unwrap();
+        assert_eq!(c.extensions.disabled, ["tsubame.column.type", "pack.later"]);
+        let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
     }
 
     #[test]

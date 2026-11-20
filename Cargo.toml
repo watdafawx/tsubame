@@ -53,6 +53,7 @@ embed-resource = "3.0.12"
 tsubame-config.workspace = true
 tsubame-core.workspace = true
 tsubame-d2d.workspace = true
+tsubame-ext-api.workspace = true
 tsubame-ui.workspace = true
 tsubame-update.workspace = true
 tsubame-win.workspace = true

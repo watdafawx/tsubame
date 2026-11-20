@@ -7345,3 +7345,26 @@ user on rig: +0.7 / +1.0 / +0.7 % and a flat thread count; 1000 menus: +36.4 %
 (+2.7 MB per 100 menus) with it, +1.2 % without. Same growth on the native
 `--stress menu` path and with packaged off or eager on. No change in our code;
 details and the helper-process estimate in `docs/ctxmenu-validation.md`.
+
+## X1 (2026-11-20): extension registry vs main, bench machine (Ryzen 9 5900X, RTX 3080, 4K at 200%)
+
+Release builds via push-to-rig. Main `a03d0e1` (`tsubame.exe 3,322,880 B sha256 ca6cca070b526706`; differs from
+the X1 base `18dc64c` only in docs). X1 `3521a0c` (`tsubame.exe 3,375,616 B sha256 51fb20d96b4071d7`). Runs
+interleaved (order alternating per round), `TSUBAME_GPU_PARK=0`, a scratch `TSUBAME_DATA_DIR`, warm cache.
+
+| Metric | Budget | main | X1 | |
+|---|---|---|---|---|
+| Cold start to first painted frame, `--bench --dir <14 entries>` | < 100 ms | 53.6 ms median, min 51.5 (n=16) | 55.9 ms median, min 51.1 (n=16) | PASS |
+| Private bytes at first paint (same runs) | | 12.87 MB median (n=8) | 12.94 MB median (n=8) | |
+| Private bytes after the GPU swap, idle (same runs) | < 110 MB | 77.0 MB median (n=8) | 76.3 MB median (n=8) | PASS |
+| Scroll paint, 1M synthetic rows, `--bench` | < 5.0 ms p95 | p50 1.79-1.89, p95 3.21-3.38 ms (n=6) | p50 1.77-1.87, p95 3.28-3.55 ms (n=6) | PASS |
+| Idle (13-23 s and 23-33 s windows, parking on) | 0 wake-ups, 0 ms | 1, 2 wakes / 0 ms (both rounds) | 1, 2 wakes / 0 ms (both rounds) | PASS |
+| Private bytes idle and parked | | 14.5, 14.5 MB | 14.4, 14.7 MB | |
+| Main exe | < 6 MB | 3,322,880 B | 3,375,616 B (+52,736 B, +1.6 %) | PASS |
+
+The idle wake-ups are the same OS threads in both builds (one `crypt32` thread, then two `ntdll` pool workers
+exiting); no Tsubame thread woke. The registry work at start-up, timed in an optimized test build: registry
+75 µs, default key map 74 µs, column set 3 µs, about 0.15 ms in all. The 2.3 ms gap in the median first paint is
+larger than that and the fastest runs are equal, so it is run-to-run spread on the shared machine, not the
+registry. Frames read the column set and command list from per-generation copies (no registry access, no
+allocation; the header lost three per-frame `Vec`s).
