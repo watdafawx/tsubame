@@ -126,9 +126,10 @@ Applied { exe, version, previous_version }
 "go back to X" and, from the 3rd failed boot, do it without asking.
 
 If `min_supported_version` is newer than what is installed, `Release.in_place_ok` is false, `download`
-refuses (`Error::TooOld`) and the UI should send the user to the release page for the installer.
+refuses (`Error::TooOld`) and the Settings page disables the download button and tells the user to get
+the installer from the release page.
 
-## Library API (what the follow-up wiring task calls)
+## Library API (what the app calls)
 
 ```rust
 use tsubame_update::{Updater, Release, Staged, Progress, Startup, WatchOutcome, Error};
@@ -151,47 +152,114 @@ spawn_check(Arc<Updater>, force, done: impl FnOnce(Result<Option<Release>>) + Se
 `Error` implements `Display` with a message fit for the UI ("signature check failed...",
 "SHA-256 mismatch for ...", "... is still in use; restart Tsubame once, then update again", ...).
 
-## Wiring into the app (follow-up task)
+## Wiring into the app
 
-None of this is done yet; `src\` and the UI crates were deliberately not touched.
+This is wired. `src\updates.rs` holds the policy and the shared state, `src\settings\updates_page.rs` draws
+Settings > Updates, and `src\main.rs` calls it at three points. The UI thread only reads the snapshot
+(and its two helpers, `ago` and `current_env`); every call that can block runs on a worker.
 
-1. **`Cargo.toml` (root):** `tsubame-update.workspace = true` (already declared in `[workspace.dependencies]`).
-2. **`main`, as early as possible** (before the single-instance check, because a relaunched copy must wait for its parent):
-   ```rust
-   let up = std::sync::Arc::new(tsubame_update::Updater::production(env!("CARGO_PKG_VERSION"))?);
-   // `--after-update <pid>`: the old process is exiting; wait for it (OpenProcess + WaitForSingleObject, <= 10 s) before taking the lock.
-   match up.on_start() {
-       Startup::Normal => {}
-       Startup::Trial { .. } => {}                                   // normal start, update still on probation
-       Startup::CrashedAfterUpdate { boots, .. } if boots >= 3 => { let _ = up.rollback(); let _ = up.relaunch(&[]); return; }
-       Startup::CrashedAfterUpdate { .. } => { /* show a banner: "Tsubame crashed after updating. [Go back to <previous>]" */ }
-   }
-   ```
-3. **After the first frame is presented:** `up.on_ready();` (this is what the watchdog waits for; it ends the trial).
-4. **Auto-check on start** (setting `updates.check_on_start`, default on, user can turn it off): on a worker thread
-   `spawn_check(up.clone(), false, |r| post_to_ui(UpdateMsg::Checked(r)))`. The 24 h limit makes this a no-op most launches.
-   Never download or apply without a click.
-5. **Settings > Updates** (one screen, plugs into the settings page list):
-   - Header: "Tsubame {status.running}", last checked (from `status().last_check_unix`), toggle `Check for updates when Tsubame starts`.
-   - `[Check now]` → `spawn_check(up.clone(), true, ...)`; while running show a spinner; result text: "You're up to date." /
-     "Version X is available" + `[Release notes]` (open `release.notes_url` in the browser) + `[Download and restart]` /
-     the error's `Display` text.
-   - `[Download and restart]` → worker thread:
-     ```rust
-     let staged = up.download(&rel, &mut |p| { post_to_ui(UpdateMsg::Progress(p)); !cancel_flag.load(Relaxed) })?;
-     up.apply(&staged)?;                       // swap done, old exe kept as tsubame.exe.old
-     post_to_ui(UpdateMsg::ReadyToRestart);    // UI saves session, destroys windows, then on the UI thread:
-     match up.relaunch_watched(&[], Duration::from_secs(30))? { WatchOutcome::Started{..} | WatchOutcome::RolledBack{..} => std::process::exit(0) }
-     ```
-     Show a progress bar from `Progress { done, total }` and a `[Cancel]`.
-   - If `release.in_place_ok == false` or `apply` returns `Error::Install(..)` (read-only install, all-users install): replace
-     the button by `[Open download page]` with text "This copy has to be updated with the installer."
-   - `[Roll back to {previous}]` shown when `up.previous_version().is_some()` → confirm → `up.rollback()` then `up.relaunch(&[])` and exit.
-   - After a successful start of the new version show "Updated to X. [Release notes]" once (compare `Startup::Trial`).
-6. **Threading:** every call except `on_start`, `on_ready` and `status` can block (network, disk). Call them from a worker, post results
-   to the UI thread. `Updater` is `Send + Sync`; share it in an `Arc`.
-7. **Do not** add a Run key, a task, or a service for updating. The only moment the updater runs is while the app is open and the
-   user (or the opt-out check on start) asked.
+**Code map**
+
+- `src\updates.rs`: `init`, `on_ready`, `auto_check`, `check_now`, `install`, `cancel`, `restart`,
+  `rollback_and_relaunch`, `snapshot`, `ago`, `wait_for_exit`, `set_auto_install`. The pure policy
+  (`off_reason`, `should_auto_check`, `manual_check_allowed`, `phase_from_error`,
+  `apply_staged_at_start`) is unit-tested in the same file.
+- `src\settings\updates_page.rs`: the page, and `status_line` (one sentence per `Phase`).
+- `src\main.rs`: the three call sites below. `src\cli.rs`: `--after-update <pid>`.
+- `[updates]` in `config.toml`: `auto_check` (default on), `auto_install` (default off), `channel`
+  (read, ignored: the updater is stable-only).
+
+**Start**, in `main` before the single-instance claim (a relaunched copy has to wait for its parent):
+
+1. `--after-update <pid>`: `wait_for_exit(pid, 10 s)` (OpenProcess + WaitForSingleObject), so the old
+   process has dropped the instance lock and its file handles.
+2. `updates::init(Env { dev_run, portable, bench }, cfg.updates.auto_install, wake)`. A dev run
+   (`--bench`, `--leak-gate`, ...), a portable copy, or an `Updater::production` that fails leaves
+   `Phase::Off(DevRun | Portable | NoUpdater)`: no updater object, no network, no disk.
+3. `on_start()`: `Normal` continues; `Trial` records "updated to X"; `CrashedAfterUpdate` with
+   `boots >= 3` rolls back, relaunches the old version and returns `StartAction::Exit`, so this process
+   ends before it touches the single-instance lock. Below 3 boots the version is only recorded.
+4. A staged download is applied here only when `updates.auto_install` is on and it is newer than the
+   running version: `apply`, then `relaunch_watched(30 s)`, then `StartAction::Exit`.
+
+**After the first painted frame** (`main`, the `first.is_some()` branch): `updates::on_ready()` on a worker
+(that is what ends the trial and stops the old process's watchdog), then
+`updates::auto_check(cfg.updates.auto_check)`. The automatic check runs only when the setting is on, the
+environment may use the network, and the 24 h / back-off clock is due (`state::check_due`); otherwise it
+spawns nothing. Nothing is downloaded or applied without a click, except with "Install updates
+automatically" on: then a found update is downloaded to staging and applied at the next start.
+
+**Settings > Updates** draws the snapshot:
+
+| `Phase` | What the page shows | Buttons |
+|---|---|---|
+| `Off(DevRun)` | "Updates are off in this run (development build)." | — |
+| `Off(Portable)` | "This is a portable copy: it does not update itself. Download a newer one yourself." | — |
+| `Off(NoUpdater)` | "Updates are not available in this build." | — |
+| `Idle` | "Not checked yet this session · last checked {ago}" | Check now |
+| `Checking` | "Checking for updates…" | Check now disabled |
+| `UpToDate` | "You're up to date · last checked {ago}" | Check now |
+| `Available(info)` | a panel: "Version X is available", the download size, "the signature is checked before it is installed" | Release notes, Download and restart |
+| `Downloading { done, total }` | progress bar and "X of Y MB" | Cancel |
+| `Staged(v)` | "Version v is downloaded. It installs when you restart Tsubame." | Restart now |
+| `ReadyToRestart(v)` | "Version v is installed. Restart to start it." | Restart now |
+| `Unreachable` | "Can't reach the update server right now. Tsubame will try again later · last checked {ago}" | Check now |
+| `Failed(m)` | the `Error`'s `Display` text ("signature check failed...", "SHA-256 mismatch for ...") | Check now |
+
+Around the state:
+
+- "This copy": "Tsubame {running}", "64-bit · installed for this user" or "64-bit · portable copy", the
+  status line for the current phase, and `[Check now]` (`updates::check_now()`, refused while checking or
+  downloading, and in a run that may not use the network at all).
+- "How updates happen": `Check for updates when Tsubame starts` (default on) and `Install updates
+  automatically` (default off). Both write `[updates]`; the second reaches the updater immediately
+  (`updates::set_auto_install`).
+- `[Roll back to {previous}]`: disabled when `snapshot().previous` is `None`, needs two clicks ("Click
+  again to roll back"), and says the previous version is kept "for a while" (nothing calls
+  `discard_previous()` yet).
+- "Update channel: Stable" is a read-only row. "Integrity": the pinned-key sentence,
+  `github.com/{repo} (https only)`, and "nothing is sent about you".
+
+**Apply flow**, from the click to the new version running:
+
+1. `[Download and restart]` calls `updates::install()`: a worker runs `download(&release, ..)` and streams
+   `Phase::Downloading { done, total }`; `updates::cancel()` makes the progress closure return false.
+2. `apply(&staged)` runs on the same worker; the result is `Phase::ReadyToRestart(v)` and the old exe is
+   kept as `tsubame.exe.old`. A failure keeps the previous state and shows the `Error` text.
+3. `[Restart now]` sets `want_restart`; `settings_requests` stores `AFTER_EXIT = 1` and posts `WM_CLOSE`.
+4. The session is saved and the window is destroyed first. Only at the end of `main` does
+   `updates::restart()` run `relaunch_watched(&[], 30 s)`, and only then does the process exit.
+5. The new process starts with `--after-update <old pid>`, waits for it, and calls `on_start()` /
+   `on_ready()`, which ends the trial. If it dies before `on_ready`, the old process's watchdog rolls back
+   and starts the old version.
+6. "Roll back" stores `AFTER_EXIT = 2`, so `updates::rollback_and_relaunch()` runs instead: `rollback()`
+   then `relaunch(&[])`, one step deep.
+
+**Threading.** Only `snapshot`, `ago` and `current_env` are called on the UI thread. Results land in the
+shared state and the wake closure posts `WM_APP_UPDATE` (`WM_APP + 5`), which invalidates the window, so
+the Settings page redraws with the new phase. `Updater` is `Send + Sync`, kept in an `Arc` for the life of
+the process.
+
+**Not done**
+
+- The two banners are recorded but not drawn: `Snapshot::updated_to` ("Updated to X" with release notes,
+  after the first start of a new version) and `Snapshot::crashed_after_update` ("Tsubame crashed after
+  updating. [Go back to X]"). Only the silent rollback from the third failed start happens; below that the
+  user sees nothing. The fields exist in `src\updates.rs` and no screen reads them.
+- With `release.in_place_ok == false` (too old, or an all-users install that cannot be written) the panel
+  says "This copy cannot update itself. Download the installer from the release page." and disables the
+  download button, but there is no `[Open download page]` button and the release-notes URL stays the only
+  link.
+- Release notes open in the default browser. There is no notes window and no "what's new" in the app.
+- `Phase::Staged` is only reachable with "Install updates automatically", and it reuses the same
+  `[Restart now]` button as `ReadyToRestart`, which calls `restart()` without an `apply` first: the swap is
+  then done by `init` at that start.
+- `discard_previous()` is never called, so the `.old` exes stay in the install dir until a later update
+  overwrites them (the uninstaller removes them).
+- `src\updates.rs` still opens with `#![allow(dead_code)]`; `ready_to_restart()` is the item with no caller
+  today.
+- No Run key, task or service, and no elevation: the updater only runs while the app is open, or at the
+  next start it triggers. Machine-wide installs are sent to the installer, never updated in place.
 
 CLI (same logic, for scripts, installer tests and support): `tsubame-update check [--force] | download | apply [--restart] | rollback [--restart] | status`,
 flags `--install-dir`, `--current-version`. Exit code 3 from `check` means "update available".
