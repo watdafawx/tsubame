@@ -1,0 +1,297 @@
+/// The interface between Tsubame and a wasm plugin (tier 2 of `docs/PLAN.md`
+/// section 4). The plugin is a component that runs in `tsubame-plughost.exe`,
+/// never in the app. See `docs/wasm-plugins.md`.
+///
+/// Rules that hold for every call:
+/// - Calls are batched and run on a worker thread, never once per row per frame.
+/// - A batch holds at most 2,000 paths. Longer lists arrive as several calls.
+/// - Every call has a deadline (`timeout_ms` in the manifest). A call that runs
+///   over it is interrupted and the instance is thrown away.
+/// - Paths are absolute Windows paths (`C:\dir\file.txt`, `\\server\share\x`).
+/// - Times are FILETIME values: 100 ns steps since 1601-01-01 UTC.
+package tsubame:plugin@0.1.0;
+
+/// Data shared by the extension points.
+interface types {
+    /// One cell of a column. The app formats and sorts it.
+    variant cell {
+        empty,
+        text(string),
+        int(s64),
+        /// A byte count, shown like the Size column.
+        bytes(u64),
+        /// A FILETIME.
+        time(u64),
+    }
+
+    /// Premultiplied BGRA pixels, `width * height * 4` bytes, top row first.
+    record image {
+        width: u32,
+        height: u32,
+        bgra: list<u8>,
+    }
+
+    /// Runs a registered command by name when pressed.
+    record button {
+        label: string,
+        command: string,
+    }
+
+    /// One row of declared UI. Tsubame draws it; a plugin never draws.
+    variant node {
+        heading(string),
+        text(string),
+        /// Text in the secondary colour.
+        dim-text(string),
+        /// Monospace text (code, hex).
+        mono(string),
+        /// A label and a value.
+        pair(tuple<string, string>),
+        image(image),
+        button(button),
+        /// Indents the nodes that follow by one step, until `outdent`.
+        indent,
+        outdent,
+    }
+
+    /// How much a previewer may read and return.
+    record limits {
+        max-bytes: u64,
+        /// Longest side of a returned image, in pixels.
+        max-px: u32,
+    }
+
+    /// One entry of a folder.
+    record entry {
+        name: string,
+        dir: bool,
+        size: u64,
+        mtime: u64,
+    }
+}
+
+/// What the host gives a plugin. Everything here is checked against the
+/// capabilities the user granted at install; anything not granted is refused.
+/// There is no network and no process import: both are always denied.
+interface host {
+    use types.{entry};
+
+    enum access {
+        read,
+        read-write,
+    }
+
+    /// Which paths a grant covers.
+    variant scope {
+        /// This folder and everything under it.
+        prefix(string),
+        /// The paths handed to the current call, and everything under them.
+        input,
+        /// Every path.
+        any,
+    }
+
+    record path-grant {
+        scope: scope,
+        access: access,
+    }
+
+    /// What this plugin was granted.
+    record capabilities {
+        network: bool,
+        run-processes: bool,
+        max-memory-mb: u32,
+        timeout-ms: u32,
+        paths: list<path-grant>,
+    }
+
+    enum fs-error {
+        /// The path is outside the granted paths, or needs write access.
+        denied,
+        not-found,
+        /// Not an absolute path, or it has `..`, a stream name or a device name.
+        invalid-path,
+        too-large,
+        io,
+    }
+
+    record file-info {
+        dir: bool,
+        size: u64,
+        mtime: u64,
+    }
+
+    enum level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// The capabilities in force for this plugin.
+    get-capabilities: func() -> capabilities;
+
+    /// Writes one line to the host's log. Long lines are cut, and a call may
+    /// log a limited number of lines.
+    log: func(level: level, message: string);
+
+    stat: func(path: string) -> result<file-info, fs-error>;
+
+    /// Reads up to `max-len` bytes at `offset`. Fewer bytes come back at the end
+    /// of the file, and the host caps one read at 4 MiB.
+    read-file: func(path: string, offset: u64, max-len: u32) -> result<list<u8>, fs-error>;
+
+    /// Lists a folder: at most `max` entries (capped at 2,000) after skipping `skip`.
+    /// An empty list means the end.
+    read-dir: func(path: string, skip: u32, max: u32) -> result<list<entry>, fs-error>;
+
+    /// Replaces the file's contents, or appends to it. Needs a read-write grant.
+    /// The folder must exist.
+    write-file: func(path: string, data: list<u8>, append: bool) -> result<_, fs-error>;
+}
+
+/// Who the plugin is. Every plugin exports this.
+interface meta {
+    enum entrypoint-kind {
+        column,
+        previewer,
+        vfs,
+        search,
+        command,
+    }
+
+    record entrypoint {
+        kind: entrypoint-kind,
+        /// The id (for a command: the name) the manifest declares.
+        id: string,
+    }
+
+    record info {
+        /// Must equal `plugin.id` in the manifest.
+        id: string,
+        /// Must equal `plugin.version` in the manifest.
+        version: string,
+        /// Must contain every entry point the manifest declares.
+        entrypoints: list<entrypoint>,
+    }
+
+    describe: func() -> info;
+}
+
+/// A details-view column: N paths in, N values out.
+interface column {
+    use types.{cell};
+
+    /// One value per path, in the same order. Returning a different number of
+    /// values is an error.
+    values: func(column: string, paths: list<string>) -> list<cell>;
+}
+
+/// The preview pane.
+interface previewer {
+    use types.{node, limits};
+
+    preview: func(id: string, path: string, limits: limits) -> result<list<node>, string>;
+}
+
+/// A folder that is not on disk: an archive, a remote share.
+interface vfs {
+    use types.{entry};
+
+    record page {
+        entries: list<entry>,
+        /// Pass it back to get the next page. None: this was the last page.
+        next: option<string>,
+    }
+
+    /// Lists `path` one page at a time (at most 2,000 entries per page).
+    list-dir: func(id: string, path: string, cursor: option<string>) -> result<page, string>;
+
+    /// Reads up to `max-len` bytes of one file at `offset`.
+    read: func(id: string, path: string, offset: u64, max-len: u32) -> result<list<u8>, string>;
+}
+
+/// A search provider.
+interface search {
+    record query {
+        text: string,
+        /// Folder to search under. Empty: everywhere the provider knows.
+        root: string,
+        /// Most hits wanted in total.
+        limit: u32,
+    }
+
+    record hit {
+        path: string,
+        dir: bool,
+        size: u64,
+        mtime: u64,
+    }
+
+    record page {
+        hits: list<hit>,
+        /// Pass it back to get the next page. None: no more hits.
+        next: option<string>,
+    }
+
+    /// Returns hits one page at a time (at most 2,000 hits per page).
+    find: func(id: string, q: query, cursor: option<string>) -> result<page, string>;
+}
+
+/// A command the user runs from the palette, a key or a menu.
+interface command {
+    record context {
+        /// The folder in front.
+        folder: string,
+        /// The selected paths. A selection of more than 2,000 paths arrives in
+        /// `parts` calls; `part` counts from 0.
+        selection: list<string>,
+        part: u32,
+        parts: u32,
+    }
+
+    /// Ok carries an optional message for the status line.
+    run: func(name: string, cx: context) -> result<option<string>, string>;
+}
+
+/// Everything. The host binds against this world, but a plugin only has to
+/// export `meta` and the interfaces of the entry points its manifest declares.
+world plugin {
+    import host;
+    export meta;
+    export column;
+    export previewer;
+    export vfs;
+    export search;
+    export command;
+}
+
+world column-plugin {
+    import host;
+    export meta;
+    export column;
+}
+
+world previewer-plugin {
+    import host;
+    export meta;
+    export previewer;
+}
+
+world vfs-plugin {
+    import host;
+    export meta;
+    export vfs;
+}
+
+world search-plugin {
+    import host;
+    export meta;
+    export search;
+}
+
+world command-plugin {
+    import host;
+    export meta;
+    export command;
+}

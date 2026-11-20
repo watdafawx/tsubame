@@ -1,0 +1,16 @@
+# The manifest of the sample column plugin. See docs/wasm-plugins.md.
+[plugin]
+id = "dev.tsubame.sample-column"
+name = "Sample column"
+version = "0.0.1"
+api = "0.1"
+component = "sample_column.wasm"
+description = "Shows each file's extension in upper case and the length of its path."
+
+# No [capabilities]: the plugin only looks at the path text, so it gets no
+# file access, no network and the default limits (64 MB, 2000 ms per call).
+
+[[column]]
+id = "ext-len"
+label = "Ext / length"
+width = 120

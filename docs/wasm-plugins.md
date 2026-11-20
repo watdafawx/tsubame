@@ -1,0 +1,431 @@
+# Wasm plugins (P5.P1): host, interface, manifest, protocol
+
+Tier 2 of `docs/PLAN.md` section 4: a plugin is a WebAssembly component that
+runs in `tsubame-plughost.exe`, a separate process, never in the app. This page
+is the reference for the four contracts between the parts: the WIT interface,
+the manifest, the capability rules and the protocol on the pipe.
+
+Code: `crates/tsubame-plughost`. Tests: `cargo test -p tsubame-plughost`
+(49 unit tests, 19 end-to-end tests that drive the real host exe).
+
+**What exists and what does not.** The host exe, the install step, the
+manifest parser, the protocol and the supervisor client are done and tested.
+The app does not load wasm plugins yet: nothing in `src/` calls the client, and
+there is no install UI. The guest SDK and the plugin author guide are P5.P2;
+`plugins/sample-column` is a working guest to copy until then.
+
+## The pieces
+
+| Piece | Where | In which binary |
+|---|---|---|
+| WIT interface | `wit/tsubame-plugin.wit` | bound by the host; guests build against it |
+| Manifest (`plugin.toml`) | `src/manifest.rs` | app, install step |
+| Capabilities and path rules | `src/caps.rs` | app, host |
+| Protocol | `src/proto.rs` | app, host |
+| Supervisor client (`Plugin`) | `src/client.rs` | app |
+| Entry points as `tsubame-ext-api` providers | `src/adapters.rs`, `src/cache.rs` | app |
+| Host: wasmtime, limits, imports, serve loop | `src/host.rs`, `src/main.rs` | `tsubame-plughost.exe` |
+| Install step | `src/host.rs` (`install`), `src/bin/tsubame-plugc.rs` | `tsubame-plugc.exe` |
+| Bench client and mock hosts | `src/bin/plughost-bench.rs` | not shipped |
+
+Cargo features keep the three binaries apart:
+
+| Build | Features | Contains |
+|---|---|---|
+| The app's dependency | `default-features = false` | manifest, protocol, client, adapters. No wasmtime: `serde`, `toml` and `tsubame-ext-api` only |
+| `tsubame-plughost.exe` | default (`host`) | wasmtime runtime, no compiler |
+| `tsubame-plugc.exe` | `compiler` | the same plus Cranelift |
+
+`tsubame-ext-api` is unchanged: no dependencies, no Win32.
+
+Build the install step on its own, `cargo build --release -p tsubame-plughost
+--features compiler --bin tsubame-plugc`. A build with `--features compiler`
+that also builds the host exe links Cranelift into it (9 MB instead of 1 MB);
+the size test below catches that.
+
+## Lifecycle
+
+1. **Install.** `tsubame-plugc <plugin folder> <cache folder>` checks
+   `plugin.toml`, compiles the `.wasm` it names and writes
+   `<cache folder>/<id>-<version>.cwasm` (temp file, then rename). It prints
+   the file's SHA-256. The app stores that hash with the plugin and shows the
+   user `Capabilities::summary()` before it enables the plugin.
+2. **Nothing runs.** `Plugin::new` starts no process and no thread. The
+   adapters answer `accepts` from the manifest. A session that never uses a
+   wasm plugin pays nothing.
+3. **First call.** The client starts one host process for the plugin (stdin and
+   stdout piped, no console window), waits for the host's hello, and sends
+   `Load`: the `.cwasm` path, its hash, the capabilities and the declared entry
+   points. The host checks all of it, instantiates the component, calls
+   `meta.describe` and answers with what the component says it is.
+4. **Calls.** One request, one reply, one at a time per plugin. Callers are
+   worker threads; the client serializes them.
+5. **Stop.** `shutdown`, `stop_if_idle(duration)` or dropping the `Plugin`
+   sends `Shutdown`, closes the host's stdin and waits up to 500 ms for the
+   process to exit before killing it. The next call starts a new host. There
+   is no idle timer: the app calls `stop_if_idle` from events it already has.
+
+One host process per plugin, so a hang or a crash takes down that plugin only.
+
+### Deadlines, kill on hang, faults
+
+| Layer | When | What happens | Host process |
+|---|---|---|---|
+| Host watchdog (epoch interruption) | the guest runs past `timeout_ms` | the guest traps at its next loop or call; the instance is dropped and built fresh for the next call; reply `Timeout` | stays |
+| Client deadline | no reply `timeout_ms` + 250 ms after the request | the process is killed and reaped; the call returns `CallError::Timeout` | killed, restarted by the next call |
+| Start deadline | no hello or no `Load` reply within 5 s | killed; `CallError::Spawn` or `CallError::Load` | killed |
+
+The second layer exists because an epoch can not interrupt a guest that is
+blocked inside a host import (a read from a dead network share).
+
+Every failure is a returned `CallError`. Nothing in the client panics or blocks
+past its deadline, so a caller is never taken down by a plugin.
+
+| Outcome | Counts as a fault | Host |
+|---|---|---|
+| `Timeout`, `Trap`, `Memory`, `BadResult` reported by the host | yes | stays |
+| No reply, process exit (`Crashed`), protocol error | yes | killed |
+| Host did not start or refused the load | yes | killed |
+| `Plugin(text)`: the plugin's own `err` result | no | stays |
+| `Unsupported`: no such entry point | no | stays |
+
+Three faults in a row (`Options::max_faults`) mark the plugin **faulted**: its
+host is stopped and every call returns `CallError::Faulted` at once, without
+starting a process, until `Plugin::reset()` (the user switches it back on). A
+successful call clears the count.
+
+The adapters turn an error into an empty result: a column shows empty cells
+(and does not cache them), a previewer returns the error text.
+
+### Bounds
+
+| What | Cap | Where |
+|---|---|---|
+| Paths per call | 2,000, and about 1 MiB of path text | client splits (`proto::chunks`), host refuses more |
+| Frame | 16 MiB | both sides, checked before allocating |
+| Entries or hits per page | 2,000 | host |
+| Pages per listing or search | 5,000 | client |
+| Bytes per `read-file` / `vfs.read` call | 4 MiB | host |
+| Bytes the host copies out of the guest per call | 32 MiB (wasmtime hostcall fuel) | host |
+| Guest memory | `max_memory_mb`, 1 to 512, default 64 | host |
+| Call time | `timeout_ms`, 10 to 30,000, default 2,000 | host, then client |
+| Column value cache | 8,192 values and 2 MiB per column | `cache::CellCache`, two generations, eviction tests |
+| Log lines per call | 64 lines of 1 KiB | host |
+| `.wasm` / `.cwasm` size | 64 MiB / 256 MiB | install step / host |
+
+## The manifest: `plugin.toml`
+
+```toml
+[plugin]
+id = "com.example.exif"          # 3-64 chars, a-z 0-9 -, at least two dot-separated parts
+name = "EXIF tools"              # 1-80 chars
+version = "1.2.0"                # N.N.N or N.N.N-pre
+api = "0.1"                      # the WIT package version the component targets
+component = "exif.wasm"          # a file name in the package, must end in .wasm
+description = "Camera columns."  # optional, up to 400 chars
+
+[capabilities]                   # optional; leaving it out grants nothing
+network = false
+run_processes = false
+max_memory_mb = 64               # 1-512
+timeout_ms = 2000                # 10-30000
+paths = [
+    { path = "$input",  access = "read" },
+    { path = "$data",   access = "read-write" },
+    { path = "$plugin", access = "read" },
+    { path = "D:/Photos/Library", access = "read" },
+]
+
+[[column]]
+id = "camera"                    # 1-64 chars, a-z 0-9 . _ -
+label = "Camera"
+align = "left"                   # or "right"; default left
+width = 140                      # DIPs, 20-2000; default 120
+
+[[previewer]]
+id = "meta"
+title = "EXIF"
+extensions = ["jpg", "jpeg"]     # lower case, no dot, at least one
+
+[[vfs]]
+id = "zip"
+title = "Zip archives"
+extensions = ["zip"]
+
+[[search]]
+id = "by-camera"
+title = "By camera"
+
+[[command]]
+name = "strip"
+title = "Strip EXIF"
+keys = ["Ctrl+Alt+E"]            # optional default chords, at most 8
+```
+
+Entry points register as `<plugin id>.<entry id>` (`Manifest::qualified`), so
+two plugins can not clash. `adapters::contribute` adds the columns, previewers,
+vfs providers and search providers to an extension's `Contributions`; commands
+are left to the app, which owns `Host::Run` and the command numbers.
+
+### Validation
+
+Parsing is strict. Any of these rejects the whole manifest, with a message that
+names the field:
+
+- An unknown key anywhere, including an unknown capability
+  (`[capabilities] filesystem = true`) or an unknown table (`[[panel]]`).
+- `max_memory_mb` or `timeout_ms` outside its range. Values are not clamped:
+  what the file says is what the user is shown and what the host enforces.
+- A path grant that is not `$plugin`, `$data`, `$input`, `*` or a valid absolute
+  path (see the path rules below); an unknown `$name`; an `access` other than
+  `read` or `read-write`; `$plugin` with `read-write`; the same location twice;
+  more than 32 grants.
+- A plugin id that is malformed or starts with `tsubame.`, `core.` or `pack.`.
+- `component` with a folder in it, or not ending in `.wasm`. A `.cwasm` is
+  refused by name: a package never ships compiled code.
+- `api` other than the version this build speaks.
+- No entry point at all, more than 32 of one kind, a duplicate id within a
+  kind, an empty or malformed id, label or extension list.
+- A file over 64 KiB.
+
+### Path grants
+
+| `path` | Covers | Notes |
+|---|---|---|
+| `$input` | the paths handed to the current call and everything under them | changes with every call. For a vfs call it also covers the file the path goes through (`C:\a.zip` for `C:\a.zip\inner\x`) |
+| `$data` | the plugin's own data folder | the app creates it; resolved in `Manifest::capabilities` |
+| `$plugin` | the folder the plugin is installed in | read only |
+| an absolute folder | that folder and everything under it | |
+| `*` | every path | shown to the user as "any file on this computer" |
+
+`Manifest::capabilities(plugin_dir, data_dir)` turns the manifest into the
+`Capabilities` that go into `Load`. `Capabilities::summary()` gives one line
+per grant for the install prompt ("Read the files and folders you use it on").
+
+## Capability enforcement
+
+The host enforces; the guest can not opt out and the client only passes the
+values on. The host validates the capabilities again when they arrive.
+
+| Capability | How it is enforced |
+|---|---|
+| Memory | A wasmtime resource limiter (`StoreLimits` for tables, instance and memory counts, plus a cap on the **sum** of all linear memories). A refused `memory.grow` returns -1 to the guest; if the call then fails the reply is `Memory`. |
+| Time | Epoch interruption. Every entry into the guest, instantiation included, runs with an epoch deadline of one tick. A watchdog thread sleeps on a condition variable while no call runs (an idle host has no wake-ups) and ticks the epoch when the deadline passes. |
+| Files | The guest has no WASI. Imports the host does not define are linked as traps. The only way to a file is the `host` interface, and each call checks the path twice (below). |
+| Network | Denied. There is no import that reaches the network. `network = true` is parsed, shown to the user and passed to the host, and changes nothing yet. |
+| Processes | Denied. There is no import that starts a process. `run_processes = true` is the same. |
+| Host memory | wasmtime's hostcall fuel caps what the host copies out of the guest (strings and lists) at 32 MiB per call, so a guest can not make the host allocate without bound. |
+
+When a network or process import is added, it must check the flag in `Ctx`
+first; until then both flags are reserved.
+
+### The path check
+
+Every path a guest passes to `stat`, `read-file`, `read-dir` or `write-file`
+goes through two checks.
+
+**1. Lexical** (`caps::normalize`, `caps::PathPolicy`; pure string work):
+
+- The path must be absolute: `X:\...` or `\\server\share\...`. `/` is accepted
+  as a separator. `\\?\X:\` and `\\?\UNC\` lose their prefix.
+- Refused outright: `.` and `..` components, a `:` anywhere but after the drive
+  letter (stream names, drive-relative paths), `< > " | ? *` and control
+  characters, a name ending in a dot or a space, device names (`NUL`, `COM1`,
+  `NUL.txt`), and every other `\\?\` or `\\.\` path.
+- A grant matches when the path equals its folder or continues it after a
+  separator (`C:\Data` does not cover `C:\Database`). Comparison folds ASCII
+  case only. Windows folds more, so a name that differs in the case of a
+  non-ASCII letter is refused; it is never wrongly allowed.
+- `write-file` needs a `read-write` grant.
+
+**2. Resolved.** Unless the grant is `*` or the path is exactly one the call was
+given, the host resolves the path (`std::fs::canonicalize`; for a file that
+does not exist yet, its folder) and requires the result to lie inside the
+resolved grant folder. A junction or symlink inside a granted folder therefore
+does not lead out of it (tested with a real junction).
+
+Known limits, for the security review (P5.P3):
+
+- The second check and the open are separate steps. Something that swaps a
+  folder for a junction between them wins the race. Closing it needs a
+  handle-based check, which `std` does not offer.
+- Hard links are not detected.
+- If the app dies while a guest is blocked inside a host import, the host
+  stays until that import returns (it exits as soon as it next reads its
+  stdin). A job object owned by the app would close this; the client is
+  `std` only and does not create one.
+- `Component::deserialize` trusts its input. The host only passes it the bytes
+  whose SHA-256 matches the hash the client sent, and it hashes the same
+  buffer it deserializes, so the file can not be swapped in between. This is
+  only as strong as the place the app keeps the hash and the cache folder:
+  both must be writable by the app alone.
+
+## The WIT interface
+
+`wit/tsubame-plugin.wit`, package `tsubame:plugin@0.1.0`. Paths are absolute
+Windows paths; times are FILETIME values.
+
+### Exports (what a plugin implements)
+
+| Interface | Function | Mirrors (`tsubame-ext-api`) |
+|---|---|---|
+| `meta` | `describe() -> info` (id, version, entry points) | required for every plugin |
+| `column` | `values(column, paths: list<string>) -> list<cell>` | `ColumnProvider::values`, `Cell` |
+| `previewer` | `preview(id, path, limits) -> result<list<node>, string>` | `Previewer::preview`, `Doc`, `Node` |
+| `vfs` | `list-dir(id, path, cursor) -> result<page, string>`, `read(id, path, offset, max-len) -> result<list<u8>, string>` | `VfsProvider::list`, `read` |
+| `search` | `find(id, query, cursor) -> result<page, string>` | `SearchProvider::search`, `Hit` |
+| `command` | `run(name, context) -> result<option<string>, string>` | a command handler |
+
+Notes:
+
+- `column.values` takes plain `list<string>` (the S3 decision: no packed
+  encoding in the public signature) and returns one typed `cell` per path
+  (`empty`, `text`, `int`, `bytes`, `time`), so the app can sort and format
+  numbers and dates. A different count is a `BadResult`.
+- Streaming calls (`list`, `search`) are pages of at most 2,000 items with an
+  opaque `next` cursor. Each page is its own call with its own deadline; the
+  client loops and feeds the caller's sink, which can stop early.
+- A command over more than 2,000 selected paths arrives as `parts` calls with
+  `part` counting from 0.
+- An image must have exactly `width * height * 4` bytes and fit the caller's
+  `max-px`, or the reply is `BadResult`.
+- Side panels, file-type rules and themes have no wasm form yet. The last two
+  are plain data and belong in a TOML pack.
+
+A plugin exports `meta` plus the interfaces of the entry points its manifest
+declares, nothing else. The worlds `column-plugin`, `previewer-plugin`,
+`vfs-plugin`, `search-plugin` and `command-plugin` are ready made for a plugin
+of one kind; a plugin with several writes its own world from the same
+interfaces. The host binds against the world `plugin` (everything) but looks up
+each export interface on its own, and only those the manifest declares. A
+declared kind the component does not export fails the load.
+
+At load the host checks that `describe()` returns the manifest's id and
+version and lists every declared entry point.
+
+### Imports (what a plugin may call): `host`
+
+| Function | Needs |
+|---|---|
+| `get-capabilities() -> capabilities` | nothing |
+| `log(level, message)` | nothing; goes to the host's stderr, which the client drops unless `ProcessLauncher::inherit_stderr` is set |
+| `stat(path) -> result<file-info, fs-error>` | read grant |
+| `read-file(path, offset, max-len) -> result<list<u8>, fs-error>` | read grant |
+| `read-dir(path, skip, max) -> result<list<entry>, fs-error>` | read grant |
+| `write-file(path, data, append) -> result<_, fs-error>` | read-write grant; the folder must exist |
+
+`fs-error` is `denied` (no grant covers it), `invalid-path` (refused by the
+lexical check), `not-found`, `too-large` or `io`.
+
+There is no WASI. A guest built for `wasm32-wasip2` with `std` works as long as
+it does not call a WASI import at run time; one that does (printing, the clock,
+`HashMap`'s random seed) traps. Which shims to offer, if any, is a P5.P2
+decision.
+
+## The protocol
+
+Over the host's stdin (requests) and stdout (replies). Little endian.
+
+```
+frame    := len:u32  id:u32  kind:u8  body        len counts id + kind + body, 5 ..= 16 MiB
+string   := len:u32  utf8
+list<T>  := count:u32  T...
+option<T>:= 0 | 1 T
+```
+
+The client picks `id`; the reply carries the same one. A reply with another id
+is a protocol error and the host is killed, so a late answer can never be
+taken for the next call's.
+
+| Kind | Name | Body |
+|---|---|---|
+| 1 | `Load` | plugin id, version, component path, sha256 (32 bytes), capabilities, entry points |
+| 2 | `Column` | column id, `list<string>` paths |
+| 3 | `Preview` | previewer id, path, max-bytes u64, max-px u32 |
+| 4 | `VfsList` | vfs id, path, `option<string>` cursor |
+| 5 | `VfsRead` | vfs id, path, offset u64, max-len u32 |
+| 6 | `Search` | provider id, text, root, limit u32, `option<string>` cursor |
+| 7 | `Command` | name, folder, `list<string>` selection, part u32, parts u32 |
+| 8 | `Shutdown` | empty |
+| 0x80 | `Hello` (host, once, id 0) | magic `TSPH`, protocol version u16, host version |
+| 0x81 | `Ok` | depends on the request: info, cells, nodes, entries + cursor, bytes, hits + cursor, optional message |
+| 0x82 | `Err` | error kind u8, message (cut to 1 KiB) |
+
+Error kinds: 1 `BadRequest`, 2 `NotLoaded`, 3 `Load`, 4 `Plugin`, 5 `Trap`,
+6 `Timeout`, 7 `Memory`, 8 `BadResult`, 9 `Unsupported`.
+
+Capabilities on the wire: `network:u8 run_processes:u8 max_memory_mb:u32
+timeout_ms:u32 list<grant>`, a grant being a scope tag (0 prefix + string,
+1 input, 2 any) and an access byte (0 read, 1 read-write). `$plugin` and
+`$data` are already resolved to folders.
+
+Rules:
+
+- The host says `Hello` before it reads anything. A client that sees another
+  protocol version refuses the host.
+- `Load` comes first and once. A call before it gets `NotLoaded`, a second
+  `Load` gets `BadRequest`.
+- Decoding never trusts a length. Every read is bounds checked, a list count is
+  checked against the bytes left before anything is allocated, and a frame
+  outside 5 bytes to 16 MiB ends the session.
+- A request that does not decode gets `BadRequest`; the client then replaces
+  the host, since the two sides are out of step.
+- `PROTOCOL VERSION` (`proto::VERSION`, now 1) changes with any change to this
+  table. App and host ship together, so there is no negotiation.
+
+## Using it from the app (not wired yet)
+
+```rust
+let manifest = Manifest::load(&plugin_dir)?;
+let caps = manifest.capabilities(plugin_dir_str, data_dir_str)?;
+// cwasm and sha256 come from the install step's record
+let load = Load::new(&manifest, &cwasm, sha256, caps);
+let plugin = Arc::new(Plugin::new(load, ProcessLauncher::new(host_exe), Options::default()));
+adapters::contribute(&manifest, &plugin, contributions);   // inside Extension::contribute
+```
+
+## Measurements
+
+Release build with the root profile, wasmtime 50.0.2.
+
+| | S3 spike | Now |
+|---|---|---|
+| `tsubame-plughost.exe`, runtime only | 896,512 B (0.86 MB) | **1,051,136 B (1.00 MB)** |
+
+The 155 KB are the `host` imports, the limiter and watchdog, the bindings for
+five export interfaces, the typed protocol and SHA-256. The test
+`release_exe_is_small` fails over 1,250,000 B; it measures
+`target/release/tsubame-plughost.exe` (or `TSUBAME_PLUGHOST_RELEASE_EXE`) and
+says so when there is no release build to measure.
+
+Timings with `plughost-bench run` and the sample plugin (63 KB `.wasm`, 232 KB
+`.cwasm`), on a development machine under load, **not** the benchmark machine,
+so they are not comparable with `docs/spike-wasm.md`:
+
+| | median | p95 |
+|---|---|---|
+| Load (read, SHA-256, deserialize, link, instantiate, `describe`) | 1.4 ms | 2.0 ms |
+| Column call, 100 paths, over the pipe | 0.08 ms | 0.12 ms |
+| Column call, 2,000 paths | 0.77 ms | 1.1 ms |
+| Clean shutdown | 4.4 ms | 5.5 ms |
+
+Process start dominated start-up there (about 23 ms for any exe on that
+machine, the host's `--version` included). Start-up on the benchmark machine
+has not been measured again.
+
+## Tests
+
+| What | Where |
+|---|---|
+| Manifest: a full file, defaults deny, each rejection | `manifest.rs` (11) |
+| Path rules: normalize, reject list, prefix / input / any grants | `caps.rs` (10) |
+| Protocol: every message round trip, bad lengths, malformed bodies, chunking | `proto.rs` (7) |
+| Client against an in-memory host: lazy start, chunks, kill on hang, late reply, crash, fault limit, bad hello, wrong id, paging, threads | `client.rs` (15) |
+| Cache caps and eviction | `cache.rs` (4) |
+| SHA-256 vectors | `sha256.rs` (2) |
+| Real host exe: round trip, 5,001 paths in 3 calls, epoch interrupt, kill of a hung process, memory cap, traps, hash and identity checks, partial exports, file grants, junction, every entry point through the adapters, exe size | `tests/host.rs` (19) |
+
+The end-to-end guest is WebAssembly text in the test file, turned into a
+component by `wit-component` against the real WIT file and compiled with the
+host's engine settings, as the install step does. Cranelift is a dev-dependency
+only.

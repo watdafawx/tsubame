@@ -3,24 +3,56 @@ name = "tsubame-plughost"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Tsubame wasm plugin host: WIT interface, capability manifest, IPC protocol, supervisor client and the host exe"
 
 [lib]
 path = "src/lib.rs"
 
+# The host exe. Runtime only: no Cranelift, it loads `.cwasm` files written by `tsubame-plugc`.
 [[bin]]
 name = "tsubame-plughost"
 path = "src/main.rs"
+required-features = ["host"]
 
-# Measurement client (spawn / round trip / memory). Not shipped, not linked into the host exe.
+# The install step: checks a plugin package and compiles its component to `.cwasm`.
+# Build it on its own (`--features compiler --bin tsubame-plugc`): the feature links
+# Cranelift into every bin of this package that is built in the same run.
+[[bin]]
+name = "tsubame-plugc"
+path = "src/bin/tsubame-plugc.rs"
+required-features = ["compiler"]
+
+# Measurement client and mock hosts for the tests. Not shipped.
 [[bin]]
 name = "plughost-bench"
 path = "src/bin/plughost-bench.rs"
 
+# The tests that drive the real host exe.
+[[test]]
+name = "host"
+required-features = ["host"]
+
 [features]
-default = ["compiler"]
-# Cranelift: compile .wasm at startup and `precompile`. Without it the host is runtime-only and loads precompiled .cwasm.
-compiler = ["wasmtime/cranelift"]
+default = ["host"]
+# Wasmtime runtime. Off (`default-features = false`) the crate is the manifest,
+# the protocol and the supervisor client only, which is what the app links.
+host = ["dep:wasmtime"]
+# Cranelift, for the install step only. Never part of the shipped host exe.
+compiler = ["host", "wasmtime/cranelift"]
 
 [dependencies]
+tsubame-ext-api.workspace = true
+serde.workspace = true
+toml.workspace = true
 # Smallest set that works: component model + runtime, no cache/profiling/wat/gc/async/threads/parallel-compilation.
-wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime", "component-model", "std"] }
+wasmtime = { version = "=50.0.2", optional = true, default-features = false, features = ["runtime", "component-model", "std"] }
+
+[dev-dependencies]
+# The tests compile their guests themselves, so they need Cranelift. Dev-only:
+# a plain `cargo build -p tsubame-plughost` does not get it.
+wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime", "component-model", "std", "cranelift"] }
+# The test guest is WebAssembly text; wit-component turns it into a component against
+# the real WIT file. All three are the wasm-tools release wasmtime 50 already uses.
+wat = "=1.261.0"
+wit-component = "0.261"
+wit-parser = "0.261"
