@@ -184,7 +184,8 @@ and Open with still use the shell.
 ## What a pack costs
 
 Nothing when there is no `packs` folder. With packs: reading and parsing the
-files at start-up (about a millisecond per small pack), and one registry entry
-per item. File colours are looked up from a list built once per registry change,
+files at start-up (too small to see in the cold-start measurement: both example
+packs together measured within the run-to-run spread, `docs/bench-log.md`), and
+one registry entry per item. File colours are looked up from a list built once per registry change,
 so drawing a row costs one short comparison per rule extension and allocates
 nothing.

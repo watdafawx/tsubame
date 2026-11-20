@@ -14,7 +14,7 @@ author = "Tsubame"
 # folder name with spaces or & stays one argument.
 [[command]]
 id = "terminal"
-title = "Open terminal here"
+title = "Windows Terminal here"
 program = "wt.exe"
 args = "-d {dir}"
 keys = ["Ctrl+Alt+T"]
@@ -24,6 +24,6 @@ keys = ["Ctrl+Alt+T"]
 # you right-clicked, {dir} the folder in front.
 [[menu]]
 id = "terminal"
-label = "Open terminal here"
+label = "Windows Terminal here"
 command = "terminal"
 show = ["folders", "background"]
