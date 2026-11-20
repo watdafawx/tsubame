@@ -9,11 +9,14 @@
 //!   fallback on one worker thread, batches with generation cancel). See
 //!   `docs/enumerator.md`.
 //! - [`procinfo`]: process counters for leak checks.
+//! - [`meta`]: background metadata engines (folder sizes, git status, file
+//!   checksums) for the P4.F5 columns and checksum command.
 
 pub mod bitmap;
 pub mod defaultfm;
 pub mod dnd;
 pub mod enumerate;
+pub mod meta;
 pub mod places;
 pub mod procinfo;
 pub mod search;
