@@ -93,10 +93,7 @@ impl Sel {
     pub fn shown(&self) -> Vec<&Row> {
         self.rows
             .iter()
-            .filter(|r| match (self.filter, r) {
-                (1, Row::Skipped { .. }) | (2, Row::Entry { .. }) => false,
-                _ => true,
-            })
+            .filter(|r| !matches!((self.filter, r), (1, Row::Skipped { .. }) | (2, Row::Entry { .. })))
             .collect()
     }
 
@@ -318,10 +315,10 @@ pub fn skipped_name(text: &str) -> String {
         let rest = text[i + 5..].trim_start();
         if let Some(rest) = rest.strip_prefix('=') {
             let rest = rest.trim_start();
-            if let Some(q) = rest.chars().next().filter(|c| matches!(*c, '\'' | '"')) {
-                if let Some(end) = rest[1..].find(q) {
-                    return rest[1..1 + end].replace('&', "");
-                }
+            if let Some(q) = rest.chars().next().filter(|c| matches!(*c, '\'' | '"'))
+                && let Some(end) = rest[1..].find(q)
+            {
+                return rest[1..1 + end].replace('&', "");
             }
         }
     }
@@ -463,10 +460,10 @@ pub fn draw(pg: &mut Pg, sel: &mut Sel, users: &[menu::UserGroup]) -> Act {
         if i >= 0.0 && (i as usize) < shown_n {
             sel.cursor = i as usize;
             // the box (or a double click) ticks the row
-            if p.pos.x < r.x + 54.0 || p.double {
-                if let Row::Entry { id, .. } = sel.shown()[i as usize] {
-                    toggle = Some(id.clone());
-                }
+            if (p.pos.x < r.x + 54.0 || p.double)
+                && let Row::Entry { id, .. } = sel.shown()[i as usize]
+            {
+                toggle = Some(id.clone());
             }
         }
     }
@@ -841,7 +838,7 @@ shell
         assert_eq!(m.user_groups[0].name, "Nilesoft");
         assert_eq!(m.nss_group, m.user_groups[0].id, "the last used group is remembered");
         assert_eq!((rep.imported, rep.group_name.as_str(), rep.created_group.clone()), (5, "Nilesoft", Some(m.nss_group.clone())));
-        assert_eq!(list.len(), 1 + 5 + 0, "Mine, Tools + 2 children, Copy path, Notepad here");
+        assert_eq!(list.len(), 1 + 5, "Mine, Tools + 2 children, Copy path, Notepad here");
         assert!(list.iter().filter(|e| e.source == menu::Source::Nilesoft && e.parent.is_empty()).all(|e| e.group == m.nss_group));
         assert!(list.iter().all(|e| e.name != "Hash"), "the unticked child is not added");
         let mut items: Vec<menu::ItemPref> = Vec::new();

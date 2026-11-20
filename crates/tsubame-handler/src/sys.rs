@@ -67,10 +67,10 @@ fn data_dir_for(exe_dir: Option<&Path>) -> PathBuf {
     if let Some(d) = std::env::var_os("TSUBAME_DATA_DIR") {
         return PathBuf::from(d);
     }
-    if let Some(d) = exe_dir {
-        if d.join("tsubame.portable").exists() || d.join("portable.txt").exists() {
-            return d.join("data");
-        }
+    if let Some(d) = exe_dir
+        && (d.join("tsubame.portable").exists() || d.join("portable.txt").exists())
+    {
+        return d.join("data");
     }
     match std::env::var_os("APPDATA") {
         Some(a) => PathBuf::from(a).join("Tsubame"),
@@ -250,7 +250,7 @@ mod win {
                 let mut len2 = buf.len() as u32;
                 if RegQueryValueExW(h, PCWSTR(n.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut len2)) == ERROR_SUCCESS {
                     let used = (len2 as usize).min(buf.len());
-                    let w: Vec<u16> = buf[..used].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let w: Vec<u16> = buf[..used].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
                     out = Some(String::from_utf16_lossy(&w).trim_end_matches('\0').to_string());
                 }
             }

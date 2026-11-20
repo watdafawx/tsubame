@@ -219,7 +219,7 @@ impl Shared {
         v
     }
 
-    fn row<'a>(snap: &'a Snap, lv: usize, key: u64) -> Option<&'a Row> {
+    fn row(snap: &Snap, lv: usize, key: u64) -> Option<&Row> {
         snap.levels.get(lv)?.rows.iter().find(|r| r.key == key)
     }
 

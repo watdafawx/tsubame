@@ -67,6 +67,7 @@ impl BatchEdit {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn button(ui: &mut Ui, g: &mut dyn Canvas, t: &Theme, id: Id, r: Rect, label: &str, primary: bool, enabled: bool) -> bool {
     let it = ui.interact(id, r, Sense::click());
     let (bg, fg) = match (primary, enabled) {

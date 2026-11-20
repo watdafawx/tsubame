@@ -75,8 +75,7 @@ pub fn fuzzy(query: &str, hay: &str) -> Option<Match> {
             }
             let mut top = NEG;
             let mut arg = usize::MAX;
-            for k in (i - 1)..j {
-                let prev = best[i - 1][k];
+            for (k, &prev) in best[i - 1].iter().enumerate().take(j).skip(i - 1) {
                 if prev == NEG {
                     continue;
                 }

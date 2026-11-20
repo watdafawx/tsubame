@@ -55,7 +55,10 @@ impl View {
         let list_id = pid(self.active, ID_LIST);
         let pressed_now = held && !self.ptr_was_active;
         let released = !held && self.ptr_was_active;
-        if pressed_now {
+        if !held {
+            self.ignore_press = false;
+        }
+        if pressed_now && !self.ignore_press {
             self.ops.message = None;
             self.press = None;
             let keep = super::KEEP_MULTI.with(|k| k.take());
@@ -88,18 +91,17 @@ impl View {
                 self.start_drag();
             }
         }
-        if released {
-            if let Some(p) = self.press.take()
-                && self.drag.is_none()
-            {
-                if let Some(row) = p.collapse {
-                    let t = self.tab_mut();
-                    t.sel.single(&t.store, row);
-                    ui.request_repaint();
-                }
-                if p.slow {
-                    self.begin_rename(ui);
-                }
+        if released
+            && let Some(p) = self.press.take()
+            && self.drag.is_none()
+        {
+            if let Some(row) = p.collapse {
+                let t = self.tab_mut();
+                t.sel.single(&t.store, row);
+                ui.request_repaint();
+            }
+            if p.slow {
+                self.begin_rename(ui);
             }
         }
         released

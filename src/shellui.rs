@@ -394,16 +394,20 @@ impl ShellUi {
 
     /// Prefetch for a grid cell `prio` rows away from the viewport.
     pub fn want_cell(&mut self, row: &RowBuf, root: Option<&str>, prio: f32) {
+        let has_pack = crate::packs::has_icon(row.name_str(), row.is_dir());
         match root {
             Some(r) if !row.is_dir() && is_thumb_ext(row.ext()) => {
                 self.thumb_want(row, r, prio);
+                if !has_pack {
+                    let px = self.grid_icon_px;
+                    let _ = self.icon_lookup(row, root, px, prio, true);
+                }
+            }
+            _ if !has_pack => {
                 let px = self.grid_icon_px;
                 let _ = self.icon_lookup(row, root, px, prio, true);
             }
-            _ => {
-                let px = self.grid_icon_px;
-                let _ = self.icon_lookup(row, root, px, prio, true);
-            }
+            _ => {}
         }
     }
 
@@ -474,6 +478,9 @@ impl ShellUi {
     fn paint_icon(&mut self, g: &mut dyn Canvas, t: &Theme, row: &RowBuf, root: Option<&str>, boxr: Rect) {
         let s = self.pic.icon_dip;
         let ir = Rect::new(boxr.x + (boxr.w - s) / 2.0, boxr.y + (boxr.h - s) / 2.0, s, s);
+        if crate::packs::draw_icon(g, t, row.name_str(), row.is_dir(), row.hidden, ir) {
+            return;
+        }
         let px = self.grid_icon_px;
         match self.icon_lookup(row, root, px, 0.0, false) {
             Some(img) => g.image(&img.key, img.w, img.h, &img.px, ir),

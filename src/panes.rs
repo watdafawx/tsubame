@@ -35,6 +35,7 @@ pub fn ratio_for(pos: f32, len: f32) -> f32 {
 }
 
 /// The two pane rectangles and the bar position for `area`.
+#[cfg(test)]
 pub fn rects(area: Rect, orient: Orient, ratio: f32) -> (Rect, Rect, f32) {
     match orient {
         Orient::Vertical => {

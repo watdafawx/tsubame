@@ -586,7 +586,7 @@ fn entry_group<'a>(entries: &'a [MenuEntry], id: &str) -> Option<&'a str> {
 
 /// Moves the rows of `list` the user put into a user group (`ItemPref.group`)
 /// into that group's list, in the order met. Separators stay behind.
-fn move_to_user_groups<'a>(list: &mut Vec<MenuItem>, menu: &ContextMenu, groups: &mut [(&'a str, Vec<MenuItem>)]) {
+fn move_to_user_groups(list: &mut Vec<MenuItem>, menu: &ContextMenu, groups: &mut [(&str, Vec<MenuItem>)]) {
     let mut moved = false;
     let mut keep = Vec::with_capacity(list.len());
     for it in list.drain(..) {
@@ -1211,8 +1211,10 @@ mod tests {
             .collect();
         // custom.1 is placed in g1; custom.3 sits in the submenu custom.9, which is placed in g1
         let entry = |id: &str, parent: &str, group: &str, kind: EntryKind| MenuEntry { id: id.into(), parent: parent.into(), group: group.into(), kind, source: Source::Custom, name: id.into(), command: "x.exe".into(), ..Default::default() };
-        let mut m = ContextMenu::default();
-        m.entries = vec![entry("custom.1", "", "g1", EntryKind::Item), entry("custom.2", "", "", EntryKind::Item), entry("custom.9", "", "g1", EntryKind::Submenu), entry("custom.3", "custom.9", "", EntryKind::Item)];
+        let mut m = ContextMenu {
+            entries: vec![entry("custom.1", "", "g1", EntryKind::Item), entry("custom.2", "", "", EntryKind::Item), entry("custom.9", "", "g1", EntryKind::Submenu), entry("custom.3", "custom.9", "", EntryKind::Item)],
+            ..Default::default()
+        };
         // no such group yet: everything stays in Custom (End of menu)
         let end = ["Copy", "--", "Open", "--", "Tool A", "Tool B", "Tool C"];
         assert_eq!(labels(&compose_all(&[copy.clone()], &native, &[], &user, &m)), end);

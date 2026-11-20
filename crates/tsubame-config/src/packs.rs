@@ -450,7 +450,7 @@ pub fn parse(file: &str, name: &str, text: &str, checks: &Checks) -> Result<Pack
             return Err(r.err(join(&at, "extensions"), "is required (a list such as [\"rs\", \"toml\"])"));
         }
         let color = r.color(t, &at, "color")?;
-        let icon = r.text(t, &at, "icon", false, MAX_NAME)?.filter(|s| !s.trim().is_empty());
+        let icon = r.text(t, &at, "icon", false, MAX_TEXT)?.filter(|s| !s.trim().is_empty());
         let open_with = match r.text(t, &at, "open_with", false, MAX_TEXT)? {
             None => None,
             Some(line) => {

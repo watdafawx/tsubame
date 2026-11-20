@@ -194,6 +194,7 @@ fn start(argv: &Argv) -> Result<(), String> {
 
 /// Starts the program on a short thread. `done` gets `None` when it started
 /// and the error text when it did not (the caller shows it in the status bar).
+#[cfg(test)]
 pub fn spawn(argv: Argv, done: impl FnOnce(Option<String>) + Send + 'static) {
     let spawned = std::thread::Builder::new().name("custom-entry".into()).spawn(move || {
         let mut cmd = std::process::Command::new(&argv.program);

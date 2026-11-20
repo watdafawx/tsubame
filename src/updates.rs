@@ -219,16 +219,16 @@ pub fn init(env: Env, auto_install: bool, wake_fn: impl Fn() + Send + Sync + 'st
     }
     // apply a staged download at this restart (auto install only)
     let staged = up.staged();
-    if apply_staged_at_start(auto_install, staged.as_ref().map(|s| s.version.as_str()), env!("CARGO_PKG_VERSION")) {
-        if let Some(st) = staged {
-            drop(sh);
-            if up.apply(&st).is_ok() {
-                if let Ok(tsubame_update::WatchOutcome::Started { .. } | tsubame_update::WatchOutcome::RolledBack { .. }) = up.relaunch_watched(&[], Duration::from_secs(30)) {
-                    return StartAction::Exit;
-                }
-            }
-            sh = lock();
+    if apply_staged_at_start(auto_install, staged.as_ref().map(|s| s.version.as_str()), env!("CARGO_PKG_VERSION"))
+        && let Some(st) = staged
+    {
+        drop(sh);
+        if up.apply(&st).is_ok()
+            && let Ok(tsubame_update::WatchOutcome::Started { .. } | tsubame_update::WatchOutcome::RolledBack { .. }) = up.relaunch_watched(&[], Duration::from_secs(30))
+        {
+            return StartAction::Exit;
         }
+        sh = lock();
     }
     drop(sh);
     StartAction::Continue
@@ -395,6 +395,19 @@ pub fn ago(last_unix: u64, now: u64) -> String {
     }
 }
 
+/// `--after-update <pid>`: wait (at most `max`) until the old process is gone, so the
+/// single-instance lock and the files it held are free.
+pub fn wait_for_exit(pid: u32, max: Duration) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            WaitForSingleObject(h, max.as_millis().min(u32::MAX as u128 - 1) as u32);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,21 +501,8 @@ mod tests {
     fn ago_text() {
         assert_eq!(ago(0, 100), "never");
         assert_eq!(ago(100, 130), "just now");
-        assert_eq!(ago(0 + 1000, 1000 + 600), "10 min ago");
+        assert_eq!(ago(1000, 1000 + 600), "10 min ago");
         assert_eq!(ago(1000, 1000 + 3 * 3600), "3 h ago");
         assert_eq!(ago(1000, 1000 + 5 * 86_400), "5 days ago");
-    }
-}
-
-/// `--after-update <pid>`: wait (at most `max`) until the old process is gone, so the
-/// single-instance lock and the files it held are free.
-pub fn wait_for_exit(pid: u32, max: Duration) {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
-    unsafe {
-        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
-            WaitForSingleObject(h, max.as_millis().min(u32::MAX as u128 - 1) as u32);
-            let _ = CloseHandle(h);
-        }
     }
 }

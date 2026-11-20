@@ -141,14 +141,14 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     if stale(&status) {
         let row = pg.next_row(&mut c);
         pg.row_text(row, "Repair", "The helper this points at moved or is gone. Repair points it at this install.", 120.0, ready);
-        if button(pg.ui, pg.g, ID_REPAIR, row.r() - 16.0, row.y + (row.h - t.height_button) / 2.0, "Repair", Look::Primary, ready, true).0 {
-            if let Availability::Ready { shim } = &avail {
-                st.note = Some(match defaultfm::repair(&mut WinRegistry, shim, &cx.env.exe) {
-                    Ok(()) => ("Repaired: folders open in Tsubame again.".to_string(), false),
-                    Err(e) => (format!("Could not repair it: {e}"), true),
-                });
-                st.refresh(&cx.env.install_dir);
-            }
+        if button(pg.ui, pg.g, ID_REPAIR, row.r() - 16.0, row.y + (row.h - t.height_button) / 2.0, "Repair", Look::Primary, ready, true).0
+            && let Availability::Ready { shim } = &avail
+        {
+            st.note = Some(match defaultfm::repair(&mut WinRegistry, shim, &cx.env.exe) {
+                Ok(()) => ("Repaired: folders open in Tsubame again.".to_string(), false),
+                Err(e) => (format!("Could not repair it: {e}"), true),
+            });
+            st.refresh(&cx.env.install_dir);
         }
     }
     let row = pg.next_row(&mut c);

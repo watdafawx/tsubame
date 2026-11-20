@@ -34,6 +34,7 @@ pub fn fit(g: &mut dyn Canvas, s: &str, font: tsubame_ui::Font, w: f32) -> Strin
 
 /// A button of `label`'s width (+ 28) with its left edge at `x`, or right edge when
 /// `right` is true. Returns (clicked, rect).
+#[allow(clippy::too_many_arguments)]
 pub fn button(ui: &mut Ui, g: &mut dyn Canvas, id: Id, x: f32, y: f32, label: &str, look: Look, enabled: bool, right: bool) -> (bool, Rect) {
     let t = ui.theme;
     let w = g.measure(label, t.font().b()) + 28.0;

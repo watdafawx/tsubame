@@ -68,6 +68,7 @@ pub struct DragCtx<'a> {
 }
 
 impl DragCtx<'_> {
+    #[allow(dead_code)]
     pub const NONE: DragCtx<'static> = DragCtx { payload: None, folder: None, released: false };
 }
 
@@ -373,8 +374,8 @@ impl Sidebar {
         let net = self.net_drives();
         let counts = [self.pinned.len(), self.quick_places().len(), self.recents.len(), pc.len(), net.len()];
         let mut first = true;
-        for sec in 0..5 {
-            if rail && (sec == RECENT || counts[sec] == 0) {
+        for (sec, &count) in counts.iter().enumerate() {
+            if rail && (sec == RECENT || count == 0) {
                 continue;
             }
             if rail {
@@ -391,13 +392,13 @@ impl Sidebar {
             }
             let h = if rail { RAIL_ITEM } else { ROW_H };
             match sec {
-                PINNED => (0..counts[sec]).for_each(|i| add(&mut v, &mut y, Kind::Pinned(i), h)),
-                QUICK => (0..counts[sec]).for_each(|i| add(&mut v, &mut y, Kind::Quick(i), h)),
-                RECENT => (0..counts[sec]).for_each(|i| add(&mut v, &mut y, Kind::Recent(i), h)),
+                PINNED => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Pinned(i), h)),
+                QUICK => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Quick(i), h)),
+                RECENT => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Recent(i), h)),
                 PC => pc.iter().for_each(|&i| add(&mut v, &mut y, Kind::Drive(i), if rail { RAIL_ITEM } else { 32.0 })),
                 _ => net.iter().for_each(|&i| add(&mut v, &mut y, Kind::Net(i), if rail { RAIL_ITEM } else { 32.0 })),
             }
-            if counts[sec] == 0 && !rail {
+            if count == 0 && !rail {
                 add(&mut v, &mut y, Kind::Empty(sec), ROW_H);
             }
             if !rail {
@@ -457,12 +458,12 @@ impl Sidebar {
                     PinSlot::Between(k) => pin_slot = Some(k),
                     PinSlot::OnRow(i) => target = Some(Kind::Pinned(i)),
                 }
-            } else if dragging && self.pinned.is_empty() && drag.folder.is_some() && !self.rail {
-                if let Some(h) = items.iter().find(|i| i.kind == Kind::Header(PINNED)) {
-                    let hr = Rect::new(inner.x, h.y - self.scroll + body.y, inner.w, h.h + ROW_H);
-                    if hr.contains_pt(mouse) {
-                        pin_slot = Some(0);
-                    }
+            } else if dragging && self.pinned.is_empty() && drag.folder.is_some() && !self.rail
+                && let Some(h) = items.iter().find(|i| i.kind == Kind::Header(PINNED))
+            {
+                let hr = Rect::new(inner.x, h.y - self.scroll + body.y, inner.w, h.h + ROW_H);
+                if hr.contains_pt(mouse) {
+                    pin_slot = Some(0);
                 }
             }
             if target.is_none() && pin_slot.is_none() && dragging {
@@ -664,24 +665,25 @@ impl Sidebar {
             c.text(glyph, Rect::new(left, r.y, t.icon_sidebar, r.h), f(t.icon_sidebar - 2.0).icon().c(), icon_col);
             let mut right = r.r() - 8.0;
             let renaming = matches!(&self.rename, Some((i, _)) if kind == Kind::Pinned(*i));
-            if let Kind::Pinned(i) = kind {
-                if hover && !renaming {
-                    // grip on the left edge, unpin on the right
-                    for dy in [-3.0f32, 0.0, 3.0] {
-                        c.circle(r.x + 8.0, r.y + r.h / 2.0 + dy, 0.9, t.text_dim);
-                    }
-                    let ub = Rect::new(r.r() - 26.0, r.y + 2.0, 20.0, r.h - 4.0);
-                    let hit = ui.interact(ID.child("unpin").with(i as u64), ub, Sense::click().cursor(Cursor::Hand));
-                    if hit.hovered {
-                        c.round(ub, t.radius_sm, t.hover);
-                    }
-                    c.text(G_UNPIN, ub, f(11.0).icon().c(), t.text_dim);
-                    right = ub.x - 2.0;
-                    if hit.clicked == Some(Button::Left) {
-                        self.unpin(i);
-                        ui.request_repaint();
-                        return None;
-                    }
+            if let Kind::Pinned(i) = kind
+                && hover
+                && !renaming
+            {
+                // grip on the left edge, unpin on the right
+                for dy in [-3.0f32, 0.0, 3.0] {
+                    c.circle(r.x + 8.0, r.y + r.h / 2.0 + dy, 0.9, t.text_dim);
+                }
+                let ub = Rect::new(r.r() - 26.0, r.y + 2.0, 20.0, r.h - 4.0);
+                let hit = ui.interact(ID.child("unpin").with(i as u64), ub, Sense::click().cursor(Cursor::Hand));
+                if hit.hovered {
+                    c.round(ub, t.radius_sm, t.hover);
+                }
+                c.text(G_UNPIN, ub, f(11.0).icon().c(), t.text_dim);
+                right = ub.x - 2.0;
+                if hit.clicked == Some(Button::Left) {
+                    self.unpin(i);
+                    ui.request_repaint();
+                    return None;
                 }
             }
             let name_r = Rect::new(r.x + 36.0, r.y, (right - r.x - 36.0).max(0.0), r.h);
@@ -807,6 +809,7 @@ impl Sidebar {
     }
 
     /// The bookmark the keyboard works on, when the panel has the focus.
+    #[allow(dead_code)]
     pub fn kb_target(&self, ui: &Ui) -> Option<usize> {
         self.kb.filter(|&k| k < self.pinned.len() && ui.has_focus(ID.child("bg")))
     }
@@ -1042,9 +1045,11 @@ mod tests {
 
     #[test]
     fn current_row_prefers_pin_then_place_then_drive() {
-        let mut s = Sidebar::default();
-        s.drives = vec![drive('C', DriveKind::Fixed), drive('Z', DriveKind::Network)];
-        s.places = vec![Place { name: "Downloads", path: "C:\\Users\\me\\Downloads".into() }];
+        let mut s = Sidebar {
+            drives: vec![drive('C', DriveKind::Fixed), drive('Z', DriveKind::Network)],
+            places: vec![Place { name: "Downloads", path: "C:\\Users\\me\\Downloads".into() }],
+            ..Default::default()
+        };
         s.pin_at("C:\\Users\\me\\Downloads", 0);
         assert_eq!(s.current("C:\\Users\\me\\Downloads"), Some(Kind::Pinned(0)));
         s.unpin(0);
@@ -1057,9 +1062,11 @@ mod tests {
 
     #[test]
     fn rail_has_no_headers_and_full_has_all_sections() {
-        let mut s = Sidebar::default();
-        s.drives = vec![drive('C', DriveKind::Fixed)];
-        s.places = vec![Place { name: "Home", path: "C:\\Users\\me".into() }];
+        let mut s = Sidebar {
+            drives: vec![drive('C', DriveKind::Fixed)],
+            places: vec![Place { name: "Home", path: "C:\\Users\\me".into() }],
+            ..Default::default()
+        };
         s.pin_at("C:\\a", 0);
         s.push_recent("C:\\r");
         let rail = s.items(true);

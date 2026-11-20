@@ -779,10 +779,10 @@ fn prune_invalid(table: &mut toml::Table, text: &str) -> Vec<String> {
     for k in keys {
         let mut path = vec![k.clone()];
         let Some(v) = table.get_mut(&k) else { continue };
-        if let Some(err) = probe(&path, v) {
-            if prune_value(&mut path, v, err, text, &mut out) {
-                table.remove(&k);
-            }
+        if let Some(err) = probe(&path, v)
+            && prune_value(&mut path, v, err, text, &mut out)
+        {
+            table.remove(&k);
         }
     }
     out
@@ -821,12 +821,11 @@ fn prune_value(path: &mut Vec<String>, v: &mut toml::Value, err: String, text: &
             let before = out.len();
             for k in keys {
                 path.push(k.clone());
-                if let Some(child) = t.get_mut(&k) {
-                    if let Some(e) = probe(path, child) {
-                        if prune_value(path, child, e, text, out) {
-                            t.remove(&k);
-                        }
-                    }
+                if let Some(child) = t.get_mut(&k)
+                    && let Some(e) = probe(path, child)
+                    && prune_value(path, child, e, text, out)
+                {
+                    t.remove(&k);
                 }
                 path.pop();
             }

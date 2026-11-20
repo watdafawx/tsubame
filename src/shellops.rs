@@ -675,6 +675,7 @@ fn opts_for(background: bool, paths: &[String]) -> (MenuOpts, Vec<Option<Extra>>
 
 /// The item menu for `paths`: own-drawn at client DIP `anchor` (screen px
 /// `sx, sy` for the shell), or the native popup with `TSUBAME_NATIVE_MENU=1`.
+#[allow(clippy::too_many_arguments)]
 pub fn open_item_menu(a: &mut App, paths: Vec<String>, folders: Vec<String>, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
     let folder = a.view.tab().path.clone();
     if crate::ctxui::own_enabled() {

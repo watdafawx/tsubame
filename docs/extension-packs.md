@@ -170,7 +170,7 @@ gone or switched off falls back to the Tsubame theme.
 id = "code"
 extensions = ["rs", "py"]        # required: no dot, any case, no wildcards
 color = "#268bd2"                # the file's name in the list and grid
-icon = "rust"                    # reserved for icon packs; read and kept, not drawn yet
+icon = "code"                    # glyph name, U+E943, badge:RS, or .ico/.png path
 open_with = '"C:\Tools\code.exe" --goto {path}'   # Enter and double click start this
 ```
 
@@ -181,11 +181,22 @@ spaces), then arguments with the same tokens as a command. It replaces the
 system's default program for Enter and double click; "Open" in the context menu
 and Open with still use the shell.
 
+`icon` replaces the file's icon in both details and grid views (content
+thumbnails still draw over it in grid view once loaded) and accepts four forms:
+
+| Form | Example | What is drawn |
+|---|---|---|
+| Image file | `"icons/rust.ico"`, `'C:\Icons\rust.png'` | `.ico` or `.png` file (relative to the `packs` folder without `..`, or an absolute path; decoded once at pack load, capped at 64 px / 1 MB total cache). A missing or unreadable file adds a warning and falls back to the shell icon. |
+| Built-in glyph name | `"code"`, `"doc"`, `"image"`, `"archive"` | Segoe Fluent Icons glyph tinted with the rule's `color` (or accent). Built-in names: `code`, `doc` (`document`, `text`), `image` (`picture`, `photo`), `archive` (`zip`), `audio` (`music`), `video` (`film`), `terminal` (`shell`), `config` (`gear`, `settings`), `data` (`table`), `book` (`markdown`), `lock` (`key`), `web` (`globe`), `link`, `star`, `tag`, `font`, `app` (`program`), `pdf`, `bug`, `tool` (`wrench`), `file`, `folder`. |
+| Icon-font codepoint | `"U+E943"` | Any Segoe Fluent Icons Private Use Area codepoint (`U+E000`–`U+F8FF`). |
+| Badge | `"badge:RS"`, `"rust"`, `"zig"` | A crisp rounded badge tinted with `color` (or accent): `badge:<1-3 ASCII chars>`, or any other plain name (1–3 chars as-is, longer names take the first 2 letters, uppercased). |
+
 ## What a pack costs
 
 Nothing when there is no `packs` folder. With packs: reading and parsing the
 files at start-up (too small to see in the cold-start measurement: both example
 packs together measured within the run-to-run spread, `docs/bench-log.md`), and
-one registry entry per item. File colours are looked up from a list built once per registry change,
-so drawing a row costs one short comparison per rule extension and allocates
-nothing.
+one registry entry per item. File colours and icons are looked up from a table
+built once per registry change (image icons are decoded once at load into a
+bounded LRU cache), so drawing a row costs one short comparison per rule
+extension and allocates nothing.

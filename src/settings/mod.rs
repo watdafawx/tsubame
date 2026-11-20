@@ -260,7 +260,7 @@ impl Settings {
                 g.round_stroke(r.pad(1.0), t.radius_md, t.focus, 1.0);
             }
             g.text(p.glyph(), Rect::new(r.x + 10.0, r.y, 18.0, r.h), f(14.0).icon().c(), if on { t.text } else { t.text_dim });
-            g.text(p.title(), Rect::new(r.x + 36.0, r.y, r.w - 40.0, r.h), t.font_md(), if on { t.text } else { t.text });
+            g.text(p.title(), Rect::new(r.x + 36.0, r.y, r.w - 40.0, r.h), t.font_md(), t.text);
             let mut go = it.clicked.is_some();
             for (qi, ev) in ui.key_input(ID_NAV.with(p as u64)) {
                 if let tsubame_ui::Event::KeyDown { key: tsubame_ui::Key::Enter | tsubame_ui::Key::Space, mods, .. } = ev

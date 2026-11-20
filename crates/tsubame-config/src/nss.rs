@@ -1117,7 +1117,7 @@ shell
         let r = parse(SAMPLE);
         let (tools, code, git, hash) = (r.entries[0].id.clone(), r.entries[1].id.clone(), r.entries[2].id.clone(), r.entries[4].id.clone());
         // one child kept: the submenu comes with it, the separator before the unkept child goes
-        let k = r.keep_ids(&[code.clone()]);
+        let k = r.keep_ids(std::slice::from_ref(&code));
         assert_eq!(k.entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec![tools.clone(), code.clone()]);
         assert_eq!(k.imported, 2);
         // children either side of the separator keep it
@@ -1126,7 +1126,7 @@ shell
         assert!(k.entries[2].is_separator());
         // only the item after the submenu: no submenu
         let np = r.entries.last().unwrap().id.clone();
-        let k = r.keep_ids(&[np.clone()]);
+        let k = r.keep_ids(std::slice::from_ref(&np));
         assert_eq!(k.entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec![np]);
         assert!(r.keep_ids(&[]).entries.is_empty());
         // the source lines survive

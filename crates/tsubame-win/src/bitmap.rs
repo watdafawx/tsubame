@@ -237,6 +237,84 @@ pub fn normalize_shell(px: &mut [u32]) {
     }
 }
 
+/// Maximum icon/image file size [`load_file`] will read (1 MiB).
+pub const MAX_IMAGE_FILE_BYTES: u64 = 1 << 20;
+
+/// Loads an icon or image file (`.ico`, `.png`, `.bmp`, ...) as premultiplied
+/// BGRA, fitted within `max_px` x `max_px`. Returns `None` if the file is
+/// missing, larger than [`MAX_IMAGE_FILE_BYTES`], or cannot be decoded.
+pub fn load_file(path: &std::path::Path, max_px: u32) -> Option<Bitmap> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_IMAGE_FILE_BYTES {
+        return None;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext.eq_ignore_ascii_case("ico")
+        && let Some(bmp) = load_ico(path, max_px)
+    {
+        return Some(bmp);
+    }
+    load_wic(path, max_px)
+}
+
+fn load_ico(path: &std::path::Path, max_px: u32) -> Option<Bitmap> {
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, IMAGE_ICON, LR_LOADFROMFILE, LoadImageW};
+    use windows::core::PCWSTR;
+    let w = crate::wide(&path.to_string_lossy());
+    let sz = max_px.clamp(16, 256) as i32;
+    let h = unsafe { LoadImageW(None, PCWSTR(w.as_ptr()), IMAGE_ICON, sz, sz, LR_LOADFROMFILE) }.ok()?;
+    let hicon = HICON(h.0);
+    let bmp = from_hicon(hicon);
+    unsafe {
+        let _ = DestroyIcon(hicon);
+    }
+    bmp.map(|b| b.fit_within(max_px))
+}
+
+fn load_wic(path: &std::path::Path, max_px: u32) -> Option<Bitmap> {
+    use windows::Win32::Foundation::{GENERIC_READ, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize};
+    use windows::core::PCWSTR;
+
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let _guard = if hr == S_OK || hr == S_FALSE {
+        ComGuard(true)
+    } else if hr == RPC_E_CHANGED_MODE {
+        ComGuard(false)
+    } else {
+        return None;
+    };
+
+    let wpath = crate::wide(&path.to_string_lossy());
+    unsafe {
+        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let decoder = factory.CreateDecoderFromFilename(PCWSTR(wpath.as_ptr()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let src = WICConvertBitmapSource(&GUID_WICPixelFormat32bppPBGRA, &frame).ok()?;
+        let (mut w, mut h) = (0u32, 0u32);
+        src.GetSize(&mut w, &mut h).ok()?;
+        if w == 0 || h == 0 || w > 4096 || h > 4096 {
+            return None;
+        }
+        let stride = w.checked_mul(4)?;
+        let len = (stride as usize).checked_mul(h as usize)?;
+        let mut buf = vec![0u8; len];
+        src.CopyPixels(std::ptr::null(), stride, &mut buf).ok()?;
+        let px: Vec<u32> = buf.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+        Some(Bitmap { w, h, px }.fit_within(max_px))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +363,92 @@ mod tests {
         let mut straight = [0x80ff_ffffu32];
         normalize_shell(&mut straight);
         assert_eq!(straight, [0x8080_8080]);
+    }
+
+    fn test_ico_1x1(b: u8, g: u8, r: u8, a: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        // ICONDIR: reserved=0, type=1 (ICO), count=1
+        out.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
+        // ICONDIRENTRY: 1x1, 0 colors, reserved=0, planes=1, bpp=32, bytes=48, offset=22
+        out.extend_from_slice(&[1, 1, 0, 0, 1, 0, 32, 0]);
+        out.extend_from_slice(&48u32.to_le_bytes());
+        out.extend_from_slice(&22u32.to_le_bytes());
+        // BITMAPINFOHEADER (40 bytes): width=1, height=2 (color+mask), planes=1, bpp=32
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&1i32.to_le_bytes());
+        out.extend_from_slice(&2i32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&32u16.to_le_bytes());
+        out.extend_from_slice(&[0u8; 24]);
+        // 1x1 BGRA pixel + 4-byte padded AND mask row (0 = opaque)
+        out.extend_from_slice(&[b, g, r, a, 0, 0, 0, 0]);
+        out
+    }
+
+    fn test_png_1x1(r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut c = 0xffff_ffffu32;
+            for &byte in data {
+                c ^= byte as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+                }
+            }
+            !c
+        }
+        fn chunk(out: &mut Vec<u8>, ty: &[u8; 4], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let start = out.len();
+            out.extend_from_slice(ty);
+            out.extend_from_slice(data);
+            let crc = crc32(&out[start..]);
+            out.extend_from_slice(&crc.to_be_bytes());
+        }
+        let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        // IHDR: 1x1, 8-bit RGBA (color type 6)
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        // IDAT: zlib stored block for 1 scanline [filter=0, r, g, b, a]
+        let raw = [0u8, r, g, b, a];
+        let (mut s1, mut s2) = (1u32, 0u32);
+        for &x in &raw {
+            s1 = (s1 + x as u32) % 65521;
+            s2 = (s2 + s1) % 65521;
+        }
+        let adler = (s2 << 16) | s1;
+        let mut z = vec![0x78, 0x01, 0x01, 5, 0, !5u8, !0u8];
+        z.extend_from_slice(&raw);
+        z.extend_from_slice(&adler.to_be_bytes());
+        chunk(&mut out, b"IDAT", &z);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn load_file_decodes_ico_and_png_and_rejects_bad_files() {
+        let dir = std::env::temp_dir().join(format!("tsubame-bmp-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ico = dir.join("a.ico");
+        std::fs::write(&ico, test_ico_1x1(0x33, 0x66, 0x99, 0xff)).unwrap();
+        let b = load_file(&ico, 32).expect("ico decoded");
+        assert!(b.w > 0 && b.h > 0 && b.w <= 32 && b.h <= 32);
+
+        let png = dir.join("b.png");
+        std::fs::write(&png, test_png_1x1(0x80, 0x40, 0x20, 0xff)).unwrap();
+        let b = load_file(&png, 32).expect("png decoded");
+        assert_eq!((b.w, b.h), (1, 1));
+        assert_eq!(b.px[0], 0xff80_4020, "premultiplied BGRA 0xAARRGGBB");
+
+        let bad = dir.join("bad.png");
+        std::fs::write(&bad, b"not a png").unwrap();
+        assert!(load_file(&bad, 32).is_none());
+        assert!(load_file(&dir.join("missing.ico"), 32).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

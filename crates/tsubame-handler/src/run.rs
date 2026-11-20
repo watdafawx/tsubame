@@ -338,10 +338,10 @@ mod tests {
         fn sleep_ms(&mut self, _ms: u32) {
             self.slept += 1;
             self.misses += 1;
-            if let Some((n, f)) = &self.appear_after {
-                if self.misses >= *n {
-                    self.files.insert(f.clone());
-                }
+            if let Some((n, f)) = &self.appear_after
+                && self.misses >= *n
+            {
+                self.files.insert(f.clone());
             }
         }
         fn now_secs(&self) -> u64 {
