@@ -68,6 +68,8 @@ static CUSTOM_ERRS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub fn set_menu_entries(saved: &[tsubame_config::MenuEntry]) {
     if let Ok(mut m) = MENU.write() {
         *m = tsubame_config::menu::effective(saved);
+        // the enabled pack entries ride along; they are never part of the saved list
+        m.extend(crate::packs::menu_entries());
     }
 }
 
@@ -704,6 +706,7 @@ fn open_own(a: &mut App, t: crate::ctxui::Target) {
     a.view.ctx = None;
     let mut menu = a.view.prefs.context_menu.clone();
     menu.entries = tsubame_config::menu::effective(&menu.entries);
+    menu.entries.extend(crate::packs::menu_entries());
     let icon_px = ((16.0 * a.view.dpi / 96.0 * (a.ui.theme.font_size_sm / 12.0).max(1.0)).round() as u32).clamp(16, 64);
     let dual = a.view.dual();
     let paste_ok = crate::ctxui::clipboard_has_files();
@@ -721,7 +724,8 @@ fn ctx_save_edits(a: &mut App) {
     if edited || learned {
         let saved = &mut a.view.prefs.context_menu;
         if edited {
-            saved.entries = c.menu.entries.clone();
+            // pack entries come from the packs folder each time; they are not saved
+            saved.entries = c.menu.entries.iter().filter(|e| e.source != tsubame_config::menu::Source::Pack).cloned().collect();
         }
         saved.items = c.menu.items.clone();
         a.view.apply_prefs(&mut a.ui, crate::settings::C_MENU);
@@ -747,6 +751,10 @@ pub fn open_background_menu(a: &mut App, folder: String, sx: i32, sy: i32, exten
 }
 
 pub fn after_frame(hwnd: HWND) {
+    // programs a pack command or file-type rule queued this frame
+    for argvs in with(|a| std::mem::take(&mut a.view.pack_runs)).unwrap_or_default() {
+        start_custom(hwnd.0 as isize, argvs);
+    }
     let extended = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     let drive = with(|a| a.view.side.shell_menu.take()).flatten();
     if let Some((path, anchor)) = drive {

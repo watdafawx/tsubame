@@ -7,6 +7,8 @@ use tsubame_ui::{Id, Rect};
 
 const ID_OPEN: Id = Id::new("adv-open");
 const ID_RESET: Id = Id::new("adv-reset");
+const ID_PACKS_OPEN: Id = Id::new("adv-packs-open");
+const ID_PACKS_RELOAD: Id = Id::new("adv-packs-reload");
 const ID_YES: Id = Id::new("adv-reset-yes");
 const ID_NO: Id = Id::new("adv-reset-no");
 
@@ -33,6 +35,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
     let row = pg.next_row(&mut c);
     pg.row_text(row, "Settings file", &cx.env.config_path.display().to_string(), 20.0, true);
+
+    packs_section(pg, cx);
 
     pg.section("Diagnostics");
     let mut c = pg.card(2, 52.0);
@@ -70,6 +74,40 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         if no {
             st.confirm = false;
         }
+    }
+}
+
+/// The extension packs folder: what loaded, what was skipped and why (`docs/extension-packs.md`).
+/// Packs are read at start-up and by "Reload packs"; nothing watches the folder.
+fn packs_section(pg: &mut Pg, cx: &mut Cx) {
+    let t = pg.t;
+    let rep = crate::packs::report();
+    pg.section("Extension packs");
+    let mut c = pg.card(1 + rep.packs.len(), 52.0);
+    let row = pg.next_row(&mut c);
+    let desc = if rep.dir_exists { rep.dir.display().to_string() } else { format!("{} (create this folder and add .toml files)", rep.dir.display()) };
+    let title = match (rep.packs.len(), rep.errors.len()) {
+        (0, 0) => "No packs loaded".to_string(),
+        (n, 0) => format!("{n} pack{} loaded", if n == 1 { "" } else { "s" }),
+        (n, e) => format!("{n} pack{} loaded, {e} skipped", if n == 1 { "" } else { "s" }),
+    };
+    pg.row_text(row, &title, &desc, 290.0, true);
+    let (reload, r) = button(pg.ui, pg.g, ID_PACKS_RELOAD, row.r() - 16.0, row.y + (row.h - t.height_button) / 2.0, "Reload packs", Look::Normal, true, true);
+    if reload {
+        cx.reload_packs = true;
+    }
+    if button(pg.ui, pg.g, ID_PACKS_OPEN, r.x - 8.0, row.y + (row.h - t.height_button) / 2.0, "Open folder", Look::Normal, rep.dir_exists, true).0 {
+        cx.open.push(rep.dir.display().to_string());
+    }
+    for p in &rep.packs {
+        let row = pg.next_row(&mut c);
+        let part = |n: usize, one: &str, many: &str| (n > 0).then(|| format!("{n} {}", if n == 1 { one } else { many }));
+        let parts: Vec<String> = [part(p.commands, "command", "commands"), part(p.menus, "menu entry", "menu entries"), part(p.themes, "theme", "themes"), part(p.rules, "file rule", "file rules")].into_iter().flatten().collect();
+        let ver = if p.version.is_empty() { String::new() } else { format!(" v{}", p.version) };
+        pg.row_text(row, &format!("{}{ver}", p.title), &format!("{} \u{b7} {}", p.id, parts.join(", ")), 20.0, true);
+    }
+    for e in rep.errors.iter().chain(&rep.warnings) {
+        pg.note("\u{E7BA}", e, rep.errors.contains(e));
     }
 }
 

@@ -1,0 +1,29 @@
+# Open in terminal: one command, a context-menu entry that runs it, and a key.
+# Copy this file to <settings folder>\packs\ (Settings > Advanced > Extension packs
+# has an "Open folder" button), then press "Reload packs" or restart Tsubame.
+# Format reference: docs/extension-packs.md
+
+[pack]
+title = "Open in terminal"
+version = "1.0"
+description = "Windows Terminal in the current folder: from the palette, a key and the right-click menu."
+author = "Tsubame"
+
+# A command shows in the command palette and in Settings > Keys (where the key can
+# be changed). {dir} is the folder in front. It runs wt.exe without a shell, so a
+# folder name with spaces or & stays one argument.
+[[command]]
+id = "terminal"
+title = "Windows Terminal here"
+program = "wt.exe"
+args = "-d {dir}"
+keys = ["Ctrl+Alt+T"]
+
+# A context-menu entry (shown after Tsubame's own rows, tagged "Pack"). With
+# `command` it runs that command's program and arguments. {path} is the folder
+# you right-clicked, {dir} the folder in front.
+[[menu]]
+id = "terminal"
+label = "Windows Terminal here"
+command = "terminal"
+show = ["folders", "background"]

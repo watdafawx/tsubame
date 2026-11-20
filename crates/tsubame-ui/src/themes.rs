@@ -5,6 +5,7 @@
 //! `DARK` / `LIGHT` tokens, not derived.
 
 use crate::theme::{DARK, LIGHT, Theme};
+use std::sync::{Mutex, RwLock};
 
 /// Colours are `0xRRGGBB`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +83,66 @@ pub fn find(id: &str) -> Option<&'static Palette> {
         "light" => "tsubame-light",
         other => other,
     };
-    THEMES.iter().find(|t| t.id == key)
+    THEMES.iter().find(|t| t.id == key).or_else(|| EXTRA.read().ok().and_then(|e| e.iter().copied().find(|t| t.id == key)))
+}
+
+// ---- themes from extension packs ---------------------------------------------------------
+
+/// The themes extension packs add (`docs/extension-packs.md`), listed after the built-in ones.
+static EXTRA: RwLock<Vec<&'static Palette>> = RwLock::new(Vec::new());
+/// Every pack palette ever made. A palette is leaked once (`Palette` holds `&'static str`), and a
+/// reload that makes the same one again reuses it, so the leak is bounded by the distinct themes seen.
+static MADE: Mutex<Vec<&'static Palette>> = Mutex::new(Vec::new());
+
+/// A theme from a pack: the colours are already filled in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackPalette {
+    pub id: String,
+    pub name: String,
+    pub dark: bool,
+    pub bg: u32,
+    pub panel: u32,
+    pub surface: u32,
+    pub text: u32,
+    pub muted: u32,
+    pub accent: u32,
+}
+
+/// Replaces the pack themes. Ids that clash with a built-in theme or repeat are skipped.
+pub fn set_extra(list: &[PackPalette]) {
+    let mut out: Vec<&'static Palette> = Vec::with_capacity(list.len());
+    if let Ok(mut made) = MADE.lock() {
+        for pp in list {
+            if THEMES.iter().any(|t| t.id == pp.id) || out.iter().any(|t| t.id == pp.id) {
+                continue;
+            }
+            let same = |m: &&&'static Palette| {
+                m.id == pp.id && m.name == pp.name && m.dark == pp.dark && (m.bg, m.panel, m.surface, m.text, m.muted, m.accent) == (pp.bg, pp.panel, pp.surface, pp.text, pp.muted, pp.accent)
+            };
+            let pal = match made.iter().find(same) {
+                Some(p) => *p,
+                None => {
+                    let leak = |s: &str| -> &'static str { Box::leak(s.to_string().into_boxed_str()) };
+                    let p: &'static Palette = Box::leak(Box::new(Palette { id: leak(&pp.id), name: leak(&pp.name), dark: pp.dark, bg: pp.bg, panel: pp.panel, surface: pp.surface, text: pp.text, muted: pp.muted, accent: pp.accent }));
+                    made.push(p);
+                    p
+                }
+            };
+            out.push(pal);
+        }
+    }
+    if let Ok(mut e) = EXTRA.write() {
+        *e = out;
+    }
+}
+
+/// Every theme the picker shows: the built-in ones, then the packs'.
+pub fn all() -> Vec<&'static Palette> {
+    let mut v: Vec<&'static Palette> = THEMES.iter().collect();
+    if let Ok(e) = EXTRA.read() {
+        v.extend(e.iter().copied());
+    }
+    v
 }
 
 /// The Tsubame theme of the same brightness (what "Light" / "Dark" colour mode picks).
@@ -244,5 +304,37 @@ mod tests {
         assert_eq!(mix(0x102030, 0xffffff, 1.0), 0x102030);
         assert_eq!(mix(0x102030, 0xffffff, 0.0), 0xffffff);
         assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    fn pp(id: &str, bg: u32) -> PackPalette {
+        PackPalette { id: id.into(), name: "Mine".into(), dark: true, bg, panel: 2, surface: 3, text: 4, muted: 5, accent: 6 }
+    }
+
+    #[test]
+    fn pack_themes_are_found_listed_and_replaced() {
+        let id = "pack.t-find.mine";
+        assert!(find(id).is_none());
+        set_extra(&[pp(id, 1), pp("tsubame-dark", 9), pp(id, 7)]);
+        let p = find(id).expect("found");
+        assert_eq!((p.name, p.bg, p.dark), ("Mine", 1, true), "a repeated id and a built-in id are skipped");
+        assert_eq!(all().len(), THEMES.len() + 1);
+        assert_eq!(find("tsubame-dark").unwrap().bg, 0x0b0f16);
+        assert_eq!(Theme::from_palette(p).bg, 1);
+        // the same theme again is the same leaked palette; a changed one is a new one
+        let again = {
+            set_extra(&[pp(id, 1)]);
+            find(id).unwrap() as *const Palette
+        };
+        assert_eq!(again, p as *const Palette);
+        set_extra(&[pp(id, 8)]);
+        assert_eq!(find(id).unwrap().bg, 8);
+        set_extra(&[]);
+        assert!(find(id).is_none());
+        assert_eq!(all().len(), THEMES.len());
     }
 }

@@ -37,6 +37,10 @@ impl View {
     /// Startup: the loaded config becomes the view's settings. `apply_hide` / `theme_from_cfg`
     /// are false in a measurement run (it shows every file and follows the system theme).
     pub fn set_prefs(&mut self, cfg: &tsubame_config::Config, apply_hide: bool, theme_from_cfg: bool) {
+        // extension packs first: their themes and commands must exist before the config names them
+        crate::packs::load(&self.env.data_dir);
+        crate::ext::apply_disabled(&cfg.extensions.disabled);
+        crate::packs::sync();
         self.prefs = cfg.clone();
         if theme_from_cfg && let Some(p) = themes::find(&cfg.appearance.theme) {
             self.theme_id = p.id.to_string();
@@ -89,11 +93,26 @@ impl View {
         if bits & C_UPDATES != 0 {
             crate::updates::set_auto_install(self.prefs.updates.auto_install);
         }
-        if bits & C_MENU != 0 {
+        // a pack switched on or off, or reloaded: its themes and menu entries follow
+        let packs_changed = crate::packs::sync();
+        if bits & C_MENU != 0 || packs_changed {
             crate::shellops::set_menu_entries(&self.prefs.context_menu.entries);
         }
         self.config_dirty = true;
         ui.request_repaint();
+    }
+
+    /// Settings > Advanced > Reload packs: reads the packs folder again (no watching, no timers).
+    pub fn reload_packs(&mut self, ui: &mut Ui) {
+        crate::packs::load(&self.env.data_dir);
+        crate::ext::apply_disabled(&self.prefs.extensions.disabled);
+        self.keymap = KeyMap::from_overrides(&self.prefs.keys.overrides).0;
+        let r = crate::packs::report();
+        self.ops.message = Some(match (r.packs.len(), r.errors.len()) {
+            (n, 0) => format!("Loaded {n} pack{}", if n == 1 { "" } else { "s" }),
+            (n, e) => format!("Loaded {n} pack{}, {e} skipped (see Settings > Advanced)", if n == 1 { "" } else { "s" }),
+        });
+        self.apply_prefs(ui, C_KEYS | C_APPEARANCE);
     }
 
     /// Startup: hands the saved context menu to the shell-menu code.
@@ -230,14 +249,18 @@ impl View {
             reset_all: false,
             restart: false,
             rollback: false,
+            reload_packs: false,
             message: None,
             private_bytes: self.private_bytes,
         };
         st.paint(ui, g, area, &mut cx);
-        let Cx { changed, open, reset_all, restart, rollback, message, .. } = cx;
+        let Cx { changed, open, reset_all, restart, rollback, reload_packs, message, .. } = cx;
         self.settings = Some(st);
         if changed != 0 {
             self.apply_prefs(ui, changed);
+        }
+        if reload_packs {
+            self.reload_packs(ui);
         }
         self.open_paths.extend(open);
         if let Some(m) = message {

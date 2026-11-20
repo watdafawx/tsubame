@@ -265,6 +265,8 @@ pub struct View {
     pub rename_request: bool,
     /// files to open with their default handler (main runs them on a worker)
     pub open_paths: Vec<String>,
+    /// programs a pack command or a file-type rule wants started (`shellops::after_frame` runs them)
+    pub pack_runs: Vec<Vec<crate::custom_cmd::Argv>>,
     pub win_cmd: Option<WinCmd>,
     /// last tab closed: the window should close
     pub quit: bool,
@@ -374,6 +376,7 @@ impl View {
             drag_keys: None,
             rename_request: false,
             open_paths: Vec::new(),
+            pack_runs: Vec::new(),
             win_cmd: None,
             quit: false,
             other: None,
@@ -716,7 +719,16 @@ impl View {
     pub fn activate(&mut self, pos: usize) {
         self.press = None;
         if let Some((path, dir)) = self.tab().entry_at(pos) {
-            if dir { self.go(&path) } else { self.open_paths.push(path) }
+            if dir {
+                self.go(&path);
+            } else {
+                // a file-type rule of a pack may name the program
+                match crate::packs::open_with(&path) {
+                    Some(Ok(argvs)) => self.pack_runs.push(argvs),
+                    Some(Err(m)) => self.ops.message = Some(m),
+                    None => self.open_paths.push(path),
+                }
+            }
         }
     }
 
@@ -1975,7 +1987,7 @@ impl ListSource for Rows<'_> {
                 g.round_a(ic, 2.0, col, 0.35);
             }
         }
-        let name_c = if row.hidden { t.text_dim } else { t.text };
+        let name_c = if row.hidden { t.text_dim } else { crate::packs::name_color(row.name_str(), row.is_dir()).unwrap_or(t.text) };
         g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, (sp[0].1 - 32.0 - 8.0).max(0.0), r.h), t.font(), name_c);
         // a column not shown has no width: nothing to format or draw
         if sp[1].1 > 0.0 {
@@ -2096,7 +2108,7 @@ impl GridSource for Tiles<'_> {
         let name = row.name_str();
         let lw = r.w - 8.0;
         let n = label_split(self.labels, c, name, self.font, lw);
-        let color = if row.hidden { t.text_dim } else { t.text };
+        let color = if row.hidden { t.text_dim } else { crate::packs::name_color(name, row.is_dir()).unwrap_or(t.text) };
         let y = boxr.b() + 6.0;
         let (l1, l2) = name.split_at(n);
         c.text(l1, Rect::new(r.x + 4.0, y, lw, LABEL_LINE), self.font, color);

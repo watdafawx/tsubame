@@ -7,8 +7,9 @@ Tests: `cargo test -p tsubame-ext-api` (registry semantics) and the app's
 
 Built-in features are the first extensions. They register at start-up
 through the same `Registry::add` a TOML pack or a wasm plugin will use, and
-the app dispatches through the registry. Tier 1 packs and tier 2 plugins are
-not loaded yet; see `docs/PLAN.md` section 4.
+the app dispatches through the registry. Tier 1 TOML packs load through it too
+(`docs/extension-packs.md`); tier 2 wasm plugins are not loaded yet, see
+`docs/PLAN.md` section 4.
 
 ## The API in one screen
 

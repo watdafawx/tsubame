@@ -7368,3 +7368,19 @@ exiting); no Tsubame thread woke. The registry work at start-up, timed in an opt
 larger than that and the fastest runs are equal, so it is run-to-run spread on the shared machine, not the
 registry. Frames read the column set and command list from per-generation copies (no registry access, no
 allocation; the header lost three per-frame `Vec`s).
+
+
+## X2: extension packs (tier-1 loader)
+
+Release build on rig, `TSUBAME_GPU_PARK=0`, `--bench --dir <200 empty files>`, n=10 per row, own data dir each.
+
+| Case | First painted frame (median, min, max) | Exe |
+|---|---|---|
+| No `packs` folder | 56.8 ms, 51.6 - 62.1 | 3,501,568 B (main: 3.38 MB) |
+| Both example packs (`open-in-terminal`, `solarized-lite`) | 53.2 ms, 51.6 - 77.2 | same |
+
+Pack parse and register cost is inside the run-to-run spread (the medians differ by less than the spread), well under
+the 100 ms budget. Idle wake-ups: nothing is scheduled by packs (no watcher, no timer); the folder is read at
+start-up and on Reload packs only. Another benchmark loop was running on rig during part of these runs, so the
+numbers carry some extra noise. Rig evidence: `docs/shots/x2-palette.png`, `x2-keybind.png`, `x2-menu.png`,
+`x2-theme.png`.
