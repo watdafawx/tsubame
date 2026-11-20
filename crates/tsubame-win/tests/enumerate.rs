@@ -322,11 +322,13 @@ fn cancel_delivers_no_stale_batches() {
         fixture.file(&format!("f{i:05}.bin"), 1);
     }
 
-    // A slow sink: it forwards the message, then blocks the worker, so the test
-    // can cancel while the worker is provably inside a send.
+    // A gated sink: it forwards the first batch and then blocks on `release`
+    // until the test thread has issued the cancel, eliminating timing races on
+    // contended CI runners. `cancel_seen` is checked *before* forwarding so the
+    // pre-cancel batch itself cannot race with the test setting `cancel_seen`.
     struct SlowSink {
         tx: Sender<Message>,
-        in_send: Arc<AtomicBool>,
+        release: Option<Receiver<()>>,
         cancel_seen: Arc<AtomicBool>,
         batches_after_cancel: Arc<AtomicUsize>,
     }
@@ -334,14 +336,13 @@ fn cancel_delivers_no_stale_batches() {
     impl Sink for SlowSink {
         fn send(&mut self, msg: Message) -> bool {
             let is_batch = matches!(msg, Message::Batch(_));
-            // Set before forwarding, so the test sees it as soon as it receives.
-            self.in_send.store(true, Ordering::SeqCst);
-            let delivered = self.tx.send(msg).is_ok();
             if is_batch && self.cancel_seen.load(Ordering::SeqCst) {
                 self.batches_after_cancel.fetch_add(1, Ordering::SeqCst);
             }
-            std::thread::sleep(Duration::from_millis(50));
-            self.in_send.store(false, Ordering::SeqCst);
+            let delivered = self.tx.send(msg).is_ok();
+            if is_batch && let Some(gate) = self.release.take() {
+                let _ = gate.recv();
+            }
             delivered
         }
     }
@@ -349,7 +350,7 @@ fn cancel_delivers_no_stale_batches() {
     let token = CancelToken::new();
     let generation = token.next_generation();
     let (tx, rx) = channel();
-    let in_send = Arc::new(AtomicBool::new(false));
+    let (gate_tx, gate_rx) = channel();
     let cancel_seen = Arc::new(AtomicBool::new(false));
     let batches_after_cancel = Arc::new(AtomicUsize::new(0));
     let enumerator = Enumerator::start_with(
@@ -358,7 +359,7 @@ fn cancel_delivers_no_stale_batches() {
         token.clone(),
         SlowSink {
             tx,
-            in_send: Arc::clone(&in_send),
+            release: Some(gate_rx),
             cancel_seen: Arc::clone(&cancel_seen),
             batches_after_cancel: Arc::clone(&batches_after_cancel),
         },
@@ -372,10 +373,11 @@ fn cancel_delivers_no_stale_batches() {
         Err(e) => panic!("no first batch: {e}"),
     };
     assert_eq!(first.len(), 256);
-    // The worker is now sleeping inside send(); cancel while it cannot send.
-    assert!(in_send.load(Ordering::SeqCst), "worker should be inside send()");
+    // The worker is now parked inside SlowSink::send() on the first batch and
+    // cannot enumerate or send another batch until we drop `gate_tx`.
     cancel_seen.store(true, Ordering::SeqCst);
     token.cancel();
+    drop(gate_tx);
 
     let mut entries = first.len();
     let mut cancelled_batches = 0usize;
