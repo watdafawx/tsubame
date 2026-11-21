@@ -232,7 +232,7 @@ fn status(a: &mut App, s: impl Into<String>) {
 
 fn active_folder(a: &App) -> Option<String> {
     let t = a.view.tab();
-    (!t.synthetic && formats::validate(Path::new(&t.path)).is_ok()).then(|| t.path.clone())
+    (!t.synthetic && !t.is_archive() && formats::validate(Path::new(&t.path)).is_ok()).then(|| t.path.clone())
 }
 
 fn name_of(p: &str) -> String {
@@ -604,6 +604,21 @@ pub fn on_key(hwnd: HWND, vk: u16, m: Mods) -> bool {
         if a.view.tabs.is_empty() || !a.view.list_focused(&a.ui) {
             return false;
         }
+        if a.view.tab().is_archive() {
+            match act {
+                KeyAct::Delete { .. } => status(a, "Archives are read-only \u{2014} cannot delete inside an archive"),
+                KeyAct::Paste => status(a, "Archives are read-only \u{2014} cannot paste into an archive"),
+                KeyAct::Cut => status(a, "Archives are read-only \u{2014} cannot cut from an archive"),
+                KeyAct::NewFolder => status(a, "Archives are read-only \u{2014} cannot create folders inside an archive"),
+                KeyAct::Copy => status(a, "Archives are read-only \u{2014} use 'Extract selected from archive' to extract"),
+                KeyAct::CopyPath => {
+                    let t = path_text(&a.view.tab().selected_paths(MAX_ITEMS));
+                    copy_text(a, t, "path");
+                }
+                _ => return false,
+            }
+            return true;
+        }
         let sel = |a: &App| a.view.tab().selected_paths(MAX_ITEMS);
         match act {
             KeyAct::Copy => copy_files(a, sel(a), false),
@@ -912,6 +927,12 @@ pub fn ctx_after_frame(hwnd: HWND) {
 /// An app action picked in the own-drawn menu.
 fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_config::MenuEntry], shift: bool) {
     let paths = if t.background { Vec::new() } else { t.paths.clone() };
+    if crate::archive_ui::is_archive_path(&t.folder)
+        && matches!(act, "file.cut" | "file.delete" | "file.rename" | "file.paste" | "x.new-folder" | "x.new-file")
+    {
+        status(a, "Archives are read-only \u{2014} extract first");
+        return;
+    }
     if matches!(act, "file.cut" | "file.delete" | "file.rename") && paths.iter().any(|p| crate::ctxui::is_root(p)) {
         status(a, "Drive roots cannot be cut, renamed or deleted");
         return;

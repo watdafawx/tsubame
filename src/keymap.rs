@@ -396,7 +396,7 @@ pub fn current_label(id: u32) -> Option<String> {
 pub fn category(name: &str) -> &'static str {
     match name.split('.').next().unwrap_or("") {
         "tab" => "Tabs",
-        "nav" => "Navigate",
+        "nav" | "search" => "Navigate",
         "file" => "File",
         "select" => "Edit",
         "view" | "sidebar" => "View",
@@ -598,12 +598,12 @@ mod tests {
         r.add(&Extra).unwrap();
         let on = KeyMap::defaults_for(Arc::new(CmdList::from_registry(&r)));
         assert_eq!(on.label(9000), "Ctrl+Alt+E");
-        assert_eq!(on.commands().len(), BUILTIN.len() + 1);
+        assert_eq!(on.commands().len(), builtin_count() + 1);
         r.set_enabled("test.extra", false).unwrap();
         let list = Arc::new(CmdList::from_registry(&r));
         let o = ov(&[("extra.tool", &["Ctrl+Alt+X"])]);
         let (off, _) = KeyMap::from_overrides_for(list, &o);
-        assert_eq!(off.commands().len(), BUILTIN.len());
+        assert_eq!(off.commands().len(), builtin_count());
         assert_eq!(off.label(9000), "");
         assert_eq!(off.lookup(Chord::new(Key::Char('E'), Mods { ctrl: true, shift: false, alt: true })), None);
         assert!(off.to_overrides(&o).contains_key("extra.tool"), "kept for when it is back on");

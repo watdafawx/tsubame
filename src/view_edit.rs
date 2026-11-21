@@ -68,8 +68,8 @@ impl View {
                 self.press = match self.row_at(pos) {
                     Some(row) => {
                         let prev = self.last_click.filter(|(r, _)| *r == row).map(|(_, t)| t);
-                        // slow-click rename: details rows only (a grid label is small)
-                        let plain = !self.cur_mods.ctrl && !self.cur_mods.shift && !self.mode.is_grid();
+                        // slow-click rename: details rows only (a grid label is small, archives are read-only)
+                        let plain = !self.cur_mods.ctrl && !self.cur_mods.shift && !self.mode.is_grid() && !self.tab().is_archive();
                         let slow = plain && rename::is_slow_click(prev, self.sole_hist[0] == Some(row), ms);
                         self.last_click = Some((row, ms));
                         Some(PressInfo { pos, slow, collapse: keep.filter(|k| *k == row) })
@@ -127,7 +127,7 @@ impl View {
     fn start_drag(&mut self) {
         let paths = self.tab().selected_paths(crate::shellops::MAX_ITEMS);
         self.press = None;
-        if !paths.is_empty() && !self.tab().synthetic {
+        if !paths.is_empty() && !self.tab().synthetic && !self.tab().is_archive() {
             self.drag_out = Some(paths);
         }
     }
@@ -189,6 +189,11 @@ impl View {
 
     /// F2: renames the cursor row; several selected rows open the batch bar.
     pub fn begin_rename(&mut self, ui: &mut Ui) {
+        if self.tab().is_archive() {
+            self.ops.message = Some("Archives are read-only \u{2014} extract first to rename".into());
+            ui.request_repaint();
+            return;
+        }
         if self.tab().sel.count() > 1 {
             return self.begin_batch(ui);
         }
@@ -292,6 +297,11 @@ impl View {
     // ---- batch rename --------------------------------------------------------
 
     pub fn begin_batch(&mut self, ui: &mut Ui) {
+        if self.tab().is_archive() {
+            self.ops.message = Some("Archives are read-only \u{2014} extract first to rename".into());
+            ui.request_repaint();
+            return;
+        }
         let t = self.tab();
         let mut paths = Vec::new();
         let mut items = Vec::new();
@@ -441,13 +451,17 @@ impl View {
 
     /// The active pane's list has the keyboard focus (file shortcuts apply).
     pub fn list_focused(&self, ui: &Ui) -> bool {
-        !self.editing && self.rename.is_none() && self.batch.is_none() && self.ctx.is_none() && self.palette.is_none() && ui.has_focus(pid(self.active, ID_LIST))
+        !self.editing && self.rename.is_none() && self.batch.is_none() && self.ctx.is_none() && self.palette.is_none() && self.search.is_none() && ui.has_focus(pid(self.active, ID_LIST))
     }
 
     /// F5 / F6 with two panes: the selection goes to the other pane's folder.
     pub(super) fn copy_or_move_to_other(&mut self, mv: bool) {
         let Some(o) = self.other.as_deref() else { return };
         let dest = o.tabs.items[o.tabs.active].path.clone();
+        if self.tab().is_archive() || crate::archive_ui::is_archive_path(&dest) {
+            self.ops.message = Some("Archives are read-only \u{2014} use Extract archive here or Extract selected".into());
+            return;
+        }
         let paths = self.tab().selected_paths(10_000);
         if paths.is_empty() {
             self.ops.message = Some("Select something first".into());
@@ -466,6 +480,10 @@ impl View {
     /// Files dropped on `folder` (a sidebar row, a folder row, a pane).
     pub fn drop_selection_on(&mut self, folder: &str) {
         let Some(d) = self.drag.take() else { return };
+        if crate::archive_ui::is_archive_path(folder) {
+            self.ops.message = Some("Archives are read-only \u{2014} cannot drop into an archive".into());
+            return;
+        }
         if let Some(why) = dnd::refusal(&d.payload, folder) {
             self.ops.message = Some(why.into());
             return;
@@ -562,14 +580,19 @@ impl View {
             }
         }
         if let Some(dir) = &dest {
-            let payload = DragPayload::new(paths.clone());
-            hint = match dnd::refusal(&payload, dir) {
-                Some(why) => {
-                    dest = None;
-                    why.to_string()
-                }
-                None => format!("{} {}", crate::ops::action_for(&paths, dir, mods).verb(), dnd::name_of(dir)),
-            };
+            if crate::archive_ui::is_archive_path(dir) {
+                dest = None;
+                hint = "Archives are read-only".into();
+            } else {
+                let payload = DragPayload::new(paths.clone());
+                hint = match dnd::refusal(&payload, dir) {
+                    Some(why) => {
+                        dest = None;
+                        why.to_string()
+                    }
+                    None => format!("{} {}", crate::ops::action_for(&paths, dir, mods).verb(), dnd::name_of(dir)),
+                };
+            }
         }
         self.drop_dest = match (pin, &dest) {
             (Some(k), _) => Some(DropDest::Pin(k)),
@@ -614,6 +637,10 @@ impl View {
     // ---- the status bar's message ----------------------------------------------
 
     pub(super) fn status_message(&self) -> Option<&str> {
-        self.ops.message.as_deref()
+        self.archive_ops
+            .status
+            .as_deref()
+            .or(self.meta.status.as_deref())
+            .or(self.ops.message.as_deref())
     }
 }

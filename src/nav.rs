@@ -103,7 +103,31 @@ fn split_root(p: &str) -> Option<(String, String, &str)> {
 }
 
 /// Breadcrumbs for `path`. Empty for something that is not a path.
+/// Archive virtual paths (`C:\dir\a.zip::sub/deep`) emit host crumbs, an
+/// archive-root crumb (`C:\dir\a.zip::`), and each inner folder segment.
 pub fn crumbs(path: &str) -> Vec<Crumb> {
+    if let Some((host, inner)) = crate::archive_ui::split_virtual(path) {
+        let mut out = crumbs_plain(host);
+        if let Some(last) = out.last_mut() {
+            last.path = crate::archive_ui::archive_root_path(host);
+        }
+        let mut rel = String::new();
+        for part in inner.split(['/', '\\']).filter(|s| !s.is_empty()) {
+            if !rel.is_empty() {
+                rel.push('/');
+            }
+            rel.push_str(part);
+            out.push(Crumb {
+                label: part.to_string(),
+                path: tsubame_core::archive::join_archive_path(host, &rel),
+            });
+        }
+        return out;
+    }
+    crumbs_plain(path)
+}
+
+fn crumbs_plain(path: &str) -> Vec<Crumb> {
     let Some((label, root, tail)) = split_root(path) else { return Vec::new() };
     let mut out = vec![Crumb { label, path: root.clone() }];
     let mut cur = root;
@@ -118,13 +142,20 @@ pub fn crumbs(path: &str) -> Vec<Crumb> {
 }
 
 /// The folder above `path`; `None` at a drive or share root.
+/// Inside an archive, steps up inner segments and exits to the host folder at root.
 pub fn parent(path: &str) -> Option<String> {
-    let c = crumbs(path);
+    if crate::archive_ui::is_archive_path(path) {
+        return crate::archive_ui::parent_of(path);
+    }
+    let c = crumbs_plain(path);
     if c.len() < 2 { None } else { Some(c[c.len() - 2].path.clone()) }
 }
 
-/// Joins a folder and an entry name.
+/// Joins a folder and an entry name (supports archive virtual directories).
 pub fn join(dir: &str, name: &str) -> String {
+    if let Some(v) = crate::archive_ui::join_child(dir, name) {
+        return v;
+    }
     if dir.ends_with('\\') { format!("{dir}{name}") } else { format!("{dir}\\{name}") }
 }
 
@@ -136,8 +167,17 @@ pub fn normalize(input: &str) -> Option<String> {
     if t.is_empty() {
         return None;
     }
+    if let Some((host, inner)) = crate::archive_ui::split_virtual(t) {
+        let host_norm = crumbs_plain(&host.replace('/', "\\")).last().map(|c| c.path.clone())?;
+        let clean = tsubame_core::archive::sanitize_inner_path(inner).ok()?;
+        return Some(if clean.is_empty() {
+            crate::archive_ui::archive_root_path(&host_norm)
+        } else {
+            tsubame_core::archive::join_archive_path(&host_norm, &clean)
+        });
+    }
     let t = t.replace('/', "\\");
-    crumbs(&t).last().map(|c| c.path.clone())
+    crumbs_plain(&t).last().map(|c| c.path.clone())
 }
 
 /// Splits the path-bar text at its last separator: (folder to list, the
@@ -264,5 +304,24 @@ mod tests {
         assert_eq!(split_fragment("C:\\Us"), ("C:\\", "Us"));
         assert_eq!(split_fragment("C:\\Users\\"), ("C:\\Users\\", ""));
         assert_eq!(split_fragment("abc"), ("", "abc"));
+    }
+
+    #[test]
+    fn archive_crumbs_parent_and_join() {
+        let p = "C:\\work\\pack.zip::docs/sub";
+        let c = crumbs(p);
+        assert_eq!(c.len(), 5);
+        assert_eq!((c[0].label.as_str(), c[0].path.as_str()), ("C:", "C:\\"));
+        assert_eq!((c[1].label.as_str(), c[1].path.as_str()), ("work", "C:\\work"));
+        assert_eq!((c[2].label.as_str(), c[2].path.as_str()), ("pack.zip", "C:\\work\\pack.zip::"));
+        assert_eq!((c[3].label.as_str(), c[3].path.as_str()), ("docs", "C:\\work\\pack.zip::docs"));
+        assert_eq!((c[4].label.as_str(), c[4].path.as_str()), ("sub", "C:\\work\\pack.zip::docs/sub"));
+
+        assert_eq!(parent(p).as_deref(), Some("C:\\work\\pack.zip::docs"));
+        assert_eq!(parent("C:\\work\\pack.zip::docs").as_deref(), Some("C:\\work\\pack.zip::"));
+        assert_eq!(parent("C:\\work\\pack.zip::").as_deref(), Some("C:\\work"));
+        assert_eq!(join("C:\\work\\pack.zip::", "docs"), "C:\\work\\pack.zip::docs");
+        assert_eq!(join("C:\\work\\pack.zip::docs", "a.txt"), "C:\\work\\pack.zip::docs/a.txt");
+        assert_eq!(normalize("C:/work/pack.zip::docs/sub/").as_deref(), Some("C:\\work\\pack.zip::docs/sub"));
     }
 }

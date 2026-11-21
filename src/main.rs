@@ -43,6 +43,7 @@
 //! icons, TSUBAME_HANG_MS sets the hung-worker threshold (default 3000),
 //! TSUBAME_DATA_DIR overrides the config/session directory.
 
+mod archive_ui;
 mod batchui;
 mod bench;
 mod cli;
@@ -61,6 +62,7 @@ mod keymap;
 mod leak;
 mod lru;
 mod memdiag;
+mod meta_ui;
 mod nav;
 mod ole_glue;
 mod ops;
@@ -69,6 +71,7 @@ mod packs;
 mod palette;
 mod panes;
 mod rename;
+mod search_ui;
 mod session;
 mod settings;
 mod shellops;

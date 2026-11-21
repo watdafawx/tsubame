@@ -152,9 +152,12 @@ pub struct Tab {
     enum_gen: u64,
     enumerator: Option<Enumerator>,
     rx: Option<Receiver<Message>>,
+    archive_rx: Option<Receiver<crate::archive_ui::ArchiveListReply>>,
     /// the tab is shown in its pane (it watches its folder)
     visible: bool,
     watching: Watching,
+    /// a watcher batch mutated the store since the last `take_watch_changed`
+    watch_changed: bool,
     wake: Option<Wake>,
     /// names to select once they show up (after a copy / move / rename)
     want: Option<(Vec<String>, Instant)>,
@@ -243,8 +246,10 @@ impl Tab {
             enum_gen: 0,
             enumerator: None,
             rx: None,
+            archive_rx: None,
             visible: false,
             watching: Watching::default(),
+            watch_changed: false,
             wake: None,
             want: None,
         }
@@ -268,12 +273,24 @@ impl Tab {
         nav::crumbs(path).pop().map(|c| c.label).unwrap_or_else(|| path.to_string())
     }
 
+    /// True when this tab is browsing a read-only virtual archive (`host.zip::...`).
+    pub fn is_archive(&self) -> bool {
+        crate::archive_ui::is_archive_path(&self.path)
+    }
+
+    /// Consumes the flag set when the directory watcher mutated this tab's store.
+    pub fn take_watch_changed(&mut self) -> bool {
+        std::mem::take(&mut self.watch_changed)
+    }
+
     /// Replaces the listing with a ready-made store (the `--bench` synthetic
     /// folder): no enumeration runs, the tab is complete at once.
     pub fn adopt_store(&mut self, label: &str, store: EntryStore) {
         self.enumerator = None;
         self.rx = None;
+        self.archive_rx = None;
         self.watching = Watching::default();
+        self.watch_changed = false;
         self.pending = false;
         self.restore = None;
         self.path = label.to_string();
@@ -296,8 +313,10 @@ impl Tab {
     pub fn start(&mut self, path: &str, wake: Wake) {
         self.enumerator = None; // cancels and detaches
         self.rx = None;
+        self.archive_rx = None;
         // a new listing: the old folder's watcher and its pending batches go
         self.watching = Watching::default();
+        self.watch_changed = false;
         self.want = None;
         self.wake = Some(wake.clone());
         self.pending = false;
@@ -318,6 +337,10 @@ impl Tab {
         self.load = Load::Loading;
         self.timing = Timing::new();
         self.enum_gen = self.token.next_generation();
+        if crate::archive_ui::is_archive_path(path) {
+            self.archive_rx = Some(crate::archive_ui::start_list(path, self.enum_gen, wake));
+            return;
+        }
         let (e, rx) = Enumerator::start_channel(path, self.enum_gen, self.token.clone(), wake);
         self.enumerator = Some(e);
         self.rx = Some(rx);
@@ -332,6 +355,30 @@ impl Tab {
     /// Moves everything the worker has delivered into the store. UI thread.
     pub fn pump(&mut self) -> Pumped {
         let mut out = Pumped::default();
+        if self.archive_rx.is_some() {
+            let reply = self.archive_rx.as_ref().map(|rx| rx.try_recv());
+            match reply {
+                Some(Ok(msg)) => {
+                    self.archive_rx = None;
+                    if msg.generation == self.enum_gen {
+                        self.finish_archive(msg.result);
+                        out.changed = true;
+                        out.done = true;
+                    }
+                }
+                Some(Err(TryRecvError::Empty)) => {}
+                Some(Err(TryRecvError::Disconnected)) => {
+                    self.archive_rx = None;
+                    self.store.end_stream();
+                    if self.load == Load::Loading {
+                        self.load = Load::Failed("The archive listing stopped unexpectedly.".into());
+                        out.changed = true;
+                    }
+                }
+                None => {}
+            }
+            return out;
+        }
         let t0 = Instant::now();
         loop {
             if t0.elapsed() >= PUMP_BUDGET {
@@ -388,7 +435,7 @@ impl Tab {
             return;
         }
         self.visible = visible;
-        if self.synthetic || self.pending {
+        if self.synthetic || self.pending || self.is_archive() {
             return;
         }
         if !visible {
@@ -417,7 +464,7 @@ impl Tab {
     }
 
     fn watch_start(&mut self) {
-        if self.watching.w.is_some() || self.synthetic || self.path.is_empty() {
+        if self.watching.w.is_some() || self.synthetic || self.path.is_empty() || self.is_archive() {
             return;
         }
         let Some(wake) = self.wake.clone() else { return };
@@ -523,8 +570,11 @@ impl Tab {
                 self.resolve_on_worker(b);
             }
         }
-        if changed && self.want.is_some() {
-            self.try_want();
+        if changed {
+            self.watch_changed = true;
+            if self.want.is_some() {
+                self.try_want();
+            }
         }
         changed
     }
@@ -588,6 +638,41 @@ impl Tab {
         self.delivered += b.len();
         if self.timing.first_batch.is_none() {
             self.timing.first_batch = Some(self.timing.t_nav.elapsed());
+        }
+    }
+
+    fn finish_archive(&mut self, result: Result<Vec<tsubame_core::archive::ArchiveEntry>, String>) {
+        match result {
+            Ok(entries) => {
+                let mut names: Vec<u16> = Vec::new();
+                let mut spans: Vec<(usize, usize, u64, i64, u16)> = Vec::with_capacity(entries.len());
+                for e in &entries {
+                    let start = names.len();
+                    names.extend(e.name.encode_utf16());
+                    let flags = if e.is_dir { FOLDER } else { 0 };
+                    spans.push((start, names.len(), e.size, e.modified, flags));
+                }
+                let inputs: Vec<EntryInput> = spans
+                    .iter()
+                    .map(|&(a, b, size, modified, flags)| EntryInput { name: &names[a..b], size, modified, flags })
+                    .collect();
+                if let Err(err) = self.store.push_batch(self.store.generation(), &inputs) {
+                    self.store.end_stream();
+                    self.load = Load::Failed(format!("Cannot store archive entries: {err:?}"));
+                    return;
+                }
+                self.delivered = entries.len();
+                self.store.end_stream();
+                self.timing.first_batch = Some(self.timing.t_nav.elapsed());
+                self.timing.done = Some(self.timing.t_nav.elapsed());
+                self.load = Load::Done;
+                self.apply_restore();
+            }
+            Err(msg) => {
+                self.store.end_stream();
+                self.timing.done = Some(self.timing.t_nav.elapsed());
+                self.load = Load::Failed(msg);
+            }
         }
     }
 

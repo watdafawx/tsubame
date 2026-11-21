@@ -112,3 +112,17 @@ order. Switching it off (`[extensions] disabled`, or
 A column whose values come from outside the entry store registers
 `ColumnSource::Batched(Box<dyn ColumnProvider>)` instead. The details view
 does not draw provider columns yet; that arrives with wasm plugins.
+
+## Built-in extensions
+
+| Extension id | Required | Contributes |
+|---|---|---|
+| `tsubame.core` | Yes | Core commands (`src/commands.rs`) and the Name column |
+| `tsubame.column.modified` | No | Date modified column (`order: 10`) |
+| `tsubame.column.type` | No | Type column (`order: 20`) |
+| `tsubame.column.size` | No | Size column (`order: 30`) |
+| `tsubame.column.git` | No | Git status column (`order: 40`, zero cost when disabled) |
+| `tsubame.vfs.archive` | No | Archive VFS browsing (`.zip`, `.tar`, `.tar.gz`, `.tgz`, `.7z`) + `archive.extract_here`, `archive.extract_selected` |
+| `tsubame.ext.folder_sizes` | No | `folder.calc_sizes` background recursive folder size scan |
+| `tsubame.ext.checksum` | No | `file.checksum` background CRC32 / MD5 / SHA-1 / SHA-256 copy |
+| `tsubame.ext.global_search` | No | `search.global` (`Ctrl+Shift+F`) Everything IPC + parallel walk search overlay |

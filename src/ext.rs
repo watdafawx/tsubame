@@ -64,6 +64,10 @@ pub fn builtin() -> Registry {
     for b in crate::cols::BUILTIN.iter().filter(|b| b.ext != CORE) {
         r.add(&Column(b)).expect("built-in columns register");
     }
+    r.add(&crate::archive_ui::ArchiveExtension).expect("archive extension registers");
+    r.add(&crate::meta_ui::FolderSizesExtension).expect("folder-sizes extension registers");
+    r.add(&crate::meta_ui::ChecksumExtension).expect("checksum extension registers");
+    r.add(&crate::search_ui::GlobalSearchExtension).expect("global-search extension registers");
     r
 }
 
@@ -104,10 +108,16 @@ mod tests {
     fn the_built_ins_register_in_table_order_and_dispatch() {
         let r = builtin();
         let ids: Vec<u32> = r.commands.iter().map(|c| c.spec.id).collect();
-        let table: Vec<u32> = crate::commands::BUILTIN.iter().map(|c| c.id).collect();
+        let table: Vec<u32> = crate::commands::all_builtin().map(|c| c.id).collect();
         assert_eq!(ids, table);
         assert_eq!(r.is_enabled(CORE), Some(true));
+        assert_eq!(r.is_enabled(crate::archive_ui::EXT_ARCHIVE), Some(true));
+        assert_eq!(r.is_enabled(crate::meta_ui::EXT_GIT_COL), Some(true));
+        assert_eq!(r.is_enabled(crate::meta_ui::EXT_FOLDER_SIZES), Some(true));
+        assert_eq!(r.is_enabled(crate::meta_ui::EXT_CHECKSUM), Some(true));
+        assert_eq!(r.is_enabled(crate::search_ui::EXT_GLOBAL_SEARCH), Some(true));
         assert!(r.command(crate::commands::CMD_RENAME).is_some());
+        assert!(r.command(crate::commands::CMD_GLOBAL_SEARCH).is_some());
         assert!(command(crate::commands::CMD_NEW_TAB).is_some_and(|(_, f)| f.has(CmdFlags::GLOBAL)));
         assert!(command(9999).is_none());
     }
@@ -117,6 +127,11 @@ mod tests {
         let mut r = builtin();
         assert!(r.set_enabled(CORE, false).is_err());
         r.set_disabled(&[CORE]);
-        assert_eq!(r.commands.len(), crate::commands::BUILTIN.len());
+        assert_eq!(r.commands.len(), crate::commands::builtin_count());
+        // optional P4 extensions switch off cleanly
+        assert_eq!(r.set_enabled(crate::search_ui::EXT_GLOBAL_SEARCH, false), Ok(true));
+        assert!(r.command(crate::commands::CMD_GLOBAL_SEARCH).is_none());
+        assert_eq!(r.set_enabled(crate::archive_ui::EXT_ARCHIVE, false), Ok(true));
+        assert!(r.command(crate::commands::CMD_ARCHIVE_EXTRACT_HERE).is_none());
     }
 }
