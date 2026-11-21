@@ -3,3 +3,20 @@ name = "tsubame-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+# Archive VFS (crate::archive). Pure-Rust decoders only, default features off so the
+# main exe keeps only what browsing and extraction need: no zip encryption/zstd/lzma,
+# no 7z encoder, no C compression libs.
+# zlib-rs is the one deflate backend: sevenz-rust2 asks for it too, and flate2 compiles
+# a single backend (its miniz_oxide is still built because sevenz-rust2 enables flate2's
+# default features, but it is compiled out and linked out).
+zip = { version = "9.8", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+tar = { version = "0.4", default-features = false }
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
+
+[dev-dependencies]
+# Test-only: build real .7z fixtures. `compress` (the LZMA encoder) is not in the
+# release build, only in test builds, so it costs the exe nothing.
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress"] }

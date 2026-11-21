@@ -1,4 +1,9 @@
 //! Portable, allocation-amortized directory listing and view state.
+//!
+//! [`archive`] is the archive VFS (zip, tar, tar.gz, 7z): browse and extract
+//! without a scratch copy, with the zip-slip check and a bounded index cache.
+pub mod archive;
+
 use std::cmp::Ordering;
 pub type EntryId = u32;
 pub const FOLDER: u16 = 1;
