@@ -59,6 +59,12 @@ pub const CMD_SETTINGS_MENU: u32 = 52;
 pub const CMD_SETTINGS_UPDATES: u32 = 53;
 pub const CMD_SETTINGS_DEFAULT_FM: u32 = 54;
 pub const CMD_RESET_KEYS: u32 = 55;
+// P4 built-in extensions (F3 archive, F5 folder sizes / checksum, F1 global search)
+pub const CMD_ARCHIVE_EXTRACT_HERE: u32 = 56;
+pub const CMD_ARCHIVE_EXTRACT_SELECTED: u32 = 57;
+pub const CMD_FOLDER_CALC_SIZES: u32 = 58;
+pub const CMD_FILE_CHECKSUM: u32 = 59;
+pub const CMD_GLOBAL_SEARCH: u32 = 60;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -122,6 +128,45 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_SETTINGS_DEFAULT_FM, "settings.default-file-manager", "Settings: default file manager", [], G),
     cmd!(CMD_RESET_KEYS, "settings.reset-keys", "Reset all keyboard shortcuts", [], G),
 ];
+
+/// Archive extension (`tsubame.vfs.archive`) commands.
+pub static ARCHIVE_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_ARCHIVE_EXTRACT_HERE, "archive.extract_here", "Extract archive here", [], F),
+    cmd!(CMD_ARCHIVE_EXTRACT_SELECTED, "archive.extract_selected", "Extract selected from archive", [], F),
+];
+
+/// Folder-sizes extension (`tsubame.ext.folder_sizes`) commands.
+pub static FOLDER_SIZE_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_FOLDER_CALC_SIZES, "folder.calc_sizes", "Calculate folder sizes", [], F),
+];
+
+/// Checksum extension (`tsubame.ext.checksum`) commands.
+pub static CHECKSUM_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_FILE_CHECKSUM, "file.checksum", "Copy file checksums (SHA-256 / SHA-1 / MD5 / CRC32)", [], F),
+];
+
+/// Global-search extension (`tsubame.ext.global_search`) commands.
+pub static SEARCH_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_GLOBAL_SEARCH, "search.global", "Global search\u{2026}", ["Ctrl+Shift+F"], G),
+];
+
+/// Every built-in command across `tsubame.core` and the P4 built-in extensions,
+/// in registration order.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
+    BUILTIN
+        .iter()
+        .chain(ARCHIVE_COMMANDS)
+        .chain(FOLDER_SIZE_COMMANDS)
+        .chain(CHECKSUM_COMMANDS)
+        .chain(SEARCH_COMMANDS)
+}
+
+/// Total number of commands registered by `crate::ext::builtin()`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const fn builtin_count() -> usize {
+    BUILTIN.len() + ARCHIVE_COMMANDS.len() + FOLDER_SIZE_COMMANDS.len() + CHECKSUM_COMMANDS.len() + SEARCH_COMMANDS.len()
+}
 
 /// Binds every default key (tests and the bench; the app binds its key map,
 /// `KeyMap::bind_all`, which starts from the same defaults).
@@ -240,18 +285,28 @@ mod tests {
         (CMD_RESET_KEYS, &[], true),
     ];
 
+    const FEATURE_BEFORE: &[Before] = &[
+        (CMD_ARCHIVE_EXTRACT_HERE, &[], false),
+        (CMD_ARCHIVE_EXTRACT_SELECTED, &[], false),
+        (CMD_FOLDER_CALC_SIZES, &[], false),
+        (CMD_FILE_CHECKSUM, &[], false),
+        (CMD_GLOBAL_SEARCH, &[(Key::Char('F'), CS)], true),
+    ];
+
     /// What ran with the Settings tab in front before the registry.
     fn settings_tab_allowed_before(cmd: u32) -> bool {
         matches!(
             cmd,
-            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER
+            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH
         ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
     }
 
     #[test]
     fn the_table_keeps_every_id_key_and_flag_and_order() {
-        assert_eq!(BUILTIN.len(), BEFORE.len());
-        for (spec, (id, keys, global)) in BUILTIN.iter().zip(BEFORE) {
+        let all: Vec<&CommandSpec> = all_builtin().collect();
+        let expected: Vec<Before> = BEFORE.iter().chain(FEATURE_BEFORE).copied().collect();
+        assert_eq!(all.len(), expected.len());
+        for (spec, (id, keys, global)) in all.iter().zip(&expected) {
             assert_eq!(spec.id, *id, "same order");
             let parsed: Vec<(Key, Mods)> = spec.keys.iter().map(|t| parse_chord(t).map(|c| (c.key, c.mods)).unwrap_or_else(|| panic!("{t}"))).collect();
             assert_eq!(parsed, *keys, "{}", spec.name);
@@ -267,8 +322,9 @@ mod tests {
 
     #[test]
     fn ids_and_names_are_unique() {
-        for (i, a) in BUILTIN.iter().enumerate() {
-            for b in &BUILTIN[i + 1..] {
+        let all: Vec<&CommandSpec> = all_builtin().collect();
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
                 assert_ne!(a.id, b.id, "{} / {}", a.name, b.name);
                 assert_ne!(a.name, b.name);
             }
@@ -280,7 +336,7 @@ mod tests {
     #[test]
     fn no_key_is_bound_twice() {
         let mut seen: Vec<(Key, Mods, u32)> = Vec::new();
-        for cmd in BUILTIN {
+        for cmd in all_builtin() {
             for t in cmd.keys.iter() {
                 let c = parse_chord(t).unwrap();
                 if let Some((_, _, other)) = seen.iter().find(|(k2, m2, _)| *k2 == c.key && *m2 == c.mods) {
@@ -310,5 +366,11 @@ mod tests {
         assert!(has(CMD_SWITCH_PANE, "Tab"));
         assert!(has(CMD_SPLIT, "Ctrl+\\"));
         assert!(has(CMD_COPY_OTHER, "F5"));
+        assert!(has(CMD_GLOBAL_SEARCH, "Ctrl+Shift+F"));
+        assert_eq!(by_name("archive.extract_here").map(|c| c.id), Some(CMD_ARCHIVE_EXTRACT_HERE));
+        assert_eq!(by_name("archive.extract_selected").map(|c| c.id), Some(CMD_ARCHIVE_EXTRACT_SELECTED));
+        assert_eq!(by_name("folder.calc_sizes").map(|c| c.id), Some(CMD_FOLDER_CALC_SIZES));
+        assert_eq!(by_name("file.checksum").map(|c| c.id), Some(CMD_FILE_CHECKSUM));
+        assert_eq!(by_name("search.global").map(|c| c.id), Some(CMD_GLOBAL_SEARCH));
     }
 }

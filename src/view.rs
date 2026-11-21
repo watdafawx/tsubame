@@ -332,6 +332,14 @@ pub struct View {
     /// private bytes of the process, sampled at most once a second while Settings is shown
     pub private_bytes: usize,
     private_at: Option<std::time::Instant>,
+    /// P4.F3: background archive extraction worker & progress
+    pub(crate) archive_ops: crate::archive_ui::ArchiveOps,
+    /// P4.F5: background git status, folder sizes & checksums
+    pub(crate) meta: crate::meta_ui::MetaUi,
+    /// P4.F1: global search overlay (built on open, dropped on close)
+    pub(crate) search: Option<Box<crate::search_ui::SearchOverlay>>,
+    /// text produced by a background command (e.g. SHA-256) to copy on the next frame
+    copy_clipboard: Option<String>,
 }
 
 impl View {
@@ -419,6 +427,10 @@ impl View {
             want_reset_all: false,
             private_bytes: 0,
             private_at: None,
+            archive_ops: crate::archive_ui::ArchiveOps::default(),
+            meta: crate::meta_ui::MetaUi::default(),
+            search: None,
+            copy_clipboard: None,
         }
     }
 
@@ -598,9 +610,13 @@ impl View {
 
     fn after_nav(&mut self) {
         self.close_edits();
+        self.meta.cancel_folder_sizes();
+        self.meta.reset_git();
         self.ops.message = None;
         let p = self.tab().path.clone();
-        self.side.push_recent(&p);
+        if !crate::archive_ui::is_archive_path(&p) {
+            self.side.push_recent(&p);
+        }
         self.filter.set_text("");
         self.editing = false;
         self.path_error = None;
@@ -641,7 +657,7 @@ impl View {
     /// modal (palette, key recorder, rename, batch) is open, ignores it cleanly
     /// without touching navigation state.
     pub fn nav_button(&mut self, ui: &mut Ui, forward: bool) -> bool {
-        if self.palette.is_some() || ui.capture_keys || self.ops.asking || self.rename.is_some() || self.batch.is_some() {
+        if self.palette.is_some() || self.search.is_some() || ui.capture_keys || self.ops.asking || self.rename.is_some() || self.batch.is_some() {
             return false;
         }
         if self.ctx.is_some() || ui.popups_open() > 0 {
@@ -730,6 +746,8 @@ impl View {
 
     fn switched(&mut self) {
         self.close_edits();
+        self.meta.cancel_folder_sizes();
+        self.meta.reset_git();
         let f = self.tab().filter.clone();
         self.filter.set_text(&f);
         self.editing = false;
@@ -747,21 +765,27 @@ impl View {
         }
     }
 
-    /// Enter / double click on view row `pos`: a folder opens in this tab, a
-    /// file runs its pack `open_with` rule or goes to the shell on a worker.
+    /// Enter / double click on view row `pos`: a folder (or supported archive
+    /// when `tsubame.vfs.archive` is enabled) opens in this tab, a file runs
+    /// its pack `open_with` rule or goes to the shell on a worker.
     pub fn activate(&mut self, pos: usize) {
         self.press = None;
         if let Some((path, dir)) = self.tab().entry_at(pos) {
             if dir {
                 self.go(&path);
+            } else if crate::archive_ui::can_browse(&path) {
+                let vpath = crate::archive_ui::archive_root_path(&path);
+                self.go(&vpath);
+            } else if crate::archive_ui::is_archive_path(&path) {
+                self.ops.message = Some("Read-only archive \u{2014} use 'Extract selected from archive' to extract files".into());
             } else {
                 self.open_file(path);
             }
         }
     }
 
-    /// Moves everything the enumerators delivered into the stores. UI thread,
-    /// no disk. True when something visible changed.
+    /// Moves everything the enumerators and P4 background workers delivered
+    /// into the stores. UI thread, no disk. True when something visible changed.
     pub fn pump(&mut self) -> bool {
         self.pump_more = false;
         let mut changed = self.pump_pane();
@@ -770,6 +794,30 @@ impl View {
             changed |= self.pump_pane();
             self.swap_live();
         }
+        let (arch_changed, arch_done) = self.archive_ops.pump();
+        changed |= arch_changed;
+        if let Some(fin) = arch_done {
+            self.ops.message = Some(fin.message);
+            self.ops.changed(&fin.dest, Vec::new());
+            self.after_ops();
+        }
+        let (meta_changed, checksum_done) = self.meta.pump();
+        changed |= meta_changed;
+        if let Some(cd) = checksum_done {
+            if !cd.sha256.is_empty() {
+                self.copy_clipboard = Some(cd.sha256);
+            }
+            self.ops.message = Some(cd.summary);
+        }
+        if let Some(s) = self.search.as_mut() {
+            changed |= s.pump();
+        }
+        if self.tab_mut().take_watch_changed() {
+            let p = self.tab().path.clone();
+            self.meta.invalidate_git(&p);
+            self.meta.invalidate_folder_sizes(&p);
+        }
+        self.sync_active_git();
         changed
     }
 
@@ -938,6 +986,19 @@ impl View {
         }
     }
 
+    /// Synchronises background P4 workers with the current extension enable states.
+    pub(super) fn sync_feature_extensions(&mut self) {
+        if !crate::meta_ui::git_column_enabled() {
+            self.meta.disable_git();
+        }
+        if !crate::meta_ui::folder_sizes_enabled() {
+            self.meta.disable_folder_sizes();
+        }
+        if !crate::search_ui::is_enabled() {
+            self.search = None;
+        }
+    }
+
     /// Switches extension `id` on or off, live, and records it in the config
     /// (`[extensions] disabled`). Its commands leave or rejoin the key map.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -945,6 +1006,10 @@ impl View {
         let changed = crate::ext::write(|r| r.set_enabled(id, on))?;
         self.prefs.extensions.disabled = crate::ext::read(|r| r.disabled());
         if changed {
+            self.sync_feature_extensions();
+            if on && id == crate::meta_ui::EXT_GIT_COL {
+                self.meta.reset_git();
+            }
             self.keymap = crate::keymap::KeyMap::from_overrides(&self.prefs.keys.overrides).0;
         }
         // rebinds the keys, publishes the map and marks the config for saving
@@ -1061,9 +1126,220 @@ impl View {
                 let slot = panes::other(self.active);
                 self.with_pane(slot, |v| v.go(&p));
             }
+            CMD_ARCHIVE_EXTRACT_HERE => self.cmd_archive_extract_here(),
+            CMD_ARCHIVE_EXTRACT_SELECTED => self.cmd_archive_extract_selected(),
+            CMD_FOLDER_CALC_SIZES => self.cmd_folder_calc_sizes(),
+            CMD_FILE_CHECKSUM => self.cmd_file_checksum(),
+            CMD_GLOBAL_SEARCH => self.toggle_global_search(ui),
             _ => {}
         }
         ui.request_repaint();
+    }
+
+    // ---- P4 feature commands (F3 archive, F5 meta, F1 global search) --------
+
+    /// Requests git status for the active tab once its listing is complete.
+    /// Zero work when `tsubame.column.git` is disabled, or inside an archive/synthetic tab.
+    fn sync_active_git(&mut self) {
+        if !crate::meta_ui::git_column_enabled() {
+            return;
+        }
+        let tab = &self.tabs.items[self.tabs.active];
+        if tab.settings || tab.synthetic || tab.is_archive() || tab.load != Load::Done {
+            return;
+        }
+        let nav_key = tab.nav_key();
+        let folder = tab.path.clone();
+        let wake = self.wake.clone();
+        let tab_ref = &self.tabs.items[self.tabs.active];
+        self.meta.sync_git(
+            nav_key,
+            &folder,
+            |cap| {
+                let n = tab_ref.shown().min(cap);
+                let mut paths = Vec::with_capacity(n);
+                for i in 0..n {
+                    if let Some((p, _)) = tab_ref.entry_at(i) {
+                        paths.push(std::path::PathBuf::from(p));
+                    }
+                }
+                paths
+            },
+            &wake,
+        );
+    }
+
+    /// `archive.extract_here`: extracts the currently open archive, or the
+    /// selected/cursor archive file, into its containing host folder.
+    fn cmd_archive_extract_here(&mut self) {
+        let tab = self.tab();
+        let archive_path = if tab.is_archive() {
+            Some(tsubame_core::archive::host_archive_path(&tab.path).to_string())
+        } else {
+            let cursor = if self.mode.is_grid() { tab.grid.cursor } else { tab.list.cursor };
+            let candidate = tab
+                .selected_paths(1)
+                .into_iter()
+                .next()
+                .or_else(|| tab.entry_at(cursor).filter(|(_, d)| !*d).map(|(p, _)| p));
+            candidate.filter(|p| tsubame_core::archive::is_archive_file(p))
+        };
+        let Some(archive_str) = archive_path else {
+            self.ops.message = Some("Select an archive file (.zip, .tar, .tar.gz, .tgz, .7z) first".into());
+            return;
+        };
+        let Some(dest) = crate::archive_ui::host_folder_of(&archive_str) else {
+            self.ops.message = Some("Can't determine extraction folder".into());
+            return;
+        };
+        let wake = self.wake.clone();
+        self.archive_ops.extract_all(std::path::PathBuf::from(archive_str), dest, wake);
+    }
+
+    /// `archive.extract_selected`: extracts the selected entries (or cursor entry)
+    /// from the currently open archive into the archive's host folder.
+    fn cmd_archive_extract_selected(&mut self) {
+        let tab = self.tab();
+        if !tab.is_archive() {
+            self.ops.message = Some("Open an archive first to extract selected entries".into());
+            return;
+        }
+        let host = tsubame_core::archive::host_archive_path(&tab.path).to_string();
+        let Some(dest) = crate::archive_ui::host_folder_of(&host) else {
+            self.ops.message = Some("Can't determine extraction folder".into());
+            return;
+        };
+        let cursor = if self.mode.is_grid() { tab.grid.cursor } else { tab.list.cursor };
+        let mut selected = tab.selected_paths(10_000);
+        if selected.is_empty()
+            && let Some((p, _)) = tab.entry_at(cursor)
+        {
+            selected.push(p);
+        }
+        let inner_paths: Vec<String> = selected
+            .iter()
+            .filter_map(|p| crate::archive_ui::split_virtual(p).map(|(_, inner)| inner.to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if inner_paths.is_empty() {
+            self.ops.message = Some("Select items inside the archive first".into());
+            return;
+        }
+        let wake = self.wake.clone();
+        self.archive_ops.extract_selected(std::path::PathBuf::from(host), inner_paths, dest, wake);
+    }
+
+    /// `folder.calc_sizes`: queues background folder-size scans for subdirectories
+    /// in the active tab (visible rows first), displaying results in the Size column.
+    fn cmd_folder_calc_sizes(&mut self) {
+        let tab = self.tab();
+        if tab.settings || tab.synthetic || tab.is_archive() {
+            self.ops.message = Some("Folder sizes are available for local folders only".into());
+            return;
+        }
+        let folder = tab.path.clone();
+        let total = tab.shown();
+        let (vis_a, vis_b) = self.last_range;
+        let vis_b = vis_b.min(total);
+        let vis_a = vis_a.min(vis_b);
+        let mut dirs = Vec::new();
+        // Visible rows first, then the rest of the listing.
+        for pos in (vis_a..vis_b).chain(0..vis_a).chain(vis_b..total) {
+            if let Some((p, true)) = tab.entry_at(pos) {
+                dirs.push(std::path::PathBuf::from(p));
+            }
+        }
+        if dirs.is_empty() {
+            self.ops.message = Some("No subfolders to measure".into());
+            return;
+        }
+        let wake = self.wake.clone();
+        self.meta.request_folder_sizes(&folder, dirs, &wake);
+    }
+
+    /// `file.checksum`: hashes the selected (or cursor) file on a background
+    /// thread, copies SHA-256 to the clipboard, and shows a summary in the status bar.
+    fn cmd_file_checksum(&mut self) {
+        let tab = self.tab();
+        if tab.settings || tab.synthetic {
+            return;
+        }
+        if tab.is_archive() {
+            self.ops.message = Some("Extract the file from the archive first to compute checksums".into());
+            return;
+        }
+        let cursor = if self.mode.is_grid() { tab.grid.cursor } else { tab.list.cursor };
+        let picked = tab
+            .store
+            .view()
+            .iter()
+            .enumerate()
+            .find(|(_, id)| tab.sel.contains(**id))
+            .and_then(|(pos, _)| tab.entry_at(pos))
+            .or_else(|| tab.entry_at(cursor));
+        match picked {
+            Some((_, true)) => {
+                self.ops.message = Some("Select a file (not a folder) to compute checksums".into());
+            }
+            Some((path, false)) => {
+                let wake = self.wake.clone();
+                self.meta.start_checksum(std::path::PathBuf::from(path), wake);
+            }
+            None => {
+                self.ops.message = Some("Select a file to compute checksums".into());
+            }
+        }
+    }
+
+    /// `search.global` (Ctrl+Shift+F): toggles the global search overlay.
+    fn toggle_global_search(&mut self, ui: &mut Ui) {
+        if self.search.take().is_some() {
+            ui.capture_keys = false;
+            ui.close_popup(crate::search_ui::ID_SEARCH_OVERLAY);
+            self.focus_list = true;
+            return;
+        }
+        // Close palette if open so only one modal overlay owns capture_keys.
+        if self.palette.take().is_some() {
+            ui.close_popup(crate::palette::ID_PALETTE);
+        }
+        let folder = self.folder_path();
+        let wake = self.wake.clone();
+        self.search = Some(Box::new(crate::search_ui::SearchOverlay::open(folder, wake)));
+    }
+
+    /// Paints the global search overlay on top of the frame and runs its action.
+    fn paint_search(&mut self, ui: &mut Ui, g: &mut dyn Canvas, size: (f32, f32)) {
+        let Some(mut s) = self.search.take() else { return };
+        let act = s.paint(ui, g, Rect::new(0.0, 0.0, size.0, size.1));
+        match act {
+            crate::search_ui::SearchAction::None => {
+                self.search = Some(s);
+            }
+            crate::search_ui::SearchAction::Close => {
+                ui.capture_keys = false;
+                self.focus_list = true;
+            }
+            crate::search_ui::SearchAction::OpenFolder(path) => {
+                ui.capture_keys = false;
+                self.go(&path);
+            }
+            crate::search_ui::SearchAction::RevealInFolder { folder, name } => {
+                ui.capture_keys = false;
+                self.go(&folder);
+                self.tab_mut().select_names(&[name]);
+            }
+            crate::search_ui::SearchAction::OpenFile(path) => {
+                ui.capture_keys = false;
+                self.open_file(path);
+                self.focus_list = true;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn search_open(&self) -> bool {
+        self.search.is_some()
     }
 
     /// The folder under the cursor, when the cursor row is a folder.
@@ -1160,6 +1436,9 @@ impl View {
             return None;
         }
         ui.begin_frame((w, h));
+        if let Some(text) = self.copy_clipboard.take() {
+            ui.clipboard.set(&text);
+        }
         if !ui.commands().is_empty() {
             for cmd in ui.commands().to_vec() {
                 self.run_command(ui, cmd);
@@ -1231,6 +1510,7 @@ impl View {
         self.side_act(ui, oa);
         self.paint_batch_preview(g, &t, (w, h));
         self.paint_palette(ui, g, (w, h));
+        self.paint_search(ui, g, (w, h));
         // the context menu is on top of everything
         if let Some(c) = self.ctx.as_mut() {
             c.paint(ui, g, Rect::new(0.0, 0.0, w, h));
@@ -1253,7 +1533,7 @@ impl View {
             again = true;
         }
         // typing in the list starts the filter
-        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
+        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() || self.search.is_some() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
         for c in typed {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
@@ -1656,8 +1936,9 @@ impl View {
         let hide_type = self.other.is_some() && panes::hide_type_column(main.w);
         // the registry's columns, in its order (fixed arrays: nothing allocated per frame)
         self.sync_cols();
+        self.sync_active_git();
         let set = &self.colset;
-        let mut shown = [Col::Name; 4];
+        let mut shown = [Col::Name; crate::cols::NUM_COLS];
         let mut n = 0;
         for &c in set.order() {
             if !(hide_type && c == Col::Type) {
@@ -1669,17 +1950,19 @@ impl View {
         let spans = self.cols.spans(total, shown);
 
         // header: sort and resize
-        let mut hc = [HeaderCol { label: "", right: false }; 4];
-        let mut hspans = [(0.0, 0.0); 4];
+        let mut hc = [HeaderCol { label: "", right: false }; crate::cols::NUM_COLS];
+        let mut hspans = [(0.0, 0.0); crate::cols::NUM_COLS];
         for (i, &c) in shown.iter().enumerate() {
             hc[i] = HeaderCol { label: set.label(c), right: set.right_aligned(c) };
             hspans[i] = spans[c.slot()];
         }
         let tab = &mut self.tabs.items[self.tabs.active];
-        let sorted = shown.iter().position(|c| c.sort_column() == tab.sort.column).map(|i| (i, tab.sort.descending));
+        let sorted = shown.iter().position(|c| c.sort_column() == Some(tab.sort.column)).map(|i| (i, tab.sort.descending));
         let hr = column_header(ui, g, pid(self.live, ID_HEADER), header_r, &hc[..n], &hspans[..n], sorted);
-        if let Some(i) = hr.sort {
-            tab.sort_by(shown[i].sort_column());
+        if let Some(i) = hr.sort
+            && let Some(sc) = shown[i].sort_column()
+        {
+            tab.sort_by(sc);
         }
         if !hide_type
             && let Some((i, x)) = hr.resize
@@ -1696,8 +1979,13 @@ impl View {
         tab.list.row_h = t.height_list_row;
         let (lr, activated) = {
             let Tab { store, sel, list: lstate, band_base, band_mode, path, synthetic, .. } = &mut *tab;
-            let root = if *synthetic { None } else { Some(path.as_str()) };
-            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, base: band_base, band_mode };
+            let in_archive = crate::archive_ui::is_archive_path(path);
+            let root = if *synthetic || in_archive { None } else { Some(path.as_str()) };
+            let git_map = (!*synthetic && !in_archive && spans[Col::Git.slot()].1 > 0.0 && self.meta.git_map.matches_folder(path))
+                .then_some(&self.meta.git_map);
+            let folder_sizes = (!*synthetic && !in_archive && spans[Col::Size.slot()].1 > 0.0 && self.meta.size_map.matches_folder(path))
+                .then_some(&self.meta.size_map);
+            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, base: band_base, band_mode };
             let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
@@ -1778,7 +2066,7 @@ impl View {
         let label_font = t.font().c();
         let (gr, activated) = {
             let Tab { store, sel, grid: gstate, band_base, band_mode, path, synthetic, .. } = &mut *tab;
-            let root = if *synthetic { None } else { Some(path.as_str()) };
+            let root = if *synthetic || crate::archive_ui::is_archive_path(path) { None } else { Some(path.as_str()) };
             let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, band_mode, labels: &mut self.labels, box_dip, font: label_font };
             let gr = grid(ui, g, pid(self.live, ID_LIST), grid_r, gstate, &mut tiles);
             tiles.prefetch(gstate);
@@ -1837,8 +2125,9 @@ impl View {
         let mut clicked = None;
         self.sync_cols();
         for (i, col) in self.colset.order().iter().enumerate() {
+            let Some(sc) = col.sort_column() else { continue };
             let label = self.colset.label(*col);
-            let is_sorted = col.sort_column() == sorted_col;
+            let is_sorted = sc == sorted_col;
             let w = g.measure(label, font) + 16.0 + if is_sorted { 14.0 } else { 0.0 };
             let cell = Rect::new(x, r.y + 3.0, w, r.h - 7.0);
             let it = ui.interact(pid(self.live, ID_HEADER).with(i as u64), cell, Sense::click());
@@ -1852,7 +2141,7 @@ impl View {
                 g.text(glyph, Rect::new(cell.r() - 18.0, cell.y, 12.0, cell.h), f(9.0).icon().c(), t.text);
             }
             if it.clicked == Some(Button::Left) {
-                clicked = Some(col.sort_column());
+                clicked = Some(sc);
             }
             x += w + 2.0;
         }
@@ -1992,8 +2281,12 @@ struct Rows<'a> {
     text: &'a mut String,
     spans: crate::cols::Spans,
     zebra: bool,
-    /// folder of the rows (None for the bench's synthetic rows: no real files)
+    /// folder of the rows (None for the bench's synthetic rows and archive VFS rows)
     root: Option<&'a str>,
+    /// git status map for the current folder (`None` when disabled or outside a repo)
+    git_map: Option<&'a crate::meta_ui::GitMap>,
+    /// computed folder sizes for the current folder (`None` when disabled or uncomputed)
+    folder_sizes: Option<&'a crate::meta_ui::FolderSizeMap>,
     /// selection snapshot before a Ctrl/Shift marquee started
     base: &'a mut Vec<EntryId>,
     band_mode: &'a mut BandMode,
@@ -2132,9 +2425,24 @@ impl ListSource for Rows<'_> {
             row.type_text(self.text);
             g.text(self.text, Rect::new(x + sp[2].0 + 8.0, r.y, (sp[2].1 - 12.0).max(0.0), r.h), t.font(), t.text_dim);
         }
-        if !row.is_dir() && sp[3].1 > 0.0 {
-            data::fmt_size(row.size, self.text);
-            g.text(self.text, Rect::new(x + sp[3].0, r.y, (sp[3].1 - 8.0).max(0.0), r.h), t.font().r(), t.text_dim);
+        if sp[3].1 > 0.0 {
+            if !row.is_dir() {
+                data::fmt_size(row.size, self.text);
+                g.text(self.text, Rect::new(x + sp[3].0, r.y, (sp[3].1 - 8.0).max(0.0), r.h), t.font().r(), t.text_dim);
+            } else if let Some(fs) = self.folder_sizes.and_then(|m| m.get(row.name_str())) {
+                data::fmt_size(fs.bytes, self.text);
+                if fs.truncated {
+                    self.text.push('+');
+                }
+                g.text(self.text, Rect::new(x + sp[3].0, r.y, (sp[3].1 - 8.0).max(0.0), r.h), t.font().r(), t.text_dim);
+            }
+        }
+        if sp[4].1 > 0.0
+            && let Some(gm) = self.git_map
+            && let Some((badge, color, bold)) = crate::meta_ui::git_badge(gm.get(row.name_str()), t)
+        {
+            let font = if bold { t.font_mono().b() } else { t.font_mono() };
+            g.text(badge, Rect::new(x + sp[4].0 + 8.0, r.y, (sp[4].1 - 12.0).max(0.0), r.h), font, color);
         }
     }
 }
@@ -3330,5 +3638,175 @@ mod tests {
         r.key(Key::Backspace, Mods::NONE);
         assert_eq!(r.v.filter.text, "", "Backspace deleted filter char");
         assert_eq!(r.v.tab().path, docs, "Backspace in filter did NOT go up");
+    }
+
+    // ---- P4.F3 Archive VFS, P4.F5 Meta & Checksum, P4.F1 Global Search ----
+
+    #[test]
+    fn archive_vfs_browse_breadcrumb_up_exit_and_readonly_guards() {
+        let mut r = Rig::new("p4-archive");
+        let zip_path = r.dir.join("bundle.zip");
+        crate::archive_ui::tests::write_test_zip(
+            &zip_path,
+            &[("top.txt", b"hello"), ("nested/inner.txt", b"world")],
+        );
+        let root = r.dir.to_str().unwrap().to_string();
+        r.v.go(&root);
+        r.settle();
+
+        // Activating bundle.zip enters it as a virtual archive folder.
+        let zip_row = (0..r.v.tab().shown())
+            .find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("bundle.zip")))
+            .expect("bundle.zip row");
+        r.v.activate(zip_row);
+        r.settle();
+        assert!(r.v.tab().is_archive(), "entered archive: {}", r.v.tab().path);
+        assert!(r.c.has_text("nested") && r.c.has_text("top.txt"), "{:?}", r.c.texts());
+
+        // Rename inside archive is gracefully refused with a clear status message.
+        r.v.begin_rename(&mut r.ui);
+        assert!(r.v.rename.is_none());
+        assert!(r.v.ops.message.as_deref().is_some_and(|m| m.contains("read-only")));
+
+        // Enter nested/ folder inside archive.
+        let nested_row = (0..r.v.tab().shown())
+            .find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, d)| d && p.ends_with("nested")))
+            .expect("nested folder row");
+        r.v.activate(nested_row);
+        r.settle();
+        assert!(r.v.tab().path.ends_with("bundle.zip::nested"), "{}", r.v.tab().path);
+        assert!(r.c.has_text("inner.txt"), "{:?}", r.c.texts());
+
+        // Up from nested -> archive root -> host folder.
+        r.v.up();
+        r.settle();
+        assert!(r.v.tab().path.ends_with("bundle.zip::"), "{}", r.v.tab().path);
+        r.v.up();
+        r.settle();
+        assert_eq!(r.v.tab().path, root, "exited archive back to host folder");
+
+        // Extract archive here works in the background and writes files to host folder.
+        let zip_row = (0..r.v.tab().shown())
+            .find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("bundle.zip")))
+            .expect("bundle.zip row");
+        {
+            let t = r.v.tab_mut();
+            t.sel.single(&t.store, zip_row);
+        }
+        r.v.run_command(&mut r.ui, CMD_ARCHIVE_EXTRACT_HERE);
+        let t0 = Instant::now();
+        while r.v.archive_ops.busy() {
+            r.v.pump();
+            assert!(t0.elapsed() < Duration::from_secs(5), "extract did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        r.v.pump();
+        assert_eq!(std::fs::read_to_string(r.dir.join("top.txt")).unwrap(), "hello");
+        assert_eq!(std::fs::read_to_string(r.dir.join("nested").join("inner.txt")).unwrap(), "world");
+    }
+
+    #[test]
+    fn git_and_folder_size_columns_render_and_disable_cleanly() {
+        let mut r = Rig::new("p4-meta");
+        std::fs::write(r.dir.join("Docs").join("payload.bin"), vec![0u8; 2048]).unwrap();
+        r.v.go(r.dir.to_str().unwrap());
+        r.settle();
+
+        // Git header shows when enabled, disappears when disabled.
+        assert!(r.c.has_text("Git"), "Git header visible: {:?}", r.c.texts());
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::meta_ui::EXT_GIT_COL, false), Ok(true));
+        r.frame();
+        assert!(!r.c.has_text("Git"), "Git header hidden when disabled: {:?}", r.c.texts());
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::meta_ui::EXT_GIT_COL, true), Ok(true));
+        r.frame();
+        assert!(r.c.has_text("Git"));
+
+        // Calculate folder sizes populates Size column for Docs (2 KB) and cancels on navigation.
+        r.v.run_command(&mut r.ui, CMD_FOLDER_CALC_SIZES);
+        let t0 = Instant::now();
+        while r.v.meta.folder_sizes_pending() > 0 {
+            r.v.pump();
+            assert!(t0.elapsed() < Duration::from_secs(5), "folder size did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        r.frame();
+        assert_eq!(r.v.meta.size_map.get("Docs").map(|s| s.bytes), Some(2048));
+        assert!(r.c.has_text("2 KB"), "computed folder size rendered: {:?}", r.c.texts());
+
+        // Navigating to another folder clears folder sizes immediately.
+        let docs = r.dir.join("Docs").to_str().unwrap().to_string();
+        r.v.go(&docs);
+        assert!(r.v.meta.size_map.is_empty());
+        r.settle();
+    }
+
+    #[test]
+    fn checksum_command_copies_sha256_and_shows_summary() {
+        let mut r = Rig::new("p4-hash");
+        std::fs::write(r.dir.join("alpha.txt"), b"abc").unwrap();
+        r.v.go(r.dir.to_str().unwrap());
+        r.settle();
+
+        let row = (0..r.v.tab().shown())
+            .find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("alpha.txt")))
+            .expect("alpha.txt row");
+        {
+            let t = r.v.tab_mut();
+            t.sel.single(&t.store, row);
+        }
+        r.v.run_command(&mut r.ui, CMD_FILE_CHECKSUM);
+        let t0 = Instant::now();
+        while r.v.meta.last_checksum.is_none() {
+            r.v.pump();
+            assert!(t0.elapsed() < Duration::from_secs(5), "checksum did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        r.frame();
+        assert_eq!(
+            r.ui.clipboard.get().as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        assert!(r.v.ops.message.as_deref().is_some_and(|m| m.contains("SHA-256 copied")));
+    }
+
+    #[test]
+    fn global_search_overlay_opens_streams_cancels_and_jumps_to_item() {
+        let mut r = Rig::new("p4-search");
+        std::fs::write(r.dir.join("Docs").join("needle.txt"), b"found").unwrap();
+        r.v.go(r.dir.to_str().unwrap());
+        r.settle();
+
+        // Ctrl+Shift+F opens global search overlay; Esc closes cleanly.
+        assert!(!r.v.search_open());
+        r.key(Key::Char('F'), Mods::CTRL_SHIFT);
+        assert!(r.v.search_open());
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.search_open());
+        assert!(!r.ui.capture_keys);
+
+        // Reopen with WalkOnly for deterministic test, stream query, then Enter jumps to parent & selects item.
+        r.v.search = Some(Box::new(crate::search_ui::SearchOverlay::with_mode(
+            r.dir.to_str().unwrap().to_string(),
+            tsubame_win::search::SearchMode::WalkOnly,
+            r.v.wake.clone(),
+        )));
+        r.frame();
+        r.v.search.as_mut().unwrap().set_query("needle.txt");
+        let t0 = Instant::now();
+        while r.v.search.as_ref().is_some_and(|s| s.is_searching()) {
+            r.v.pump();
+            assert!(t0.elapsed() < Duration::from_secs(5), "search did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        r.frame();
+        assert_eq!(r.v.search.as_ref().unwrap().hits.len(), 1);
+        assert!(r.c.has_text("needle.txt"), "{:?}", r.c.texts());
+
+        r.key(Key::Enter, Mods::NONE);
+        assert!(!r.v.search_open(), "Enter closed search overlay");
+        r.settle();
+        assert_eq!(r.v.tab().path, r.dir.join("Docs").to_str().unwrap());
+        assert_eq!(r.v.tab().sel.count(), 1);
+        assert!(r.v.tab().selected_paths(1)[0].ends_with("needle.txt"));
     }
 }

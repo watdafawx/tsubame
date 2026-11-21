@@ -52,6 +52,7 @@ impl View {
         let (km, _unknown) = KeyMap::from_overrides(&cfg.keys.overrides);
         self.keymap = km;
         keymap::set_current(&self.keymap);
+        self.sync_feature_extensions();
         if apply_hide {
             self.apply_hide();
         }
@@ -124,6 +125,7 @@ impl View {
     pub fn reset_prefs(&mut self, ui: &mut Ui, cfg: &tsubame_config::Config) {
         self.prefs = cfg.clone();
         crate::ext::apply_disabled(&cfg.extensions.disabled);
+        self.sync_feature_extensions();
         self.keymap = KeyMap::defaults();
         self.apply_prefs(ui, C_APPEARANCE | C_ZEBRA | C_HIDE | C_KEYS | C_UPDATES | C_MENU);
     }

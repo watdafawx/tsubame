@@ -853,7 +853,7 @@ mod tests {
         assert_eq!(all, 3);
         let n = rows.iter().filter(|r| matches!(r, Row::Cmd { .. })).count();
         // every command except the palette's own, once
-        assert_eq!(n, BUILTIN.len() - 1);
+        assert_eq!(n, crate::commands::builtin_count() - 1);
         let mut ids: Vec<u32> = rows.iter().filter_map(|r| if let Row::Cmd { id, .. } = r { Some(*id) } else { None }).collect();
         ids.sort();
         ids.dedup();
