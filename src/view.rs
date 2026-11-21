@@ -26,7 +26,7 @@ use crate::shellui::GridPic;
 use tsubame_config::DEFAULT_SIDEBAR_WIDTH;
 use tsubame_core::{EntryId, EntryStore, Selection};
 use tsubame_ui::{
-    BandCells, Button, Canvas, Cursor, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header, f, grid, list, splitter, tab_strip, text_input,
+    BandCells, BandMode, Button, Canvas, Cursor, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header, f, grid, list, splitter, tab_strip, text_input,
 };
 use tsubame_win::enumerate::Wake;
 
@@ -253,6 +253,8 @@ pub struct View {
     /// pane whose list asked for a context menu this frame (made active
     /// before main opens the menu)
     menu_pane: Option<usize>,
+    /// pane whose list was clicked this frame (made active at end of paint)
+    focus_pane: Option<usize>,
     /// per pane slot: the tab strip's rect and scroll (drops on tabs)
     strips: [(Rect, f32); 2],
     /// a drag started on our rows: main runs it as an OLE drag
@@ -373,6 +375,7 @@ impl View {
             menu_request: None,
             bg_menu: None,
             menu_pane: None,
+            focus_pane: None,
             strips: [(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0); 2],
             drag_out: None,
             drop_dest: None,
@@ -630,6 +633,26 @@ impl View {
             t.start(&p, wake);
             self.after_nav();
         }
+    }
+
+    /// Mouse Back/Forward (XBUTTON1/XBUTTON2, APPCOMMAND_BROWSER_BACKWARD/FORWARD).
+    /// Routes to the active pane's Back / Forward command (same path as Alt+Left /
+    /// Alt+Right). If a menu or popup is open, closes it without navigating; if a
+    /// modal (palette, key recorder, rename, batch) is open, ignores it cleanly
+    /// without touching navigation state.
+    pub fn nav_button(&mut self, ui: &mut Ui, forward: bool) -> bool {
+        if self.palette.is_some() || ui.capture_keys || self.ops.asking || self.rename.is_some() || self.batch.is_some() {
+            return false;
+        }
+        if self.ctx.is_some() || ui.popups_open() > 0 {
+            self.ctx = None;
+            ui.close_all_popups();
+            ui.request_repaint();
+            return true;
+        }
+        let cmd = if forward { CMD_FORWARD } else { CMD_BACK };
+        self.run_command(ui, cmd);
+        true
     }
     pub fn up(&mut self) {
         if let Some(p) = nav::parent(&self.tab().path) {
@@ -1201,6 +1224,8 @@ impl View {
         // one before main opens the menu (its rows, its folder)
         if let Some(slot) = self.menu_pane.take() {
             self.set_active_pane(slot);
+        } else if let Some(slot) = self.focus_pane.take() {
+            self.set_active_pane(slot);
         }
         let oa = self.side.paint_overlay(ui, g, self.other.is_some());
         self.side_act(ui, oa);
@@ -1558,11 +1583,19 @@ impl View {
                 self.go(&p);
                 return;
             }
+            if hit.clicked == Some(Button::Middle) {
+                let p = self.crumbs.crumbs[first - 1].path.clone();
+                g.unclip();
+                self.open_in_new_tab(&p);
+                ui.request_repaint();
+                return;
+            }
             x += ELLIPSIS_W;
             g.text("\u{E76C}", Rect::new(x, bar.y, SEP_W, bar.h), f(8.0).icon().c(), t.text_dim);
             x += SEP_W;
         }
         let mut go = None;
+        let mut new_tab = None;
         for i in first..n {
             let last = i + 1 == n;
             let wd = self.crumbs.widths[i] + 2.0 * CRUMB_PAD;
@@ -1575,6 +1608,8 @@ impl View {
             g.text(&self.crumbs.crumbs[i].label, Rect::new(x + CRUMB_PAD, bar.y, self.crumbs.widths[i] + 2.0, bar.h), font, if last { t.text } else { t.text_dim });
             if hit.clicked == Some(Button::Left) {
                 go = Some(self.crumbs.crumbs[i].path.clone());
+            } else if hit.clicked == Some(Button::Middle) {
+                new_tab = Some(self.crumbs.crumbs[i].path.clone());
             }
             x += wd;
             if !last {
@@ -1585,6 +1620,9 @@ impl View {
         g.unclip();
         if let Some(p) = go {
             self.go(&p);
+        } else if let Some(p) = new_tab {
+            self.open_in_new_tab(&p);
+            ui.request_repaint();
         }
     }
 
@@ -1652,19 +1690,23 @@ impl View {
         let spans = self.cols.spans(total, shown);
 
         // the list
+        let was_renaming = self.rename.is_some();
         g.fill(list_r, t.row);
         let tab = &mut self.tabs.items[self.tabs.active];
         tab.list.row_h = t.height_list_row;
         let (lr, activated) = {
-            let Tab { store, sel, list: lstate, path, synthetic, .. } = &mut *tab;
+            let Tab { store, sel, list: lstate, band_base, band_mode, path, synthetic, .. } = &mut *tab;
             let root = if *synthetic { None } else { Some(path.as_str()) };
-            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root };
+            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, base: band_base, band_mode };
             let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
             (lr, lr.activated)
         };
         self.last_range = lr.range;
+        if lr.pressed && self.other.is_some() && self.live != self.active {
+            self.focus_pane = Some(self.live);
+        }
         match lr.context {
             Some((Some(row), pt)) => self.menu_request = Some((row, Some(pt))),
             Some((None, pt)) => self.bg_menu = Some(pt),
@@ -1683,6 +1725,18 @@ impl View {
                 self.ignore_press = true;
             }
             self.activate(pos);
+            ui.request_repaint();
+        } else if lr.empty_double_click && !was_renaming && !self.tab().synthetic {
+            if ui.active() == Some(pid(self.live, ID_LIST)) {
+                self.ignore_press = true;
+            }
+            self.up();
+            ui.request_repaint();
+        } else if let Some(pos) = lr.middle_clicked
+            && !was_renaming
+            && let Some((path, true)) = self.tab().entry_at(pos)
+        {
+            self.open_in_new_tab(&path);
             ui.request_repaint();
         }
     }
@@ -1710,6 +1764,7 @@ impl View {
         self.list_r = grid_r;
         self.sort_strip(ui, g, strip_r, t);
 
+        let was_renaming = self.rename.is_some();
         let (cw, ch, box_dip, icon_dip) = self.mode.dims();
         let dpi = self.dpi;
         g.fill(grid_r, t.row);
@@ -1722,14 +1777,17 @@ impl View {
         shell.set_grid(GridPic { box_dip, icon_dip, dpi }, cols * rows_vis);
         let label_font = t.font().c();
         let (gr, activated) = {
-            let Tab { store, sel, grid: gstate, band_base, path, synthetic, .. } = &mut *tab;
+            let Tab { store, sel, grid: gstate, band_base, band_mode, path, synthetic, .. } = &mut *tab;
             let root = if *synthetic { None } else { Some(path.as_str()) };
-            let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, labels: &mut self.labels, box_dip, font: label_font };
+            let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, band_mode, labels: &mut self.labels, box_dip, font: label_font };
             let gr = grid(ui, g, pid(self.live, ID_LIST), grid_r, gstate, &mut tiles);
             tiles.prefetch(gstate);
             (gr, gr.activated)
         };
         self.last_range = gr.range;
+        if gr.pressed && self.other.is_some() && self.live != self.active {
+            self.focus_pane = Some(self.live);
+        }
         match gr.context {
             Some((Some(cell), pt)) => self.menu_request = Some((cell, Some(pt))),
             Some((None, pt)) => self.bg_menu = Some(pt),
@@ -1747,6 +1805,18 @@ impl View {
                 self.ignore_press = true;
             }
             self.activate(pos);
+            ui.request_repaint();
+        } else if gr.empty_double_click && !was_renaming && !self.tab().synthetic {
+            if ui.active() == Some(pid(self.live, ID_LIST)) {
+                self.ignore_press = true;
+            }
+            self.up();
+            ui.request_repaint();
+        } else if let Some(pos) = gr.middle_clicked
+            && !was_renaming
+            && let Some((path, true)) = self.tab().entry_at(pos)
+        {
+            self.open_in_new_tab(&path);
             ui.request_repaint();
         }
     }
@@ -1924,6 +1994,46 @@ struct Rows<'a> {
     zebra: bool,
     /// folder of the rows (None for the bench's synthetic rows: no real files)
     root: Option<&'a str>,
+    /// selection snapshot before a Ctrl/Shift marquee started
+    base: &'a mut Vec<EntryId>,
+    band_mode: &'a mut BandMode,
+}
+
+/// Shared marquee selection begin/update/end logic for both Details and Grid views.
+fn band_begin_sel(store: &EntryStore, sel: &mut Selection, base: &mut Vec<EntryId>, mode_slot: &mut BandMode, mode: BandMode) {
+    *mode_slot = mode;
+    base.clear();
+    match mode {
+        BandMode::Replace => sel.clear(),
+        BandMode::Add | BandMode::Toggle => {
+            let s = &*sel;
+            base.extend(store.view().iter().copied().filter(|&id| s.contains(id)));
+        }
+    }
+}
+
+fn band_update_sel(store: &EntryStore, sel: &mut Selection, base: &[EntryId], mode: BandMode, covered: impl Iterator<Item = usize>) {
+    match mode {
+        BandMode::Replace => {
+            let ids = covered.filter_map(|i| store.at(i));
+            sel.replace_with(store, ids);
+        }
+        BandMode::Add => {
+            let ids = base.iter().copied().chain(covered.filter_map(|i| store.at(i)));
+            sel.replace_with(store, ids);
+        }
+        BandMode::Toggle => {
+            let cov: std::collections::HashSet<EntryId> = covered.filter_map(|i| store.at(i)).collect();
+            let base_set: std::collections::HashSet<EntryId> = base.iter().copied().collect();
+            let ids = base.iter().copied().filter(|id| !cov.contains(id)).chain(cov.iter().copied().filter(|id| !base_set.contains(id)));
+            sel.replace_with(store, ids);
+        }
+    }
+}
+
+fn band_end_sel(base: &mut Vec<EntryId>) {
+    base.clear();
+    base.shrink_to(256);
 }
 
 thread_local! {
@@ -1980,6 +2090,16 @@ impl ListSource for Rows<'_> {
     }
     fn select_none(&mut self) {
         self.sel.clear();
+    }
+    fn band_begin(&mut self, mode: BandMode) {
+        band_begin_sel(self.store, self.sel, self.base, self.band_mode, mode);
+    }
+    fn band_update(&mut self, rows: Option<(usize, usize)>) {
+        let covered = rows.into_iter().flat_map(|(a, b)| a..=b);
+        band_update_sel(self.store, self.sel, self.base, *self.band_mode, covered);
+    }
+    fn band_end(&mut self) {
+        band_end_sel(self.base);
     }
     fn draw_row(&mut self, g: &mut dyn Canvas, t: &Theme, i: usize, r: Rect, st: RowState) {
         let Some(id) = self.store.at(i) else { return };
@@ -2047,8 +2167,9 @@ struct Tiles<'a> {
     row: &'a mut RowBuf,
     /// folder of the cells (None for the bench's synthetic rows)
     root: Option<&'a str>,
-    /// selection before a rubber band started (a Ctrl band adds to it)
+    /// selection before a rubber band started (Ctrl/Shift band uses it)
     base: &'a mut Vec<EntryId>,
+    band_mode: &'a mut BandMode,
     labels: &'a mut [(u64, u32)],
     box_dip: f32,
     font: Font,
@@ -2092,25 +2213,16 @@ impl GridSource for Tiles<'_> {
     fn select_none(&mut self) {
         self.sel.clear();
     }
-    fn band_begin(&mut self, additive: bool) {
-        self.base.clear();
-        if additive {
-            let sel = &*self.sel;
-            self.base.extend(self.store.view().iter().copied().filter(|&id| sel.contains(id)));
-        } else {
-            self.sel.clear();
-        }
+    fn band_begin(&mut self, mode: BandMode) {
+        band_begin_sel(self.store, self.sel, self.base, self.band_mode, mode);
     }
     fn band_update(&mut self, cells: Option<BandCells>, cols: usize) {
-        let store = self.store;
-        let len = store.view().len();
-        let covered = cells.into_iter().flat_map(move |b| b.indices(cols, len)).filter_map(move |i| store.at(i));
-        let ids = self.base.iter().copied().chain(covered);
-        self.sel.replace_with(store, ids);
+        let len = self.store.view().len();
+        let covered = cells.into_iter().flat_map(move |b| b.indices(cols, len));
+        band_update_sel(self.store, self.sel, self.base, *self.band_mode, covered);
     }
     fn band_end(&mut self) {
-        self.base.clear();
-        self.base.shrink_to(256);
+        band_end_sel(self.base);
     }
     fn draw_cell(&mut self, c: &mut dyn Canvas, t: &Theme, i: usize, r: Rect, _st: RowState) {
         let Some(id) = self.store.at(i) else { return };
@@ -2901,5 +3013,322 @@ mod tests {
         crate::ext::apply_disabled(&[]);
         let _ = std::fs::remove_dir_all(&pack_data);
         crate::packs::load(&pack_data);
+    }
+
+    // ---- B8-MOUSE-UX: back/forward, empty dblclick -> up, marquee, middle-click ----
+
+    #[test]
+    fn mouse_back_forward_navigates_active_pane_and_respects_modals_and_popups() {
+        let mut r = Rig::dual("b8-nav");
+        let root = r.dir.to_str().unwrap().to_string();
+        let docs = r.dir.join("Docs").to_str().unwrap().to_string();
+        // navigate pane 0 into Docs
+        r.v.go(&docs);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+
+        // XBUTTON1 (back) -> root; XBUTTON2 (forward) -> Docs
+        assert!(r.v.nav_button(&mut r.ui, false));
+        r.settle();
+        assert_eq!(r.v.tab().path, root);
+        assert!(r.v.nav_button(&mut r.ui, true));
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+
+        // popup open: closes popup without navigating or losing history
+        let pop = Id::new("test-pop");
+        r.ui.open_popup(pop);
+        assert!(r.ui.popups_open() > 0);
+        assert!(r.v.nav_button(&mut r.ui, false));
+        assert_eq!(r.ui.popups_open(), 0, "popup dismissed");
+        assert_eq!(r.v.tab().path, docs, "did not navigate while dismissing popup");
+        assert!(r.v.tab().history.can_back(), "history intact");
+
+        // palette open: ignored without navigating
+        r.key(Key::Char('P'), Mods::CTRL_SHIFT);
+        assert!(r.v.palette_open());
+        assert!(!r.v.nav_button(&mut r.ui, false));
+        assert_eq!(r.v.tab().path, docs);
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.palette_open());
+
+        // inline rename open: ignored without navigating
+        r.v.go(&root);
+        r.settle();
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.rename.is_some());
+        assert!(!r.v.nav_button(&mut r.ui, false));
+        assert_eq!(r.v.tab().path, root);
+        r.key(Key::Escape, Mods::NONE);
+        assert!(r.v.rename.is_none());
+
+        // dual-pane: active pane 1 receives Back/Forward, pane 0 untouched
+        r.v.set_active_pane(1);
+        r.frame();
+        r.v.go(&docs);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+        assert!(r.v.nav_button(&mut r.ui, false));
+        r.settle();
+        assert_eq!(r.v.tab().path, root, "pane 1 went back");
+        let p0_path = r.v.with_pane(0, |v| v.tab().path.clone());
+        assert_eq!(p0_path, root, "pane 0 unaffected");
+    }
+
+    #[test]
+    fn double_click_empty_space_goes_up_in_details_and_grid_only() {
+        let mut r = Rig::new("b8-dblup");
+        let root = r.dir.to_str().unwrap().to_string();
+        let docs = r.dir.join("Docs").to_str().unwrap().to_string();
+        let dbl = |r: &mut Rig, x: f32, y: f32| {
+            let pos = Pt::new(x, y);
+            r.move_to(x, y);
+            r.ui.push(Event::MouseDown { pos, button: Button::Left, mods: Mods::NONE, double: true });
+            r.frame();
+            r.ui.push(Event::MouseUp { pos, button: Button::Left, mods: Mods::NONE });
+            r.frame();
+        };
+
+        // Details view: empty space below rows -> goes up
+        r.v.go(&docs);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+        let (l, rh) = r.list_of(0);
+        dbl(&mut r, l.x + 80.0, l.b() - 30.0);
+        r.settle();
+        assert_eq!(r.v.tab().path, root, "details empty double-click navigated up");
+
+        // Negative: double-click on a file row opens the file, does NOT go up
+        let txt_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("alpha.txt"))).unwrap();
+        dbl(&mut r, l.x + 80.0, l.y + (txt_row as f32 + 0.5) * rh);
+        assert_eq!(r.v.tab().path, root, "row double-click did not go up");
+        assert_eq!(r.v.open_paths.len(), 1);
+        r.v.open_paths.clear();
+
+        // Negative: double-click on column header does NOT go up
+        let header_y = l.y - r.ui.theme.height_column_header / 2.0;
+        dbl(&mut r, l.x + 80.0, header_y);
+        assert_eq!(r.v.tab().path, root, "header double-click did not go up");
+
+        // Negative: double-click on scrollbar does NOT go up
+        dbl(&mut r, l.r() - 4.0, l.b() - 30.0);
+        assert_eq!(r.v.tab().path, root, "scrollbar double-click did not go up");
+
+        // Negative: double-click empty space while inline-renaming does NOT go up
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.rename.is_some());
+        dbl(&mut r, l.x + 80.0, l.b() - 30.0);
+        assert_eq!(r.v.tab().path, root, "double-click while renaming did not go up");
+
+        // Grid view: double-click empty space -> goes up
+        r.v.set_mode(ViewMode::GridSmall);
+        r.v.go(&docs);
+        r.settle();
+        assert_eq!(r.v.tab().path, docs);
+        let gl = r.v.list_r;
+        dbl(&mut r, gl.x + 300.0, gl.b() - 30.0);
+        r.settle();
+        assert_eq!(r.v.tab().path, root, "grid empty double-click navigated up");
+    }
+
+    #[test]
+    fn details_and_grid_marquee_select_modifiers_empty_click_esc_and_row_drag() {
+        let mut r = Rig::new("b8-marquee");
+        let (l, rh) = r.list_of(0);
+        // rows: 0=Docs, 1=alpha.txt, 2=beta.txt
+        assert_eq!(r.v.tab().shown(), 3);
+        let row_y = |i: usize| l.y + (i as f32 + 0.5) * rh;
+        let empty = Pt::new(l.x + 120.0, l.y + rh * 8.0);
+
+        let sel_indices = |v: &View| -> Vec<usize> {
+            let t = v.tab();
+            (0..t.shown()).filter(|&i| t.store.at(i).is_some_and(|id| t.sel.contains(id))).collect()
+        };
+
+        // 1. Plain marquee in Details view from empty space over rows 1..=2
+        {
+            let t = r.v.tab_mut();
+            t.sel.single(&t.store, 0);
+        }
+        r.frame();
+        assert_eq!(sel_indices(&r.v), vec![0]);
+        r.move_to(empty.x, empty.y);
+        r.ui.push(Event::MouseDown { pos: empty, button: Button::Left, mods: Mods::NONE, double: false });
+        r.frame();
+        assert!(sel_indices(&r.v).is_empty(), "empty press clears selection");
+        r.move_to(l.x + 80.0, row_y(1));
+        assert!(r.v.tab().list.banding(), "marquee active past deadzone");
+        assert!(r.v.drag_out.is_none(), "marquee never triggers OLE drag_out");
+        assert_eq!(sel_indices(&r.v), vec![1, 2]);
+        r.ui.push(Event::MouseUp { pos: Pt::new(l.x + 80.0, row_y(1)), button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert!(!r.v.tab().list.banding());
+        assert_eq!(sel_indices(&r.v), vec![1, 2]);
+        assert!(r.v.tab().band_base.is_empty());
+
+        // 2. Ctrl marquee toggles against snapshot {1, 2}: drag over rows 2 -> {1}
+        r.move_to(empty.x, empty.y);
+        r.ui.push(Event::MouseDown { pos: empty, button: Button::Left, mods: Mods::CTRL, double: false });
+        r.frame();
+        assert_eq!(sel_indices(&r.v), vec![1, 2], "Ctrl press preserves selection");
+        r.move_to(l.x + 80.0, row_y(2));
+        assert_eq!(sel_indices(&r.v), vec![1], "Ctrl marquee toggled row 2 off");
+        // extend up to row 0: covers {0, 1, 2} ^ {1, 2} = {0}
+        r.move_to(l.x + 80.0, row_y(0));
+        assert_eq!(sel_indices(&r.v), vec![0], "Ctrl marquee toggled 0 on and 1,2 off");
+        r.ui.push(Event::MouseUp { pos: Pt::new(l.x + 80.0, row_y(0)), button: Button::Left, mods: Mods::CTRL });
+        r.frame();
+        assert_eq!(sel_indices(&r.v), vec![0]);
+
+        // 3. Shift marquee adds to snapshot {0}: drag over row 2 -> {0, 2}
+        r.move_to(empty.x, empty.y);
+        r.ui.push(Event::MouseDown { pos: empty, button: Button::Left, mods: Mods::SHIFT, double: false });
+        r.frame();
+        r.move_to(l.x + 80.0, row_y(2));
+        assert_eq!(sel_indices(&r.v), vec![0, 2], "Shift marquee added row 2 to snapshot");
+        r.ui.push(Event::MouseUp { pos: Pt::new(l.x + 80.0, row_y(2)), button: Button::Left, mods: Mods::SHIFT });
+        r.frame();
+        assert_eq!(sel_indices(&r.v), vec![0, 2]);
+
+        // 4. Plain click on empty space without dragging clears selection & focuses pane
+        r.click(empty.x, empty.y);
+        assert!(sel_indices(&r.v).is_empty(), "empty click clears selection");
+        assert!(r.ui.has_focus(pid(0, ID_LIST)), "empty click focuses list");
+
+        // 5. Esc cancels marquee cleanly and releases capture
+        r.move_to(empty.x, empty.y);
+        r.ui.push(Event::MouseDown { pos: empty, button: Button::Left, mods: Mods::NONE, double: false });
+        r.frame();
+        r.move_to(l.x + 80.0, row_y(1));
+        assert!(r.v.tab().list.banding());
+        assert_eq!(r.ui.active(), Some(pid(0, ID_LIST)));
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.tab().list.banding() && !r.v.tab().list.has_band(), "Esc ends marquee");
+        assert_eq!(r.ui.active(), None, "Esc clears active/capture");
+        r.ui.push(Event::MouseUp { pos: Pt::new(l.x + 80.0, row_y(1)), button: Button::Left, mods: Mods::NONE });
+        r.frame();
+
+        // 6. Dragging from an item row starts OLE drag_out and does NOT start marquee
+        let p_row = Pt::new(l.x + 40.0, row_y(1));
+        r.move_to(p_row.x, p_row.y);
+        r.ui.push(Event::MouseDown { pos: p_row, button: Button::Left, mods: Mods::NONE, double: false });
+        r.frame();
+        assert!(!r.v.tab().list.has_band(), "row press does not start marquee");
+        r.move_to(p_row.x + 14.0, p_row.y + 4.0);
+        assert!(r.v.drag_out.is_some(), "row drag starts OLE drag_out");
+        assert!(!r.v.tab().list.banding(), "row drag never starts marquee");
+        r.v.drag_out = None;
+        r.ui.push(Event::MouseUp { pos: Pt::new(p_row.x + 14.0, p_row.y + 4.0), button: Button::Left, mods: Mods::NONE });
+        r.frame();
+
+        // 7. Grid view Ctrl toggle + Shift add + Esc cancel
+        r.v.set_mode(ViewMode::GridSmall);
+        r.frame();
+        let gl = r.v.list_r;
+        let gempty = Pt::new(gl.x + 500.0, gl.y + 200.0);
+        {
+            let t = r.v.tab_mut();
+            t.sel.single(&t.store, 0);
+        }
+        r.frame();
+        // Shift drag over cell 2 (x = 192..288)
+        r.move_to(gempty.x, gempty.y);
+        r.ui.push(Event::MouseDown { pos: gempty, button: Button::Left, mods: Mods::SHIFT, double: false });
+        r.frame();
+        r.move_to(gl.x + 220.0, gl.y + 40.0);
+        assert_eq!(sel_indices(&r.v), vec![0, 2], "grid Shift marquee adds cell 2");
+        r.ui.push(Event::MouseUp { pos: Pt::new(gl.x + 220.0, gl.y + 40.0), button: Button::Left, mods: Mods::SHIFT });
+        r.frame();
+        // Ctrl drag over cells 1..=2 toggles 2 off and 1 on -> {0, 1}
+        r.move_to(gempty.x, gempty.y);
+        r.ui.push(Event::MouseDown { pos: gempty, button: Button::Left, mods: Mods::CTRL, double: false });
+        r.frame();
+        r.move_to(gl.x + 120.0, gl.y + 40.0);
+        assert_eq!(sel_indices(&r.v), vec![0, 1], "grid Ctrl marquee toggles covered cells");
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.tab().grid.banding() && r.ui.active().is_none(), "Esc cancels grid marquee");
+        r.ui.push(Event::MouseUp { pos: Pt::new(gl.x + 120.0, gl.y + 40.0), button: Button::Left, mods: Mods::CTRL });
+        r.frame();
+    }
+
+    #[test]
+    fn middle_click_folder_and_breadcrumb_open_new_tab_and_backspace_goes_up() {
+        let mut r = Rig::new("b8-mid");
+        let root = r.dir.to_str().unwrap().to_string();
+        let docs = r.dir.join("Docs").to_str().unwrap().to_string();
+        let mid_click = |r: &mut Rig, x: f32, y: f32| {
+            let pos = Pt::new(x, y);
+            r.move_to(x, y);
+            r.ui.push(Event::MouseDown { pos, button: Button::Middle, mods: Mods::NONE, double: false });
+            r.frame();
+            r.ui.push(Event::MouseUp { pos, button: Button::Middle, mods: Mods::NONE });
+            r.frame();
+        };
+
+        let (l, rh) = r.list_of(0);
+        let dir_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(_, d)| d)).unwrap();
+        let file_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(_, d)| !d)).unwrap();
+
+        // Details: middle-click file does nothing
+        assert_eq!(r.v.tabs.len(), 1);
+        mid_click(&mut r, l.x + 60.0, l.y + (file_row as f32 + 0.5) * rh);
+        assert_eq!(r.v.tabs.len(), 1, "middle-click on file does not open a tab");
+
+        // Details: middle-click folder opens new tab
+        mid_click(&mut r, l.x + 60.0, l.y + (dir_row as f32 + 0.5) * rh);
+        r.settle();
+        assert_eq!(r.v.tabs.len(), 2, "middle-click on folder opens new tab");
+        assert_eq!(r.v.tab().path, docs);
+
+        // Breadcrumb: middle-click the parent segment opens root in a new tab
+        let t = r.ui.theme;
+        let bar_y = t.height_titlebar + t.height_toolbar / 2.0;
+        let bs = t.height_button;
+        let bar_x = t.space_4 + 3.0 * bs + 4.0 + t.space_4;
+        let fw = t.layout_filter_width.min((1120.0 - bar_x) / 2.0).max(60.0);
+        let vb_x = 1120.0 - t.space_4 - fw - t.space_4 - bs;
+        let bar_w = (vb_x - t.space_4 - bar_x).max(40.0);
+        let first_x = bar_x + 8.0 + 16.0 + 6.0;
+        let avail = (bar_x + bar_w) - 8.0 - first_x;
+        let first = first_visible_crumb(&r.v.crumbs.widths, avail);
+        let n = r.v.crumbs.crumbs.len();
+        assert!(n >= 2 && first <= n - 2);
+        let mut cx = first_x;
+        if first > 0 {
+            cx += ELLIPSIS_W + SEP_W;
+        }
+        for i in first..(n - 2) {
+            cx += r.v.crumbs.widths[i] + 2.0 * CRUMB_PAD + SEP_W;
+        }
+        let parent_x = cx + CRUMB_PAD + r.v.crumbs.widths[n - 2] / 2.0;
+        mid_click(&mut r, parent_x, bar_y);
+        r.settle();
+        assert_eq!(r.v.tabs.len(), 3, "middle-click on breadcrumb opens new tab");
+        assert_eq!(r.v.tab().path, root);
+
+        // Grid: middle-click folder opens new tab
+        r.v.set_mode(ViewMode::GridSmall);
+        r.frame();
+        let (ox, oy) = r.v.tab().grid.cell_origin(dir_row);
+        let (gx, gy) = (r.v.list_r.x + ox + 40.0, r.v.list_r.y + oy + 40.0);
+        mid_click(&mut r, gx, gy);
+        r.settle();
+        assert_eq!(r.v.tabs.len(), 4, "grid middle-click on folder opens new tab");
+        assert_eq!(r.v.tab().path, docs);
+
+        // Backspace goes up when list focused
+        r.key(Key::Backspace, Mods::NONE);
+        r.settle();
+        assert_eq!(r.v.tab().path, root, "Backspace navigates up");
+
+        // Backspace in filter box edits filter instead of going up
+        r.v.go(&docs);
+        r.settle();
+        r.ui.push(Event::Char('a'));
+        r.frame();
+        assert_eq!(r.v.filter.text, "a");
+        r.key(Key::Backspace, Mods::NONE);
+        assert_eq!(r.v.filter.text, "", "Backspace deleted filter char");
+        assert_eq!(r.v.tab().path, docs, "Backspace in filter did NOT go up");
     }
 }

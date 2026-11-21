@@ -134,6 +134,8 @@ const CARET_MS: u32 = 530;
 const CARET_IDLE: Duration = Duration::from_secs(10);
 /// not exported by the windows crate features we use
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const APPCOMMAND_BROWSER_BACKWARD: u32 = 1;
+const APPCOMMAND_BROWSER_FORWARD: u32 = 2;
 const WATCH_MS: u32 = 1000;
 const HANG_MS: u32 = 20_000;
 /// Resize border of the frameless window, DIPs.
@@ -1296,6 +1298,37 @@ fn map_key(vk: u16) -> Key {
     }
 }
 
+/// Decodes XBUTTON1 (Back -> Some(false)) / XBUTTON2 (Forward -> Some(true)) from WM_XBUTTON* wParam.
+fn xbutton_nav(wp: WPARAM) -> Option<bool> {
+    match ((wp.0 >> 16) & 0xffff) as u16 {
+        XBUTTON1 => Some(false),
+        XBUTTON2 => Some(true),
+        _ => None,
+    }
+}
+
+/// Decodes APPCOMMAND_BROWSER_BACKWARD (Some(false)) / APPCOMMAND_BROWSER_FORWARD (Some(true)) from WM_APPCOMMAND lParam.
+fn appcommand_nav(lp: LPARAM) -> Option<bool> {
+    // GET_APPCOMMAND_LPARAM(lParam) = HIWORD(lParam) & ~FAPPCOMMAND_MASK
+    let cmd = (((lp.0 >> 16) & 0xffff) as u32) & !FAPPCOMMAND_MASK;
+    match cmd {
+        APPCOMMAND_BROWSER_BACKWARD => Some(false),
+        APPCOMMAND_BROWSER_FORWARD => Some(true),
+        _ => None,
+    }
+}
+
+/// Routes a Back/Forward navigation button to the active pane.
+fn mouse_nav(hwnd: HWND, forward: bool) -> bool {
+    with(|a| {
+        note_input(a);
+        let changed = a.view.nav_button(&mut a.ui, forward);
+        arm_ctx(hwnd, a);
+        changed
+    })
+    .unwrap_or(false)
+}
+
 fn button_event(hwnd: HWND, msg: u32, lp: LPARAM) {
     let pos = dip_pt(lp);
     let mods = mods();
@@ -1516,6 +1549,35 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 button_event(hwnd, msg, lp);
                 LRESULT(0)
             }
+            // Mouse Back (XBUTTON1) / Forward (XBUTTON2). Return TRUE (1) on both
+            // down and up so DefWindowProc does not double-fire WM_APPCOMMAND.
+            WM_XBUTTONDOWN | WM_XBUTTONDBLCLK => {
+                if let Some(forward) = xbutton_nav(wp) {
+                    if mouse_nav(hwnd, forward) {
+                        invalidate(hwnd);
+                    }
+                    LRESULT(1)
+                } else {
+                    DefWindowProcW(hwnd, msg, wp, lp)
+                }
+            }
+            WM_XBUTTONUP => {
+                if xbutton_nav(wp).is_some() {
+                    LRESULT(1)
+                } else {
+                    DefWindowProcW(hwnd, msg, wp, lp)
+                }
+            }
+            WM_APPCOMMAND => {
+                if let Some(forward) = appcommand_nav(lp) {
+                    if mouse_nav(hwnd, forward) {
+                        invalidate(hwnd);
+                    }
+                    LRESULT(1)
+                } else {
+                    DefWindowProcW(hwnd, msg, wp, lp)
+                }
+            }
             WM_MOUSEMOVE => {
                 if with(|a| !std::mem::replace(&mut a.tracking, true)).unwrap_or(false) {
                     let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
@@ -1627,7 +1689,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     invalidate(hwnd);
                     return LRESULT(0);
                 }
-                // file shortcuts of the list (copy, paste, delete, undo)
+                // dedicated keyboard Browser Back / Forward keys
+                if matches!(VIRTUAL_KEY(wp.0 as u16), VK_BROWSER_BACK | VK_BROWSER_FORWARD) {
+                    if !repeat && mouse_nav(hwnd, VIRTUAL_KEY(wp.0 as u16) == VK_BROWSER_FORWARD) {
+                        invalidate(hwnd);
+                    }
+                    return LRESULT(0);
+                }
+                // file shortcuts of the list (copy, paste, delete, undo, Alt+Enter Properties)
                 if !repeat && shellops::on_key(hwnd, wp.0 as u16, mods()) {
                     return LRESULT(0);
                 }
@@ -1643,9 +1712,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 push(hwnd, Event::KeyUp { key: map_key(wp.0 as u16), mods: mods() });
                 LRESULT(0)
             }
-            // Alt+letter while the own menu is open is its accelerator (it
-            // came as WM_SYSKEYDOWN); DefWindowProc would only beep
-            WM_SYSCHAR if with(|a| a.view.ctx.as_ref().is_some_and(|c| c.open)).unwrap_or(false) => LRESULT(0),
+            // Alt+letter / Alt+Enter (Alt+D, Alt+Enter, own menu accelerators) arrive
+            // as WM_SYSCHAR after WM_SYSKEYDOWN; DefWindowProc would only beep.
+            // Keep Alt+Space for the window's system menu.
+            WM_SYSCHAR if wp.0 != ' ' as usize => LRESULT(0),
             // text as characters (injected VK_PACKET input and every layout
             // arrive here); a surrogate pair comes as two messages
             WM_CHAR => {
@@ -1779,5 +1849,23 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xbutton_and_appcommand_decode_back_and_forward() {
+        assert_eq!(xbutton_nav(WPARAM((XBUTTON1 as usize) << 16)), Some(false));
+        assert_eq!(xbutton_nav(WPARAM((XBUTTON2 as usize) << 16)), Some(true));
+        assert_eq!(xbutton_nav(WPARAM(0)), None);
+
+        // WM_APPCOMMAND puts command in low 12 bits of HIWORD, device in FAPPCOMMAND_MASK bits
+        let mk_appcmd = |cmd: u32, dev: u32| LPARAM(((cmd | dev) as isize) << 16);
+        assert_eq!(appcommand_nav(mk_appcmd(APPCOMMAND_BROWSER_BACKWARD, 0x8000)), Some(false));
+        assert_eq!(appcommand_nav(mk_appcmd(APPCOMMAND_BROWSER_FORWARD, 0x8000)), Some(true));
+        assert_eq!(appcommand_nav(mk_appcmd(3, 0x8000)), None); // APPCOMMAND_BROWSER_REFRESH
     }
 }

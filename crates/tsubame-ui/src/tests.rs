@@ -211,12 +211,18 @@ struct Rows {
     n: usize,
     drawn: Vec<usize>,
     selected: std::collections::BTreeSet<usize>,
+    base: std::collections::BTreeSet<usize>,
+    band_mode: BandMode,
     anchor: usize,
+    ended: usize,
 }
 
 impl Rows {
     fn new(n: usize) -> Rows {
-        Rows { n, drawn: Vec::new(), selected: Default::default(), anchor: 0 }
+        Rows { n, drawn: Vec::new(), selected: Default::default(), base: Default::default(), band_mode: BandMode::Replace, anchor: 0, ended: 0 }
+    }
+    fn sel(&self) -> Vec<usize> {
+        self.selected.iter().copied().collect()
     }
 }
 
@@ -244,6 +250,27 @@ impl ListSource for Rows {
             self.selected = [i].into();
             self.anchor = i;
         }
+    }
+    fn select_none(&mut self) {
+        self.selected.clear();
+    }
+    fn band_begin(&mut self, mode: BandMode) {
+        self.band_mode = mode;
+        if mode == BandMode::Replace {
+            self.selected.clear();
+        }
+        self.base = self.selected.clone();
+    }
+    fn band_update(&mut self, rows: Option<(usize, usize)>) {
+        let cov: std::collections::BTreeSet<usize> = rows.into_iter().flat_map(|(a, b)| a..=b).collect();
+        match self.band_mode {
+            BandMode::Replace => self.selected = cov,
+            BandMode::Add => self.selected = self.base.union(&cov).copied().collect(),
+            BandMode::Toggle => self.selected = self.base.symmetric_difference(&cov).copied().collect(),
+        }
+    }
+    fn band_end(&mut self) {
+        self.ended += 1;
     }
 }
 
@@ -800,13 +827,14 @@ struct Tiles {
     drawn: Vec<usize>,
     selected: std::collections::BTreeSet<usize>,
     base: std::collections::BTreeSet<usize>,
+    band_mode: BandMode,
     anchor: usize,
     ended: usize,
 }
 
 impl Tiles {
     fn new(n: usize) -> Tiles {
-        Tiles { n, drawn: Vec::new(), selected: Default::default(), base: Default::default(), anchor: 0, ended: 0 }
+        Tiles { n, drawn: Vec::new(), selected: Default::default(), base: Default::default(), band_mode: BandMode::Replace, anchor: 0, ended: 0 }
     }
     fn sel(&self) -> Vec<usize> {
         self.selected.iter().copied().collect()
@@ -840,16 +868,19 @@ impl GridSource for Tiles {
     fn select_none(&mut self) {
         self.selected.clear();
     }
-    fn band_begin(&mut self, additive: bool) {
-        if !additive {
+    fn band_begin(&mut self, mode: BandMode) {
+        self.band_mode = mode;
+        if mode == BandMode::Replace {
             self.selected.clear();
         }
         self.base = self.selected.clone();
     }
     fn band_update(&mut self, cells: Option<BandCells>, cols: usize) {
-        self.selected = self.base.clone();
-        if let Some(b) = cells {
-            self.selected.extend(b.indices(cols, self.n));
+        let cov: std::collections::BTreeSet<usize> = cells.into_iter().flat_map(|b| b.indices(cols, self.n)).collect();
+        match self.band_mode {
+            BandMode::Replace => self.selected = cov,
+            BandMode::Add => self.selected = self.base.union(&cov).copied().collect(),
+            BandMode::Toggle => self.selected = self.base.symmetric_difference(&cov).copied().collect(),
         }
     }
     fn band_end(&mut self) {
@@ -1176,4 +1207,88 @@ fn capture_keys_hands_every_chord_to_the_focused_widget() {
     h.key(Key::Char('T'), Mods::CTRL);
     run(&mut h, false, &mut seen, &mut cmds);
     assert_eq!(cmds, vec![7]);
+}
+
+#[test]
+fn list_marquee_plain_ctrl_shift_esc_empty_dblclick_and_middle_click() {
+    let mut h = Harness::new();
+    let mut st = ListState::new(22.0);
+    let mut rows = Rows::new(5); // 5 rows = 110 DIPs in a 440 DIP rect -> plenty of empty space below
+    list_frame(&mut h, &mut st, &mut rows);
+    let y = |i: usize| LIST_RECT.y + i as f32 * 22.0 + 11.0;
+    let empty_y = LIST_RECT.y + 200.0;
+
+    // plain marquee from empty space up over rows 2..=4
+    rows.selected = [0].into();
+    h.down(100.0, empty_y);
+    list_frame(&mut h, &mut st, &mut rows);
+    assert!(rows.sel().is_empty(), "plain press on empty space clears selection");
+    assert!(!st.banding(), "deadzone prevents immediate band");
+    h.move_to(200.0, y(2));
+    list_frame(&mut h, &mut st, &mut rows);
+    assert!(st.banding());
+    assert_eq!(rows.sel(), vec![2, 3, 4]);
+    let accent = h.ui.theme.accent;
+    let band_fills = h.c.ops.iter().filter(|o| matches!(o, Op::Fill(_, c, a) if *c == accent && *a < 1.0)).count();
+    assert_eq!(band_fills, 1, "marquee fill drawn with accent color");
+    h.up(200.0, y(2));
+    list_frame(&mut h, &mut st, &mut rows);
+    assert!(!st.banding());
+    assert_eq!(rows.sel(), vec![2, 3, 4]);
+
+    // Ctrl marquee toggles against snapshot {2, 3, 4}: drag over rows 1..=3 -> {1, 4}
+    h.down_m(100.0, empty_y, Mods::CTRL, false);
+    list_frame(&mut h, &mut st, &mut rows);
+    assert_eq!(rows.sel(), vec![2, 3, 4], "Ctrl press preserves selection");
+    h.move_to(100.0, y(1));
+    list_frame(&mut h, &mut st, &mut rows);
+    // y(1) to empty_y covers rows 1..=4 -> {2,3,4} ^ {1,2,3,4} = {1}
+    assert_eq!(rows.sel(), vec![1]);
+    h.up(100.0, y(1));
+    list_frame(&mut h, &mut st, &mut rows);
+    assert_eq!(rows.sel(), vec![1]);
+
+    // Shift marquee adds to snapshot {1}: drag over rows 3..=4 -> {1, 3, 4}
+    h.down_m(100.0, empty_y, Mods::SHIFT, false);
+    list_frame(&mut h, &mut st, &mut rows);
+    h.move_to(100.0, y(3));
+    list_frame(&mut h, &mut st, &mut rows);
+    assert_eq!(rows.sel(), vec![1, 3, 4]);
+    h.up(100.0, y(3));
+    list_frame(&mut h, &mut st, &mut rows);
+    assert_eq!(rows.sel(), vec![1, 3, 4]);
+
+    // Esc cancels marquee cleanly and releases capture
+    h.down(100.0, empty_y);
+    list_frame(&mut h, &mut st, &mut rows);
+    h.move_to(100.0, y(3));
+    let out = h.frame(|ui, c| {
+        list(ui, c, LIST, LIST_RECT, &mut st, &mut rows);
+    });
+    assert!(st.banding() && out.capture);
+    h.key(Key::Escape, Mods::NONE);
+    let out = h.frame(|ui, c| {
+        list(ui, c, LIST, LIST_RECT, &mut st, &mut rows);
+    });
+    assert!(!st.banding() && !st.has_band(), "Esc cancels marquee");
+    assert!(!out.capture, "Esc releases capture");
+    h.up(100.0, y(3));
+    list_frame(&mut h, &mut st, &mut rows);
+
+    // Double-click empty space reports empty_double_click; row double-click reports activated only
+    h.down_m(100.0, empty_y, Mods::NONE, true);
+    h.up(100.0, empty_y);
+    let r = list_frame(&mut h, &mut st, &mut rows);
+    assert!(r.empty_double_click && r.activated.is_none());
+
+    h.down_m(100.0, y(1), Mods::NONE, true);
+    h.up(100.0, y(1));
+    let r = list_frame(&mut h, &mut st, &mut rows);
+    assert!(!r.empty_double_click && r.activated == Some(1));
+
+    // Middle-click row reports middle_clicked
+    h.push(Event::MouseDown { pos: Pt::new(100.0, y(2)), button: Button::Middle, mods: Mods::NONE, double: false });
+    h.push(Event::MouseUp { pos: Pt::new(100.0, y(2)), button: Button::Middle, mods: Mods::NONE });
+    let r = list_frame(&mut h, &mut st, &mut rows);
+    assert_eq!(r.middle_clicked, Some(2));
 }

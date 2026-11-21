@@ -563,6 +563,7 @@ pub enum KeyAct {
     Undo,
     Redo,
     NewFolder,
+    Properties,
 }
 
 /// The file shortcut `vk` with `m` stands for (Explorer's keys).
@@ -571,7 +572,7 @@ pub fn key_act(vk: u16, m: Mods) -> Option<KeyAct> {
     let ch = |c: u8| vk == c as u16;
     let (c, s) = (m.ctrl, m.shift);
     if m.alt {
-        return None;
+        return (!c && !s && k == VK_RETURN).then_some(KeyAct::Properties);
     }
     Some(if c && !s && (ch(b'C') || k == VK_INSERT) {
         KeyAct::Copy
@@ -623,6 +624,21 @@ pub fn on_key(hwnd: HWND, vk: u16, m: Mods) -> bool {
                 a.view.ops.redo();
             }
             KeyAct::NewFolder => new_item(a, false),
+            KeyAct::Properties => {
+                if a.view.tab().synthetic {
+                    return false;
+                }
+                let mut paths = sel(a);
+                if paths.is_empty()
+                    && let Some(f) = active_folder(a)
+                {
+                    paths.push(f);
+                }
+                if paths.is_empty() {
+                    return false;
+                }
+                open_properties(paths);
+            }
         }
         true
     })
@@ -631,6 +647,60 @@ pub fn on_key(hwnd: HWND, vk: u16, m: Mods) -> bool {
         invalidate(hwnd);
     }
     r
+}
+
+/// Opens the native Windows Properties dialog for `paths` on a dedicated STA
+/// worker thread (never blocks the UI thread; shell32 hosts the modeless sheet
+/// on its own worker thread).
+fn open_properties(paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("tsubame-properties".into()).spawn(move || unsafe {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, IDataObject};
+        use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+        use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFindLastID, ILFree, SHCreateDataObject, SHMultiFileProperties, SHObjectProperties, SHOP_FILEPATH};
+        use windows::core::PCWSTR;
+
+        let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        if paths.len() == 1 {
+            let w = wide(&paths[0]);
+            let _ = SHObjectProperties(None, SHOP_FILEPATH, PCWSTR(w.as_ptr()), PCWSTR::null());
+        } else {
+            let mut opened = false;
+            let mut full: Vec<*mut ITEMIDLIST> = Vec::with_capacity(paths.len());
+            for p in &paths {
+                let w = wide(p);
+                let pidl = ILCreateFromPathW(PCWSTR(w.as_ptr()));
+                if !pidl.is_null() {
+                    full.push(pidl);
+                }
+            }
+            if !full.is_empty() {
+                let parent_str = Path::new(&paths[0]).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                let pw = wide(&parent_str);
+                let parent_pidl = ILCreateFromPathW(PCWSTR(pw.as_ptr()));
+                if !parent_pidl.is_null() {
+                    let children: Vec<*const ITEMIDLIST> = full.iter().map(|&p| ILFindLastID(p) as *const ITEMIDLIST).collect();
+                    if let Ok(data_obj) = SHCreateDataObject::<_, IDataObject>(Some(parent_pidl as *const ITEMIDLIST), Some(&children), None) {
+                        opened = SHMultiFileProperties(&data_obj, 0).is_ok();
+                    }
+                    ILFree(Some(parent_pidl as *const ITEMIDLIST));
+                }
+                for p in full {
+                    ILFree(Some(p as *const ITEMIDLIST));
+                }
+            }
+            if !opened {
+                let w = wide(&paths[0]);
+                let _ = SHObjectProperties(None, SHOP_FILEPATH, PCWSTR(w.as_ptr()), PCWSTR::null());
+            }
+        }
+        if com {
+            CoUninitialize();
+        }
+    });
 }
 
 fn new_item(a: &mut App, file: bool) {
@@ -1106,6 +1176,9 @@ mod tests {
         assert_eq!(key_act(k(b'Z'), m(true, false)), Some(KeyAct::Undo));
         assert_eq!(key_act(k(b'Y'), m(true, false)), Some(KeyAct::Redo));
         assert_eq!(key_act(k(b'N'), m(true, true)), Some(KeyAct::NewFolder));
+        assert_eq!(key_act(VK_RETURN.0, Mods::ALT), Some(KeyAct::Properties));
+        assert_eq!(key_act(VK_RETURN.0, Mods::NONE), None);
+        assert_eq!(key_act(VK_RETURN.0, Mods { ctrl: true, shift: false, alt: true }), None);
         assert_eq!(key_act(k(b'C'), Mods { ctrl: true, shift: false, alt: true }), None);
         assert_eq!(key_act(k(b'C'), m(false, false)), None, "typing goes to the filter");
     }

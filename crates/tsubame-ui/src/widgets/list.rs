@@ -13,7 +13,32 @@ use crate::geom::{Pt, Rect};
 use crate::input::{Button, Event, Key, Mods};
 use crate::theme::Theme;
 use crate::ui::{Id, Sense, Ui};
+use crate::widgets::grid::BAND_DEADZONE;
 use crate::widgets::scrollbar::{ScrollMetrics, vscrollbar};
+
+/// How a marquee / rubber-band selection combines with the pre-drag selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BandMode {
+    /// Plain drag: replaces the selection.
+    #[default]
+    Replace,
+    /// Shift drag: adds covered items to the pre-drag selection.
+    Add,
+    /// Ctrl drag: toggles covered items against the pre-drag selection.
+    Toggle,
+}
+
+impl BandMode {
+    pub fn from_mods(mods: Mods) -> BandMode {
+        if mods.ctrl && !mods.shift {
+            BandMode::Toggle
+        } else if mods.shift {
+            BandMode::Add
+        } else {
+            BandMode::Replace
+        }
+    }
+}
 
 /// How a row is drawn this frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,8 +76,22 @@ pub trait ListSource {
     fn draw_row(&mut self, c: &mut dyn Canvas, theme: &Theme, i: usize, r: Rect, st: RowState);
     /// The cursor moved to `i` (or a click landed on it): update the selection.
     fn select(&mut self, _i: usize, _mods: Mods, _by: SelectBy) {}
-    /// A press on empty space below the last row.
+    /// A press on empty space below the last row (non-left press, e.g. right click).
     fn select_none(&mut self) {}
+    /// A left press on empty space started a marquee band.
+    fn band_begin(&mut self, _mode: BandMode) {}
+    /// Every frame the band is active past the dead zone: inclusive row range
+    /// covered (`None`: covers no rows).
+    fn band_update(&mut self, _rows: Option<(usize, usize)>) {}
+    fn band_end(&mut self) {}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ListBand {
+    /// start in content coordinates (x from the rows' left edge, y from the top)
+    sx: f32,
+    sy: f64,
+    started: bool,
 }
 
 /// Scroll and cursor of one list. Plain data: the app keeps one per view.
@@ -65,11 +104,24 @@ pub struct ListState {
     pub row_h: f32,
     /// rows area height of the last frame (page size for keys)
     pub view_h: f32,
+    band: Option<ListBand>,
 }
 
 impl ListState {
     pub fn new(row_h: f32) -> ListState {
-        ListState { scroll: 0.0, cursor: 0, row_h, view_h: 0.0 }
+        ListState { scroll: 0.0, cursor: 0, row_h, view_h: 0.0, band: None }
+    }
+    /// Is a marquee band being dragged (past the dead zone)?
+    pub fn banding(&self) -> bool {
+        self.band.is_some_and(|b| b.started)
+    }
+    /// Is a left press on empty space tracking a potential or active marquee band?
+    pub fn has_band(&self) -> bool {
+        self.band.is_some()
+    }
+    /// Cancels any in-progress marquee band.
+    pub fn cancel_band(&mut self) {
+        self.band = None;
     }
     pub fn content_h(&self, len: usize) -> f64 {
         len as f64 * self.row_h as f64
@@ -133,6 +185,12 @@ pub struct ListResponse {
     pub range: (usize, usize),
     /// double click or Enter on this row
     pub activated: Option<usize>,
+    /// plain left double-click on empty space below the last row
+    pub empty_double_click: bool,
+    /// middle click released on this row
+    pub middle_clicked: Option<usize>,
+    /// a left or middle press landed inside the rows area this frame
+    pub pressed: bool,
     /// right click released (row under it, if any), at this point
     pub context: Option<(Option<usize>, Pt)>,
     /// the Menu key / Shift+F10 on the cursor row (the app opens the menu)
@@ -169,10 +227,14 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
     if let Some(p) = it.pressed
         && rows.contains_pt(p.pos)
     {
+        if p.button != Button::Right {
+            resp.pressed = true;
+        }
         let row = st.row_at_offset(p.pos.y - rows.y);
         if row < len {
             match p.button {
                 Button::Left => {
+                    st.band = None;
                     resp.cursor_moved |= st.move_cursor(row, len);
                     src.select(row, p.mods, SelectBy::Click);
                     if p.double {
@@ -180,23 +242,54 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
                     }
                 }
                 Button::Right => {
+                    st.band = None;
                     st.cursor = row;
                     src.select(row, p.mods, SelectBy::RightClick);
                 }
                 Button::Middle => {}
             }
-        } else if p.button != Button::Middle {
-            src.select_none();
+        } else {
+            match p.button {
+                Button::Left => {
+                    if p.double && p.mods.none() {
+                        st.band = None;
+                        resp.empty_double_click = true;
+                    } else {
+                        st.band = Some(ListBand { sx: p.pos.x - rows.x, sy: (p.pos.y - rows.y) as f64 + st.scroll, started: false });
+                        src.band_begin(BandMode::from_mods(p.mods));
+                    }
+                }
+                Button::Right => {
+                    st.band = None;
+                    src.select_none();
+                }
+                Button::Middle => {}
+            }
         }
     }
     if it.clicked == Some(Button::Right) && rows.contains_pt(it.click_pos) {
         let row = st.row_at_offset(it.click_pos.y - rows.y);
         resp.context = Some(((row < len).then_some(row), it.click_pos));
     }
+    if it.clicked == Some(Button::Middle) && rows.contains_pt(it.click_pos) {
+        let row = st.row_at_offset(it.click_pos.y - rows.y);
+        if row < len {
+            resp.middle_clicked = Some(row);
+        }
+    }
 
     // keys
     for (qi, ev) in ui.key_input(id) {
         let Event::KeyDown { key, mods, .. } = ev else { continue };
+        if key == Key::Escape && mods.none() && st.band.is_some() {
+            ui.consume(qi);
+            if st.band.take().is_some_and(|b| b.started) {
+                src.band_end();
+            }
+            ui.clear_active();
+            ui.request_repaint();
+            continue;
+        }
         let page = st.page_rows();
         let cur = st.cursor;
         let target = match key {
@@ -233,6 +326,48 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
         }
     }
 
+    // marquee rubber band: edge autoscroll, then covered rows
+    let mut band_rect: Option<Rect> = None;
+    if let Some(mut b) = st.band {
+        if !it.active || !ui.is_active(id) {
+            if b.started {
+                src.band_end();
+            }
+            st.band = None;
+            ui.request_repaint();
+        } else {
+            let m = ui.mouse();
+            let past = if m.y < rows.y { m.y - rows.y } else if m.y > rows.b() { m.y - rows.b() } else { 0.0 };
+            if past != 0.0 && b.started {
+                let speed = (5.0 + past.abs() * 0.4).min(30.0) as f64;
+                if st.set_scroll(st.scroll + speed * past.signum() as f64, len) {
+                    ui.request_repaint();
+                }
+            }
+            let max_y = st.content_h(len).max(st.scroll + st.view_h as f64).max(1.0);
+            let mx = (m.x - rows.x).clamp(0.0, rows.w);
+            let my = ((m.y - rows.y) as f64 + st.scroll).clamp(0.0, max_y);
+            if !b.started && (mx - b.sx).hypot((my - b.sy) as f32) >= BAND_DEADZONE {
+                b.started = true;
+                st.band = Some(b);
+            }
+            if b.started {
+                let (x0, x1) = (b.sx.min(mx), b.sx.max(mx));
+                let (y0, y1) = (b.sy.min(my), b.sy.max(my));
+                let content_h = st.content_h(len);
+                let covered = if len > 0 && y0 < content_h && y1 > 0.0 {
+                    let r0 = (y0 / rh as f64).floor().max(0.0) as usize;
+                    let r1 = (((y1 - 1e-6).max(y0)) / rh as f64).floor().max(0.0) as usize;
+                    (r0 < len).then(|| (r0, r1.min(len - 1)))
+                } else {
+                    None
+                };
+                src.band_update(covered);
+                band_rect = Some(Rect::new(rows.x + x0, rows.y + (y0 - st.scroll) as f32, x1 - x0, (y1 - y0) as f32));
+            }
+        }
+    }
+
     // scrollbar (registered after the list: on top of it for clicks)
     let m = ScrollMetrics { content: st.content_h(len), view: st.view_h as f64, page: (st.page_rows() as f64) * rh as f64 };
     vscrollbar(ui, c, id.child("sb"), track, m, &mut st.scroll);
@@ -242,7 +377,7 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
     let (first, last) = st.visible(len);
     resp.range = (first, last);
     let off = (st.scroll - first as f64 * rh as f64) as f32;
-    let hot_row = (it.hovered && ui.active().is_none_or(|a| a == id) && rows.contains_pt(ui.mouse())).then(|| st.row_at_offset(ui.mouse().y - rows.y));
+    let hot_row = (it.hovered && ui.active().is_none_or(|a| a == id) && rows.contains_pt(ui.mouse()) && !st.banding()).then(|| st.row_at_offset(ui.mouse().y - rows.y));
     let focused = it.focused && ui.window_focused();
     let theme = &ui.theme;
     c.clip(rows);
@@ -259,6 +394,10 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
             c.round_stroke(r, 2.0, theme.focus, 1.0);
         }
         src.draw_row(c, theme, i, r, rs);
+    }
+    if let Some(br) = band_rect {
+        c.fill_a(br, theme.accent, 0.18);
+        c.round_stroke(br, 0.0, theme.accent, 1.0);
     }
     c.unclip();
     resp
