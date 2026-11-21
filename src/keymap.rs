@@ -399,7 +399,7 @@ pub fn category(name: &str) -> &'static str {
         "nav" | "search" => "Navigate",
         "file" => "File",
         "select" => "Edit",
-        "view" | "sidebar" => "View",
+        "view" | "sidebar" | "preview" => "View",
         "pane" => "Panes",
         "settings" | "app" | "palette" => "App",
         _ => "Tools",

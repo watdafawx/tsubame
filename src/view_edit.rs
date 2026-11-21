@@ -451,7 +451,7 @@ impl View {
 
     /// The active pane's list has the keyboard focus (file shortcuts apply).
     pub fn list_focused(&self, ui: &Ui) -> bool {
-        !self.editing && self.rename.is_none() && self.batch.is_none() && self.ctx.is_none() && self.palette.is_none() && self.search.is_none() && ui.has_focus(pid(self.active, ID_LIST))
+        !self.editing && self.rename.is_none() && self.batch.is_none() && self.ctx.is_none() && self.palette.is_none() && self.search.is_none() && !self.preview.quick_look_open() && ui.has_focus(pid(self.active, ID_LIST))
     }
 
     /// F5 / F6 with two panes: the selection goes to the other pane's folder.

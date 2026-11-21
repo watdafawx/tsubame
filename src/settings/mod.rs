@@ -32,6 +32,7 @@ pub const C_KEYS: u32 = 8;
 pub const C_UPDATES: u32 = 16;
 pub const C_MENU: u32 = 32;
 pub const C_OTHER: u32 = 64;
+pub const C_PREVIEW: u32 = 128;
 
 const ID_NAV: Id = Id::new("settings-nav");
 const ID_FIND: Id = Id::new("settings-find");
@@ -80,7 +81,7 @@ impl Page {
     /// Words the "Find a setting" box looks in (besides the title).
     fn keywords(self) -> &'static str {
         match self {
-            Page::General => "start folder session restore hidden system files delete recycle confirm",
+            Page::General => "start folder session restore hidden system files delete recycle confirm preview quick look syntax hex",
             Page::Appearance => "theme dark light colour color accent density zebra font size rows",
             Page::ContextMenu => "right click menu custom command nilesoft import submenu",
             Page::Keys => "keyboard shortcuts keybindings hotkeys rebind chord",

@@ -59,12 +59,14 @@ pub const CMD_SETTINGS_MENU: u32 = 52;
 pub const CMD_SETTINGS_UPDATES: u32 = 53;
 pub const CMD_SETTINGS_DEFAULT_FM: u32 = 54;
 pub const CMD_RESET_KEYS: u32 = 55;
-// P4 built-in extensions (F3 archive, F5 folder sizes / checksum, F1 global search)
+// P4 built-in extensions (F3 archive, F5 folder sizes / checksum, F1 global search, F2 preview)
 pub const CMD_ARCHIVE_EXTRACT_HERE: u32 = 56;
 pub const CMD_ARCHIVE_EXTRACT_SELECTED: u32 = 57;
 pub const CMD_FOLDER_CALC_SIZES: u32 = 58;
 pub const CMD_FILE_CHECKSUM: u32 = 59;
 pub const CMD_GLOBAL_SEARCH: u32 = 60;
+pub const CMD_PREVIEW_TOGGLE: u32 = 61;
+pub const CMD_PREVIEW_QUICK_LOOK: u32 = 62;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -150,6 +152,12 @@ pub static SEARCH_COMMANDS: &[CommandSpec] = &[
     cmd!(CMD_GLOBAL_SEARCH, "search.global", "Global search\u{2026}", ["Ctrl+Shift+F"], G),
 ];
 
+/// Preview extension (`tsubame.ext.preview`) commands.
+pub static PREVIEW_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_PREVIEW_TOGGLE, "preview.toggle_pane", "Toggle preview pane", ["Alt+P"], F),
+    cmd!(CMD_PREVIEW_QUICK_LOOK, "preview.quick_look", "Quick Look", ["Space", "F3"], F),
+];
+
 /// Every built-in command across `tsubame.core` and the P4 built-in extensions,
 /// in registration order.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -160,12 +168,18 @@ pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
         .chain(FOLDER_SIZE_COMMANDS)
         .chain(CHECKSUM_COMMANDS)
         .chain(SEARCH_COMMANDS)
+        .chain(PREVIEW_COMMANDS)
 }
 
 /// Total number of commands registered by `crate::ext::builtin()`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub const fn builtin_count() -> usize {
-    BUILTIN.len() + ARCHIVE_COMMANDS.len() + FOLDER_SIZE_COMMANDS.len() + CHECKSUM_COMMANDS.len() + SEARCH_COMMANDS.len()
+    BUILTIN.len()
+        + ARCHIVE_COMMANDS.len()
+        + FOLDER_SIZE_COMMANDS.len()
+        + CHECKSUM_COMMANDS.len()
+        + SEARCH_COMMANDS.len()
+        + PREVIEW_COMMANDS.len()
 }
 
 /// Binds every default key (tests and the bench; the app binds its key map,
@@ -291,6 +305,8 @@ mod tests {
         (CMD_FOLDER_CALC_SIZES, &[], false),
         (CMD_FILE_CHECKSUM, &[], false),
         (CMD_GLOBAL_SEARCH, &[(Key::Char('F'), CS)], true),
+        (CMD_PREVIEW_TOGGLE, &[(Key::Char('P'), AL)], false),
+        (CMD_PREVIEW_QUICK_LOOK, &[(Key::Space, NM), (Key::F(3), NM)], false),
     ];
 
     /// What ran with the Settings tab in front before the registry.
@@ -367,10 +383,15 @@ mod tests {
         assert!(has(CMD_SPLIT, "Ctrl+\\"));
         assert!(has(CMD_COPY_OTHER, "F5"));
         assert!(has(CMD_GLOBAL_SEARCH, "Ctrl+Shift+F"));
+        assert!(has(CMD_PREVIEW_TOGGLE, "Alt+P"));
+        assert!(has(CMD_PREVIEW_QUICK_LOOK, "Space"));
+        assert!(has(CMD_PREVIEW_QUICK_LOOK, "F3"));
         assert_eq!(by_name("archive.extract_here").map(|c| c.id), Some(CMD_ARCHIVE_EXTRACT_HERE));
         assert_eq!(by_name("archive.extract_selected").map(|c| c.id), Some(CMD_ARCHIVE_EXTRACT_SELECTED));
         assert_eq!(by_name("folder.calc_sizes").map(|c| c.id), Some(CMD_FOLDER_CALC_SIZES));
         assert_eq!(by_name("file.checksum").map(|c| c.id), Some(CMD_FILE_CHECKSUM));
         assert_eq!(by_name("search.global").map(|c| c.id), Some(CMD_GLOBAL_SEARCH));
+        assert_eq!(by_name("preview.toggle_pane").map(|c| c.id), Some(CMD_PREVIEW_TOGGLE));
+        assert_eq!(by_name("preview.quick_look").map(|c| c.id), Some(CMD_PREVIEW_QUICK_LOOK));
     }
 }

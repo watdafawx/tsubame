@@ -70,6 +70,7 @@ mod overlay;
 mod packs;
 mod palette;
 mod panes;
+mod preview_ui;
 mod rename;
 mod search_ui;
 mod session;

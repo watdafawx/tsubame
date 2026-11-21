@@ -120,6 +120,7 @@ const ID_WIN: Id = Id::new("winctl");
 const ID_SPLIT: Id = Id::new("pane-split");
 const ID_LAYOUT: Id = Id::new("pane-layout");
 const ID_SEARCH: Id = Id::new("pane-search");
+const ID_PREVIEW_BTN: Id = Id::new("toolbar-preview");
 /// Height of a pane's own tab strip (two panes).
 const PANE_STRIP_H: f32 = 30.0;
 
@@ -338,6 +339,8 @@ pub struct View {
     pub(crate) meta: crate::meta_ui::MetaUi,
     /// P4.F1: global search overlay (built on open, dropped on close)
     pub(crate) search: Option<Box<crate::search_ui::SearchOverlay>>,
+    /// P4.F2: docked preview pane & Quick Look overlay (lazy worker)
+    pub(crate) preview: crate::preview_ui::PreviewState,
     /// text produced by a background command (e.g. SHA-256) to copy on the next frame
     copy_clipboard: Option<String>,
 }
@@ -430,6 +433,7 @@ impl View {
             archive_ops: crate::archive_ui::ArchiveOps::default(),
             meta: crate::meta_ui::MetaUi::default(),
             search: None,
+            preview: crate::preview_ui::PreviewState::default(),
             copy_clipboard: None,
         }
     }
@@ -657,7 +661,7 @@ impl View {
     /// modal (palette, key recorder, rename, batch) is open, ignores it cleanly
     /// without touching navigation state.
     pub fn nav_button(&mut self, ui: &mut Ui, forward: bool) -> bool {
-        if self.palette.is_some() || self.search.is_some() || ui.capture_keys || self.ops.asking || self.rename.is_some() || self.batch.is_some() {
+        if self.palette.is_some() || self.search.is_some() || self.preview.quick_look_open() || ui.capture_keys || self.ops.asking || self.rename.is_some() || self.batch.is_some() {
             return false;
         }
         if self.ctx.is_some() || ui.popups_open() > 0 {
@@ -812,6 +816,7 @@ impl View {
         if let Some(s) = self.search.as_mut() {
             changed |= s.pump();
         }
+        changed |= self.preview.pump();
         if self.tab_mut().take_watch_changed() {
             let p = self.tab().path.clone();
             self.meta.invalidate_git(&p);
@@ -997,6 +1002,11 @@ impl View {
         if !crate::search_ui::is_enabled() {
             self.search = None;
         }
+        if !crate::preview_ui::is_enabled() {
+            self.preview.pane_open = false;
+            self.preview.quick_look = false;
+            self.preview.release_worker();
+        }
     }
 
     /// Switches extension `id` on or off, live, and records it in the config
@@ -1006,14 +1016,21 @@ impl View {
         let changed = crate::ext::write(|r| r.set_enabled(id, on))?;
         self.prefs.extensions.disabled = crate::ext::read(|r| r.disabled());
         if changed {
+            if !on && id == crate::preview_ui::EXT_PREVIEW {
+                self.preview.disable(ui);
+            }
             self.sync_feature_extensions();
             if on && id == crate::meta_ui::EXT_GIT_COL {
                 self.meta.reset_git();
+            }
+            if on && id == crate::preview_ui::EXT_PREVIEW {
+                self.preview.apply_prefs(ui, &self.prefs.preview);
             }
             self.keymap = crate::keymap::KeyMap::from_overrides(&self.prefs.keys.overrides).0;
         }
         // rebinds the keys, publishes the map and marks the config for saving
         self.apply_prefs(ui, crate::settings::C_KEYS);
+        self.sync_space_binding(ui);
         Ok(changed)
     }
 
@@ -1131,6 +1148,8 @@ impl View {
             CMD_FOLDER_CALC_SIZES => self.cmd_folder_calc_sizes(),
             CMD_FILE_CHECKSUM => self.cmd_file_checksum(),
             CMD_GLOBAL_SEARCH => self.toggle_global_search(ui),
+            CMD_PREVIEW_TOGGLE => self.toggle_preview_pane(ui),
+            CMD_PREVIEW_QUICK_LOOK => self.toggle_quick_look(ui),
             _ => {}
         }
         ui.request_repaint();
@@ -1342,6 +1361,223 @@ impl View {
         self.search.is_some()
     }
 
+    // ---- P4.F2 Preview pane & Quick Look ------------------------------------
+
+    /// `preview.toggle_pane` (`Alt+P`): opens or closes the right-docked preview pane.
+    fn toggle_preview_pane(&mut self, ui: &mut Ui) {
+        if !crate::preview_ui::is_enabled() {
+            return;
+        }
+        let open = !self.preview.pane_open;
+        self.preview.set_pane_open(open);
+        self.prefs.preview.enabled = self.preview.pane_open;
+        self.config_dirty = true;
+        if self.preview.pane_open {
+            self.sync_preview();
+        }
+        ui.request_repaint();
+    }
+
+    /// True when the user is typing in a text field or a modal overlay owns input.
+    fn is_typing_field(&self, ui: &Ui) -> bool {
+        self.editing
+            || self.rename.is_some()
+            || self.batch.is_some()
+            || self.palette.is_some()
+            || self.search.is_some()
+            || self.ctx.is_some()
+            || ui.has_focus(pid(self.live, ID_FILTER))
+            || ui.has_focus(pid(self.live, ID_PATH_EDIT))
+            || ui.has_focus(pid(self.active, ID_FILTER))
+            || ui.has_focus(pid(self.active, ID_PATH_EDIT))
+    }
+
+    /// `preview.quick_look` (`Space` / `F3`): toggles the centered Quick Look modal.
+    fn toggle_quick_look(&mut self, ui: &mut Ui) {
+        if !crate::preview_ui::is_enabled() || !self.prefs.preview.quick_look || self.tab().settings {
+            return;
+        }
+        if self.preview.quick_look_open() {
+            self.preview.close_quick_look(ui);
+            self.focus_list = true;
+            ui.request_repaint();
+            return;
+        }
+        if self.is_typing_field(ui) {
+            return;
+        }
+        self.preview.open_quick_look();
+        self.sync_preview();
+        ui.request_repaint();
+    }
+
+    /// Keeps `Space` bound as a global shortcut ONLY while the file list has
+    /// focus and Quick Look is enabled, so `Space` beats `list`/`grid` selection
+    /// without ever hijacking typing in filter/rename/pathbar/palette/search.
+    pub(super) fn sync_space_binding(&mut self, ui: &mut Ui) {
+        let space = crate::keymap::Chord::new(Key::Space, Mods::NONE);
+        let mapped_to_ql = self.keymap.chords(CMD_PREVIEW_QUICK_LOOK).contains(&space);
+        if !mapped_to_ql {
+            return;
+        }
+        ui.shortcuts.list.retain(|s| !(s.key == Key::Space && s.mods == Mods::NONE && s.command == CMD_PREVIEW_QUICK_LOOK));
+        let want = crate::preview_ui::is_enabled()
+            && self.prefs.preview.quick_look
+            && !self.tab().settings
+            && self.list_focused(ui);
+        if want {
+            ui.shortcuts.bind(Key::Space, Mods::NONE, CMD_PREVIEW_QUICK_LOOK, true);
+        }
+    }
+
+    /// Computes what the active pane currently selects/focuses without touching the disk.
+    fn build_preview_target(&self) -> crate::preview_ui::PreviewTarget {
+        use crate::preview_ui::PreviewTarget;
+        let t = self.tab();
+        if t.settings || t.synthetic || t.shown() == 0 {
+            return PreviewTarget::Empty;
+        }
+        let sel_count = t.sel.count();
+        if sel_count > 1 {
+            let mut samples = Vec::new();
+            for pos in 0..t.shown() {
+                let Some(id) = t.store.at(pos) else { continue };
+                if !t.sel.contains(id) {
+                    continue;
+                }
+                if let (Some(name_u16), Some(rec)) = (t.store.name(id), t.store.record(id)) {
+                    let is_dir = rec.flags & tsubame_core::FOLDER != 0;
+                    samples.push((String::from_utf16_lossy(name_u16), if is_dir { 0 } else { rec.size }, is_dir));
+                    if samples.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+            return PreviewTarget::Multi {
+                count: sel_count,
+                total_bytes: t.sel.total_size().min(u64::MAX as u128) as u64,
+                samples,
+            };
+        }
+        let cursor = if self.mode.is_grid() { t.grid.cursor } else { t.list.cursor };
+        let row_pos = if sel_count == 1 {
+            if t.store.at(cursor).is_some_and(|id| t.sel.contains(id)) {
+                cursor
+            } else {
+                t.store.view().iter().position(|id| t.sel.contains(*id)).unwrap_or(cursor)
+            }
+        } else {
+            cursor
+        };
+        if row_pos >= t.shown() {
+            return PreviewTarget::Empty;
+        }
+        let Some((path, is_dir)) = t.entry_at(row_pos) else {
+            return PreviewTarget::Empty;
+        };
+        let size = t
+            .store
+            .at(row_pos)
+            .and_then(|id| t.store.record(id))
+            .map(|r| if is_dir { 0 } else { r.size })
+            .unwrap_or(0);
+        let name = crate::dnd::name_of(&path).to_string();
+        let in_archive = crate::archive_ui::is_archive_path(&path);
+        PreviewTarget::Single {
+            path: std::path::PathBuf::from(path),
+            name,
+            index: row_pos,
+            total: t.shown(),
+            is_dir,
+            size,
+            in_archive,
+        }
+    }
+
+    /// Synchronises the lazy `PreviewWorker` with the active pane's focused/selected file.
+    fn sync_preview(&mut self) {
+        if !self.preview.active() {
+            return;
+        }
+        let target = self.build_preview_target();
+        self.preview.sync_target(target, &self.prefs.preview, &self.wake);
+    }
+
+    /// Steps the active pane's selection by `delta` (Quick Look Left/Right/Up/Down).
+    fn step_preview_selection(&mut self, delta: isize) {
+        let len = self.tab().shown();
+        if len == 0 {
+            return;
+        }
+        let is_grid = self.mode.is_grid();
+        let cur = if is_grid { self.tab().grid.cursor } else { self.tab().list.cursor };
+        let next = if delta < 0 {
+            cur.saturating_sub(delta.unsigned_abs())
+        } else {
+            (cur + delta as usize).min(len - 1)
+        };
+        let t = self.tab_mut();
+        if is_grid {
+            t.grid.cursor = next;
+            t.grid.reveal = true;
+        } else {
+            t.list.cursor = next;
+            t.list.ensure_visible(next, len);
+        }
+        t.sel.single(&t.store, next);
+        self.sync_preview();
+    }
+
+    fn apply_preview_action(&mut self, ui: &mut Ui, act: crate::preview_ui::PreviewAction) {
+        use crate::preview_ui::PreviewAction;
+        match act {
+            PreviewAction::None => {}
+            PreviewAction::ClosePane => {
+                self.preview.set_pane_open(false);
+                self.prefs.preview.enabled = false;
+                self.config_dirty = true;
+                ui.request_repaint();
+            }
+            PreviewAction::CloseQuickLook => {
+                self.preview.close_quick_look(ui);
+                self.focus_list = true;
+                ui.request_repaint();
+            }
+            PreviewAction::OpenFile(path) => {
+                if self.preview.quick_look_open() {
+                    self.preview.close_quick_look(ui);
+                    self.focus_list = true;
+                }
+                self.open_file(path);
+                ui.request_repaint();
+            }
+            PreviewAction::Step(delta) => {
+                self.step_preview_selection(delta);
+                ui.request_repaint();
+            }
+        }
+    }
+
+    fn paint_quick_look(&mut self, ui: &mut Ui, g: &mut dyn Canvas, size: (f32, f32)) {
+        if !self.preview.quick_look {
+            return;
+        }
+        self.sync_preview();
+        let cfg = self.prefs.preview.clone();
+        let act = self.preview.paint_quick_look(ui, g, size, &cfg);
+        self.apply_preview_action(ui, act);
+    }
+
+    #[cfg(test)]
+    pub fn preview_pane_open(&self) -> bool {
+        self.preview.pane_visible()
+    }
+
+    #[cfg(test)]
+    pub fn quick_look_open(&self) -> bool {
+        self.preview.quick_look_open()
+    }
+
     /// The folder under the cursor, when the cursor row is a folder.
     fn selected_folder(&self) -> Option<String> {
         let t = self.tab();
@@ -1485,12 +1721,23 @@ impl View {
             let toolbar = r.cut_top(t.height_toolbar);
             let status = r.cut_bottom(t.height_status_bar);
             let sidebar = r.cut_left(t.layout_sidebar_width);
-            let batch_bar = r.cut_top(self.batch_h());
-            let main = r;
+            let (mut main_col, pv_rect, pv_w) = self.preview.split_body(ui, g, r);
+            if let Some(w) = pv_w {
+                self.prefs.preview.width = w.clamp(tsubame_config::PreviewConfig::MIN_WIDTH, tsubame_config::PreviewConfig::MAX_WIDTH);
+                self.config_dirty = true;
+            }
+            let batch_bar = main_col.cut_top(self.batch_h());
+            let main = main_col;
 
             // body first: the later widgets (toolbar, title bar) win hit tests
             self.paint_side(ui, g, sidebar);
             self.paint_main(ui, g, shell, main, &t);
+            if let Some(pr) = pv_rect {
+                self.sync_preview();
+                let cfg = self.prefs.preview.clone();
+                let act = self.preview.paint_docked(ui, g, pr, &cfg);
+                self.apply_preview_action(ui, act);
+            }
             if batch_bar.h > 0.0 {
                 self.paint_batch_bar(ui, g, &t, batch_bar);
             }
@@ -1511,6 +1758,7 @@ impl View {
         self.paint_batch_preview(g, &t, (w, h));
         self.paint_palette(ui, g, (w, h));
         self.paint_search(ui, g, (w, h));
+        self.paint_quick_look(ui, g, (w, h));
         // the context menu is on top of everything
         if let Some(c) = self.ctx.as_mut() {
             c.paint(ui, g, Rect::new(0.0, 0.0, w, h));
@@ -1533,7 +1781,7 @@ impl View {
             again = true;
         }
         // typing in the list starts the filter
-        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() || self.search.is_some() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
+        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() || self.search.is_some() || self.preview.quick_look_open() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
         for c in typed {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
@@ -1548,6 +1796,7 @@ impl View {
             self.tab_mut().set_filter(&text);
             again = true;
         }
+        self.sync_space_binding(ui);
         // the pointer went up in this frame: one more frame sees the release
         // (drop, slow-click rename) even when nothing else asks for it
         if (self.drag.is_some() || self.press.is_some()) && self.ptr_was_active && ui.active().is_none() {
@@ -1582,7 +1831,11 @@ impl View {
         let mut r = Rect::new(0.0, 0.0, size.0, size.1);
         let titlebar = r.cut_top(t.height_titlebar);
         let sidebar = r.cut_left(t.layout_sidebar_width);
-        let area = r;
+        let (area, pv_rect, pv_w) = self.preview.split_body(ui, g, r);
+        if let Some(w) = pv_w {
+            self.prefs.preview.width = w.clamp(tsubame_config::PreviewConfig::MIN_WIDTH, tsubame_config::PreviewConfig::MAX_WIDTH);
+            self.config_dirty = true;
+        }
         let len = panes::len_of(area, self.orient);
         let mut pos = panes::pos_for(self.ratio, len);
         let sp = match self.orient {
@@ -1600,6 +1853,12 @@ impl View {
             let rect = self.pane_rects[slot];
             let active = slot == self.active;
             self.with_pane(slot, |v| v.paint_pane(ui, g, shell, rect, t, active));
+        }
+        if let Some(pr) = pv_rect {
+            self.sync_preview();
+            let cfg = self.prefs.preview.clone();
+            let act = self.preview.paint_docked(ui, g, pr, &cfg);
+            self.apply_preview_action(ui, act);
         }
         self.paint_titlebar(ui, g, titlebar, t, false);
     }
@@ -1721,11 +1980,13 @@ impl View {
         }
         x += bs + t.space_4;
 
-        // filter box on the right, path bar takes the rest
+        // filter box on the right (+ preview pane toggle button at the far right), path bar takes the rest
+        let show_pv_btn = crate::preview_ui::is_enabled() && !compact;
+        let pv_reserve = if show_pv_btn { bs + t.space_2 } else { 0.0 };
         let filter_id = pid(self.live, ID_FILTER);
         let icon_only = compact && self.filter.text.is_empty() && !ui.has_focus(filter_id);
-        let fw = if icon_only { bs } else if compact { 140.0 } else { t.layout_filter_width.min((r.r() - x) / 2.0).max(60.0) };
-        let fr = Rect::new(r.r() - t.space_4 - fw, r.y + (r.h - t.height_path_bar) / 2.0, fw, t.height_path_bar);
+        let fw = if icon_only { bs } else if compact { 140.0 } else { t.layout_filter_width.min((r.r() - pv_reserve - x) / 2.0).max(60.0) };
+        let fr = Rect::new(r.r() - t.space_4 - pv_reserve - fw, r.y + (r.h - t.height_path_bar) / 2.0, fw, t.height_path_bar);
         // view mode toggle between the path bar and the filter box
         let vb = Rect::new(fr.x - t.space_4 - bs, by, bs, bs);
         let glyph = match self.mode {
@@ -1747,6 +2008,21 @@ impl View {
             }
         } else {
             self.paint_filter(ui, g, fr, t, compact);
+        }
+        if show_pv_btn {
+            let pb = Rect::new(r.r() - t.space_4 - bs, by, bs, bs);
+            let it = ui.interact(pid(self.live, ID_PREVIEW_BTN), pb, Sense::click());
+            let on = self.preview.pane_visible();
+            if on {
+                g.round(pb, t.radius_md, t.selected);
+                g.round_stroke(pb, t.radius_md, t.focus, 1.0);
+            } else if it.hovered {
+                g.round(pb, t.radius_md, if it.active { t.selected_inactive } else { t.hover });
+            }
+            g.text("\u{E8A0}", pb, f(t.icon_toolbar).icon().c(), if on { t.accent } else { t.text });
+            if it.clicked == Some(Button::Left) {
+                self.toggle_preview_pane(ui);
+            }
         }
         if underline {
             g.fill(Rect::new(r.x, r.b() - 2.0, r.w, 2.0), t.accent);
@@ -3808,5 +4084,370 @@ mod tests {
         assert_eq!(r.v.tab().path, r.dir.join("Docs").to_str().unwrap());
         assert_eq!(r.v.tab().sel.count(), 1);
         assert!(r.v.tab().selected_paths(1)[0].ends_with("needle.txt"));
+    }
+
+    // ---- P4.F2 Preview Pane, Quick Look & Live Settings Toggles ----
+
+    fn wait_preview(r: &mut Rig) {
+        let t0 = Instant::now();
+        while r.v.preview.loaded_kind().is_none() {
+            r.v.pump();
+            r.frame();
+            assert!(t0.elapsed() < Duration::from_secs(5), "preview did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        r.frame();
+    }
+
+    fn test_bmp(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let stride = (w * 3).div_ceil(4) * 4;
+        let pixels = stride * h;
+        let size = 54 + pixels;
+        let mut out = Vec::with_capacity(size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&(w as i32).to_le_bytes());
+        out.extend_from_slice(&(h as i32).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&pixels.to_le_bytes());
+        out.extend_from_slice(&[0u8; 16]);
+        let pad = (stride - w * 3) as usize;
+        for _ in 0..h {
+            for _ in 0..w {
+                out.extend_from_slice(&[rgb[2], rgb[1], rgb[0]]);
+            }
+            out.resize(out.len() + pad, 0);
+        }
+        out
+    }
+
+    #[test]
+    fn preview_pane_toggles_with_alt_p_is_lazy_and_renders_modes() {
+        let mut r = Rig::new("p4-pv-pane");
+        std::fs::write(r.dir.join("code.rs"), b"fn main() { let x = 42; }\n").unwrap();
+        std::fs::write(r.dir.join("pic.bmp"), test_bmp(8, 6, [0x20, 0x40, 0x80])).unwrap();
+        std::fs::write(r.dir.join("raw.bin"), b"MZ\x90\x00\x03\x00\x00\x00").unwrap();
+        std::fs::write(r.dir.join("archive.iso"), b"\x01\x02\x03\x04\x05\x06\x07\x08").unwrap();
+        r.v.go(r.dir.to_str().unwrap());
+        r.settle();
+
+        // Lazy: closed at start, zero worker spawned.
+        assert!(!r.v.preview_pane_open());
+        assert!(!r.v.preview.worker_running());
+
+        // Select code.rs and press Alt+P -> pane opens, worker decodes Rust code.
+        let code_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("code.rs"))).unwrap();
+        {
+            let t = r.v.tab_mut();
+            t.list.cursor = code_row;
+            t.sel.single(&t.store, code_row);
+        }
+        r.key(Key::Char('P'), Mods::ALT);
+        assert!(r.v.preview_pane_open());
+        assert!(r.v.prefs.preview.enabled);
+        assert!(r.v.preview.worker_running());
+        wait_preview(&mut r);
+        assert!(matches!(r.v.preview.loaded_kind(), Some(tsubame_win::preview::PreviewKind::Text { .. })));
+        assert!(r.c.has_text("Rust"), "language badge rendered: {:?}", r.c.texts());
+        assert!(r.c.has_text("Wrap"), "Wrap toggle rendered: {:?}", r.c.texts());
+
+        // Switch to pic.bmp -> Image mode with Fit / 100% toggle.
+        let pic_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("pic.bmp"))).unwrap();
+        {
+            let t = r.v.tab_mut();
+            t.list.cursor = pic_row;
+            t.sel.single(&t.store, pic_row);
+        }
+        r.frame();
+        let t0 = Instant::now();
+        while !matches!(r.v.preview.loaded_kind(), Some(tsubame_win::preview::PreviewKind::Image { .. })) {
+            r.v.pump();
+            r.frame();
+            assert!(t0.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(r.c.has_text("Fit") && r.c.has_text("100%"), "image zoom toggles: {:?}", r.c.texts());
+
+        // Switch to raw.bin -> direct Hex mode (8 B auto in 320 px pane).
+        let bin_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("raw.bin"))).unwrap();
+        {
+            let t = r.v.tab_mut();
+            t.list.cursor = bin_row;
+            t.sel.single(&t.store, bin_row);
+        }
+        r.frame();
+        let t0 = Instant::now();
+        while !matches!(r.v.preview.loaded_kind(), Some(tsubame_win::preview::PreviewKind::Hex { .. })) {
+            r.v.pump();
+            r.frame();
+            assert!(t0.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(r.c.has_text("PE/MZ") && r.c.has_text("00000000"), "hex dump rendered: {:?}", r.c.texts());
+
+        // Switch to archive.iso -> Unsupported with "View as Hex" button; clicking it forces Hex.
+        let iso_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("archive.iso"))).unwrap();
+        {
+            let t = r.v.tab_mut();
+            t.list.cursor = iso_row;
+            t.sel.single(&t.store, iso_row);
+        }
+        r.frame();
+        let t0 = Instant::now();
+        while !matches!(r.v.preview.loaded_kind(), Some(tsubame_win::preview::PreviewKind::Unsupported { .. })) {
+            r.v.pump();
+            r.frame();
+            assert!(t0.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(r.c.has_text("No preview available") && r.c.has_text("View as Hex"));
+        r.v.preview.request_force_hex();
+        r.frame();
+        let t0 = Instant::now();
+        while !matches!(r.v.preview.loaded_kind(), Some(tsubame_win::preview::PreviewKind::Hex { .. })) {
+            r.v.pump();
+            r.frame();
+            assert!(t0.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(r.c.has_text("00000000"), "forced hex rendered: {:?}", r.c.texts());
+
+        // Multi-select shows "N items selected — ... total".
+        r.key(Key::Char('A'), Mods::CTRL);
+        assert!(r.c.texts().iter().any(|t| t.contains("items selected")), "{:?}", r.c.texts());
+
+        // Empty folder shows "No item selected".
+        let docs = r.dir.join("Docs").to_str().unwrap().to_string();
+        r.v.go(&docs);
+        r.settle();
+        assert!(r.c.has_text("No item selected"), "{:?}", r.c.texts());
+
+        // Alt+P again closes pane and shuts down worker cleanly.
+        r.key(Key::Char('P'), Mods::ALT);
+        assert!(!r.v.preview_pane_open());
+        assert!(!r.v.prefs.preview.enabled);
+        assert!(!r.v.preview.worker_running());
+    }
+
+    #[test]
+    fn quick_look_opens_with_space_and_f3_steps_selection_and_closes_on_esc() {
+        let mut r = Rig::new("p4-ql");
+        assert!(!r.v.quick_look_open());
+        assert!(!r.v.preview.worker_running());
+
+        // Select row 1 (alpha.txt) and open Quick Look with Space.
+        {
+            let t = r.v.tab_mut();
+            t.list.cursor = 1;
+            t.sel.single(&t.store, 1);
+        }
+        r.frame();
+        r.key(Key::Space, Mods::NONE);
+        assert!(r.v.quick_look_open());
+        assert!(r.ui.capture_keys);
+        assert!(r.v.preview.worker_running());
+        wait_preview(&mut r);
+        assert!(r.c.has_text("alpha.txt") && r.c.has_text("2 / 3"), "{:?}", r.c.texts());
+
+        // Right arrow steps active pane selection to row 2 (beta.txt) and updates Quick Look live.
+        r.key(Key::Right, Mods::NONE);
+        assert_eq!(r.v.tab().list.cursor, 2);
+        let t0 = Instant::now();
+        while !r.c.has_text("beta.txt") {
+            r.v.pump();
+            r.frame();
+            assert!(t0.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(r.c.has_text("3 / 3"), "{:?}", r.c.texts());
+
+        // Left arrow steps back to row 1 (alpha.txt).
+        r.key(Key::Left, Mods::NONE);
+        assert_eq!(r.v.tab().list.cursor, 1);
+
+        // Esc closes Quick Look and stops the worker (since docked pane is closed).
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.quick_look_open());
+        assert!(!r.ui.capture_keys);
+        assert!(!r.v.preview.worker_running());
+
+        // F3 also opens Quick Look; Space closes it.
+        r.key(Key::F(3), Mods::NONE);
+        assert!(r.v.quick_look_open());
+        r.key(Key::Space, Mods::NONE);
+        assert!(!r.v.quick_look_open());
+        assert!(!r.v.preview.worker_running());
+    }
+
+    #[test]
+    fn space_is_ignored_when_typing_in_filter_rename_pathbar_palette_or_search() {
+        let mut r = Rig::new("p4-space-guard");
+
+        // 1. Filter box: Ctrl+F then Space + ' ' must type space, never open Quick Look.
+        r.key(Key::Char('F'), Mods::CTRL);
+        r.ui.push(Event::Char('a'));
+        r.frame();
+        r.ui.push(Event::KeyDown { key: Key::Space, mods: Mods::NONE, repeat: false });
+        r.ui.push(Event::Char(' '));
+        r.frame();
+        assert!(!r.v.quick_look_open(), "Space in filter must not open Quick Look");
+        assert_eq!(r.v.filter.text, "a ", "Space reached filter input");
+        r.key(Key::Escape, Mods::NONE);
+        r.key(Key::Escape, Mods::NONE);
+        assert!(r.v.list_focused(&r.ui));
+
+        // 2. Inline rename: F2 then Space + ' ' must not open Quick Look.
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.rename.is_some());
+        r.ui.push(Event::KeyDown { key: Key::Space, mods: Mods::NONE, repeat: false });
+        r.ui.push(Event::Char(' '));
+        r.frame();
+        assert!(!r.v.quick_look_open(), "Space in inline rename must not open Quick Look");
+        r.key(Key::Escape, Mods::NONE);
+        assert!(r.v.rename.is_none());
+
+        // 3. Path bar edit: Ctrl+L then Space must not open Quick Look.
+        r.key(Key::Char('L'), Mods::CTRL);
+        assert!(r.v.editing);
+        r.ui.push(Event::KeyDown { key: Key::Space, mods: Mods::NONE, repeat: false });
+        r.ui.push(Event::Char(' '));
+        r.frame();
+        assert!(!r.v.quick_look_open(), "Space in pathbar must not open Quick Look");
+        r.key(Key::Escape, Mods::NONE);
+        assert!(!r.v.editing);
+
+        // 4. Command palette: Ctrl+K then Space must not open Quick Look.
+        r.key(Key::Char('K'), Mods::CTRL);
+        assert!(r.v.palette_open());
+        r.ui.push(Event::KeyDown { key: Key::Space, mods: Mods::NONE, repeat: false });
+        r.ui.push(Event::Char(' '));
+        r.frame();
+        assert!(!r.v.quick_look_open(), "Space in palette must not open Quick Look");
+        r.key(Key::Escape, Mods::NONE);
+
+        // 5. Global search: Ctrl+Shift+F then Space must not open Quick Look.
+        r.key(Key::Char('F'), Mods::CTRL_SHIFT);
+        assert!(r.v.search_open());
+        r.ui.push(Event::KeyDown { key: Key::Space, mods: Mods::NONE, repeat: false });
+        r.ui.push(Event::Char(' '));
+        r.frame();
+        assert!(!r.v.quick_look_open(), "Space in global search must not open Quick Look");
+        r.key(Key::Escape, Mods::NONE);
+    }
+
+    #[test]
+    fn preview_splitter_resizes_persists_and_double_click_resets_to_320() {
+        let mut r = Rig::new("p4-pv-split");
+        r.key(Key::Char('P'), Mods::ALT);
+        assert!(r.v.preview_pane_open());
+        assert_eq!(r.v.prefs.preview.width, 320);
+
+        let t = r.ui.theme;
+        let split_y = t.height_titlebar + t.height_toolbar + 120.0;
+        // Splitter sits at x = 1120 - 320 - 5 = 795..800.
+        let sx = 1120.0 - 320.0 - 2.5;
+        r.move_to(sx, split_y);
+        r.ui.push(Event::MouseDown { pos: Pt::new(sx, split_y), button: Button::Left, mods: Mods::NONE, double: false });
+        r.frame();
+        // Drag left by 80 px -> preview widens to 400 px.
+        r.move_to(sx - 80.0, split_y);
+        r.ui.push(Event::MouseUp { pos: Pt::new(sx - 80.0, split_y), button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert_eq!(r.v.prefs.preview.width, 400);
+        assert!(r.v.config_dirty);
+
+        // Sync to config preserves the resized width.
+        let mut cfg = tsubame_config::Config::default();
+        crate::session::sync_config(&r.v, &mut cfg);
+        assert_eq!(cfg.preview.width, 400);
+        assert!(cfg.preview.enabled);
+
+        // Double-click splitter at its new x (= 1120 - 400 - 2.5) resets to 320 px.
+        let sx2 = 1120.0 - 400.0 - 2.5;
+        r.move_to(sx2, split_y);
+        r.ui.push(Event::MouseDown { pos: Pt::new(sx2, split_y), button: Button::Left, mods: Mods::NONE, double: true });
+        r.frame();
+        r.ui.push(Event::MouseUp { pos: Pt::new(sx2, split_y), button: Button::Left, mods: Mods::NONE });
+        r.frame();
+        assert_eq!(r.v.prefs.preview.width, 320);
+        assert_eq!(r.v.preview.width, 320.0);
+    }
+
+    #[test]
+    fn preview_live_settings_toggles_and_extension_disable_are_zero_cost() {
+        use crate::settings::C_PREVIEW;
+        let mut r = Rig::new("p4-pv-settings");
+        std::fs::write(r.dir.join("mod.rs"), b"pub fn hi() -> u32 { 1 }\n").unwrap();
+        r.v.go(r.dir.to_str().unwrap());
+        r.settle();
+
+        // Select mod.rs
+        let rs_row = (0..r.v.tab().shown()).find(|&i| r.v.tab().entry_at(i).is_some_and(|(p, _)| p.ends_with("mod.rs"))).unwrap();
+        {
+            let t = r.v.tab_mut();
+            t.list.cursor = rs_row;
+            t.sel.single(&t.store, rs_row);
+        }
+
+        // Settings toggle: preview.enabled = true opens pane live.
+        r.v.prefs.preview.enabled = true;
+        r.v.apply_prefs(&mut r.ui, C_PREVIEW);
+        r.frame();
+        assert!(r.v.preview_pane_open());
+        wait_preview(&mut r);
+        assert_eq!(r.v.preview.worker_syntax_highlight(), Some(true));
+
+        // Live syntax_highlight toggle propagates straight to worker & re-decodes plain spans.
+        r.v.prefs.preview.syntax_highlight = false;
+        r.v.apply_prefs(&mut r.ui, C_PREVIEW);
+        assert_eq!(r.v.preview.worker_syntax_highlight(), Some(false));
+        r.frame();
+        let t0 = Instant::now();
+        loop {
+            r.v.pump();
+            r.frame();
+            if let Some(tsubame_win::preview::PreviewKind::Text { lines, .. }) = r.v.preview.loaded_kind()
+                && !lines.is_empty()
+                && lines[0].spans.iter().all(|s| s.kind == tsubame_win::preview::TokenKind::Plain)
+            {
+                break;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "syntax toggle did not re-decode");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        // Settings toggle: quick_look = false blocks Space / F3.
+        r.v.prefs.preview.quick_look = false;
+        r.v.apply_prefs(&mut r.ui, C_PREVIEW);
+        r.frame();
+        r.key(Key::Space, Mods::NONE);
+        assert!(!r.v.quick_look_open(), "Space blocked when quick_look setting is false");
+        r.key(Key::F(3), Mods::NONE);
+        assert!(!r.v.quick_look_open(), "F3 blocked when quick_look setting is false");
+        r.v.prefs.preview.quick_look = true;
+        r.v.apply_prefs(&mut r.ui, C_PREVIEW);
+        r.frame();
+
+        // Disabling extension tsubame.ext.preview hides pane + Quick Look and stops worker.
+        r.key(Key::Space, Mods::NONE);
+        assert!(r.v.quick_look_open());
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::preview_ui::EXT_PREVIEW, false), Ok(true));
+        r.frame();
+        assert!(!r.v.preview_pane_open());
+        assert!(!r.v.quick_look_open());
+        assert!(!r.v.preview.worker_running(), "zero worker when extension disabled");
+        r.key(Key::Char('P'), Mods::ALT);
+        r.key(Key::Space, Mods::NONE);
+        r.key(Key::F(3), Mods::NONE);
+        assert!(!r.v.preview_pane_open() && !r.v.quick_look_open() && !r.v.preview.worker_running());
+
+        // Re-enabling extension restores clean state for subsequent tests.
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::preview_ui::EXT_PREVIEW, true), Ok(true));
+        r.frame();
     }
 }

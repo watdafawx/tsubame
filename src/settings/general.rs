@@ -1,7 +1,7 @@
 //! Settings > General: where a window opens, hidden files, deleting.
 
 use super::lay::Pg;
-use super::{C_HIDE, C_OTHER, Cx};
+use super::{C_HIDE, C_OTHER, C_PREVIEW, Cx};
 use tsubame_ui::{Id, Rect, TextInput, text_input};
 
 const ID_FOLDER: Id = Id::new("settings-start-folder");
@@ -80,5 +80,30 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     if let Some(v) = pg.toggle_row(&mut c, "Confirm before deleting", "Ask first. Permanent deletes always ask, whatever this says.", g.confirm_delete, true) {
         g.confirm_delete = v;
         cx.changed |= C_OTHER;
+    }
+
+    let pv_ext = crate::preview_ui::is_enabled();
+    let pv = &mut cx.prefs.preview;
+    pg.section("Preview");
+    let mut c = pg.card(5, 52.0);
+    if let Some(v) = pg.toggle_row(&mut c, "Show preview pane (Alt+P)", "Dock a resizable preview pane on the right edge of the window.", pv.enabled, pv_ext) {
+        pv.enabled = v;
+        cx.changed |= C_PREVIEW;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Enable Quick Look (Space / F3)", "Open a centered preview overlay when pressing Space or F3 in the file list.", pv.quick_look, pv_ext) {
+        pv.quick_look = v;
+        cx.changed |= C_PREVIEW;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Syntax tinting in text preview", "Highlight keywords, types, strings, numbers and comments in code files.", pv.syntax_highlight, pv_ext) {
+        pv.syntax_highlight = v;
+        cx.changed |= C_PREVIEW;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Auto 8-byte hex in narrow pane", "Switch hex dumps to 8 bytes per row when the docked pane is narrower than 420 px.", pv.hex_auto_width, pv_ext) {
+        pv.hex_auto_width = v;
+        cx.changed |= C_PREVIEW;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Direct hex for binaries", "Show hex directly for .exe, .dll, .bin and .dat files instead of an Unsupported card.", pv.direct_hex_binaries, pv_ext) {
+        pv.direct_hex_binaries = v;
+        cx.changed |= C_PREVIEW;
     }
 }
