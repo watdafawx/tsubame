@@ -11,6 +11,8 @@
 //! - [`procinfo`]: process counters for leak checks.
 //! - [`meta`]: background metadata engines (folder sizes, git status, file
 //!   checksums) for the P4.F5 columns and checksum command.
+//! - [`preview`]: the P4.F2 preview pane and Quick Look backend — image, text,
+//!   media metadata and hex decoders behind one async worker.
 
 pub mod bitmap;
 pub mod defaultfm;
@@ -18,6 +20,7 @@ pub mod dnd;
 pub mod enumerate;
 pub mod meta;
 pub mod places;
+pub mod preview;
 pub mod procinfo;
 pub mod search;
 pub mod shell;

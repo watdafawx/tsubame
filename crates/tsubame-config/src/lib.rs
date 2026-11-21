@@ -173,6 +173,21 @@ fn default_profile() -> String {
 fn default_sidebar_width() -> f32 {
     DEFAULT_SIDEBAR_WIDTH
 }
+/// `[preview]` width default, in DIPs (`docs/preview-mock.md`).
+pub const DEFAULT_PREVIEW_WIDTH: u32 = 320;
+
+fn default_preview_width() -> u32 {
+    DEFAULT_PREVIEW_WIDTH
+}
+
+/// Widths outside `PreviewConfig::MIN_WIDTH..=PreviewConfig::MAX_WIDTH` are
+/// clamped instead of failing the file, so a hand-edited `width = 9999` keeps
+/// every other setting.
+fn de_preview_width<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let raw = i64::deserialize(d)?;
+    Ok(raw.clamp(PreviewConfig::MIN_WIDTH as i64, PreviewConfig::MAX_WIDTH as i64) as u32)
+}
+
 fn default_window_w() -> i32 {
     1120
 }
@@ -271,6 +286,62 @@ pub struct Panes {
 impl Default for Panes {
     fn default() -> Self {
         Panes { dual: false, split: Split::Vertical, ratio: 0.5, sidebar_width: DEFAULT_SIDEBAR_WIDTH, sidebar_collapsed: false }
+    }
+}
+
+/// `[preview]`: the split preview pane and Quick Look (P4.F2).
+///
+/// Defaults come from `docs/preview-mock.md`: a 320 px pane that starts
+/// closed, Quick Look on `Space`/`F3`, zero-dependency syntax tinting, hex
+/// rows that follow the pane width, and direct hex for raw binaries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreviewConfig {
+    /// The docked pane is open. `Alt+P` toggles it; first start is closed.
+    pub enabled: bool,
+    /// Pane width in DIPs, clamped to [`PreviewConfig::MIN_WIDTH`]..=
+    /// [`PreviewConfig::MAX_WIDTH`].
+    #[serde(default = "default_preview_width", deserialize_with = "de_preview_width")]
+    pub width: u32,
+    /// `Space` / `F3` Quick Look overlay over the listing.
+    #[serde(default = "yes")]
+    pub quick_look: bool,
+    /// Zero-dependency 6-token syntax tinting in the text preview.
+    #[serde(default = "yes")]
+    pub syntax_highlight: bool,
+    /// Use 8 bytes/row in docked panes narrower than 420 px (16 bytes/row
+    /// otherwise and in Quick Look).
+    #[serde(default = "yes")]
+    pub hex_auto_width: bool,
+    /// Show hex directly for `.bin`/`.dat`/`.exe`/`.dll` rather than an
+    /// Unsupported card with a `View as Hex` button.
+    #[serde(default = "yes")]
+    pub direct_hex_binaries: bool,
+}
+
+impl PreviewConfig {
+    /// Narrowest pane the splitter allows.
+    pub const MIN_WIDTH: u32 = 220;
+    /// Widest pane the splitter allows (`600 px` cap in the mock).
+    pub const MAX_WIDTH: u32 = 600;
+
+    /// `self` with `width` inside the allowed range.
+    pub fn normalized(mut self) -> Self {
+        self.width = self.width.clamp(Self::MIN_WIDTH, Self::MAX_WIDTH);
+        self
+    }
+}
+
+impl Default for PreviewConfig {
+    fn default() -> Self {
+        PreviewConfig {
+            enabled: false,
+            width: DEFAULT_PREVIEW_WIDTH,
+            quick_look: true,
+            syntax_highlight: true,
+            hex_auto_width: true,
+            direct_hex_binaries: true,
+        }
     }
 }
 
@@ -435,6 +506,7 @@ pub struct Config {
     pub general: General,
     pub appearance: Appearance,
     pub panes: Panes,
+    pub preview: PreviewConfig,
     pub sidebar: Sidebar,
     pub updates: Updates,
     pub keys: Keys,
@@ -451,6 +523,7 @@ impl Default for Config {
             general: General::default(),
             appearance: Appearance::default(),
             panes: Panes::default(),
+            preview: PreviewConfig::default(),
             sidebar: Sidebar::default(),
             updates: Updates::default(),
             keys: Keys::default(),
@@ -1029,6 +1102,66 @@ maximized = true
         assert!(c.extensions.disabled.is_empty());
         assert_eq!(c.window, WindowState { x: 0, y: 0, w: 1120, h: 720, maximized: false });
         assert_eq!(c.start_folder(), StartFolder::Last);
+    }
+
+    #[test]
+    fn the_preview_section_defaults_match_the_mock() {
+        let c = Config::default();
+        assert_eq!(c.preview, PreviewConfig::default());
+        assert!(!c.preview.enabled, "the pane starts closed until Alt+P");
+        assert_eq!(c.preview.width, DEFAULT_PREVIEW_WIDTH);
+        assert_eq!(c.preview.width, 320);
+        assert_eq!(PreviewConfig::MIN_WIDTH, 220);
+        assert_eq!(PreviewConfig::MAX_WIDTH, 600);
+        assert!(c.preview.quick_look);
+        assert!(c.preview.syntax_highlight);
+        assert!(c.preview.hex_auto_width);
+        assert!(c.preview.direct_hex_binaries);
+    }
+
+    #[test]
+    fn preview_width_is_clamped_and_round_trips() {
+        for (text, want) in [("100", 220u32), ("320", 320), ("600", 600), ("4_000", 600), ("-5", 220)] {
+            let c: Config = toml::from_str(&format!("[preview]\nwidth = {text}\n")).unwrap();
+            assert_eq!(c.preview.width, want, "width = {text}");
+            let back: Config = toml::from_str(&ConfigFile::new(c.clone()).to_toml()).unwrap();
+            assert_eq!(back.preview.width, want, "round trip of width = {text}");
+        }
+        // the in-memory helper clamps too
+        assert_eq!(PreviewConfig { width: 999, ..PreviewConfig::default() }.normalized().width, 600);
+        assert_eq!(PreviewConfig { width: 0, ..PreviewConfig::default() }.normalized().width, 220);
+    }
+
+    #[test]
+    fn the_preview_section_round_trips_and_partial_sections_take_defaults() {
+        let text = "[preview]\nenabled = true\nwidth = 420\nquick_look = false\nsyntax_highlight = false\nhex_auto_width = false\ndirect_hex_binaries = false\n";
+        let c: Config = toml::from_str(text).unwrap();
+        assert!(c.preview.enabled);
+        assert_eq!(c.preview.width, 420);
+        assert!(!c.preview.quick_look && !c.preview.syntax_highlight);
+        assert!(!c.preview.hex_auto_width && !c.preview.direct_hex_binaries);
+        let back: Config = toml::from_str(&ConfigFile::new(c.clone()).to_toml()).unwrap();
+        assert_eq!(back, c);
+
+        let partial: Config = toml::from_str("[preview]\nenabled = true\n").unwrap();
+        assert!(partial.preview.enabled);
+        assert_eq!(partial.preview.width, DEFAULT_PREVIEW_WIDTH, "missing keys keep their defaults");
+        assert!(partial.preview.quick_look && partial.preview.syntax_highlight);
+    }
+
+    #[test]
+    fn a_wrong_preview_value_drops_only_that_key() {
+        let (l, d) = load_text("preview-typed", "version = 1\n[preview]\nquick_look = \"sometimes\"\nwidth = 380\n");
+        match &l.status {
+            LoadStatus::Partial { problems, .. } => {
+                assert_eq!(problems.len(), 1, "{problems:?}");
+                assert!(problems[0].starts_with("preview.quick_look"), "{problems:?}");
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+        assert!(l.value.config.preview.quick_look, "the failing key uses its default");
+        assert_eq!(l.value.config.preview.width, 380, "the key next to it is kept");
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
