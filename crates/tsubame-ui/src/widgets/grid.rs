@@ -12,11 +12,11 @@ use crate::geom::{Pt, Rect};
 use crate::input::{Button, Event, Key, Mods};
 use crate::theme::Theme;
 use crate::ui::{Id, Sense, Ui};
-use crate::widgets::list::{RowState, SelectBy};
+use crate::widgets::list::{BandMode, RowState, SelectBy};
 use crate::widgets::scrollbar::{ScrollMetrics, vscrollbar};
 
-/// A rubber band smaller than this (DIPs, either axis) is still a click.
-pub const BAND_DEADZONE: f32 = 3.0;
+/// Pointer travel (DIPs) before a press on empty space becomes a marquee band.
+pub const BAND_DEADZONE: f32 = 4.0;
 
 /// Cells a rubber band covers: inclusive row and column ranges. A cell is
 /// covered when the band touches its tile.
@@ -48,9 +48,8 @@ pub trait GridSource {
     fn select(&mut self, _i: usize, _mods: Mods, _by: SelectBy) {}
     /// A press on empty space that is not a left press (right press).
     fn select_none(&mut self) {}
-    /// A left press on empty space started a rubber band. `additive` (Ctrl):
-    /// keep the selection as the base; otherwise it starts empty.
-    fn band_begin(&mut self, _additive: bool) {}
+    /// A left press on empty space started a rubber band.
+    fn band_begin(&mut self, _mode: BandMode) {}
     /// Every frame the band is up and moved past the dead zone: the cells it
     /// covers (`None`: it covers none). The selection is base + these.
     fn band_update(&mut self, _cells: Option<BandCells>, _cols: usize) {}
@@ -113,6 +112,14 @@ impl GridState {
     /// Is a rubber band being dragged (past the dead zone)?
     pub fn banding(&self) -> bool {
         self.band.is_some_and(|b| b.started)
+    }
+    /// Is a left press on empty space tracking a potential or active rubber band?
+    pub fn has_band(&self) -> bool {
+        self.band.is_some()
+    }
+    /// Cancels any in-progress rubber band.
+    pub fn cancel_band(&mut self) {
+        self.band = None;
     }
     /// Index of the first cell on the top visible row.
     pub fn top_index(&self) -> usize {
@@ -224,6 +231,12 @@ pub struct GridResponse {
     pub cols: usize,
     /// double click or Enter on this cell
     pub activated: Option<usize>,
+    /// plain left double-click on empty space
+    pub empty_double_click: bool,
+    /// middle click released on this cell
+    pub middle_clicked: Option<usize>,
+    /// a left or middle press landed inside the cells area this frame
+    pub pressed: bool,
     /// right click released (cell under it, if any), at this point
     pub context: Option<(Option<usize>, Pt)>,
     /// the Menu key / Shift+F10 on the cursor cell
@@ -274,9 +287,13 @@ pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridSt
     if let Some(p) = it.pressed
         && area.contains_pt(p.pos)
     {
+        if p.button != Button::Right {
+            resp.pressed = true;
+        }
         let cell = st.cell_at(p.pos.x - area.x, p.pos.y - area.y, len);
         match (cell, p.button) {
             (Some(i), Button::Left) => {
+                st.band = None;
                 resp.cursor_moved |= st.move_cursor(i, len);
                 src.select(i, p.mods, SelectBy::Click);
                 if p.double {
@@ -284,14 +301,23 @@ pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridSt
                 }
             }
             (Some(i), Button::Right) => {
+                st.band = None;
                 st.cursor = i;
                 src.select(i, p.mods, SelectBy::RightClick);
             }
             (None, Button::Left) => {
-                st.band = Some(Band { sx: p.pos.x - area.x, sy: (p.pos.y - area.y) as f64 + st.scroll, started: false });
-                src.band_begin(p.mods.ctrl);
+                if p.double && p.mods.none() {
+                    st.band = None;
+                    resp.empty_double_click = true;
+                } else {
+                    st.band = Some(Band { sx: p.pos.x - area.x, sy: (p.pos.y - area.y) as f64 + st.scroll, started: false });
+                    src.band_begin(BandMode::from_mods(p.mods));
+                }
             }
-            (None, Button::Right) => src.select_none(),
+            (None, Button::Right) => {
+                st.band = None;
+                src.select_none();
+            }
             (_, Button::Middle) => {}
         }
     }
@@ -299,10 +325,22 @@ pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridSt
         let cell = st.cell_at(it.click_pos.x - area.x, it.click_pos.y - area.y, len);
         resp.context = Some((cell, it.click_pos));
     }
+    if it.clicked == Some(Button::Middle) && area.contains_pt(it.click_pos) {
+        resp.middle_clicked = st.cell_at(it.click_pos.x - area.x, it.click_pos.y - area.y, len);
+    }
 
     // keys
     for (qi, ev) in ui.key_input(id) {
         let Event::KeyDown { key, mods, .. } = ev else { continue };
+        if key == Key::Escape && mods.none() && st.band.is_some() {
+            ui.consume(qi);
+            if st.band.take().is_some_and(|b| b.started) {
+                src.band_end();
+            }
+            ui.clear_active();
+            ui.request_repaint();
+            continue;
+        }
         if let Some(t) = nav_target(key, st.cursor, cols, len, st.page_rows()) {
             ui.consume(qi);
             resp.cursor_moved |= st.move_cursor(t, len);
@@ -329,7 +367,7 @@ pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridSt
     // rubber band: edge autoscroll, then the covered cells
     let mut band_rect: Option<Rect> = None;
     if let Some(mut b) = st.band {
-        if !it.active {
+        if !it.active || !ui.is_active(id) {
             if b.started {
                 src.band_end();
             }
@@ -341,13 +379,14 @@ pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridSt
             if past != 0.0 && b.started {
                 // faster the further out, about 5 to 30 DIPs a frame
                 let speed = (5.0 + past.abs() * 0.4).min(30.0) as f64;
-                st.set_scroll(st.scroll + speed * past.signum() as f64, len);
-                ui.request_repaint();
+                if st.set_scroll(st.scroll + speed * past.signum() as f64, len) {
+                    ui.request_repaint();
+                }
             }
-            let content_h = st.content_h(len).max(1.0);
+            let max_y = st.content_h(len).max(st.scroll + st.view_h as f64).max(1.0);
             let mx = (m.x - area.x).clamp(0.0, st.view_w);
-            let my = ((m.y - area.y) as f64 + st.scroll).clamp(0.0, content_h);
-            if !b.started && ((mx - b.sx).abs() > BAND_DEADZONE || (my - b.sy).abs() > BAND_DEADZONE as f64) {
+            let my = ((m.y - area.y) as f64 + st.scroll).clamp(0.0, max_y);
+            if !b.started && (mx - b.sx).hypot((my - b.sy) as f32) >= BAND_DEADZONE {
                 b.started = true;
                 st.band = Some(b);
             }
@@ -355,9 +394,17 @@ pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridSt
                 let (x0, x1) = (b.sx.min(mx), b.sx.max(mx));
                 let (y0, y1) = (b.sy.min(my), b.sy.max(my));
                 let nrows = st.rows_for(len);
-                let (c0, c1) = ((x0 / cw) as usize, (x1 / cw) as usize);
-                let (r0, r1) = ((y0 / ch as f64) as usize, (y1 / ch as f64) as usize);
-                let cells = (len > 0 && c0 < cols && r0 < nrows).then(|| BandCells { rows: (r0, r1.min(nrows - 1)), cols: (c0, c1.min(cols - 1)) });
+                let grid_w = cols as f32 * cw;
+                let grid_h = nrows as f64 * ch as f64;
+                let cells = if len > 0 && x0 < grid_w && x1 > 0.0 && y0 < grid_h && y1 > 0.0 {
+                    let c0 = (x0 / cw).floor().max(0.0) as usize;
+                    let c1 = (((x1 - 1e-4).max(x0)) / cw).floor().max(0.0) as usize;
+                    let r0 = (y0 / ch as f64).floor().max(0.0) as usize;
+                    let r1 = (((y1 - 1e-6).max(y0)) / ch as f64).floor().max(0.0) as usize;
+                    (c0 < cols && r0 < nrows).then(|| BandCells { rows: (r0, r1.min(nrows - 1)), cols: (c0, c1.min(cols - 1)) })
+                } else {
+                    None
+                };
                 src.band_update(cells, cols);
                 band_rect = Some(Rect::new(area.x + x0, area.y + (y0 - st.scroll) as f32, x1 - x0, (y1 - y0) as f32));
             }

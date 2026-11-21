@@ -20,7 +20,7 @@ use crate::nav::{self, History};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use tsubame_core::{EntryInput, EntryStore, FOLDER, FilterMode, HIDDEN, READONLY, REPARSE, SYSTEM, Selection, Sort};
-use tsubame_ui::{GridState, ListState};
+use tsubame_ui::{BandMode, GridState, ListState};
 use std::collections::VecDeque;
 use std::sync::mpsc::{Sender, channel};
 use tsubame_win::enumerate::{Batch, CancelToken, Done, Enumerator, Message, Wake};
@@ -130,8 +130,10 @@ pub struct Tab {
     pub list: ListState,
     /// scroll and cursor of the grid view (the details view keeps `list`)
     pub grid: GridState,
-    /// selection before a Ctrl+rubber-band started (the band adds to it)
+    /// selection before a Ctrl/Shift rubber-band started
     pub band_base: Vec<tsubame_core::EntryId>,
+    /// how the active rubber-band combines with `band_base`
+    pub band_mode: BandMode,
     pub load: Load,
     /// entries the enumerator delivered so far
     pub delivered: usize,
@@ -228,6 +230,7 @@ impl Tab {
             list: ListState::new(row_h),
             grid: GridState::new(96.0, 118.0),
             band_base: Vec::new(),
+            band_mode: BandMode::Replace,
             load: Load::Done,
             delivered: 0,
             timing: Timing::new(),
@@ -692,9 +695,12 @@ impl Tab {
     fn reset_view(&mut self) {
         self.list.scroll = 0.0;
         self.list.cursor = 0;
+        self.list.cancel_band();
         self.grid.scroll = 0.0;
         self.grid.cursor = 0;
+        self.grid.cancel_band();
         self.band_base.clear();
+        self.band_mode = BandMode::Replace;
     }
 
     /// Applies the filter box text. Typing one more character only searches

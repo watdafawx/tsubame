@@ -62,7 +62,7 @@ impl View {
             self.ops.message = None;
             self.press = None;
             let keep = super::KEEP_MULTI.with(|k| k.take());
-            if ui.active() == Some(list_id) && self.rename.is_none() {
+            if ui.active() == Some(list_id) && self.rename.is_none() && !self.tab().list.has_band() && !self.tab().grid.has_band() {
                 let pos = ui.mouse();
                 let ms = now_ms();
                 self.press = match self.row_at(pos) {
@@ -154,7 +154,7 @@ impl View {
         }
     }
 
-    /// Esc: closes the rename / batch (a drag is OLE's: Esc cancels it there).
+    /// Esc: closes the rename / batch or cancels a marquee band (a drag is OLE's: Esc cancels it there).
     pub(super) fn cancel_edits(&mut self) -> bool {
         if self.batch.take().is_some() {
             self.focus_list = true;
@@ -162,6 +162,13 @@ impl View {
         }
         if self.rename.take().is_some() {
             self.focus_list = true;
+            return true;
+        }
+        let t = self.tab_mut();
+        if t.list.has_band() || t.grid.has_band() {
+            t.list.cancel_band();
+            t.grid.cancel_band();
+            t.band_base.clear();
             return true;
         }
         false
@@ -172,6 +179,10 @@ impl View {
         self.rename = None;
         self.batch = None;
         self.press = None;
+        let t = self.tab_mut();
+        t.list.cancel_band();
+        t.grid.cancel_band();
+        t.band_base.clear();
     }
 
     // ---- inline rename -------------------------------------------------------
@@ -430,7 +441,7 @@ impl View {
 
     /// The active pane's list has the keyboard focus (file shortcuts apply).
     pub fn list_focused(&self, ui: &Ui) -> bool {
-        !self.editing && self.rename.is_none() && self.batch.is_none() && ui.has_focus(pid(self.active, ID_LIST))
+        !self.editing && self.rename.is_none() && self.batch.is_none() && self.ctx.is_none() && self.palette.is_none() && ui.has_focus(pid(self.active, ID_LIST))
     }
 
     /// F5 / F6 with two panes: the selection goes to the other pane's folder.

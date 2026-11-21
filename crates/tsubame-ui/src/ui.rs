@@ -709,6 +709,12 @@ impl Ui {
     pub fn is_active(&self, id: Id) -> bool {
         self.active == Some(id)
     }
+    /// Ends the current active widget drag/capture (e.g. Esc cancelling a marquee).
+    pub fn clear_active(&mut self) {
+        if self.active.take().is_some() {
+            self.repaint = true;
+        }
+    }
     pub fn focus(&self) -> Option<Id> {
         self.focus
     }
