@@ -68,6 +68,7 @@ pub fn builtin() -> Registry {
     r.add(&crate::meta_ui::FolderSizesExtension).expect("folder-sizes extension registers");
     r.add(&crate::meta_ui::ChecksumExtension).expect("checksum extension registers");
     r.add(&crate::search_ui::GlobalSearchExtension).expect("global-search extension registers");
+    r.add(&crate::preview_ui::PreviewExtension).expect("preview extension registers");
     r
 }
 
@@ -116,8 +117,11 @@ mod tests {
         assert_eq!(r.is_enabled(crate::meta_ui::EXT_FOLDER_SIZES), Some(true));
         assert_eq!(r.is_enabled(crate::meta_ui::EXT_CHECKSUM), Some(true));
         assert_eq!(r.is_enabled(crate::search_ui::EXT_GLOBAL_SEARCH), Some(true));
+        assert_eq!(r.is_enabled(crate::preview_ui::EXT_PREVIEW), Some(true));
         assert!(r.command(crate::commands::CMD_RENAME).is_some());
         assert!(r.command(crate::commands::CMD_GLOBAL_SEARCH).is_some());
+        assert!(r.command(crate::commands::CMD_PREVIEW_TOGGLE).is_some());
+        assert!(r.command(crate::commands::CMD_PREVIEW_QUICK_LOOK).is_some());
         assert!(command(crate::commands::CMD_NEW_TAB).is_some_and(|(_, f)| f.has(CmdFlags::GLOBAL)));
         assert!(command(9999).is_none());
     }
@@ -133,5 +137,8 @@ mod tests {
         assert!(r.command(crate::commands::CMD_GLOBAL_SEARCH).is_none());
         assert_eq!(r.set_enabled(crate::archive_ui::EXT_ARCHIVE, false), Ok(true));
         assert!(r.command(crate::commands::CMD_ARCHIVE_EXTRACT_HERE).is_none());
+        assert_eq!(r.set_enabled(crate::preview_ui::EXT_PREVIEW, false), Ok(true));
+        assert!(r.command(crate::commands::CMD_PREVIEW_TOGGLE).is_none());
+        assert!(r.command(crate::commands::CMD_PREVIEW_QUICK_LOOK).is_none());
     }
 }

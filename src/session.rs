@@ -175,6 +175,7 @@ pub fn sync_config(view: &View, cfg: &mut tsubame_config::Config) {
     cfg.panes.ratio = view.ratio;
     cfg.panes.sidebar_width = view.sidebar_width;
     cfg.panes.sidebar_collapsed = view.side.rail;
+    cfg.preview = view.prefs.preview.clone().normalized();
     cfg.sidebar.pinned = view.side.pinned.clone();
     cfg.sidebar.closed = view.side.closed_names();
 }

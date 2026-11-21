@@ -9,7 +9,7 @@
 use super::*;
 use crate::keymap::{self, KeyMap};
 use crate::palette::{self, Action, Mode, Palette};
-use crate::settings::{C_APPEARANCE, C_HIDE, C_KEYS, C_MENU, C_UPDATES, C_ZEBRA, Cx, Page, Settings};
+use crate::settings::{C_APPEARANCE, C_HIDE, C_KEYS, C_MENU, C_PREVIEW, C_UPDATES, C_ZEBRA, Cx, Page, Settings};
 use std::time::{Duration, Instant};
 use tsubame_ui::themes;
 
@@ -52,6 +52,8 @@ impl View {
         let (km, _unknown) = KeyMap::from_overrides(&cfg.keys.overrides);
         self.keymap = km;
         keymap::set_current(&self.keymap);
+        self.preview.width = cfg.preview.width.clamp(tsubame_config::PreviewConfig::MIN_WIDTH, tsubame_config::PreviewConfig::MAX_WIDTH) as f32;
+        self.preview.pane_open = cfg.preview.enabled && crate::preview_ui::is_enabled();
         self.sync_feature_extensions();
         if apply_hide {
             self.apply_hide();
@@ -94,6 +96,10 @@ impl View {
         if bits & C_UPDATES != 0 {
             crate::updates::set_auto_install(self.prefs.updates.auto_install);
         }
+        if bits & C_PREVIEW != 0 {
+            self.preview.apply_prefs(ui, &self.prefs.preview);
+            self.sync_space_binding(ui);
+        }
         // a pack switched on or off, or reloaded: its themes and menu entries follow
         let packs_changed = crate::packs::sync();
         if bits & C_MENU != 0 || packs_changed {
@@ -127,7 +133,7 @@ impl View {
         crate::ext::apply_disabled(&cfg.extensions.disabled);
         self.sync_feature_extensions();
         self.keymap = KeyMap::defaults();
-        self.apply_prefs(ui, C_APPEARANCE | C_ZEBRA | C_HIDE | C_KEYS | C_UPDATES | C_MENU);
+        self.apply_prefs(ui, C_APPEARANCE | C_ZEBRA | C_HIDE | C_KEYS | C_UPDATES | C_MENU | C_PREVIEW);
     }
 
     /// The folder new tabs and the palette start from (not the Settings tab's empty path).

@@ -92,6 +92,14 @@ ratio = 0.5                  # size of the first pane, 0.15-0.85
 sidebar_width = 208.0
 sidebar_collapsed = false    # true = 48 px icon rail
 
+[preview]
+enabled = false              # docked right preview pane (Alt+P)
+width = 320                  # pane width in DIPs, 220-600 (double-click splitter resets to 320)
+quick_look = true            # Space / F3 Quick Look overlay
+syntax_highlight = true      # 6-token syntax tinting in text/code preview
+hex_auto_width = true        # 8 bytes/row in docked panes < 420 px, 16 bytes/row otherwise
+direct_hex_binaries = true   # show hex directly for .exe/.dll/.bin/.dat
+
 [sidebar]
 closed = ["network"]         # folded sections: pinned | quick | recent | pc | network
 
@@ -160,6 +168,12 @@ maximized = false
 | `panes.ratio` | `0.5` | first pane's share, clamped 0.15–0.85; the splitter drags it, double-click resets |
 | `panes.sidebar_width` | `208.0` | sidebar width, clamped 120–480; dragging under 120 collapses to the rail |
 | `panes.sidebar_collapsed` | `false` | `true` = the 48 px icon rail (Ctrl+B) |
+| `preview.enabled` | `false` | docked right preview pane (Alt+P, Settings > General, live) |
+| `preview.width` | `320` | docked preview pane width in DIPs, clamped 220–600; double-click splitter resets to 320 |
+| `preview.quick_look` | `true` | `Space` / `F3` centered Quick Look overlay (Settings > General, live) |
+| `preview.syntax_highlight` | `true` | 6-token syntax tinting in text/code preview (Settings > General, live) |
+| `preview.hex_auto_width` | `true` | auto-switch hex dump to 8 bytes/row in docked panes narrower than 420 px (Settings > General, live) |
+| `preview.direct_hex_binaries` | `true` | show hex directly for `.exe`/`.dll`/`.bin`/`.dat` instead of an Unsupported card (Settings > General, live) |
 | `sidebar.pinned` | empty | `[[sidebar.pinned]]` `name` + `path` (both strings; write the path in single quotes, `path = 'D:\work'`), shown in the Pinned section. Extra keys in an entry are ignored |
 | `sidebar.closed` | empty | sidebar sections folded by the user |
 | `updates.auto_check` | `true` | background check at start (<= 1 per 24 h). `false` = no network from the automatic path |
