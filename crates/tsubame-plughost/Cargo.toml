@@ -41,7 +41,7 @@ required-features = ["host"]
 default = ["host"]
 # Wasmtime runtime. Off (`default-features = false`) the crate is the manifest,
 # the protocol and the supervisor client only, which is what the app links.
-host = ["dep:wasmtime"]
+host = ["dep:wasmtime", "dep:windows-sys"]
 # Cranelift, for the install step only. Never part of the shipped host exe.
 compiler = ["host", "wasmtime/cranelift"]
 
@@ -51,6 +51,18 @@ serde.workspace = true
 toml.workspace = true
 # Smallest set that works: component model + runtime, no cache/profiling/wat/gc/async/threads/parallel-compilation.
 wasmtime = { version = "=50.0.2", optional = true, default-features = false, features = ["runtime", "component-model", "std"] }
+
+# Handle-based file access in the host (`src/host/fsopen.rs`). Already in the graph through wasmtime.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
+] }
 
 [dev-dependencies]
 # The tests compile their guests themselves, so they need Cranelift. Dev-only:

@@ -1,9 +1,16 @@
 //! Capabilities: what a plugin may touch, and the path rules that enforce it.
 //!
 //! Everything is denied unless a grant allows it. This module is the lexical
-//! half of the path check (pure string work, no I/O); the host adds a second
-//! check on the resolved path so a link inside a granted folder can not lead
-//! out of it (`host.rs`).
+//! half of the path check (pure string work, no I/O); the host then opens the
+//! path one component at a time from the grant's folder and checks the handle
+//! it got, so a link inside a granted folder can not lead out of it
+//! (`host/fsopen.rs`).
+//!
+//! Network paths (`\\server\share\...`) are files on another computer: opening
+//! one makes Windows connect to that server. A UNC path is only ever allowed
+//! under an `$input` path that is itself UNC (the user is on that share), or
+//! under a UNC folder grant when the plugin also has `network = true`. `*`
+//! never covers one.
 
 use std::fmt;
 
@@ -73,6 +80,8 @@ pub enum CapError {
     /// A prefix grant that is not a normalized absolute path.
     BadPrefix(String),
     Duplicate(String),
+    /// A prefix grant on a network share (UNC) without `network = true`.
+    NetworkPath(String),
 }
 
 impl fmt::Display for CapError {
@@ -83,6 +92,7 @@ impl fmt::Display for CapError {
             CapError::TooManyPaths(n) => write!(f, "{n} path grants, at most {MAX_PATH_GRANTS} are allowed"),
             CapError::BadPrefix(p) => write!(f, "path grant `{p}` is not a normalized absolute path"),
             CapError::Duplicate(p) => write!(f, "path grant `{p}` is listed twice"),
+            CapError::NetworkPath(p) => write!(f, "path grant `{p}` is on another computer; a network path needs `network = true`"),
         }
     }
 }
@@ -109,6 +119,9 @@ impl Capabilities {
                     if normalize(p).as_deref() != Ok(p.as_str()) {
                         return Err(CapError::BadPrefix(p.clone()));
                     }
+                    if is_unc(p) && !self.network {
+                        return Err(CapError::NetworkPath(p.clone()));
+                    }
                     key(p)
                 }
                 Scope::Input => "$input".to_string(),
@@ -130,6 +143,7 @@ impl Capabilities {
             out.push(match &g.scope {
                 Scope::Any => format!("{verb} any file on this computer"),
                 Scope::Input => format!("{verb} the files and folders you use it on"),
+                Scope::Prefix(p) if is_unc(p) => format!("{verb} files on the server {}: {p}", unc_server(p)),
                 Scope::Prefix(p) => format!("{verb} files in {p}"),
             });
         }
@@ -184,8 +198,10 @@ fn is_device_name(component: &str) -> bool {
     if NAMES.iter().any(|n| stem.eq_ignore_ascii_case(n)) {
         return true;
     }
-    let b = stem.as_bytes();
-    b.len() == 4 && (b[..3].eq_ignore_ascii_case(b"COM") || b[..3].eq_ignore_ascii_case(b"LPT")) && b[3].is_ascii_digit()
+    // COM0-COM9 and LPT0-LPT9, and the superscript digits Windows also reserves (`COM¹`).
+    let (Some(head), Some(digit)) = (stem.get(..3), stem.get(3..)) else { return false };
+    (head.eq_ignore_ascii_case("COM") || head.eq_ignore_ascii_case("LPT"))
+        && matches!(digit, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "\u{b9}" | "\u{b2}" | "\u{b3}")
 }
 
 fn check_component(c: &str) -> Result<(), PathError> {
@@ -248,6 +264,10 @@ pub fn normalize(path: &str) -> Result<String, PathError> {
     if unc {
         let (Some(server), Some(share)) = (comps.next(), comps.next()) else { return Err(PathError::NotAbsolute) };
         check_component(server)?;
+        // `\\host@80\...` and `\\host@SSL\...` go to the WebDAV redirector, which is HTTP.
+        if server.contains('@') {
+            return Err(PathError::BadName);
+        }
         check_component(share)?;
         out.push_str("\\\\");
         out.push_str(server);
@@ -266,6 +286,16 @@ pub fn normalize(path: &str) -> Result<String, PathError> {
         out.push('\\');
     }
     Ok(out)
+}
+
+/// True for a normalized network path (`\\server\share...`).
+pub fn is_unc(normalized: &str) -> bool {
+    normalized.starts_with("\\\\")
+}
+
+/// The server of a normalized UNC path.
+fn unc_server(normalized: &str) -> &str {
+    normalized[2..].split('\\').next().unwrap_or("")
 }
 
 /// `X:\` at the start (so not the drive-relative `X:file`).
@@ -309,10 +339,15 @@ fn parent(k: &str) -> Option<&str> {
 /// A folder that allows a path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Root {
-    /// An "any path" grant: there is no folder to stay inside.
+    /// An "any path" grant: there is no folder to stay inside, but the path
+    /// must stay on a local drive.
     Any,
-    /// The normalized folder (or input path) the path must stay inside.
+    /// A folder grant: the normalized folder the path must stay inside. It may
+    /// resolve to a network path only when the plugin has `network = true`.
     Dir(String),
+    /// An input path of the current call that covers the path: the path must
+    /// stay inside it. The user handed it over, so it may be on a network share.
+    Input(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,6 +362,7 @@ pub enum Denied {
 pub struct PathPolicy {
     /// key, normalized root, access
     prefixes: Vec<(String, String, Access)>,
+    network: bool,
     input: Option<Access>,
     any: Option<Access>,
     /// The current call's paths as handed over; turned into `inputs` on first use.
@@ -337,7 +373,7 @@ pub struct PathPolicy {
 
 impl PathPolicy {
     pub fn new(caps: &Capabilities) -> PathPolicy {
-        let mut p = PathPolicy { prefixes: Vec::new(), input: None, any: None, pending: Vec::new(), inputs: Vec::new() };
+        let mut p = PathPolicy { prefixes: Vec::new(), network: caps.network, input: None, any: None, pending: Vec::new(), inputs: Vec::new() };
         for g in &caps.paths {
             match &g.scope {
                 Scope::Prefix(root) => {
@@ -383,21 +419,24 @@ impl PathPolicy {
     pub fn check(&mut self, path: &str, want: Access) -> Result<(String, Vec<Root>), Denied> {
         let norm = normalize(path).map_err(Denied::Invalid)?;
         let k = key(&norm);
+        let unc = is_unc(&norm);
         let mut roots = Vec::new();
-        if self.any.is_some_and(|a| a.covers(want)) {
+        // `*` is "any file on this computer": never a network path.
+        if !unc && self.any.is_some_and(|a| a.covers(want)) {
             roots.push(Root::Any);
         }
         for (rk, root, access) in &self.prefixes {
-            if access.covers(want) && is_under(&k, rk) {
+            if access.covers(want) && is_under(&k, rk) && (!unc || self.network) {
                 roots.push(Root::Dir(root.clone()));
             }
         }
+        // A UNC path can only meet an input that is itself UNC: `parent` stops at the share root.
         if self.input.is_some_and(|a| a.covers(want)) {
             self.settle();
             let mut at = Some(k.as_str());
             while let Some(a) = at {
                 if let Ok(i) = self.inputs.binary_search_by(|e| e.0.as_str().cmp(a)) {
-                    roots.push(Root::Dir(self.inputs[i].1.clone()));
+                    roots.push(Root::Input(self.inputs[i].1.clone()));
                     break;
                 }
                 at = parent(a);
@@ -545,9 +584,9 @@ mod tests {
         assert!(p.uses_inputs());
         assert_eq!(p.check("C:\\a\\one.txt", Access::Read), Err(Denied::NotGranted));
         p.set_inputs(vec!["C:\\a\\one.txt".into(), "C:\\dir".into(), "not absolute".into(), "c:\\A\\ONE.txt".into()]);
-        assert_eq!(p.check("c:\\a\\ONE.TXT", Access::Read).unwrap().1, vec![Root::Dir("C:\\a\\one.txt".into())]);
+        assert_eq!(p.check("c:\\a\\ONE.TXT", Access::Read).unwrap().1, vec![Root::Input("C:\\a\\one.txt".into())]);
         // under an input folder
-        assert_eq!(p.check("C:\\dir\\deep\\x", Access::Read).unwrap().1, vec![Root::Dir("C:\\dir".into())]);
+        assert_eq!(p.check("C:\\dir\\deep\\x", Access::Read).unwrap().1, vec![Root::Input("C:\\dir".into())]);
         // a sibling, the parent and write access are not covered
         assert_eq!(p.check("C:\\a\\two.txt", Access::Read), Err(Denied::NotGranted));
         assert_eq!(p.check("C:\\a", Access::Read), Err(Denied::NotGranted));
@@ -572,6 +611,48 @@ mod tests {
         // still no traversal, streams or devices
         assert!(matches!(p.check("Z:\\x\\..\\y", Access::Read), Err(Denied::Invalid(_))));
         assert!(matches!(p.check("\\\\.\\PhysicalDrive0", Access::Read), Err(Denied::Invalid(_))));
+    }
+
+    #[test]
+    fn unc_paths_need_the_network_or_a_unc_input() {
+        // `*` never covers a network path, read or write.
+        let any = |access| PathGrant { scope: Scope::Any, access };
+        let mut p = PathPolicy::new(&caps(vec![any(Access::ReadWrite)]));
+        assert_eq!(p.check("\\\\server\\share\\x", Access::Read), Err(Denied::NotGranted));
+        assert_eq!(p.check("\\\\?\\UNC\\server\\share\\x", Access::ReadWrite), Err(Denied::NotGranted));
+        assert_eq!(p.check("C:\\x", Access::Read).unwrap().1, vec![Root::Any]);
+        // WebDAV server names are refused before any grant is looked at
+        assert_eq!(normalize("\\\\host@80\\dav\\x"), Err(PathError::BadName));
+        assert_eq!(normalize("\\\\host@SSL\\DavWWWRoot\\x"), Err(PathError::BadName));
+
+        // a UNC folder grant needs `network = true`, and only then covers the share
+        let share = prefix("\\\\server\\share", Access::Read);
+        assert_eq!(caps(vec![share.clone()]).validate(), Err(CapError::NetworkPath("\\\\server\\share".into())));
+        let mut p = PathPolicy::new(&caps(vec![share.clone()]));
+        assert_eq!(p.check("\\\\server\\share\\x", Access::Read), Err(Denied::NotGranted), "a host that skips validate still denies");
+        let net = Capabilities { network: true, paths: vec![share], ..Capabilities::default() };
+        assert_eq!(net.validate(), Ok(()));
+        assert_eq!(net.summary()[0], "Read files on the server server: \\\\server\\share");
+        let mut p = PathPolicy::new(&net);
+        assert_eq!(p.check("\\\\SERVER\\share\\x", Access::Read).unwrap().1, vec![Root::Dir("\\\\server\\share".into())]);
+        assert_eq!(p.check("\\\\server\\other\\x", Access::Read), Err(Denied::NotGranted));
+
+        // an input on a share covers that share's tree, with or without the network
+        let mut p = PathPolicy::new(&caps(vec![PathGrant { scope: Scope::Input, access: Access::Read }, any(Access::Read)]));
+        p.set_inputs(vec!["\\\\nas\\media\\films".into(), "C:\\local".into()]);
+        assert_eq!(p.check("\\\\nas\\media\\films\\a.mkv", Access::Read).unwrap().1, vec![Root::Input("\\\\nas\\media\\films".into())]);
+        assert_eq!(p.check("\\\\nas\\media\\other.mkv", Access::Read), Err(Denied::NotGranted));
+        assert_eq!(p.check("\\\\nas\\media", Access::Read), Err(Denied::NotGranted));
+    }
+
+    #[test]
+    fn superscript_device_names_are_refused() {
+        for p in ["C:\\a\\COM\u{b9}", "C:\\a\\com\u{b2}.txt", "C:\\a\\LPT\u{b3}", "C:\\a\\COM0", "C:\\a\\lpt0.x"] {
+            assert_eq!(normalize(p), Err(PathError::Device), "{p}");
+        }
+        for p in ["C:\\a\\COM\u{b9}\u{b9}", "C:\\a\\COM\u{2074}", "C:\\a\\COMA", "C:\\a\\LPT"] {
+            assert!(normalize(p).is_ok(), "{p}");
+        }
     }
 
     #[test]

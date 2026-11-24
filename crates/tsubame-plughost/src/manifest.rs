@@ -393,6 +393,15 @@ impl Manifest {
             }
             paths.push(d);
         }
+        // A folder on another computer is network access (PH-01): say so, or it is refused.
+        if !c.network
+            && let Some(p) = paths.iter().find_map(|d| match &d.location {
+                Location::Absolute(p) if caps::is_unc(p) => Some(p),
+                _ => None,
+            })
+        {
+            return err(format!("capabilities.paths: `{p}` is on another computer; a network path needs `network = true`"));
+        }
 
         let mut columns = Vec::with_capacity(raw.column.len());
         for r in &raw.column {
@@ -648,6 +657,19 @@ keys = ["Ctrl+Alt+E"]
         // wrong types
         rejects("", "[capabilities]\nnetwork = \"yes\"\n", "invalid type");
         rejects("", "[capabilities]\nmax_memory_mb = \"64\"\n", "invalid type");
+    }
+
+    #[test]
+    fn a_network_folder_needs_the_network_capability() {
+        rejects("", "[capabilities]\npaths = [{ path = \"//nas/share\", access = \"read\" }]\n", "needs `network = true`");
+        rejects("", "[capabilities]\nnetwork = false\npaths = [{ path = \"\\\\\\\\?\\\\UNC\\\\nas\\\\share\\\\x\", access = \"read\" }]\n", "on another computer");
+        rejects("", "[capabilities]\nnetwork = true\npaths = [{ path = \"//nas@80/dav\", access = \"read\" }]\n", "not allowed");
+        let m = with("", "[capabilities]\nnetwork = true\npaths = [{ path = \"//nas/share\", access = \"read\" }]\n").unwrap();
+        let c = m.capabilities("C:\\p", "C:\\d").unwrap();
+        assert_eq!(c.summary()[0], "Read files on the server nas: \\\\nas\\share");
+        // `$data` and `$plugin` on a share are network paths too
+        let m = with("", "[capabilities]\npaths = [{ path = \"$data\", access = \"read-write\" }]\n").unwrap();
+        assert!(m.capabilities("C:\\p", "\\\\nas\\profiles\\data").unwrap_err().0.contains("needs `network = true`"));
     }
 
     #[test]

@@ -110,6 +110,21 @@ path is given.
 | PH-21 | low | `src/host.rs:249-269` | `get-capabilities` returns the resolved `$plugin` and `$data` folders, which contain the Windows user name, to every plugin, including ones with no grants. | A capability-free plugin learns the account name and the install layout. | Return `$plugin` / `$data` as symbolic scopes; resolve them only inside the host. | S |
 | PH-22 | info | `docs/wasm-plugins.md` "Bounds", `src/proto.rs:342-352`, `src/host.rs:232-242` | Documentation and code differ. The host refuses more than 2,000 paths but not "about 1 MiB of path text" (only the client splits). `fs-error` distinguishes `denied` from `not-found` after resolution, so a junction inside a grant is an existence oracle for the folder it points to. `network = true` and `run_processes = true` are shown to the user ("Use the network") while granting nothing. | None. | Enforce `MAX_BATCH_BYTES` in `dec_paths`; return `denied` for anything that resolves outside; say "reserved" in the prompt until an import exists. | S |
 
+## Status
+
+The table above is the review as written. Fixes since:
+
+| ID | Status | How |
+|---|---|---|
+| PH-01 | fixed (Card A) | `*` never covers a UNC path; a UNC folder grant (and `$data`/`$plugin` on a share) needs `network = true`, in `Manifest::parse` and in the host's `validate`; a server name with `@` is refused; the prompt names the server. In the host, `*` and folder grants without the network also refuse a handle whose final path or drive is remote (mapped drives). A UNC path the user handed over (`$input`) still works. |
+| PH-04 | fixed (Card B) | `src/host/fsopen.rs` opens every component below the grant's folder with `FILE_OPEN_REPARSE_POINT` relative to the parent's handle and refuses symlinks, junctions and mount points, dangling or not. A new file is created relative to its folder's handle. |
+| PH-05 | fixed (Card B) | The name is looked up once; the checks run on the opened handle (`GetFinalPathNameByHandleW` against the grant folder's final path) and all I/O uses that handle. The swap race in `ph05` no longer leaks (thousands of reads during hundreds of swaps, 0 outside). |
+| PH-06 | fixed (Card B) | Under a folder grant a file with `nNumberOfLinks > 1` is refused for read, stat and write (decision: reads too, fail closed). A path the call was given exactly is exempt: the user named that file. |
+| PH-09 | fixed (Card A) | `COM¹ COM² COM³ LPT¹ LPT² LPT³` are device names. |
+
+The PoC tests for these now assert that the attack fails and run in the normal
+suite; the exploit setup is unchanged.
+
 ## What was checked and holds
 
 | Topic | Result |
@@ -346,9 +361,11 @@ cargo test -p tsubame-plughost --test security_poc -- --ignored --nocapture
 cargo test -p tsubame-plughost --test host -- --ignored --nocapture ph0
 ```
 
-All are `#[ignore]` and pass while the weakness exists. `ph04` and `ph05` need
-the right to create symlinks (Developer Mode); they print `NOT RUN` otherwise.
-`ph01` in `tests/host.rs` opens `\\127.0.0.1\C$` and nothing else.
+The open ones are `#[ignore]` and pass while the weakness exists. The tests
+for fixed findings (PH-01, PH-04, PH-05, PH-06, PH-09) are regression tests:
+not ignored, they assert the attack fails. `ph04` and `ph05` need the right to
+create symlinks (Developer Mode); they print `NOT RUN` otherwise. `ph01` in
+`tests/host.rs` tries `\\127.0.0.1\C$` and nothing else.
 
 | Test | File | Finding |
 |---|---|---|
