@@ -211,6 +211,10 @@ Kept current as work lands: every measurement surprise, QA finding or improvemen
 
 | Date | Finding | Status |
 |---|---|---|
+| 2026-11-25 | Real-mouse check on the user's machine: Back/Forward buttons and double-click-up work; marks the manual real-mouse gate as passed for the 0.2 build. | Done |
+| 2026-11-25 | Middle-click on the last open tab freezes the UI for a noticeable time before the window closes (also on 0.1.0). Rig repro and trace pending. | Open (B9-LAG) |
+| 2026-11-25 | First right-click context menu after launch is slightly laggy on the user's machine (many third-party shell extensions); warm opens are fine. Cold-path trace pending. | Open (B9-LAG) |
+| 2026-11-25 | Release `tsubame.exe` built as `-p tsubame -p tsubame-handler` is 4.63 MB vs 3.50 MB for `-p tsubame -p tsubame-plughost`; both under budget. Find which feature unification adds about 1.1 MB. | Open |
 | 2026-11-25 | Archive delete/rename/cut/paste/new/drop-in now show 'Archives are read-only. Extract first.'; extract onto existing files asks Replace / Keep both / Skip (`3b01718`). Rename, cut, paste, drop-in and right-click menus not rig-checked individually. | Fixed |
 | 2026-11-24 | Release `tsubame.exe` is 3.34 MiB after the Batch 8 archive crates (budget < 6 MB, 0.1.0 was 3.20 MB). | Within budget |
 | 2026-11-24 | `tsubame-plughost.exe` release build is 9.31 MiB (wasmtime runtime and component model, no Cranelift in the normal graph). The earlier 1.00 MB figure does not reproduce; find out how it was measured and set a size budget. | Open (P5 review) |
