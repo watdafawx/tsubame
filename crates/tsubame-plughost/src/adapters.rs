@@ -10,6 +10,7 @@ use crate::cache::CellCache;
 use crate::client::Plugin;
 use crate::manifest::{ColumnDecl, Manifest, ProviderDecl};
 use crate::proto::MAX_BATCH;
+use crate::sanitize::{self, sanitize as clean_text};
 use std::sync::{Arc, Mutex};
 use tsubame_ext_api::{Cell, ColumnProvider, ColumnSource, ColumnSpec, Contributions, Doc, Hit, Host, Limits, Previewer, Query, SearchProvider, VfsEntry, VfsProvider};
 
@@ -86,12 +87,19 @@ impl ColumnProvider for WasmColumn {
             // Cells stay empty and are not cached, so a later call asks again.
             return;
         }
+        sanitize::clean_cells(&mut got);
         let mut cache = lock(&self.cache);
         for (&i, cell) in misses.iter().zip(got) {
             cache.put(paths[i], cell.clone());
             out[start + i] = cell;
         }
     }
+}
+
+/// An error text for the user: the plugin's name first, so a plugin can not
+/// pass its words off as the app's, and no control or bidi characters.
+fn plugin_error(plugin: &Plugin, e: &crate::client::CallError) -> String {
+    format!("{}: {}", clean_text(plugin.id(), 64), clean_text(&e.to_string(), sanitize::MAX_MESSAGE))
 }
 
 fn has_extension(extensions: &[String], ext: &str) -> bool {
@@ -116,7 +124,14 @@ impl Previewer for WasmPreviewer {
     }
 
     fn preview(&self, path: &str, limits: Limits, out: &mut Doc) -> Result<(), String> {
-        self.plugin.preview(&self.id, path, limits, &mut out.nodes).map_err(|e| e.to_string())
+        let start = out.nodes.len();
+        self.plugin.preview(&self.id, path, limits, &mut out.nodes).map_err(|e| plugin_error(&self.plugin, &e))?;
+        // Only the new nodes: what the caller already had is not the plugin's.
+        let mut fresh = out.nodes.split_off(start);
+        let load = self.plugin.load();
+        sanitize::clean_doc(&mut fresh, limits.max_bytes, &|c| sanitize::own_command(&load.plugin_id, &load.entrypoints, c));
+        out.nodes.append(&mut fresh);
+        Ok(())
     }
 }
 
@@ -140,12 +155,17 @@ impl VfsProvider for WasmVfs {
     }
 
     fn list(&self, path: &str, sink: &mut dyn FnMut(&[VfsEntry]) -> bool) -> Result<(), String> {
-        self.plugin.vfs_list(&self.id, path, sink).map_err(|e| e.to_string())
+        let mut clean = |entries: &[VfsEntry]| {
+            let mut v = entries.to_vec();
+            sanitize::clean_entries(&mut v);
+            sink(&v)
+        };
+        self.plugin.vfs_list(&self.id, path, &mut clean).map_err(|e| plugin_error(&self.plugin, &e))
     }
 
     fn read(&self, path: &str, out: &mut Vec<u8>) -> Result<(), String> {
         let start = out.len();
-        self.plugin.vfs_read(&self.id, path, VFS_READ_MAX + 1, out).map_err(|e| e.to_string())?;
+        self.plugin.vfs_read(&self.id, path, VFS_READ_MAX + 1, out).map_err(|e| plugin_error(&self.plugin, &e))?;
         if (out.len() - start) as u64 > VFS_READ_MAX {
             out.truncate(start);
             return Err(format!("file is larger than {} MB", VFS_READ_MAX >> 20));
@@ -167,7 +187,13 @@ impl WasmSearch {
 
 impl SearchProvider for WasmSearch {
     fn search(&self, q: &Query, sink: &mut dyn FnMut(&[Hit]) -> bool) -> Result<(), String> {
-        self.plugin.search(&self.id, q.text, q.root, q.limit, sink).map_err(|e| e.to_string())
+        let root = q.root;
+        let mut clean = |hits: &[Hit]| {
+            let mut v = hits.to_vec();
+            sanitize::clean_hits(&mut v, root);
+            sink(&v)
+        };
+        self.plugin.search(&self.id, q.text, q.root, q.limit, &mut clean).map_err(|e| plugin_error(&self.plugin, &e))
     }
 }
 

@@ -9,6 +9,7 @@
 //! | [`client`] | [`client::Plugin`]: lazy start, deadlines, kill on hang, fault limit | app |
 //! | `launcher` (Windows) | `JobLauncher`: job object, cleared environment, refuses an elevated app | app |
 //! | [`adapters`] | entry points as `tsubame-ext-api` providers | app |
+//! | [`sanitize`] | the text filter and the checks on plugin output | app, host |
 //! | [`cache`] | bounded cache of column values | app |
 //! | [`host`] | wasmtime, limits, the `host` imports, the serve loop (feature `host`) | `tsubame-plughost.exe` |
 //!
@@ -26,4 +27,5 @@ pub mod launcher;
 pub mod host;
 pub mod manifest;
 pub mod proto;
+pub mod sanitize;
 pub mod sha256;

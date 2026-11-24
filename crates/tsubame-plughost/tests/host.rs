@@ -763,7 +763,7 @@ fn previewer_vfs_search_and_command() {
     // the plugin's own error comes through as text and is not a fault
     let failing = WasmPreviewer::new(p.clone(), &decl("fail", &["png"]));
     for _ in 0..5 {
-        assert_eq!(failing.preview("C:\\a.png", Limits { max_bytes: 1, max_px: 64 }, &mut small).unwrap_err(), "no preview for this file");
+        assert_eq!(failing.preview("C:\\a.png", Limits { max_bytes: 1, max_px: 64 }, &mut small).unwrap_err(), "test.fixture: no preview for this file");
     }
     assert_eq!(p.status(), Status::Running);
 

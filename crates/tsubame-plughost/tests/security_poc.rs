@@ -1,6 +1,7 @@
 //! Security review P5.P3: proofs of concept for `docs/security/plughost-review.md`.
 //!
-//! Every test here is `#[ignore]` and **passes while the weakness is present**.
+//! Every PoC here is `#[ignore]` and **passes while the weakness is present**; a fixed
+//! finding's test is un-ignored and asserts the attack fails (PH-13 b, PH-16, PH-17).
 //! The test name starts with the finding's id. When a finding is fixed, turn
 //! its test into a regression test (flip the assertion, drop the `#[ignore]`).
 //!
@@ -14,10 +15,11 @@ use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tsubame_ext_api::{Cell, Node};
+use tsubame_ext_api::{Cell, Doc, Hit, Limits, Node, Query, VfsEntry};
+use tsubame_plughost::adapters::{WasmColumn, WasmPreviewer, WasmSearch, WasmVfs};
 use tsubame_plughost::caps::{self, Access, Capabilities, PathGrant, PathPolicy, Root, Scope};
 use tsubame_plughost::client::{CallError, HostIo, HostProcess, Launcher, Options, Plugin, Status};
-use tsubame_plughost::manifest::{Kind, Manifest};
+use tsubame_plughost::manifest::{Kind, Manifest, ProviderDecl};
 use tsubame_plughost::proto::{self, Info, Load};
 
 fn manifest(plugin: &str, caps: &str) -> String {
@@ -208,14 +210,29 @@ fn load(timeout_ms: u32) -> Load {
         component: "C:\\none.cwasm".into(),
         sha256: [0; 32],
         caps: Capabilities { timeout_ms, ..Capabilities::default() },
-        entrypoints: vec![(Kind::Column, "c".into())],
+        entrypoints: entrypoints(),
     }
+}
+
+fn entrypoints() -> Vec<(Kind, String)> {
+    vec![(Kind::Column, "c".into()), (Kind::Previewer, "pv".into()), (Kind::Vfs, "v".into()), (Kind::Search, "s".into()), (Kind::Command, "open".into())]
+}
+
+fn decl(id: &str) -> ProviderDecl {
+    ProviderDecl { id: id.into(), title: id.into(), extensions: vec!["zip".into()] }
+}
+
+/// A plugin whose host answers the first call with `answer` (request id 2).
+fn plugin_answering(answer: Vec<u8>) -> Arc<Plugin> {
+    let mut script = greeting();
+    script.extend(answer);
+    Arc::new(Plugin::new(load(2_000), Scripted { script, consumed: Arc::new(AtomicUsize::new(0)) }, Options::default()))
 }
 
 /// Hello, then the answer to `Load` (the client's first request id is 1).
 fn greeting() -> Vec<u8> {
     let mut s = proto::enc_hello();
-    s.extend(proto::enc_ok_info(1, &Info { id: "test.poc".into(), version: "1.0.0".into(), entrypoints: vec![(Kind::Column, "c".into())] }).unwrap());
+    s.extend(proto::enc_ok_info(1, &Info { id: "test.poc".into(), version: "1.0.0".into(), entrypoints: entrypoints() }).unwrap());
     s
 }
 
@@ -272,17 +289,121 @@ fn ph15_status_blocks_behind_a_call_in_flight() {
     assert_eq!(worker.join().unwrap(), Err(CallError::Timeout));
 }
 
-// ---- PH-17: an error message that repeats the plugin's file ---------------------------------------
+// ---- PH-17: untrusted text in messages (fixed: regression tests) ---------------------------------
 
 #[test]
-#[ignore = "PoC PH-17: passes while a manifest error echoes the untrusted line, escape codes included"]
-fn ph17_a_manifest_error_repeats_untrusted_input_unbounded_and_unescaped() {
+fn ph17_a_manifest_error_does_not_repeat_untrusted_input() {
     // One 60 KB line with a terminal escape sequence in it and a syntax error at its end.
     let esc = char::from(27);
     let text = format!("x = {esc}[2J{esc}[31mFAKE OUTPUT {}", "A".repeat(60_000));
     let e = Manifest::parse(&text).unwrap_err();
-    println!("PH-17: a {} byte manifest gives a {} byte error message", text.len(), e.0.len());
-    // `tsubame-plugc` prints this with eprintln!; the app would show it in a dialog or a log.
-    assert!(e.0.len() > 60_000, "the whole line is repeated");
-    assert!(e.0.contains(esc), "with its control characters");
+    assert!(e.0.len() < 400, "{} bytes", e.0.len());
+    assert!(!e.0.contains(esc) && !e.0.contains("FAKE OUTPUT"), "{:?}", e.0);
+}
+
+#[test]
+fn ph17_a_plugin_error_is_cleaned_and_named() {
+    use tsubame_ext_api::SearchProvider;
+    let esc = char::from(27);
+    let msg = format!("{esc}[2JTsubame: your disk is full\u{202e}!{}", "x".repeat(5_000));
+    let p = plugin_answering(proto::enc_err(2, proto::ErrKind::Plugin, &msg));
+    let e = WasmSearch::new(p, &decl("s")).search(&Query { text: "a", root: "", limit: 10 }, &mut |_| true).unwrap_err();
+    assert!(e.starts_with("test.poc: "), "{e:.80}");
+    assert!(e.len() < 1_200, "{} bytes", e.len());
+    assert!(!e.contains(esc) && !e.contains('\u{202e}'), "{e:.80?}");
+}
+
+// ---- PH-16 / PH-13 b: plugin output at the adapters (fixed: regression tests) ---------------------
+
+fn hit(path: &str) -> Hit {
+    Hit { path: path.into(), dir: false, size: 1, mtime: 2 }
+}
+
+fn search(root: &str, hits: &[Hit]) -> Vec<String> {
+    use tsubame_ext_api::SearchProvider;
+    let p = plugin_answering(proto::enc_ok_hits(2, hits, None).unwrap());
+    let mut got = Vec::new();
+    WasmSearch::new(p, &decl("s"))
+        .search(&Query { text: "a", root, limit: 100 }, &mut |h| {
+            got.extend(h.iter().map(|h| h.path.clone()));
+            true
+        })
+        .unwrap();
+    got
+}
+
+#[test]
+fn ph16_a_unc_hit_from_a_plugin_is_dropped() {
+    let hits = [hit(r"\\attacker.example\share\x"), hit(r"C:\data\ok")];
+    assert_eq!(search("", &hits), [r"C:\data\ok"]);
+    assert_eq!(search(r"C:\data", &hits), [r"C:\data\ok"]);
+}
+
+#[test]
+fn ph16_a_hit_outside_the_query_root_or_with_dotdot_is_dropped() {
+    let hits = [hit(r"C:\data\..\Windows\x"), hit(r"C:\other\x"), hit(r"C:\data\sub\x")];
+    assert_eq!(search(r"C:\data", &hits), [r"C:\data\sub\x"]);
+}
+
+#[test]
+fn ph16_a_dotdot_entry_name_is_dropped() {
+    use tsubame_ext_api::VfsProvider;
+    let e = |n: &str| VfsEntry { name: n.into(), dir: false, size: 0, mtime: 0 };
+    let entries = [e(r"..\..\Startup\x.cmd"), e(".."), e("a/b"), e("NUL"), e("evil\u{202e}gnp.exe"), e("ctl\u{7}"), e("fine.txt")];
+    let p = plugin_answering(proto::enc_ok_entries(2, &entries, None).unwrap());
+    let mut names = Vec::new();
+    WasmVfs::new(p, &decl("v"))
+        .list(r"C:\a.zip", &mut |es| {
+            names.extend(es.iter().map(|e| e.name.clone()));
+            true
+        })
+        .unwrap();
+    assert_eq!(names, ["fine.txt"]);
+}
+
+fn preview(nodes: &[Node], max_bytes: u64) -> Vec<Node> {
+    use tsubame_ext_api::Previewer;
+    let p = plugin_answering(proto::enc_ok_doc(2, nodes).unwrap());
+    let mut doc = Doc { nodes: vec![Node::Heading("kept".into())] };
+    WasmPreviewer::new(p, &decl("pv")).preview(r"C:\a.zip", Limits { max_bytes, max_px: 100 }, &mut doc).unwrap();
+    assert_eq!(doc.nodes[0], Node::Heading("kept".into()), "what the caller had stays");
+    doc.nodes.split_off(1)
+}
+
+#[test]
+fn ph16_a_button_may_only_run_the_plugins_own_commands() {
+    let button = |c: &str| Node::Button { label: "Open".into(), command: c.to_string().into() };
+    let got = preview(&[button("test.poc.open"), button("tsubame.delete"), button("test.poc.delete"), button("other.open")], 1 << 20);
+    assert_eq!(got, [button("test.poc.open")]);
+}
+
+#[test]
+fn ph13_b_overlong_strings_and_documents_are_capped() {
+    use tsubame_plughost::sanitize::{MAX_NODES, MAX_NODE_TEXT};
+    let big = Node::Text { text: "x".repeat(100_000), dim: false };
+    let got = preview(&[big], 1 << 20);
+    assert!(matches!(&got[..], [Node::Text { text, .. }] if text.len() == MAX_NODE_TEXT), "{}", got.len());
+
+    let many: Vec<Node> = (0..MAX_NODES + 500).map(|_| Node::Indent).collect();
+    assert_eq!(preview(&many, 1 << 20).len(), MAX_NODES);
+
+    // `limits.max_bytes` bounds the document.
+    let lines: Vec<Node> = (0..10).map(|_| Node::Mono("y".repeat(1_000))).collect();
+    assert_eq!(preview(&lines, 3_500).len(), 3);
+}
+
+#[test]
+fn ph17_control_and_bidi_characters_are_dropped_from_text() {
+    let got = preview(&[Node::Heading("a\u{202e}b\u{1b}[2Jc\u{2028}d".into()), Node::Pair("k\u{200b}".into(), "v\u{feff}".into())], 1 << 20);
+    assert_eq!(got, [Node::Heading("ab[2Jcd".into()), Node::Pair("k".into(), "v".into())]);
+}
+
+#[test]
+fn ph13_b_an_overlong_cell_is_capped() {
+    use tsubame_ext_api::ColumnProvider;
+    use tsubame_plughost::sanitize::MAX_CELL_TEXT;
+    let p = plugin_answering(proto::enc_ok_cells(2, &[Cell::Text("z\u{202e}".repeat(5_000))]).unwrap());
+    let mut out = Vec::new();
+    WasmColumn::new(p, "c").values(&[r"C:\a"], &mut out);
+    assert!(matches!(&out[..], [Cell::Text(s)] if s.len() == MAX_CELL_TEXT && !s.contains('\u{202e}')), "{}", out.len());
 }
