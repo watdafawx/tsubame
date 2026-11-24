@@ -520,7 +520,7 @@ impl Plugin {
             Err((kind, msg)) => match kind {
                 ErrKind::Plugin => {
                     st.faults = 0;
-                    Err(CallError::Plugin(msg))
+                    Err(CallError::Plugin(crate::sanitize::sanitize(&msg, crate::sanitize::MAX_MESSAGE)))
                 }
                 ErrKind::Unsupported => Err(CallError::Unsupported(msg)),
                 // The host dropped the instance and is ready for the next call.
@@ -620,7 +620,7 @@ impl Plugin {
         let mut message = None;
         for (part, chunk) in chunks.into_iter().enumerate() {
             if let Some(m) = self.call(|id| proto::enc_command(id, name, folder, chunk, part as u32, parts), proto::dec_message)? {
-                message = Some(m);
+                message = Some(crate::sanitize::sanitize(&m, crate::sanitize::MAX_MESSAGE));
             }
         }
         Ok(message)

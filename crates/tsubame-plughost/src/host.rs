@@ -279,11 +279,7 @@ impl wit_host::Host for Ctx {
             wit_host::Level::Warn => "warn",
             wit_host::Level::Error => "error",
         };
-        let mut n = message.len().min(MAX_LOG_LINE);
-        while !message.is_char_boundary(n) {
-            n -= 1;
-        }
-        let line: String = message[..n].chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let line = crate::sanitize::sanitize(&message, MAX_LOG_LINE);
         let _ = writeln!(io::stderr(), "[{}] {level}: {line}", self.plugin_id);
     }
 
@@ -496,7 +492,7 @@ impl Loaded {
                 if cells.len() != n {
                     return fail(ErrKind::BadResult, format!("{} values for {n} paths", cells.len()));
                 }
-                let cells: Vec<api::Cell> = cells
+                let mut cells: Vec<api::Cell> = cells
                     .into_iter()
                     .map(|c| match c {
                         wit::Cell::Empty => api::Cell::Empty,
@@ -506,6 +502,7 @@ impl Loaded {
                         wit::Cell::Time(v) => api::Cell::Time(v),
                     })
                     .collect();
+                crate::sanitize::clean_cells(&mut cells);
                 proto::enc_ok_cells(id, &cells).map_err(too_large)
             }
             Request::Preview { id: previewer, path, limits } => {
@@ -537,6 +534,7 @@ impl Loaded {
                         wit::Node::Outdent => api::Node::Outdent,
                     });
                 }
+                crate::sanitize::clean_doc(&mut doc, limits.max_bytes, &|c| crate::sanitize::own_command(&self.load.plugin_id, &self.load.entrypoints, c));
                 proto::enc_ok_doc(id, &doc).map_err(too_large)
             }
             Request::VfsList { id: vfs, path, cursor } => {
@@ -548,7 +546,8 @@ impl Loaded {
                 if page.entries.len() > proto::MAX_BATCH {
                     return fail(ErrKind::BadResult, format!("a page of {} entries, at most {} are allowed", page.entries.len(), proto::MAX_BATCH));
                 }
-                let entries: Vec<api::VfsEntry> = page.entries.into_iter().map(|e| api::VfsEntry { name: e.name, dir: e.dir, size: e.size, mtime: e.mtime }).collect();
+                let mut entries: Vec<api::VfsEntry> = page.entries.into_iter().map(|e| api::VfsEntry { name: e.name, dir: e.dir, size: e.size, mtime: e.mtime }).collect();
+                crate::sanitize::clean_entries(&mut entries);
                 proto::enc_ok_entries(id, &entries, page.next.as_deref()).map_err(too_large)
             }
             Request::VfsRead { id: vfs, path, offset, max_len } => {
@@ -573,7 +572,8 @@ impl Loaded {
                 if page.hits.len() > proto::MAX_BATCH {
                     return fail(ErrKind::BadResult, format!("a page of {} hits, at most {} are allowed", page.hits.len(), proto::MAX_BATCH));
                 }
-                let hits: Vec<api::Hit> = page.hits.into_iter().map(|h| api::Hit { path: h.path, dir: h.dir, size: h.size, mtime: h.mtime }).collect();
+                let mut hits: Vec<api::Hit> = page.hits.into_iter().map(|h| api::Hit { path: h.path, dir: h.dir, size: h.size, mtime: h.mtime }).collect();
+                crate::sanitize::clean_hits(&mut hits, &q.root);
                 proto::enc_ok_hits(id, &hits, page.next.as_deref()).map_err(too_large)
             }
             Request::Command { name, folder, selection, part, parts } => {
@@ -587,6 +587,7 @@ impl Loaded {
                 let msg = self
                     .guarded(watchdog, inputs, |l| l.command.as_ref().expect("declared").call_run(&mut l.store, &name, &cx))?
                     .map_err(|e| (ErrKind::Plugin, e))?;
+                let msg = msg.map(|m| crate::sanitize::sanitize(&m, crate::sanitize::MAX_MESSAGE));
                 proto::enc_ok_message(id, msg.as_deref()).map_err(too_large)
             }
             Request::Load(_) | Request::Shutdown => fail(ErrKind::BadRequest, "not a call"),

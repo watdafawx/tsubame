@@ -362,7 +362,11 @@ impl Manifest {
         if text.len() as u64 > MAX_MANIFEST_BYTES {
             return err(format!("larger than {MAX_MANIFEST_BYTES} bytes"));
         }
-        let raw: Raw = toml::from_str(text).map_err(|e| ManifestError(e.to_string().trim_end().to_string()))?;
+        let raw: Raw = toml::from_str(text).map_err(|e| {
+            // Not `e.to_string()`: that repeats the offending source line, unbounded and unescaped.
+            let at = e.span().map(|s| format!(" (at byte {})", s.start)).unwrap_or_default();
+            ManifestError(format!("{}{at}", crate::sanitize::sanitize(e.message(), 200)))
+        })?;
 
         check_plugin_id(&raw.plugin.id)?;
         check_label("plugin.name", &raw.plugin.name, 80)?;
