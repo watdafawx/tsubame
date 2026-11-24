@@ -1,0 +1,23 @@
+# Sample column plugin built with tsubame-plugin-sdk. See docs/plugin-authoring.md.
+[plugin]
+id = "dev.tsubame.sample-file-kind"
+name = "Sample: file kind"
+version = "0.1.0"
+api = "0.1"
+component = "sample_file_kind.wasm"
+description = "Two columns: the kind of file (from its extension) and the length of its name."
+
+# No [capabilities] table: this plugin only reads the path text it is given, so
+# it asks for no file access, no network, no processes, and takes the default
+# limits (64 MB, 2000 ms per call).
+
+[[column]]
+id = "kind"
+label = "Kind"
+width = 110
+
+[[column]]
+id = "name-length"
+label = "Name length"
+align = "right"
+width = 90

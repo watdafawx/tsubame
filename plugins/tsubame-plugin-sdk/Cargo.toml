@@ -1,0 +1,12 @@
+[package]
+name = "tsubame-plugin-sdk"
+version = "0.1.0"
+description = "Guest SDK for Tsubame wasm plugins: bindings for tsubame:plugin@0.1.0 and the plugin! macro"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The same wit-bindgen the bare-WIT sample uses. Macros only: no runtime code is
+# pulled into the guest beyond what `generate!` writes.
+wit-bindgen = { version = "0.63", default-features = false, features = ["macros"] }

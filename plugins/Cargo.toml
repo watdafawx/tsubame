@@ -1,0 +1,29 @@
+# Guest workspace: the plugin SDK and the sample plugins that use it.
+#
+# Not part of the app workspace (the root `Cargo.toml` does not list it), so
+# none of this reaches the shipping exe's link. The guests build for
+# `wasm32-wasip2`; the SDK also compiles for the host so its tests run with a
+# plain `cargo test`. See docs/plugin-authoring.md.
+#
+# Build ONE plugin per cargo command (`cargo build -p <plugin>`), as
+# `build-plugin.ps1` does.
+[workspace]
+resolver = "3"
+members = ["tsubame-plugin-sdk", "sample-file-kind", "sample-csv-summary"]
+# Predates the SDK, has its own workspace and lock file; kept as the bare-WIT example.
+exclude = ["sample-column"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+tsubame-plugin-sdk = { path = "tsubame-plugin-sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

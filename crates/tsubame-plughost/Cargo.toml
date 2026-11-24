@@ -32,6 +32,11 @@ path = "src/bin/plughost-bench.rs"
 name = "host"
 required-features = ["host"]
 
+# The sample plugins in `plugins/`, built with the guest SDK, run in the real host exe.
+[[test]]
+name = "samples"
+required-features = ["host"]
+
 [features]
 default = ["host"]
 # Wasmtime runtime. Off (`default-features = false`) the crate is the manifest,

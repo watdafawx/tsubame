@@ -116,7 +116,7 @@ Work is split into phases. Each phase has a gate that is checked before the next
 | P2 | Daily driver: file operations, watcher, shell integration, icons, panes, palette, config | Daily use without data-loss hazards | Done |
 | P3 | Extension registry | Built-in features registered through `tsubame-ext-api` | Done (`docs/extensions.md`, `docs/extension-packs.md`) |
 | P4 | Features as built-in extensions | Each feature switchable | Partial: F1, F2, F3, F5 done as switchable built-ins; F4 still core-only; F6 not started |
-| P5 | Wasm plugins | Host lifecycle, capability manifest, SDK | Partial: P1 done (`docs/wasm-plugins.md`); P2 guest SDK and P3 security review open |
+| P5 | Wasm plugins | Host lifecycle, capability manifest, SDK | Partial: P1 and P2 done (`docs/wasm-plugins.md`, `docs/plugin-authoring.md`); P3 security review open |
 | P6 | Ship: installer, updater, default file manager | Signed release a user can install and update | Mostly done; two items open |
 
 Work outside the original plan that has landed: the memory work (MEM1: flip-model swap chain, WARP prewarm, segment heap), the performance passes (PERF1 to PERF3), the integration pass that unified file operations, panes and drag-drop (INT1), the opt-in default-file-manager shim (R2) and the own-drawn context menu (CM1 to CM5, see `docs/ctxmenu.md`).
@@ -182,7 +182,7 @@ Each one gets a mock first where it has UI.
 | ID | Task | Status |
 |---|---|---|
 | P1 | WIT interface from `tsubame-ext-api`, capability manifest, `tsubame-plughost` lifecycle (lazy start, kill on hang), IPC | Done (`docs/wasm-plugins.md`) |
-| P2 | Guest SDK crate, two sample plugins (a column, a previewer), plugin author docs | Not done (no SDK crate or author guide yet; `plugins/sample-column` is a working guest to copy) |
+| P2 | Guest SDK crate, two sample plugins (a column, a previewer), plugin author docs | Done (`plugins/tsubame-plugin-sdk`, `plugins/sample-file-kind`, `plugins/sample-csv-summary`, `docs/plugin-authoring.md`; e2e in `crates/tsubame-plughost/tests/samples.rs`) |
 | P3 | Security review of P1; set a `tsubame-plughost.exe` size budget (suggest < 12 MB) and explain the old 1.00 MB figure | Not done (accepted 2026-11-24) |
 
 ### P6. Ship
@@ -211,6 +211,7 @@ Kept current as work lands: every measurement surprise, QA finding or improvemen
 
 | Date | Finding | Status |
 |---|---|---|
+| 2026-11-25 | P5.P2 guest SDK and samples: sample `.cwasm` files are 327 KB (file kind column) and 426 KB (CSV previewer); `.wasm` 88 KB and 122 KB. The SDK exports every WIT interface and answers the unused ones with errors, so a plugin of one kind still works against the host. vfs, search and command have no SDK trait yet. The e2e test skips when `wasm32-wasip2` is missing unless `TSUBAME_REQUIRE_WASM_SAMPLES` is set; decide whether CI sets it. | Done |
 | 2026-11-25 | Real-mouse check on the user's machine: Back/Forward buttons and double-click-up work; marks the manual real-mouse gate as passed for the 0.2 build. | Done |
 | 2026-11-25 | Middle-click on the last open tab freezes the UI for a noticeable time before the window closes (also on 0.1.0). Cause: closing the last tab emptied the tab list and the next paint panicked (`panic=abort`), so Windows Error Reporting froze the window 3 to 4.5 s and the session was not saved. Fixed in `2fa51c7`: close in 4.9 to 21 ms, exit under 70 ms, session saved, no WER event. A last-tab-close regression test was added. | Fixed |
 | 2026-11-25 | First right-click context menu after launch is slightly laggy on the user's machine (many third-party shell extensions); warm opens are fine. Cause: cold first menu held the popup invisible for the 60 ms grace while shell extensions loaded (about 550 to 600 ms off the UI thread), and an early click could start a second packaged-handler scan. Fixed in `2fa51c7`: cold first paint 65.7 ms to 2.7 ms on rig; warm opens unchanged (p95 43.6 ms). FOX's third-party extensions still load off-thread; `TSUBAME_TRACE_LAG=<file>` traces them if it still feels slow. | Fixed, verify on FOX |

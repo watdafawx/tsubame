@@ -11,8 +11,9 @@ Code: `crates/tsubame-plughost`. Tests: `cargo test -p tsubame-plughost`
 **What exists and what does not.** The host exe, the install step, the
 manifest parser, the protocol and the supervisor client are done and tested.
 The app does not load wasm plugins yet: nothing in `src/` calls the client, and
-there is no install UI. The guest SDK and the plugin author guide are P5.P2;
-`plugins/sample-column` is a working guest to copy until then.
+there is no install UI. The guest SDK (`plugins/tsubame-plugin-sdk`), two sample plugins and the
+author guide (`docs/plugin-authoring.md`) are P5.P2 and are done;
+`plugins/sample-column` is the bare-WIT guest, without the SDK.
 
 ## The pieces
 
@@ -319,8 +320,8 @@ lexical check), `not-found`, `too-large` or `io`.
 
 There is no WASI. A guest built for `wasm32-wasip2` with `std` works as long as
 it does not call a WASI import at run time; one that does (printing, the clock,
-`HashMap`'s random seed) traps. Which shims to offer, if any, is a P5.P2
-decision.
+`HashMap`'s random seed) traps. P5.P2 decision: no shims; the SDK
+documents what not to call (`docs/plugin-authoring.md`).
 
 ## The protocol
 
