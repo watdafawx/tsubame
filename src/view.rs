@@ -262,6 +262,8 @@ pub struct View {
     pub drag_out: Option<Vec<String>>,
     /// where a drop at the pointer lands (set while a drag is painted)
     pub drop_dest: Option<DropDest>,
+    /// the last drag frame hovered an archive (a drop there says "read-only")
+    pub drop_read_only: bool,
     /// modifier keys OLE reports during a drag (they rule the drop)
     pub drag_keys: Option<Mods>,
     /// the shell menu's Rename: inline rename on the next frame
@@ -390,6 +392,7 @@ impl View {
             strips: [(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0); 2],
             drag_out: None,
             drop_dest: None,
+            drop_read_only: false,
             drag_keys: None,
             rename_request: false,
             open_paths: Vec::new(),

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::index::is_under;
 use super::{
-    ArchiveEntry, ArchiveError, ArchiveFormat, ArchiveIndex, ArchiveIndexCache, sanitize_entry_path,
+    ArchiveEntry, ArchiveError, ConflictAnswer, ConflictChoice, ConflictState, keep_both_path, ArchiveFormat, ArchiveIndex, ArchiveIndexCache, sanitize_entry_path,
     sanitize_inner_path,
 };
 
@@ -103,7 +103,7 @@ pub fn extract_all_indexed(
     cancel: &AtomicBool,
     progress: impl FnMut(u64, u64),
 ) -> Result<ExtractReport, ArchiveError> {
-    extract_impl(index, None, dest, options, cancel, progress)
+    extract_impl(index, None, dest, options, cancel, progress, None)
 }
 
 /// Extracts the selected entries, files and folders (recursively), keeping their
@@ -129,7 +129,7 @@ pub fn extract_entries_with(
 ) -> Result<ExtractReport, ArchiveError> {
     let index = open_index(archive)?;
     let selection = selection_of(&index, inner)?;
-    extract_impl(&index, Some(&selection), dest, options, cancel, progress)
+    extract_impl(&index, Some(&selection), dest, options, cancel, progress, None)
 }
 
 /// [`extract_entries`] on an index the caller already has. `selection` holds
@@ -144,7 +144,31 @@ pub fn extract_selection_indexed(
 ) -> Result<ExtractReport, ArchiveError> {
     let refs: Vec<&str> = selection.iter().map(String::as_str).collect();
     let selection = selection_of(index, &refs)?;
-    extract_impl(index, Some(&selection), dest, options, cancel, progress)
+    extract_impl(index, Some(&selection), dest, options, cancel, progress, None)
+}
+
+/// Extracts everything (`selection` `None`) or the canonical `selection` paths,
+/// asking `ask` whenever a file target already exists: skip it, replace it or
+/// write `name (2)` beside it. An "apply to all" answer is asked once. Every name
+/// still goes through the zip-slip check first; a kept-both name stays in the
+/// folder the check cleared.
+pub fn extract_resolving(
+    index: &ArchiveIndex,
+    selection: Option<&[String]>,
+    dest: &Path,
+    options: &ExtractOptions,
+    cancel: &AtomicBool,
+    progress: impl FnMut(u64, u64),
+    ask: &mut dyn FnMut(&Path) -> ConflictAnswer,
+) -> Result<ExtractReport, ArchiveError> {
+    let selection = match selection {
+        Some(sel) => {
+            let refs: Vec<&str> = sel.iter().map(String::as_str).collect();
+            Some(selection_of(index, &refs)?)
+        }
+        None => None,
+    };
+    extract_impl(index, selection.as_ref(), dest, options, cancel, progress, Some(ask))
 }
 
 /// Bytes of one entry, for the preview pane. Fails with
@@ -442,6 +466,7 @@ fn extract_impl(
     options: &ExtractOptions,
     cancel: &AtomicBool,
     mut progress: impl FnMut(u64, u64),
+    ask: Option<&mut dyn FnMut(&Path) -> ConflictAnswer>,
 ) -> Result<ExtractReport, ArchiveError> {
     if cancel.load(Ordering::Relaxed) {
         return Err(ArchiveError::Cancelled);
@@ -465,6 +490,11 @@ fn extract_impl(
         out: ExtractReport::default(),
         done: 0,
         total,
+        ask: match ask {
+            Some(ask) => Some(ask as &mut dyn FnMut(&Path) -> ConflictAnswer),
+            None => None,
+        },
+        conflicts: ConflictState::default(),
     };
     match index.format() {
         ArchiveFormat::Zip => extract_zip(index.archive_path(), selection, &mut sink)?,
@@ -486,6 +516,9 @@ struct Sink<'a> {
     out: ExtractReport,
     done: u64,
     total: u64,
+    /// Asked for each existing file target when set; `None` follows `options.overwrite`.
+    ask: Option<&'a mut (dyn FnMut(&Path) -> ConflictAnswer + 'a)>,
+    conflicts: ConflictState,
 }
 
 impl Sink<'_> {
@@ -510,7 +543,7 @@ impl Sink<'_> {
                 };
             }
         };
-        let target = self.root.join(&relative);
+        let mut target = self.root.join(&relative);
         self.ensure_parents(&relative)?;
         if is_dir {
             self.create_dir(&target)?;
@@ -521,7 +554,12 @@ impl Sink<'_> {
             self.out.skipped += 1;
             return Ok(());
         };
-        if !self.wants_write(&target)? {
+        if self.ask.is_some() {
+            match self.resolve_conflict(&target)? {
+                Some(chosen) => target = chosen,
+                None => return Ok(()),
+            }
+        } else if !self.wants_write(&target)? {
             return Ok(());
         }
         let mut file = replace_file(&target)?;
@@ -557,6 +595,29 @@ impl Sink<'_> {
         self.out.files += 1;
         self.out.bytes += self.done - before;
         Ok(())
+    }
+
+    /// Asks about an existing file target. `Some(path)` is where to write (the
+    /// target itself, or its `name (2)`), `None` means skip. A real folder in the
+    /// way is still an error: there is nothing to replace or rename around.
+    fn resolve_conflict(&mut self, target: &Path) -> Result<Option<PathBuf>, ArchiveError> {
+        let Ok(metadata) = fs::symlink_metadata(target) else {
+            return Ok(Some(target.to_path_buf()));
+        };
+        if metadata.is_dir() {
+            return Err(ArchiveError::Exists(target.to_path_buf()));
+        }
+        let Some(ask) = self.ask.as_mut() else {
+            return Ok(Some(target.to_path_buf()));
+        };
+        match self.conflicts.decide(target, &mut **ask) {
+            ConflictChoice::Replace => Ok(Some(target.to_path_buf())),
+            ConflictChoice::Skip => {
+                self.out.skipped += 1;
+                Ok(None)
+            }
+            ConflictChoice::KeepBoth => Ok(Some(keep_both_path(target, &|p| fs::symlink_metadata(p).is_ok()))),
+        }
     }
 
     fn wants_write(&mut self, target: &Path) -> Result<bool, ArchiveError> {

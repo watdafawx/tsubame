@@ -190,7 +190,7 @@ impl View {
     /// F2: renames the cursor row; several selected rows open the batch bar.
     pub fn begin_rename(&mut self, ui: &mut Ui) {
         if self.tab().is_archive() {
-            self.ops.message = Some("Archives are read-only \u{2014} extract first to rename".into());
+            self.ops.message = Some(crate::archive_ui::READ_ONLY_MSG.into());
             ui.request_repaint();
             return;
         }
@@ -298,7 +298,7 @@ impl View {
 
     pub fn begin_batch(&mut self, ui: &mut Ui) {
         if self.tab().is_archive() {
-            self.ops.message = Some("Archives are read-only \u{2014} extract first to rename".into());
+            self.ops.message = Some(crate::archive_ui::READ_ONLY_MSG.into());
             ui.request_repaint();
             return;
         }
@@ -459,7 +459,7 @@ impl View {
         let Some(o) = self.other.as_deref() else { return };
         let dest = o.tabs.items[o.tabs.active].path.clone();
         if self.tab().is_archive() || crate::archive_ui::is_archive_path(&dest) {
-            self.ops.message = Some("Archives are read-only \u{2014} use Extract archive here or Extract selected".into());
+            self.ops.message = Some(crate::archive_ui::READ_ONLY_MSG.into());
             return;
         }
         let paths = self.tab().selected_paths(10_000);
@@ -481,7 +481,7 @@ impl View {
     pub fn drop_selection_on(&mut self, folder: &str) {
         let Some(d) = self.drag.take() else { return };
         if crate::archive_ui::is_archive_path(folder) {
-            self.ops.message = Some("Archives are read-only \u{2014} cannot drop into an archive".into());
+            self.ops.message = Some(crate::archive_ui::READ_ONLY_MSG.into());
             return;
         }
         if let Some(why) = dnd::refusal(&d.payload, folder) {
@@ -551,6 +551,7 @@ impl View {
             self.drop_dest = None;
             return;
         };
+        self.drop_read_only = false;
         let m = ui.mouse();
         let mods = self.drag_keys.unwrap_or(self.cur_mods);
         let paths = d.payload.paths.clone();
@@ -583,6 +584,7 @@ impl View {
             if crate::archive_ui::is_archive_path(dir) {
                 dest = None;
                 hint = "Archives are read-only".into();
+                self.drop_read_only = true;
             } else {
                 let payload = DragPayload::new(paths.clone());
                 hint = match dnd::refusal(&payload, dir) {

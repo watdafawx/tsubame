@@ -22,6 +22,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+mod conflict;
 mod format;
 mod index;
 mod path;
@@ -29,6 +30,7 @@ mod read;
 #[cfg(test)]
 mod tests;
 
+pub use conflict::{ConflictAnswer, ConflictChoice, ConflictState, keep_both_path};
 pub use format::ArchiveFormat;
 pub use index::{
     ArchiveEntry, ArchiveIndex, ArchiveIndexCache, ARCHIVE_CACHE_BYTES, ARCHIVE_CACHE_ENTRIES,
@@ -39,8 +41,8 @@ pub use path::{
 };
 pub use read::{
     ExtractOptions, ExtractReport, Overwrite, extract_all, extract_all_indexed, extract_all_with,
-    extract_entries, extract_entries_with, extract_selection_indexed, list_dir, list_dir_cached,
-    read_entry_bytes,
+    extract_entries, extract_entries_with, extract_resolving, extract_selection_indexed, list_dir,
+    list_dir_cached, read_entry_bytes,
 };
 
 /// Why an archive could not be listed, read or extracted.

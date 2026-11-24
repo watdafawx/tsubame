@@ -221,6 +221,24 @@ pub fn start_list(virtual_path: &str, generation: u64, wake: Wake) -> Receiver<A
     rx
 }
 
+// ---- Read-only message + extract conflicts -------------------------------------
+
+/// Status-bar text for every edit that cannot happen inside a browsed archive
+/// (delete, rename, cut, paste, new file/folder, drop-in).
+pub const READ_ONLY_MSG: &str = "Archives are read-only. Extract first.";
+
+/// Asks what to do with an existing file while extracting: the choice, and
+/// whether it applies to the rest of the extraction. Runs on the extract thread.
+pub type ConflictAsker = fn(&Path) -> archive::ConflictAnswer;
+
+static CONFLICT_ASKER: OnceLock<ConflictAsker> = OnceLock::new();
+
+/// The window layer registers its dialog once; without one (tests) extraction
+/// replaces existing files as before.
+pub fn set_conflict_asker(f: ConflictAsker) {
+    let _ = CONFLICT_ASKER.set(f);
+}
+
 // ---- Background extraction manager ------------------------------------------
 
 /// Event streamed from a background archive extraction thread to the UI thread.
@@ -311,9 +329,14 @@ impl ArchiveOps {
                             wake();
                         }
                     };
-                    match selection.as_deref() {
-                        Some(sel) => extract_selection_indexed(&index, sel, &dest, &opts, &cancel_w, &mut on_progress),
-                        None => extract_all_indexed(&index, &dest, &opts, &cancel_w, &mut on_progress),
+                    match CONFLICT_ASKER.get() {
+                        Some(asker) => {
+                            archive::extract_resolving(&index, selection.as_deref(), &dest, &opts, &cancel_w, &mut on_progress, &mut |p| asker(p))
+                        }
+                        None => match selection.as_deref() {
+                            Some(sel) => extract_selection_indexed(&index, sel, &dest, &opts, &cancel_w, &mut on_progress),
+                            None => extract_all_indexed(&index, &dest, &opts, &cancel_w, &mut on_progress),
+                        },
                     }
                 })();
                 let _ = tx.send(ExtractEvent::Done {

@@ -458,6 +458,158 @@ fn folder_file_collisions_are_errors() {
 }
 
 #[test]
+fn keep_both_names_count_up_and_keep_the_extension() {
+    let taken = |set: &'static [&'static str]| move |p: &Path| set.iter().any(|s| p.ends_with(s));
+    let p = Path::new("out").join("a.txt");
+    assert_eq!(keep_both_path(&p, &taken(&["a.txt"])), Path::new("out").join("a (2).txt"));
+    assert_eq!(
+        keep_both_path(&p, &taken(&["a.txt", "a (2).txt", "a (3).txt"])),
+        Path::new("out").join("a (4).txt")
+    );
+    let no_ext = Path::new("out").join("README");
+    assert_eq!(keep_both_path(&no_ext, &taken(&["README"])), Path::new("out").join("README (2)"));
+    let dotted = Path::new("out").join("a.tar.gz");
+    assert_eq!(keep_both_path(&dotted, &taken(&[])), Path::new("out").join("a.tar (2).gz"));
+}
+
+#[test]
+fn conflict_state_asks_once_only_for_apply_to_all() {
+    // no "all": every conflict asks again, with its own target
+    let mut state = ConflictState::default();
+    let mut asked = Vec::new();
+    let mut answers = vec![(ConflictChoice::Replace, false), (ConflictChoice::Skip, false)];
+    for name in ["a", "b"] {
+        let c = state.decide(Path::new(name), &mut |p| {
+            asked.push(p.to_path_buf());
+            answers.remove(0)
+        });
+        assert_eq!(c, if name == "a" { ConflictChoice::Replace } else { ConflictChoice::Skip });
+    }
+    assert_eq!(asked, [PathBuf::from("a"), PathBuf::from("b")]);
+
+    // "all": the first answer sticks, the asker is not called again
+    let mut state = ConflictState::default();
+    let mut calls = 0;
+    for name in ["a", "b", "c"] {
+        let c = state.decide(Path::new(name), &mut |_| {
+            calls += 1;
+            (ConflictChoice::KeepBoth, true)
+        });
+        assert_eq!(c, ConflictChoice::KeepBoth);
+    }
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn extract_resolving_skip_replace_keep_both() {
+    let tmp = TempDir::new("resolving");
+    let zip_path = tmp.join("a.zip");
+    write_zip(&zip_path, &[("one.txt", b"new1"), ("two.txt", b"new2"), ("sub/three.txt", b"new3")], &[]);
+    let index = open_index(&zip_path).unwrap();
+    let opts = ExtractOptions::default();
+    let seed = |out: &Path| {
+        let _ = fs::remove_dir_all(out);
+        fs::create_dir_all(out.join("sub")).unwrap();
+        for f in ["one.txt", "two.txt", "sub/three.txt"] {
+            fs::write(out.join(f), b"old").unwrap();
+        }
+    };
+
+    // per-file answers: one.txt skip, two.txt replace, three.txt keep both
+    let out = tmp.join("each");
+    seed(&out);
+    let mut asked = 0;
+    let report = extract_resolving(&index, None, &out, &opts, &no_cancel(), |_, _| {}, &mut |p| {
+        asked += 1;
+        let choice = match p.file_name().unwrap().to_str().unwrap() {
+            "one.txt" => ConflictChoice::Skip,
+            "two.txt" => ConflictChoice::Replace,
+            _ => ConflictChoice::KeepBoth,
+        };
+        (choice, false)
+    })
+    .unwrap();
+    assert_eq!(asked, 3);
+    assert_eq!((report.files, report.skipped), (2, 1));
+    assert_eq!(read(&out.join("one.txt")), "old");
+    assert_eq!(read(&out.join("two.txt")), "new2");
+    assert_eq!(read(&out.join("sub/three.txt")), "old");
+    assert_eq!(read(&out.join("sub/three (2).txt")), "new3");
+
+    // apply to all, keep both: originals untouched, three "(2)" copies, one question
+    let out = tmp.join("all-keep");
+    seed(&out);
+    let mut calls = 0;
+    let report = extract_resolving(&index, None, &out, &opts, &no_cancel(), |_, _| {}, &mut |_| {
+        calls += 1;
+        (ConflictChoice::KeepBoth, true)
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!((report.files, report.skipped), (3, 0));
+    assert_eq!(read(&out.join("one.txt")), "old");
+    assert_eq!(read(&out.join("one (2).txt")), "new1");
+    assert_eq!(read(&out.join("two (2).txt")), "new2");
+    assert_eq!(read(&out.join("sub/three (2).txt")), "new3");
+
+    // apply to all, skip: nothing written
+    let out = tmp.join("all-skip");
+    seed(&out);
+    let report =
+        extract_resolving(&index, None, &out, &opts, &no_cancel(), |_, _| {}, &mut |_| (ConflictChoice::Skip, true)).unwrap();
+    assert_eq!((report.files, report.skipped), (0, 3));
+    assert_eq!(read(&out.join("two.txt")), "old");
+
+    // apply to all, replace; a selection limits what is asked
+    let out = tmp.join("all-replace");
+    seed(&out);
+    let sel = vec!["two.txt".to_string()];
+    let report = extract_resolving(&index, Some(&sel), &out, &opts, &no_cancel(), |_, _| {}, &mut |_| {
+        (ConflictChoice::Replace, true)
+    })
+    .unwrap();
+    assert_eq!(report.files, 1);
+    assert_eq!(read(&out.join("two.txt")), "new2");
+    assert_eq!(read(&out.join("one.txt")), "old");
+
+    // no conflict: the asker is never called
+    let out = tmp.join("fresh");
+    extract_resolving(&index, None, &out, &opts, &no_cancel(), |_, _| {}, &mut |_| panic!("no conflict")).unwrap();
+    assert_eq!(read(&out.join("sub/three.txt")), "new3");
+
+    // a real folder in the way stays an error, asker not consulted
+    let out = tmp.join("folder-blocks");
+    fs::create_dir_all(out.join("one.txt")).unwrap();
+    assert!(matches!(
+        extract_resolving(&index, None, &out, &opts, &no_cancel(), |_, _| {}, &mut |_| panic!("no ask")),
+        Err(ArchiveError::Exists(_))
+    ));
+}
+
+#[test]
+fn extract_resolving_keeps_the_zip_slip_defence() {
+    let tmp = TempDir::new("resolving-slip");
+    let zip_path = tmp.join("evil.zip");
+    write_zip(&zip_path, &[("../evil.txt", b"pwn"), ("ok.txt", b"fine")], &[]);
+    let index = open_index(&zip_path).unwrap();
+    let out = tmp.join("out/deep");
+    fs::create_dir_all(&out).unwrap();
+    fs::write(out.join("ok.txt"), b"old").unwrap();
+    // the existing ok.txt is kept both ways; the hostile name never reaches the asker
+    let mut asked = Vec::new();
+    let report = extract_resolving(&index, None, &out, &ExtractOptions::default(), &no_cancel(), |_, _| {}, &mut |p| {
+        asked.push(p.to_path_buf());
+        (ConflictChoice::KeepBoth, true)
+    })
+    .unwrap();
+    assert_eq!(report.unsafe_paths, ["../evil.txt"]);
+    assert_eq!(asked, [out.join("ok.txt")]);
+    assert_eq!(read(&out.join("ok (2).txt")), "fine");
+    assert!(!tmp.join("evil.txt").exists() && !tmp.join("out/evil.txt").exists());
+    assert_eq!(tree(&out), ["ok (2).txt", "ok.txt"]);
+}
+
+#[test]
 fn zip_slip_is_rejected() {
     let tmp = TempDir::new("zip-slip");
     let zip_path = tmp.join("evil.zip");
