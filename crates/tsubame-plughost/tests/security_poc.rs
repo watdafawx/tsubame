@@ -1,11 +1,12 @@
 //! Security review P5.P3: proofs of concept for `docs/security/plughost-review.md`.
 //!
-//! Every PoC here is `#[ignore]` and **passes while the weakness is present**; a fixed
-//! finding's test is un-ignored and asserts the attack fails (PH-13 b, PH-16, PH-17).
-//! The test name starts with the finding's id. When a finding is fixed, turn
-//! its test into a regression test (flip the assertion, drop the `#[ignore]`).
+//! A test that is `#[ignore]` **passes while its weakness is present**. The
+//! test name starts with the finding's id. When a finding is fixed, its test
+//! becomes a regression test (assertion flipped, `#[ignore]` dropped, the
+//! exploit setup kept): PH-01, PH-09, PH-13 b, PH-16 and PH-17 are fixed and run
+//! in the normal suite.
 //!
-//! Run them: `cargo test -p tsubame-plughost --test security_poc -- --ignored --nocapture`
+//! Run the open PoCs: `cargo test -p tsubame-plughost --test security_poc -- --ignored --nocapture`
 //!
 //! These need no wasm guest: they drive the public API of the manifest, the
 //! path policy, the protocol and the client. The PoCs that need a real host
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tsubame_ext_api::{Cell, Doc, Hit, Limits, Node, Query, VfsEntry};
 use tsubame_plughost::adapters::{WasmColumn, WasmPreviewer, WasmSearch, WasmVfs};
-use tsubame_plughost::caps::{self, Access, Capabilities, PathGrant, PathPolicy, Root, Scope};
+use tsubame_plughost::caps::{self, Access, Capabilities, Denied, PathError, PathGrant, PathPolicy, Root, Scope};
 use tsubame_plughost::client::{CallError, HostIo, HostProcess, Launcher, Options, Plugin, Status};
 use tsubame_plughost::manifest::{Kind, Manifest, ProviderDecl};
 use tsubame_plughost::proto::{self, Info, Load};
@@ -27,54 +28,63 @@ fn manifest(plugin: &str, caps: &str) -> String {
 }
 
 // ---- PH-01: a `*` grant, or a UNC prefix, reaches the network with `network = false` -------------
+// Fixed: `*` never covers a UNC path, a UNC folder grant needs `network = true`, `@` (WebDAV) is refused.
 
 #[test]
-#[ignore = "PoC PH-01: passes while UNC paths are allowed without the network capability"]
 fn ph01_unc_paths_pass_the_policy_without_the_network_capability() {
     let caps = Capabilities { paths: vec![PathGrant { scope: Scope::Any, access: Access::ReadWrite }], ..Capabilities::default() };
     assert!(!caps.network, "the plugin was never given the network");
     assert_eq!(caps.summary()[0], "Read and change any file on this computer", "what the user was told");
     let mut policy = PathPolicy::new(&caps);
-    for path in [
-        // SMB to any server: Windows sends the user's NTLM response to it.
-        "\\\\attacker.example\\share\\x",
+    for (path, want) in [
+        // SMB to any server: Windows would send the user's NTLM response to it.
+        ("\\\\attacker.example\\share\\x", Denied::NotGranted),
         // WebDAV redirector: an HTTP request whose URL carries data out.
-        "\\\\attacker.example@80\\dav\\c2VjcmV0LWRhdGE",
-        "\\\\attacker.example@SSL\\DavWWWRoot\\x",
+        ("\\\\attacker.example@80\\dav\\c2VjcmV0LWRhdGE", Denied::Invalid(PathError::BadName)),
+        ("\\\\attacker.example@SSL\\DavWWWRoot\\x", Denied::Invalid(PathError::BadName)),
         // Loopback SMB: admin shares and named pipes of local services.
-        "\\\\127.0.0.1\\C$\\Windows\\win.ini",
-        "\\\\localhost\\pipe\\some-local-service",
-        "\\\\?\\UNC\\attacker.example\\share\\x",
+        ("\\\\127.0.0.1\\C$\\Windows\\win.ini", Denied::NotGranted),
+        ("\\\\localhost\\pipe\\some-local-service", Denied::NotGranted),
+        ("\\\\?\\UNC\\attacker.example\\share\\x", Denied::NotGranted),
     ] {
-        let (norm, roots) = policy.check(path, Access::ReadWrite).unwrap_or_else(|e| panic!("{path}: {e:?}"));
-        // `Root::Any` means `host.rs` opens `norm` with no further check.
-        assert_eq!(roots, [Root::Any], "{path}");
-        assert!(norm.starts_with("\\\\"), "{norm}");
+        for access in [Access::Read, Access::ReadWrite] {
+            assert_eq!(policy.check(path, access), Err(want), "{path}");
+        }
     }
+    // A local path is still covered.
+    assert_eq!(policy.check("C:\\x", Access::ReadWrite).unwrap().1, [Root::Any]);
 
-    // The manifest accepts a UNC folder as a grant while `network` stays false.
-    let m = Manifest::parse(&manifest(
+    // The manifest refuses a UNC folder as a grant while `network` stays false ...
+    let e = Manifest::parse(&manifest(
         "id = \"com.example.x\"\nname = \"X\"\nversion = \"1.0.0\"",
         "[capabilities]\nnetwork = false\npaths = [{ path = \"//attacker.example/share\", access = \"read\" }]",
     ))
+    .unwrap_err();
+    assert!(e.0.contains("needs `network = true`"), "{}", e.0);
+    // ... and so does the host's own check of what the client sends.
+    let c = Capabilities { paths: vec![PathGrant { scope: Scope::Prefix("\\\\attacker.example\\share".into()), access: Access::Read }], ..Capabilities::default() };
+    assert!(c.validate().is_err());
+    // With the network capability it is allowed, and the prompt names the server.
+    let m = Manifest::parse(&manifest(
+        "id = \"com.example.x\"\nname = \"X\"\nversion = \"1.0.0\"",
+        "[capabilities]\nnetwork = true\npaths = [{ path = \"//attacker.example/share\", access = \"read\" }]",
+    ))
     .unwrap();
     let c = m.capabilities("C:\\p", "C:\\d").unwrap();
-    assert!(!c.network);
-    assert_eq!(c.summary()[0], "Read files in \\\\attacker.example\\share");
-    assert!(!c.summary().iter().any(|l| l.contains("network")));
+    assert_eq!(c.summary()[0], "Read files on the server attacker.example: \\\\attacker.example\\share");
 }
 
-// ---- PH-09: reserved device names the lexical check misses ---------------------------------------
+// ---- PH-09: reserved device names the lexical check missed ---------------------------------------
+// Fixed: the superscript digits are device digits too.
 
 #[test]
-#[ignore = "PoC PH-09: passes while COM\u{b9}/LPT\u{b2} style device names are accepted"]
 fn ph09_superscript_device_names_are_accepted() {
     // Windows reserves COM1-9, LPT1-9 and also the superscript digits 1, 2 and 3
-    // ("Naming Files, Paths, and Namespaces"). `is_device_name` only knows ASCII digits.
+    // ("Naming Files, Paths, and Namespaces").
     for p in ["C:\\a\\COM\u{b9}", "C:\\a\\COM\u{b2}", "C:\\a\\LPT\u{b3}", "C:\\a\\com\u{b9}.txt"] {
-        assert!(caps::normalize(p).is_ok(), "{p}");
+        assert_eq!(caps::normalize(p), Err(PathError::Device), "{p}");
     }
-    // the ASCII forms are refused, as intended
+    // the ASCII forms are refused, as before
     assert!(caps::normalize("C:\\a\\COM1").is_err());
 }
 

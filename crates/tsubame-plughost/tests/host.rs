@@ -156,7 +156,7 @@ impl Image {
     }
 }
 
-const COLUMNS: [&str; 9] = ["echo", "len", "hang", "grow", "read", "write", "short", "trap", "caps"];
+const COLUMNS: [&str; 11] = ["echo", "len", "hang", "grow", "read", "write", "short", "trap", "caps", "info", "dir"];
 
 fn entrypoints(full: bool) -> Vec<(Kind, &'static str)> {
     let mut eps: Vec<(Kind, &str)> = COLUMNS.iter().map(|c| (Kind::Column, *c)).collect();
@@ -175,6 +175,8 @@ fn guest_wat(id: &str, full: bool) -> String {
   (import "tsubame:plugin/host@0.1.0" "read-file" (func $read (param i32 i32 i64 i32 i32)))
   (import "tsubame:plugin/host@0.1.0" "write-file" (func $write (param i32 i32 i32 i32 i32 i32)))
   (import "tsubame:plugin/host@0.1.0" "get-capabilities" (func $caps (param i32)))
+  (import "tsubame:plugin/host@0.1.0" "stat" (func $stat (param i32 i32 i32)))
+  (import "tsubame:plugin/host@0.1.0" "read-dir" (func $readdir (param i32 i32 i32 i32 i32)))
   (memory (export "memory") 2)
   (global $heap (mut i32) (i32.const 65536))
   (data (i32.const 300) "hi")
@@ -259,6 +261,27 @@ fn guest_wat(id: &str, full: bool) -> String {
                 (then (call $int (local.get $c) (i64.const 0)))
                 (else
                   (call $int (local.get $c) (i64.sub (i64.const -1) (i64.extend_i32_u (i32.load8_u (i32.const 281)))))))
+              (br $cell)))
+          ;; i: `stat`: the size, 1000000000 + the size for a folder, or -(1 + error code)
+          (if (i32.eq (local.get $mode) (i32.const 105))
+            (then
+              (call $stat (local.get $sp) (local.get $sl) (i32.const 400))
+              (if (i32.eqz (i32.load8_u (i32.const 400)))
+                (then
+                  (call $int (local.get $c)
+                    (i64.add (i64.load (i32.const 416))
+                      (i64.mul (i64.extend_i32_u (i32.load8_u (i32.const 408))) (i64.const 1000000000)))))
+                (else
+                  (call $int (local.get $c) (i64.sub (i64.const -1) (i64.extend_i32_u (i32.load8_u (i32.const 408)))))))
+              (br $cell)))
+          ;; d: `read-dir`: the number of entries, or -(1 + error code)
+          (if (i32.eq (local.get $mode) (i32.const 100))
+            (then
+              (call $readdir (local.get $sp) (local.get $sl) (i32.const 0) (i32.const 2000) (i32.const 440))
+              (if (i32.eqz (i32.load8_u (i32.const 440)))
+                (then (call $int (local.get $c) (i64.extend_i32_u (i32.load (i32.const 448)))))
+                (else
+                  (call $int (local.get $c) (i64.sub (i64.const -1) (i64.extend_i32_u (i32.load8_u (i32.const 444)))))))
               (br $cell)))
           ;; anything else: the path itself as text
           (i32.store8 (local.get $c) (i32.const 1))
@@ -405,6 +428,7 @@ fn column(p: &Plugin, column: &str, paths: &[&str]) -> Result<Vec<Cell>, CallErr
 const DENIED: Cell = Cell::Int(-1);
 const NOT_FOUND: Cell = Cell::Int(-2);
 const INVALID_PATH: Cell = Cell::Int(-3);
+const IO: Cell = Cell::Int(-5);
 
 // ---- lifecycle and batches ------------------------------------------------------------------
 
@@ -868,29 +892,46 @@ fn release_exe_is_small() {
 
 // ---- security review P5.P3: proofs of concept ---------------------------------------------------
 //
-// See `docs/security/plughost-review.md`. Each test is `#[ignore]` and **passes
-// while the weakness is present**; the name starts with the finding's id.
-// Run them: `cargo test -p tsubame-plughost --test host -- --ignored --nocapture ph`.
+// See `docs/security/plughost-review.md`. The name starts with the finding's id.
+// A test that is `#[ignore]` **passes while its weakness is present**; run those with
+// `cargo test -p tsubame-plughost --test host -- --ignored --nocapture ph`.
+// Fixed findings keep their PoC as a regression test: same exploit setup, the
+// assertion flipped, run in the normal suite (PH-01, PH-04, PH-05, PH-06).
 // The PoCs that need no guest are in `tests/security_poc.rs`.
 
-/// PH-01: with a `*` grant and `network = false` the host opens UNC paths, so
-/// the plugin can make this machine talk SMB (or WebDAV) to any server. The
-/// PoC stays on the loopback address.
+/// PH-01 (fixed): with a `*` grant and `network = false` the host used to open
+/// UNC paths, so the plugin could make this machine talk SMB (or WebDAV) to
+/// any server. Now the path is refused before anything is opened. The PoC
+/// stays on the loopback address.
 #[cfg(windows)]
 #[test]
-#[ignore = "PoC PH-01: passes while a `*` grant lets the host open UNC paths"]
 fn ph01_any_grant_makes_the_host_open_a_unc_path() {
     let t = Temp::new("poc-unc");
-    let c = Capabilities { paths: vec![grant(Scope::Any, Access::Read)], timeout_ms: 20_000, ..Capabilities::default() };
+    let c = Capabilities { paths: vec![grant(Scope::Any, Access::ReadWrite)], timeout_ms: 20_000, ..Capabilities::default() };
     assert!(!c.network);
     let p = plugin(&t, c);
-    let r = column(&p, "read", &["\\\\127.0.0.1\\C$\\Windows\\win.ini"]);
-    println!("PH-01: reading \\\\127.0.0.1\\C$\\Windows\\win.ini through the host: {r:?}");
-    match r {
-        // Any answer but "invalid path" or "denied" means the host went to the SMB redirector.
-        Ok(cells) => assert!(cells[0] != INVALID_PATH && cells[0] != DENIED, "{cells:?}"),
-        // So does a host that is still waiting for the server.
-        Err(e) => assert_eq!(e, CallError::Timeout),
+    let start = Instant::now();
+    let r = column(&p, "read", &["\\\\127.0.0.1\\C$\\Windows\\win.ini", "\\\\?\\UNC\\127.0.0.1\\C$\\Windows\\win.ini", "\\\\localhost\\C$\\x", "\\\\127.0.0.1@80\\dav\\x"]);
+    println!("PH-01: reading \\\\127.0.0.1\\C$\\Windows\\win.ini through the host: {r:?} in {:?}", start.elapsed());
+    assert_eq!(r.unwrap(), [DENIED, DENIED, DENIED, INVALID_PATH], "refused by the policy, no SMB or WebDAV connection");
+    assert_eq!(column(&p, "info", &["\\\\127.0.0.1\\C$\\Windows"]).unwrap(), [DENIED]);
+    assert_eq!(column(&p, "dir", &["\\\\127.0.0.1\\C$\\Windows"]).unwrap(), [DENIED]);
+    assert_eq!(column(&p, "write", &["\\\\127.0.0.1\\C$\\x.txt"]).unwrap(), [DENIED]);
+    assert!(start.elapsed() < Duration::from_secs(10), "no network timeout was waited for");
+}
+
+/// PH-01 (fixed), folder grants: a UNC folder grant without `network = true`
+/// is refused by the host's own validation, so a client that skipped the
+/// manifest check still can not hand one over.
+#[cfg(windows)]
+#[test]
+fn a_unc_folder_grant_without_the_network_is_refused_by_the_host() {
+    let t = Temp::new("unc-grant");
+    let c = caps(vec![grant(Scope::Prefix("\\\\127.0.0.1\\C$".into()), Access::Read)]);
+    let p = Plugin::new(load_for(&t, full_cwasm(), c, true), ProcessLauncher::new(HOST_EXE), options());
+    match column(&p, "read", &["\\\\127.0.0.1\\C$\\Windows\\win.ini"]) {
+        Err(CallError::Load(m)) => assert!(m.contains("needs `network = true`"), "{m}"),
+        other => panic!("{other:?}"),
     }
 }
 
@@ -913,12 +954,12 @@ fn ph03_a_modified_cwasm_with_a_matching_hash_is_deserialized_and_run() {
     assert_eq!(column(&p, "echo", &["C:\\a"]).unwrap(), [Cell::Text("C:\\a".into())]);
 }
 
-/// PH-04: a dangling file symlink inside a read-write grant. The resolved-path
-/// check falls back to the parent folder for a file that "does not exist yet",
-/// then the open follows the link and creates the target outside the grant.
+/// PH-04 (fixed): a dangling file symlink inside a read-write grant. The old
+/// resolved-path check fell back to the parent folder for a file that "did not
+/// exist yet", then the open followed the link and created the target outside
+/// the grant. Now the leaf is opened without following links and a link is refused.
 #[cfg(windows)]
 #[test]
-#[ignore = "PoC PH-04: passes while write-file follows a dangling symlink out of the grant"]
 fn ph04_a_dangling_symlink_lets_write_file_create_a_file_outside_the_grant() {
     let t = Temp::new("poc-symlink");
     std::fs::create_dir_all(t.path("granted")).unwrap();
@@ -934,19 +975,37 @@ fn ph04_a_dangling_symlink_lets_write_file_create_a_file_outside_the_grant() {
     assert!(!Path::new(&target).exists());
     let r = column(&p, "write", &[&link]).unwrap();
     println!("PH-04: write-file through the dangling link: {r:?}; outside file exists: {}", Path::new(&target).exists());
-    assert_eq!(r, [Cell::Int(0)]);
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi", "the plugin wrote outside its grant");
+    assert_eq!(r, [DENIED]);
+    assert!(!Path::new(&target).exists(), "nothing was created outside the grant");
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link itself is untouched");
+    // reading or looking at the link is refused too
+    assert_eq!(column(&p, "read", &[&link]).unwrap(), [DENIED]);
+    assert_eq!(column(&p, "info", &[&link]).unwrap(), [DENIED]);
+
+    // A link whose target exists, outside the grant: same answer, the file is untouched.
+    std::fs::write(&target, "outside").unwrap();
+    assert_eq!(column(&p, "write", &[&link]).unwrap(), [DENIED]);
+    assert_eq!(column(&p, "read", &[&link]).unwrap(), [DENIED]);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "outside");
+
+    // A folder symlink in the middle of the path is refused as well, also when creating.
+    let dirlink = t.path("granted\\sub");
+    std::os::windows::fs::symlink_dir(t.path("outside"), &dirlink).unwrap();
+    assert_eq!(column(&p, "write", &[&format!("{dirlink}\\new.txt"), &format!("{dirlink}\\created-by-plugin.txt")]).unwrap(), [DENIED, DENIED]);
+    assert_eq!(column(&p, "dir", &[&dirlink]).unwrap(), [DENIED]);
+    assert!(!Path::new(&t.path("outside\\new.txt")).exists());
+    let _ = std::fs::remove_dir(&dirlink);
 }
 
-/// PH-05: check and use are separate steps. A process that swaps what a name
-/// points to between the resolved-path check and the open wins. Here the name
-/// is a plain file at check time and a symlink to a file outside the grant at
-/// open time; one atomic rename does the swap.
+/// PH-05 (fixed): check and use used to be separate steps, and a process that
+/// swapped what a name points to between them won (50 of the first 500 reads).
+/// Now the check is made on the handle the read uses. The name is a plain file
+/// at one moment and a symlink to a file outside the grant at the next; one
+/// atomic rename does the swap. No read may return the outside file.
 #[cfg(windows)]
 #[test]
-#[ignore = "PoC PH-05: passes while the path check and the open can be raced"]
 fn ph05_swapping_a_file_for_a_link_between_check_and_open_reads_outside_the_grant() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let t = Temp::new("poc-race");
     let secret = t.write("outside\\secret.txt", "SECRET-OUTSIDE!!");
     let slot = t.write("granted\\f.txt", "inside");
@@ -957,15 +1016,16 @@ fn ph05_swapping_a_file_for_a_link_between_check_and_open_reads_outside_the_gran
     }
     let _ = std::fs::remove_file(&tmp);
     let root = tsubame_plughost::caps::normalize(&t.path("granted")).unwrap();
-    let p = plugin(&t, caps(vec![grant(Scope::Prefix(root), Access::Read)]));
+    let p = plugin(&t, caps(vec![grant(Scope::Prefix(root), Access::ReadWrite)]));
     let stop = Arc::new(AtomicBool::new(false));
+    let swaps = Arc::new(AtomicUsize::new(0));
     let flipper = {
-        let (stop, slot, secret, tmp) = (stop.clone(), slot.clone(), secret.clone(), tmp.clone());
+        let (stop, swaps, slot, secret, tmp) = (stop.clone(), swaps.clone(), slot.clone(), secret.clone(), tmp.clone());
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 // granted\f.txt becomes a link to the file outside ...
-                if std::os::windows::fs::symlink_file(&secret, &tmp).is_ok() {
-                    let _ = std::fs::rename(&tmp, &slot);
+                if std::os::windows::fs::symlink_file(&secret, &tmp).is_ok() && std::fs::rename(&tmp, &slot).is_ok() {
+                    swaps.fetch_add(1, Ordering::Relaxed);
                 }
                 // ... and a plain file again.
                 if std::fs::write(&tmp, "inside").is_ok() {
@@ -975,31 +1035,44 @@ fn ph05_swapping_a_file_for_a_link_between_check_and_open_reads_outside_the_gran
         })
     };
     let batch = vec![slot.as_str(); 500];
-    let (mut tries, mut leaked, mut denied) = (0usize, 0usize, 0usize);
-    let end = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < end && leaked == 0 {
+    let (mut tries, mut leaked, mut denied, mut inside, mut wrote_out) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let end = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < end {
         match column(&p, "read", &batch) {
             Ok(cells) => {
                 tries += cells.len();
                 leaked += cells.iter().filter(|c| matches!(c, Cell::Text(s) if s.starts_with("SECRET"))).count();
                 denied += cells.iter().filter(|c| **c == DENIED).count();
+                inside += cells.iter().filter(|c| matches!(c, Cell::Text(s) if s == "inside" || s == "hi")).count();
             }
             Err(_) => p.reset(),
+        }
+        // writes race the same way: the outside file must never change
+        if column(&p, "write", &batch[..50]).is_err() {
+            p.reset();
+        }
+        if std::fs::read_to_string(&secret).unwrap() != "SECRET-OUTSIDE!!" {
+            wrote_out += 1;
         }
     }
     stop.store(true, Ordering::SeqCst);
     flipper.join().unwrap();
-    println!("PH-05: {tries} reads, {denied} correctly denied, {leaked} returned the file outside the grant");
-    assert!(leaked > 0, "the race was not won in 30 s ({tries} reads)");
+    let swaps = swaps.load(Ordering::Relaxed);
+    println!("PH-05: {tries} reads during {swaps} swaps: {inside} inside, {denied} denied (the link), {leaked} returned the file outside the grant");
+    assert!(swaps > 0 && tries > 0, "the race ran ({swaps} swaps, {tries} reads)");
+    assert_eq!(leaked, 0, "a read returned the file outside the grant");
+    assert_eq!(wrote_out, 0, "a write reached the file outside the grant");
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "SECRET-OUTSIDE!!");
 }
 
-/// PH-06: a hard link inside a grant is the file outside it. Nothing detects it.
+/// PH-06 (fixed): a hard link inside a grant is the file outside it. Under a
+/// folder grant a file with more than one link is now refused for reads, writes
+/// and stat; a file with one link is not affected.
 #[test]
-#[ignore = "PoC PH-06: passes while hard links are followed out of a grant"]
 fn ph06_a_hard_link_reads_and_overwrites_a_file_outside_the_grant() {
     let t = Temp::new("poc-hardlink");
     let secret = t.write("outside\\secret.txt", "secret outside");
-    std::fs::create_dir_all(t.path("granted")).unwrap();
+    let plain = t.write("granted\\plain.txt", "plain");
     let alias = t.path("granted\\alias.txt");
     if let Err(e) = std::fs::hard_link(&secret, &alias) {
         println!("PH-06 NOT RUN: could not create a hard link ({e})");
@@ -1007,9 +1080,37 @@ fn ph06_a_hard_link_reads_and_overwrites_a_file_outside_the_grant() {
     }
     let root = tsubame_plughost::caps::normalize(&t.path("granted")).unwrap();
     let p = plugin(&t, caps(vec![grant(Scope::Prefix(root), Access::ReadWrite)]));
+    assert_eq!(column(&p, "read", &[&alias, &plain]).unwrap(), [DENIED, Cell::Text("plain".into())]);
+    assert_eq!(column(&p, "write", &[&alias, &plain]).unwrap(), [DENIED, Cell::Int(0)]);
+    assert_eq!(column(&p, "info", &[&alias]).unwrap(), [DENIED]);
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "secret outside", "the file outside the grant is untouched");
+    assert_eq!(std::fs::read_to_string(&plain).unwrap(), "hi");
+
+    // The user handing over exactly that path is not an escape: an input path is opened as given.
+    let p = plugin(&t, caps(vec![grant(Scope::Input, Access::Read)]));
     assert_eq!(column(&p, "read", &[&alias]).unwrap(), [Cell::Text("secret outside".into())]);
-    assert_eq!(column(&p, "write", &[&alias]).unwrap(), [Cell::Int(0)]);
-    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "hi", "the file outside the grant was replaced");
+}
+
+/// `stat` and `read-dir` go through the same handle-based open as reads and writes.
+#[test]
+fn stat_and_read_dir_use_the_checked_handle() {
+    let t = Temp::new("stat-dir");
+    t.write("granted\\a.txt", "12345");
+    t.write("granted\\b.txt", "x");
+    t.write("granted\\sub\\c.txt", "x");
+    t.write("outside\\d.txt", "x");
+    let root = tsubame_plughost::caps::normalize(&t.path("granted")).unwrap();
+    let p = plugin(&t, caps(vec![grant(Scope::Prefix(root), Access::Read)]));
+    assert_eq!(
+        column(&p, "info", &[&t.path("granted\\a.txt"), &t.path("granted\\sub"), &t.path("granted"), &t.path("granted\\nope"), &t.path("outside\\d.txt")]).unwrap(),
+        [Cell::Int(5), Cell::Int(1_000_000_000), Cell::Int(1_000_000_000), NOT_FOUND, DENIED]
+    );
+    assert_eq!(column(&p, "dir", &[&t.path("granted"), &t.path("granted\\sub"), &t.path("granted\\a.txt"), &t.path("outside")]).unwrap(), [Cell::Int(3), Cell::Int(1), IO, DENIED]);
+    // a big folder, read through the handle in several buffers
+    for i in 0..1500 {
+        t.write(&format!("granted\\many\\file-with-a-longer-name-{i:05}.txt"), "");
+    }
+    assert_eq!(column(&p, "dir", &[&t.path("granted\\many")]).unwrap(), [Cell::Int(1500)]);
 }
 
 // ---- the app's launcher (PH-07, tier 1) ---------------------------------------------------------

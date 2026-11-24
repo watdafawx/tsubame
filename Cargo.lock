@@ -1150,6 +1150,7 @@ dependencies = [
  "wasmtime",
  "wat",
  "windows",
+ "windows-sys",
  "wit-component",
  "wit-parser",
 ]

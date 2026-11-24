@@ -197,8 +197,12 @@ names the field:
 | `$input` | the paths handed to the current call and everything under them | changes with every call. For a vfs call it also covers the file the path goes through (`C:\a.zip` for `C:\a.zip\inner\x`) |
 | `$data` | the plugin's own data folder | the app creates it; resolved in `Manifest::capabilities` |
 | `$plugin` | the folder the plugin is installed in | read only |
-| an absolute folder | that folder and everything under it | |
-| `*` | every path | shown to the user as "any file on this computer" |
+| an absolute folder | that folder and everything under it | a folder on another computer (`\\server\share`) needs `network = true`; the prompt names the server |
+| `*` | every path on this computer | shown to the user as "any file on this computer". It never covers a `\\server\share` path or a mapped network drive |
+
+`$data` and `$plugin` follow the same rule: if the app puts them on a network
+share, the plugin needs `network = true`. A path in `$input` may be on a share;
+the user picked it.
 
 `Manifest::capabilities(plugin_dir, data_dir)` turns the manifest into the
 `Capabilities` that go into `Load`. `Capabilities::summary()` gives one line
@@ -213,7 +217,7 @@ values on. The host validates the capabilities again when they arrive.
 |---|---|
 | Memory | A wasmtime resource limiter (`StoreLimits` for tables, instance and memory counts, plus a cap on the **sum** of all linear memories). A refused `memory.grow` returns -1 to the guest; if the call then fails the reply is `Memory`. |
 | Time | Epoch interruption. Every entry into the guest, instantiation included, runs with an epoch deadline of one tick. A watchdog thread sleeps on a condition variable while no call runs (an idle host has no wake-ups) and ticks the epoch when the deadline passes. |
-| Files | The guest has no WASI. Imports the host does not define are linked as traps. The only way to a file is the `host` interface, and each call checks the path twice (below). |
+| Files | The guest has no WASI. Imports the host does not define are linked as traps. The only way to a file is the `host` interface, and each call checks the path, then opens it from the grant and checks the handle (below). |
 | Network | Denied. There is no import that reaches the network. `network = true` is parsed, shown to the user and passed to the host, and changes nothing yet. |
 | Processes | Denied. There is no import that starts a process. `run_processes = true` is the same. |
 | Host memory | wasmtime's hostcall fuel caps what the host copies out of the guest (strings and lists) at 32 MiB per call, so a guest can not make the host allocate without bound. |
@@ -233,25 +237,52 @@ goes through two checks.
 - Refused outright: `.` and `..` components, a `:` anywhere but after the drive
   letter (stream names, drive-relative paths), `< > " | ? *` and control
   characters, a name ending in a dot or a space, device names (`NUL`, `COM1`,
-  `NUL.txt`), and every other `\\?\` or `\\.\` path.
+  `COM¹`, `NUL.txt`), a server name with `@` (the WebDAV redirector), and
+  every other `\\?\` or `\\.\` path.
+- A `\\server\share` path matches only a grant for that share (with
+  `network = true`) or a path the call was given. `*` does not cover it.
 - A grant matches when the path equals its folder or continues it after a
   separator (`C:\Data` does not cover `C:\Database`). Comparison folds ASCII
   case only. Windows folds more, so a name that differs in the case of a
   non-ASCII letter is refused; it is never wrongly allowed.
 - `write-file` needs a `read-write` grant.
 
-**2. Resolved.** Unless the grant is `*` or the path is exactly one the call was
-given, the host resolves the path (`std::fs::canonicalize`; for a file that
-does not exist yet, its folder) and requires the result to lie inside the
-resolved grant folder. A junction or symlink inside a granted folder therefore
-does not lead out of it (tested with a real junction).
+**2. Opened from the grant** (`host/fsopen.rs`, Windows). The host opens the
+grant's folder (for `*`, the drive's root), then each further component
+relative to the handle of the one before (`NtCreateFile` with `RootDirectory`
+and `FILE_OPEN_REPARSE_POINT`). So the name is looked up once, and the I/O
+(`stat`, `read-file`, `read-dir`, `write-file`) runs on the handle that was
+checked; nothing opens the path a second time.
+
+- A symlink, junction or mount point below the grant's folder is refused, even
+  one that points back inside. A dangling link is refused too, so a write never
+  creates its target. Other reparse points (cloud files, dedup) are opened
+  normally, and the second handle must be the same file as the first.
+- The final path of the handle (`GetFinalPathNameByHandleW`) must lie inside
+  the final path of the grant's folder, and must not be on another computer
+  unless the grant allows it.
+- Under a folder grant (and `$input` folders), a file with more than one hard
+  link is refused for every call except `read-dir`. A path the call was given
+  exactly is opened as the user named it, links followed.
+- A new file is created relative to its folder's handle, and deleted again if
+  the handle check fails. `write-file` truncates only after every check.
+- `read-dir` lists through the folder's handle; a link to a folder is listed as
+  a file.
+
+Tested with real junctions, symlinks (when the OS allows creating them), hard
+links and a swap race (`tests/host.rs`, the `ph04`/`ph05`/`ph06` tests).
 
 Known limits, for the security review (P5.P3):
 
-- The second check and the open are separate steps. Something that swaps a
-  folder for a junction between them wins the race. Closing it needs a
-  handle-based check, which `std` does not offer.
-- Hard links are not detected.
+- The grant's folder itself (and, for `*`, the drive root) is opened by its
+  path on each call, links followed. It is the folder the user granted, so it is
+  trusted; a link the user placed there is honoured.
+- Refusing every link and hard link below a grant is strict: a plugin can not
+  follow a link the user made inside a granted folder, and can not read a
+  hard-linked file there (it can read it by its exact path if the user hands it
+  over).
+- Each component costs one open, so a deep path under a folder grant costs more
+  than the old resolve (about 0.3 ms per read in the tests).
 - If the app dies while a guest is blocked inside a host import, the host
   stays until that import returns (it exits as soon as it next reads its
   stdin). A job object owned by the app would close this; the client is

@@ -9,15 +9,19 @@
 //!   plugin's `timeout_ms` is over, which traps the guest at its next loop or
 //!   call. The instance is then thrown away and built fresh for the next call.
 //! - **Files.** The guest has no WASI. Its only way to a file is the `host`
-//!   interface below, and every path goes through [`PathPolicy`] and then a
-//!   check of the resolved path.
+//!   interface below, and every path goes through [`PathPolicy`] and then
+//!   [`fsopen`], which opens it from the grant's folder one component at a
+//!   time, checks the handle it got, and does the I/O on that handle.
 //! - **Network, processes.** There is no import for either.
 
-use crate::caps::{self, Access, Capabilities, Denied, PathPolicy, Root, Scope};
+use crate::caps::{self, Access, Capabilities, Denied, PathPolicy, Scope};
 use crate::manifest::Kind;
 use crate::proto::{self, ErrKind, Info, Load, Request};
 use crate::sha256;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+
+mod fsopen;
+use fsopen::{OpenError, Want};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tsubame_ext_api as api;
@@ -193,11 +197,12 @@ fn fs_error(e: &io::Error) -> wit_host::FsError {
     }
 }
 
-/// The resolved (link-free) path as a comparison key.
-fn real_key(path: &str) -> io::Result<String> {
-    let real = std::fs::canonicalize(path)?;
-    let s = real.to_str().ok_or_else(|| io::Error::other("path is not unicode"))?;
-    caps::normalize(s).map(|n| caps::key(&n)).map_err(io::Error::other)
+fn open_error(e: OpenError) -> wit_host::FsError {
+    match e {
+        OpenError::Denied => wit_host::FsError::Denied,
+        OpenError::NotFound => wit_host::FsError::NotFound,
+        OpenError::Io => wit_host::FsError::Io,
+    }
 }
 
 impl Ctx {
@@ -205,41 +210,17 @@ impl Ctx {
         Ctx { limits: Limiter::new(load.caps.max_memory_mb), policy: PathPolicy::new(&load.caps), caps: load.caps.clone(), plugin_id: load.plugin_id.clone(), log_left: MAX_LOG_LINES }
     }
 
-    /// The path to open for `want`, or why not. Two checks: the lexical one
-    /// (`PathPolicy`), then the resolved path must still be inside the folder
-    /// that allowed it, so a link or junction can not lead out of a grant.
-    fn resolve(&mut self, path: &str, want: Access) -> Result<String, wit_host::FsError> {
-        let (norm, roots) = self.policy.check(path, want).map_err(|d| match d {
+    /// Opens `path` for `want`, or says why not. Two checks: the lexical one
+    /// (`PathPolicy`), then `fsopen` opens the path from the folder that
+    /// allowed it without following links and checks the handle it got, so a
+    /// link, junction, hard link or a swap in between can not lead out of a grant.
+    fn open(&mut self, path: &str, want: Want) -> Result<std::fs::File, wit_host::FsError> {
+        let access = if matches!(want, Want::Write { .. }) { Access::ReadWrite } else { Access::Read };
+        let (norm, roots) = self.policy.check(path, access).map_err(|d| match d {
             Denied::Invalid(_) => wit_host::FsError::InvalidPath,
             Denied::NotGranted => wit_host::FsError::Denied,
         })?;
-        let k = caps::key(&norm);
-        // "Any path", or exactly a path the user handed over: nothing to stay inside.
-        if roots.iter().any(|r| match r {
-            Root::Any => true,
-            Root::Dir(d) => caps::key(d) == k,
-        }) {
-            return Ok(norm);
-        }
-        // A file that is about to be created has no resolved path yet: resolve its folder.
-        let real = match real_key(&norm) {
-            Ok(r) => r,
-            Err(e) if e.kind() == io::ErrorKind::NotFound && want == Access::ReadWrite => {
-                let (dir, name) = norm.rsplit_once('\\').ok_or(wit_host::FsError::InvalidPath)?;
-                let dir = real_key(dir).map_err(|e| fs_error(&e))?;
-                format!("{}\\{}", dir.trim_end_matches('\\'), name.to_ascii_lowercase())
-            }
-            Err(e) => return Err(fs_error(&e)),
-        };
-        for r in &roots {
-            if let Root::Dir(d) = r
-                && let Ok(root) = real_key(d)
-                && caps::is_under(&real, &root)
-            {
-                return Ok(norm);
-            }
-        }
-        Err(wit_host::FsError::Denied)
+        fsopen::open_checked(&norm, &roots, self.caps.network, want).map_err(open_error)
     }
 }
 
@@ -284,14 +265,12 @@ impl wit_host::Host for Ctx {
     }
 
     fn stat(&mut self, path: String) -> Result<wit_host::FileInfo, wit_host::FsError> {
-        let p = self.resolve(&path, Access::Read)?;
-        let m = std::fs::metadata(&p).map_err(|e| fs_error(&e))?;
+        let m = self.open(&path, Want::Stat)?.metadata().map_err(|e| fs_error(&e))?;
         Ok(wit_host::FileInfo { dir: m.is_dir(), size: m.len(), mtime: filetime(m.modified()) })
     }
 
     fn read_file(&mut self, path: String, offset: u64, max_len: u32) -> Result<Vec<u8>, wit_host::FsError> {
-        let p = self.resolve(&path, Access::Read)?;
-        let mut f = std::fs::File::open(&p).map_err(|e| fs_error(&e))?;
+        let mut f = self.open(&path, Want::Read)?;
         if offset > 0 {
             f.seek(SeekFrom::Start(offset)).map_err(|e| fs_error(&e))?;
         }
@@ -302,25 +281,18 @@ impl wit_host::Host for Ctx {
     }
 
     fn read_dir(&mut self, path: String, skip: u32, max: u32) -> Result<Vec<wit::Entry>, wit_host::FsError> {
-        let p = self.resolve(&path, Access::Read)?;
+        let d = self.open(&path, Want::List)?;
         let max = (max as usize).min(proto::MAX_BATCH);
-        let mut out = Vec::new();
-        for e in std::fs::read_dir(&p).map_err(|e| fs_error(&e))?.skip(skip as usize).take(max) {
-            let e = e.map_err(|e| fs_error(&e))?;
-            let (dir, size, mtime) = match e.metadata() {
-                Ok(m) => (m.is_dir(), m.len(), filetime(m.modified())),
-                Err(_) => (false, 0, 0),
-            };
-            out.push(wit::Entry { name: e.file_name().to_string_lossy().into_owned(), dir, size, mtime });
-        }
-        Ok(out)
+        let entries = fsopen::read_dir(&d, skip as usize, max).map_err(open_error)?;
+        Ok(entries.into_iter().map(|e| wit::Entry { name: e.name, dir: e.dir, size: e.size, mtime: e.mtime }).collect())
     }
 
     fn write_file(&mut self, path: String, data: Vec<u8>, append: bool) -> Result<(), wit_host::FsError> {
-        let p = self.resolve(&path, Access::ReadWrite)?;
-        let mut o = std::fs::OpenOptions::new();
-        if append { o.append(true).create(true) } else { o.write(true).create(true).truncate(true) };
-        let mut f = o.open(&p).map_err(|e| fs_error(&e))?;
+        let mut f = self.open(&path, Want::Write { append })?;
+        // Truncated only now, after the handle passed every check.
+        if !append {
+            f.set_len(0).map_err(|e| fs_error(&e))?;
+        }
         f.write_all(&data).map_err(|e| fs_error(&e))
     }
 }
