@@ -8,7 +8,7 @@ Measured 2026-11-17 on the benchmark machine (Ryzen 9 5900X, Windows 11), releas
 
 | Piece | Path |
 |---|---|
-| WIT world (two exports: `list<string>` and packed `list<u8>`) | `crates/tsubame-plughost/wit/column.wit` |
+| WIT world (two exports: `list<string>` and packed `list<u8>`) | `crates/tsubame-plughost/wit/tsubame-plugin.wit` (package `tsubame:plugin@0.1.0`, `column` interface / `column-plugin` world) |
 | Host exe (`serve`, `bench`, `precompile`) | `crates/tsubame-plughost/src/main.rs` |
 | Pipe framing + test data (shared) | `crates/tsubame-plughost/src/proto.rs` |
 | Measurement client `plughost-bench` (separate bin, not part of the host exe) | `crates/tsubame-plughost/src/bin/plughost-bench.rs` |

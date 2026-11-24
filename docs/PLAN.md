@@ -107,16 +107,16 @@ Mocks come before UI code.
 
 ## 6. Roadmap
 
-Work is split into phases. Each phase has a gate that is checked before the next one starts. Status below is as of 2026-11-19.
+Work is split into phases. Each phase has a gate that is checked before the next one starts. Status below is as of 2026-11-24.
 
 | Phase | Scope | Gate | Status |
 |---|---|---|---|
 | P0 | Spikes: renderer, enumeration, wasm host, shell on worker threads | Budgets reachable, or the plan changes | Done |
 | P1 | A skeleton you can browse with | Browse, sort, filter, tabs; leak gate runs | Done |
 | P2 | Daily driver: file operations, watcher, shell integration, icons, panes, palette, config | Daily use without data-loss hazards | Done |
-| P3 | Extension registry | Built-in features registered through `tsubame-ext-api` | Not started (`tsubame-ext-api` is a stub) |
-| P4 | Features as built-in extensions | Each feature switchable | Not started (batch rename shipped early, in P2) |
-| P5 | Wasm plugins | Host lifecycle, capability manifest, SDK | Partial (P0 host spike and sample column only) |
+| P3 | Extension registry | Built-in features registered through `tsubame-ext-api` | Done (`docs/extensions.md`, `docs/extension-packs.md`) |
+| P4 | Features as built-in extensions | Each feature switchable | Partial: F1, F2, F3, F5 done as switchable built-ins; F4 still core-only; F6 not started |
+| P5 | Wasm plugins | Host lifecycle, capability manifest, SDK | Partial: P1 done (`docs/wasm-plugins.md`); P2 guest SDK and P3 security review open |
 | P6 | Ship: installer, updater, default file manager | Signed release a user can install and update | Mostly done; two items open |
 
 Work outside the original plan that has landed: the memory work (MEM1: flip-model swap chain, WARP prewarm, segment heap), the performance passes (PERF1 to PERF3), the integration pass that unified file operations, panes and drag-drop (INT1), the opt-in default-file-manager shim (R2) and the own-drawn context menu (CM1 to CM5, see `docs/ctxmenu.md`).
@@ -170,19 +170,19 @@ Each one gets a mock first where it has UI.
 
 | ID | Extension | Status |
 |---|---|---|
-| F1 | Global search: MFT/USN index (admin) with a plain parallel walk fallback; separately, an Everything IPC search provider | Not done |
-| F2 | Preview pane: image, text/code, media info, hex; Quick Look on Space | Not done |
-| F3 | Archive VFS (zip, 7z, tar) browse and extract | Not done |
+| F1 | Global search: MFT/USN index (admin) with a plain parallel walk fallback; separately, an Everything IPC search provider | Done (built-in extension `tsubame.ext.global_search`, `src/search_ui.rs`) |
+| F2 | Preview pane: image, text/code, media info, hex; Quick Look on Space | Done (built-in extension `tsubame.ext.preview`, `src/preview_ui.rs`, `docs/preview-mock.md`) |
+| F3 | Archive VFS (zip, 7z, tar) browse and extract | Done (built-in extension `tsubame.vfs.archive`, `src/archive_ui.rs`) |
 | F4 | Batch rename with live preview | Done in U3 as a built-in; not yet on the extension registry |
-| F5 | Folder sizes column (background, cached), git status column, checksum command | Not done |
+| F5 | Folder sizes column (background, cached), git status column, checksum command | Done (built-in extensions `tsubame.ext.folder_sizes`, `tsubame.ext.checksum`, `tsubame.column.git`; `crates/tsubame-win/src/meta/`) |
 | F6 | Miller columns view, tree view, tags and colours, file-age colouring | Not done |
 
 ### P5. Wasm plugins
 
 | ID | Task | Status |
 |---|---|---|
-| P1 | WIT interface from `tsubame-ext-api`, capability manifest, `tsubame-plughost` lifecycle (lazy start, kill on hang), IPC | Not done (the S3 host spike exists) |
-| P2 | Guest SDK crate, two sample plugins (a column, a previewer), plugin author docs | Not done (`plugins/sample-column` is the S3 guest) |
+| P1 | WIT interface from `tsubame-ext-api`, capability manifest, `tsubame-plughost` lifecycle (lazy start, kill on hang), IPC | Done (`docs/wasm-plugins.md`) |
+| P2 | Guest SDK crate, two sample plugins (a column, a previewer), plugin author docs | Not done (no SDK crate or author guide yet; `plugins/sample-column` is a working guest to copy) |
 | P3 | Security review of P1 | Not done |
 
 ### P6. Ship
