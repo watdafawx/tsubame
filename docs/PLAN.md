@@ -214,10 +214,10 @@ Kept current as work lands: every measurement surprise, QA finding or improvemen
 | 2026-11-24 | Release `tsubame.exe` is 3.34 MiB after the Batch 8 archive crates (budget < 6 MB, 0.1.0 was 3.20 MB). | Within budget |
 | 2026-11-24 | `tsubame-plughost.exe` release build is 9.31 MiB (wasmtime runtime and component model, no Cranelift in the normal graph). The earlier 1.00 MB figure does not reproduce; find out how it was measured and set a size budget. | Open (P5 review) |
 | 2026-11-24 | Rig QA of Batch 8 (preview pane, Quick Look, global search, archive VFS, git and checksum columns, mouse UX, context menu): 24 pass, 1 fail, 4 partial. No crash or hang, idle CPU delta 0.000 s. | Done |
-| 2026-11-24 | Zip entry times display +2 h (DOS local time treated as UTC). | Fix in progress |
-| 2026-11-24 | List keyboard focus is lost after inline-rename Esc and after the command palette closes (`Ctrl+Shift+F`, `Alt+Enter` stop working until a row is clicked). | Fix in progress |
-| 2026-11-24 | First breadcrumb click out of an archive was swallowed once. | Fix in progress (cause unknown) |
-| 2026-11-24 | `archive.extract_here`, `archive.extract_selected`, `file.checksum`, `folder.calc_sizes` have no default key binding. | Fix in progress |
+| 2026-11-24 | Zip entry times display +2 h (DOS local time treated as UTC). | Fixed (`67eb12a`). Zip extended timestamp 0x5455 not read (slows listing); optional follow-up |
+| 2026-11-24 | List keyboard focus is lost after inline-rename Esc and after the command palette closes (`Ctrl+Shift+F`, `Alt+Enter` stop working until a row is clicked). | Not reproduced on rig; defensive refocus added when the palette closes (`15ac858`) |
+| 2026-11-24 | First breadcrumb click out of an archive was swallowed once. | Not reproduced; watch for it |
+| 2026-11-24 | `archive.extract_here`, `archive.extract_selected`, `file.checksum`, `folder.calc_sizes` have no default key binding. | Open: no obviously free chord; needs a keybinding pass |
 | 2026-11-24 | Delete and rename inside an archive are blocked silently; extract overwrites existing files without asking. | Accepted: tracked under P4.F3 follow-up |
 | 2026-11-24 | Mouse Back/Forward buttons passed only 1 of 7 synthetic-input tries. Source handles them; `Alt+Left/Right` work. | Needs one check on a real mouse |
 | 2026-11-24 | Preview pane default shows 564 px wide at 200% scale (config default is 320 DIP, so about 640 px). | Check the DIP to px conversion |
