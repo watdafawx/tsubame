@@ -194,9 +194,9 @@ Each one gets a mock first where it has UI.
 | Set as default file manager, opt-in and fail-safe (`docs/default-file-manager.md`) | Done |
 | Shell helper process, only if the leak gate shows shell extensions leaking | Not done |
 | Decide on a second `Canvas` backend for Linux/macOS | Not done |
-| Release gate: scripted rig QA checklist (preview, Quick Look, search, archive, columns, mouse, context menu, idle CPU) run before every tag | Not done (accepted 2026-11-24) |
-| Release gate: short manual real-mouse list in `docs/release.md` for input that synthetic tests cannot cover (Back/Forward buttons) | Not done (accepted 2026-11-24) |
-| Release gate: Defender and SmartScreen smoke test on a clean VM for each unsigned release | Not done (accepted 2026-11-24) |
+| Release gate: scripted rig QA checklist (preview, Quick Look, search, archive, columns, mouse, context menu, idle CPU) run before every tag | Documented (`docs/qa-checklist.md`, `docs/release.md`); automation not done |
+| Release gate: short manual real-mouse list in `docs/release.md` for input that synthetic tests cannot cover (Back/Forward buttons) | Documented (`docs/qa-checklist.md`, `docs/release.md`); automation not done |
+| Release gate: Defender and SmartScreen smoke test on a clean VM for each unsigned release | Documented (`docs/qa-checklist.md`, `docs/release.md`); automation not done |
 
 ## 8. Open decisions (defaults apply if nobody answers)
 

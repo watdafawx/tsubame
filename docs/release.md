@@ -85,13 +85,15 @@ signed with the old key, then switch signing to the new key. Remove the old key 
    when an in-place update from older versions would break (config format change etc.): those users are
    told to run the installer instead.
 3. Commit the version bump, `git push`.
-4. Tag and push the tag. The tag must equal `v` + the Cargo version, or the workflow stops:
+4. Run the pre-tag checks: the scripted rig matrix `docs\qa-checklist.md` in full, then the manual
+   checks below. Both must be green, or a FAIL/UNTESTABLE waived in `docs\PLAN.md` §9 with a reason.
+5. Tag and push the tag. The tag must equal `v` + the Cargo version, or the workflow stops:
    ```powershell
    git tag v0.1.0
    git push origin v0.1.0
    ```
-5. Watch the `release` workflow (Actions tab). On success the Release `v0.1.0` exists with the five files above.
-6. Smoke test (below).
+6. Watch the `release` workflow (Actions tab). On success the Release `v0.1.0` exists with the five files above.
+7. Smoke test (below).
 
 CI does: check tag == version, `cargo test -p tsubame-update`, Inno Setup (preinstalled, else `choco`),
 `tools\release.ps1` (release build, zip, installer, manifest, signature, SHA256SUMS), uploads the files as a
@@ -134,6 +136,58 @@ Output in `dist\<version>\`. Upload all files to a GitHub Release yourself. The 
 
 `release.ps1` refuses to sign with a key whose public half is not pinned in `keys.rs` (the app would reject
 that release); `-AllowUnpinned` overrides, `-DevKey` signs with the public DEV key for rehearsals only.
+
+## Manual checks before a tag
+
+Everything else is scripted: the rig QA matrix in `docs\qa-checklist.md` covers preview, Quick Look,
+global search, archives, columns, mouse and navigation, the context menu, idle CPU and the exe size
+budgets, and an agent runs it in full before the tag (step 4 above). Two checks stay manual because
+neither synthetic input nor a development machine can stand in for a real mouse and a clean VM.
+
+### Real mouse: Back and Forward
+
+Synthetic input passed the mouse Back/Forward buttons only 1 of 7 tries (2026-11-24, `PLAN.md` §9), so
+check them by hand on the rig desktop, through the normal push-to-rig launch, with a mouse that has side
+buttons (the rig display is 4K at 200%).
+
+1. Open Tsubame with one tab and navigate at least five folders deep by double-click; go up two levels.
+2. Press the button the OS maps to Back (the one that acts like `Alt+Left`) five times, letting each
+   navigation paint before the next press.
+3. Press the button that acts like Forward twice.
+4. Repeat once with `Alt+Left` / `Alt+Right` and once with the toolbar arrows.
+
+Expected: every press moves exactly one step through the tab's history, the path bar and list follow,
+no tab is opened or switched, and no press is swallowed or doubled. Forward stays disabled after the
+newest entry. The three input paths (side buttons, chords, toolbar) must show the same history.
+
+### Clean VM: Defender and SmartScreen (unsigned installer)
+
+The installer is unsigned, so the first run on a clean machine warns. That is expected and must be
+checked, not assumed. Run this on a clean VM snapshot for every unsigned release; the per-Windows-version
+matrix (Windows 11 24H2/25H2, Windows 10 22H2 if still supported, Server 2022) is
+`docs\release-checklist.md` step 7 and only needs the full pass on a major release.
+
+1. Restore a clean snapshot: Windows 11 x64, Defender at defaults (real-time and cloud-delivered
+   protection on, no exclusions), no previous Tsubame install, a non-admin user.
+2. Run the release's `tsubame-X.Y.Z-x64-setup.exe`. SmartScreen must show "Windows protected your PC":
+   choose More info > Run anyway. Record the exact wording and a screenshot; the README carries the same
+   sentence and must still match.
+3. Install per-user (no UAC prompt), launch from the Start menu, open a folder, close the window.
+4. Update from the previous version: on a second clean snapshot install N-1, then install this build
+   through the in-app updater and restart. Confirm Settings > Updates shows the new version and the
+   installed exe was replaced. For a first release with no earlier version, mark this step UNTESTABLE and
+   point at `tools\release-e2e.ps1` (local pair, DEV key) instead.
+5. Uninstall from Settings > Apps and confirm the install folder, the HKCU Uninstall entry and the
+   shortcuts are gone; run the full registry/task/service diff from `docs\release-checklist.md` step 7
+   when this is a major release.
+6. Check Defender's protection history after install and first launch, and run a custom scan of the
+   install folder and of the unzipped portable build. No detection is a PASS. If Defender quarantines or
+   submits a file, record the detection name and version and do not publish until it is resolved (also
+   submit the exes to the Microsoft file-submission portal, `docs\default-file-manager.md` checklist
+   item 18).
+
+Record the VM build, the SmartScreen wording, any Defender finding and the update result in the release
+notes or the release PR.
 
 ## Testing an update end to end
 
