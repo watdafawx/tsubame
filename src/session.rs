@@ -79,7 +79,8 @@ pub fn capture(view: &View, window: tsubame_config::WindowState) -> Session {
             SessionPane { active_tab: active_tab.min(tabs_v.len().saturating_sub(1)), tabs: tabs_v }
         })
         .collect();
-    Session { version: session::SESSION_VERSION, last_folder: view.tab().path.clone(), active_pane: view.active.min(n - 1), window, panes, recents: view.side.recents.clone() }
+    let last_folder = view.tabs.current().map(|t| t.path.clone()).unwrap_or_default();
+    Session { version: session::SESSION_VERSION, last_folder, active_pane: view.active.min(n - 1), window, panes, recents: view.side.recents.clone() }
 }
 
 /// The shape of the window from the config (one pane or two, how they sit,

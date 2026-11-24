@@ -189,6 +189,10 @@ struct App {
     last_paint: Instant,
     /// menu entries, drag and drop, clipboard, delete (`src/shellops.rs`)
     ops: shellops::ShellOps,
+    /// WM_CLOSE already posted/handled (prevents duplicate close posts or double flush)
+    closing: bool,
+    /// `save_flush(..., true)` already ran on `WM_CLOSE`
+    saved_on_close: bool,
 }
 
 thread_local! {
@@ -295,6 +299,7 @@ fn window_state(hwnd: HWND) -> tsubame_config::WindowState {
 
 fn main() {
     wakelog::init();
+    tsubame_win::lagtrace::init();
     let args: Vec<String> = std::env::args().collect();
     let cwd = std::env::current_dir().unwrap_or_default();
     let cli = cli::Cli::parse(&args, &cwd);
@@ -585,6 +590,8 @@ fn main() {
                 last_input: Instant::now(),
                 last_paint: Instant::now(),
                 ops: Default::default(),
+                closing: false,
+                saved_on_close: false,
             })
         });
         with(|a| shellops::attach(a, hwnd, drop_target));
@@ -607,10 +614,44 @@ fn main() {
             DispatchMessageW(&msg);
         }
         wakelog::write();
+        let trace = tsubame_win::lagtrace::on();
+        let t_teardown = trace.then(Instant::now);
+        if trace {
+            tsubame_win::lagtrace::record("close.loop_exit", None, format_args!("ok=true"), false);
+        }
         // drop D2D/D3D objects now, while the process is fully alive (a
         // thread-local destructor run inside ExitProcess crashes in D3D teardown)
         let taken = APP.with(|a| a.try_borrow_mut().ok().and_then(|mut a| a.take()));
-        drop(taken);
+        if let Some(app) = taken {
+            if trace {
+                let App { view, ui, saver, gfx, bench, timing, gate, pool, shell, stress, ops, .. } = app;
+                let t = Instant::now();
+                drop(view);
+                tsubame_win::lagtrace::record("close.drop.view", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                let t = Instant::now();
+                drop(pool);
+                tsubame_win::lagtrace::record("close.drop.pool", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                let t = Instant::now();
+                drop((shell, ui, saver, bench, timing, gate, stress, ops));
+                tsubame_win::lagtrace::record("close.drop.state", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                let t = Instant::now();
+                drop(gfx);
+                tsubame_win::lagtrace::record("close.drop.gfx", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+            } else {
+                drop(app);
+            }
+        }
+        if trace {
+            let t = Instant::now();
+            drop(_instance);
+            tsubame_win::lagtrace::record("close.drop.instance", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+            if let Some(t0) = t_teardown {
+                tsubame_win::lagtrace::record("close.exit", Some(t0.elapsed().as_secs_f64() * 1000.0), format_args!(""), true);
+            }
+            tsubame_win::lagtrace::flush();
+        } else {
+            drop(_instance);
+        }
         // "Download and restart" / "Roll back": the window is gone and the session saved
         match AFTER_EXIT.load(Ordering::Acquire) {
             1 => {
@@ -848,6 +889,10 @@ fn arm_save(hwnd: HWND, a: &mut App) {
 /// when the content is unchanged.
 fn save_flush(hwnd: HWND, force: bool) {
     let geom = window_state(hwnd);
+    save_flush_geom(hwnd, geom, force);
+}
+
+fn save_flush_geom(hwnd: HWND, geom: tsubame_config::WindowState, force: bool) {
     with(|a| {
         a.saver.session = session::capture(&a.view, geom);
         a.saver.session_changed();
@@ -901,7 +946,7 @@ unsafe fn on_paint(hwnd: HWND) {
             s.painted(total);
         }
         // timing of the navigation: a frame with rows / the final frame was presented
-        let final_frame = out.is_some() && a.view.tab_mut().frame_presented();
+        let final_frame = out.is_some() && !a.view.tabs.is_empty() && a.view.tab_mut().frame_presented();
         (total, a.gfx.end_ms, a.gfx.path(), out, final_frame)
     });
     let _ = unsafe { EndPaint(hwnd, &ps) };
@@ -1237,7 +1282,12 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
         None => {}
     }
     if quit {
-        let _ = unsafe { DestroyWindow(hwnd) };
+        let should_post = with(|a| !std::mem::replace(&mut a.closing, true)).unwrap_or(true);
+        if should_post {
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
         return;
     }
     settings_requests(hwnd);
@@ -1838,17 +1888,58 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_CLOSE => {
-                // save the session (and the geometry) before the window goes
-                save_flush(hwnd, true);
+                let trace = tsubame_win::lagtrace::on();
+                let t_all = trace.then(Instant::now);
+                // Read geometry before hiding, then hide immediately so disk
+                // flushes (`sync_all`) and teardown never leave a frozen window
+                // on screen.
+                let geom = window_state(hwnd);
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                if let Some(t) = t_all {
+                    tsubame_win::lagtrace::record("close.wm_close.hide", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                }
+                let t_save = trace.then(Instant::now);
+                save_flush_geom(hwnd, geom, true);
+                with(|a| a.saved_on_close = true);
+                if let Some(t) = t_save {
+                    tsubame_win::lagtrace::record("close.wm_close.save_flush", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                }
+                let t_dest = trace.then(Instant::now);
                 let _ = DestroyWindow(hwnd);
+                if let Some(t) = t_dest {
+                    tsubame_win::lagtrace::record("close.wm_close.destroy_window", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                }
+                if let Some(t) = t_all {
+                    tsubame_win::lagtrace::record("close.wm_close.total", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                }
                 LRESULT(0)
             }
             WM_DESTROY => {
-                // also reached when the app closes itself (last tab, leak gate)
+                let trace = tsubame_win::lagtrace::on();
+                let t_all = trace.then(Instant::now);
+                let t = trace.then(Instant::now);
                 tsubame_win::uia::shutdown(hwnd);
-                save_flush(hwnd, true);
+                if let Some(t) = t {
+                    tsubame_win::lagtrace::record("close.wm_destroy.uia", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                }
+                // Also reached directly when bench/timing/stress calls DestroyWindow.
+                let already_saved = with(|a| a.saved_on_close).unwrap_or(false);
+                if !already_saved {
+                    let t = trace.then(Instant::now);
+                    save_flush(hwnd, true);
+                    if let Some(t) = t {
+                        tsubame_win::lagtrace::record("close.wm_destroy.save_flush", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                    }
+                }
+                let t = trace.then(Instant::now);
                 shellops::destroy(hwnd);
+                if let Some(t) = t {
+                    tsubame_win::lagtrace::record("close.wm_destroy.shellops", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), false);
+                }
                 PostQuitMessage(0);
+                if let Some(t) = t_all {
+                    tsubame_win::lagtrace::record("close.wm_destroy.total", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!(""), true);
+                }
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),

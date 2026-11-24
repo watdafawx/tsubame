@@ -208,7 +208,9 @@ impl PreviewState {
     pub fn release_worker(&mut self) {
         if let Some((worker, _rx)) = self.worker.take() {
             worker.clear_cache();
-            worker.shutdown();
+            // Drop cancels and detaches without blocking the UI thread on an
+            // in-flight decode.
+            drop(worker);
         }
         self.requested_key = None;
         self.loading_since = None;

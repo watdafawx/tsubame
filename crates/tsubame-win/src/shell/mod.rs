@@ -419,6 +419,11 @@ fn worker(idx: usize, lane: u8, sh: Arc<Shared>, st: Arc<WorkerState>, tx: Sende
                     continue;
                 }
                 let queued_us = job.queued.elapsed().as_micros() as u64;
+                if crate::lagtrace::on()
+                    && let Request::CtxMenu { generation, ref paths, ref opts, .. } = job.req
+                {
+                    crate::lagtrace::record("ctx.worker.start", Some(queued_us as f64 / 1000.0), format_args!("gen={generation} worker={idx} paths={} bg={}", paths.len(), opts.background), false);
+                }
                 st.job.store(job.id, Relaxed);
                 st.kind.store(job.req.kind(), Relaxed);
                 st.busy_since.store(sh.now_ms(), Release);

@@ -882,10 +882,6 @@ impl GitStatusWorker {
 
     /// Stop the worker and wait for the thread.
     pub fn shutdown(mut self) {
-        self.stop();
-    }
-
-    fn stop(&mut self) {
         self.tx = None;
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -895,7 +891,9 @@ impl GitStatusWorker {
 
 impl Drop for GitStatusWorker {
     fn drop(&mut self) {
-        self.stop();
+        // Signal exit and detach: joining here would stall the UI thread or
+        // window teardown behind an in-flight `git status` subprocess.
+        self.tx = None;
     }
 }
 

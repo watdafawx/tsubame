@@ -707,18 +707,53 @@ impl View {
     }
 
     /// Closes tab `i`: its store is freed and its enumeration cancelled
-    /// (the tab drops). The last tab closing ends the window.
+    /// (the tab drops). Closing the last tab of one pane in dual-pane mode
+    /// collapses to the surviving pane; closing the last remaining tab in the
+    /// window requests a clean `WM_CLOSE` while keeping the tab intact so
+    /// paint/session-capture never index an empty tab list.
     pub fn close_tab(&mut self, i: usize) {
+        if i >= self.tabs.items.len() {
+            return;
+        }
+        if self.tabs.items.len() <= 1 {
+            if let Some(o) = self.other.take() {
+                let was_settings = self.tabs.items[i].settings;
+                let o = *o;
+                self.tabs = o.tabs;
+                self.strip = o.strip;
+                self.filter = o.filter;
+                self.path_text = o.path_text;
+                self.editing = o.editing;
+                self.edit_frames = o.edit_frames;
+                self.path_error = o.path_error;
+                self.edit_nav = o.edit_nav;
+                self.crumbs = o.crumbs;
+                self.focus_list = true;
+                self.focus_path = false;
+                self.list_top = o.list_top;
+                self.list_r = o.list_r;
+                self.last_range = o.last_range;
+                self.live = 0;
+                self.active = 0;
+                self.config_dirty = true;
+                if was_settings {
+                    self.settings = None;
+                }
+                self.switched();
+            } else {
+                if !self.quit && tsubame_win::lagtrace::on() {
+                    tsubame_win::lagtrace::record("close.trigger", None, format_args!("kind=last_tab"), false);
+                }
+                self.quit = true;
+            }
+            return;
+        }
         let was_settings = self.tabs.items.get(i).is_some_and(|t| t.settings);
         drop(self.tabs.close(i));
         if was_settings {
             self.settings = None;
         }
-        if self.tabs.is_empty() {
-            self.quit = true;
-        } else {
-            self.switched();
-        }
+        self.switched();
     }
 
     pub fn switch_tab(&mut self, i: usize) {
@@ -1856,6 +1891,10 @@ impl View {
             let rect = self.pane_rects[slot];
             let active = slot == self.active;
             self.with_pane(slot, |v| v.paint_pane(ui, g, shell, rect, t, active));
+            if self.other.is_none() {
+                // Closing the last tab in pane 0 collapsed dual pane to single pane.
+                break;
+            }
         }
         if let Some(pr) = pv_rect {
             self.sync_preview();
@@ -1943,6 +1982,9 @@ impl View {
             }
             g.text(glyphs[i], b, f(t.icon_window_control).icon().c(), if close && it.hovered { t.on_danger } else { t.text });
             if it.clicked == Some(Button::Left) {
+                if close && tsubame_win::lagtrace::on() {
+                    tsubame_win::lagtrace::record("close.trigger", None, format_args!("kind=win_x"), false);
+                }
                 self.win_cmd = Some(cmds[i]);
             }
         }
@@ -2980,6 +3022,47 @@ mod tests {
         assert!(!r.v.quit);
         r.key(Key::Char('W'), Mods::CTRL);
         assert!(r.v.quit, "closing the last tab ends the window");
+        assert_eq!(r.v.tabs.len(), 1, "last tab stays intact until WM_CLOSE saves the session");
+        let saved = crate::session::capture(&r.v, tsubame_config::WindowState::default());
+        assert_eq!(saved.tabs().len(), 1, "session capture keeps the last tab instead of panicking");
+    }
+
+    #[test]
+    fn middle_click_and_tab_x_on_last_tab_do_not_panic_and_keep_session() {
+        // Middle-click on tab 0 in a 1-tab window (previously panicked at View::tab() inside sole_row()).
+        let mut r = Rig::new("mid-last");
+        r.frame(); // register tab strip hit rect
+        let mid = Pt::new(100.0, 20.0);
+        r.ui.push(Event::MouseDown { pos: mid, button: Button::Middle, mods: Mods::NONE, double: false });
+        r.ui.push(Event::MouseUp { pos: mid, button: Button::Middle, mods: Mods::NONE });
+        r.frame();
+        assert!(r.v.quit, "middle-click on last tab requests window close");
+        assert_eq!(r.v.tabs.len(), 1);
+        let saved = crate::session::capture(&r.v, tsubame_config::WindowState::default());
+        assert_eq!(saved.tabs().len(), 1);
+
+        // Tab close (×) button on tab 0 in a 1-tab window.
+        let mut r2 = Rig::new("x-last");
+        r2.frame();
+        let xbtn = Pt::new(40.0 + r2.ui.theme.layout_tab_width - 15.0, 20.0);
+        r2.ui.push(Event::MouseDown { pos: xbtn, button: Button::Left, mods: Mods::NONE, double: false });
+        r2.ui.push(Event::MouseUp { pos: xbtn, button: Button::Left, mods: Mods::NONE });
+        r2.frame();
+        assert!(r2.v.quit, "tab × button on last tab requests window close");
+        assert_eq!(r2.v.tabs.len(), 1);
+    }
+
+    #[test]
+    fn closing_last_tab_in_dual_pane_collapses_to_surviving_pane() {
+        let mut r = Rig::new("dual-last");
+        r.v.set_layout(true, tsubame_config::Split::Vertical);
+        assert!(r.v.dual());
+        r.frame();
+        r.v.close_tab(0);
+        assert!(!r.v.quit, "closing one pane's last tab keeps the surviving pane open");
+        assert!(!r.v.dual(), "window collapses to single pane");
+        assert_eq!(r.v.tabs.len(), 1);
+        r.frame();
     }
 
     #[test]

@@ -199,7 +199,10 @@ impl PreviewWorker {
 
     /// Cancels everything, joins the thread and drops the receiver.
     pub fn shutdown(mut self) {
-        self.stop();
+        self.signal_stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 
     fn token_for(&self, generation: u64) -> Arc<AtomicBool> {
@@ -212,7 +215,9 @@ impl PreviewWorker {
         token
     }
 
-    fn stop(&mut self) {
+    /// Cancels queued/in-flight work and wakes the worker to exit without
+    /// blocking the caller (UI-thread safe; call [`shutdown`] to join).
+    fn signal_stop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
         let mut tokens = lock(&self.shared.tokens);
         for (_, token) in tokens.drain(..) {
@@ -221,15 +226,14 @@ impl PreviewWorker {
         drop(tokens);
         lock(&self.shared.queue).clear();
         self.shared.cv.notify_all();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 
 impl Drop for PreviewWorker {
     fn drop(&mut self) {
-        self.stop();
+        // Cancel and detach: never block the UI thread or window teardown on an
+        // in-flight image/media decode. Call `shutdown()` when a join is wanted.
+        self.signal_stop();
     }
 }
 
