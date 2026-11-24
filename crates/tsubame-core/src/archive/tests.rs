@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use super::read::{open_index, read_capped};
+use super::read::{open_index, read_capped, zip_time, zip_wall_seconds};
 use super::*;
 
 /// A unique folder under the system temp dir, removed when the test ends.
@@ -698,4 +698,29 @@ fn format_detection_uses_extension_then_magic() {
         list_dir(&tmp.join("missing.zip"), ""),
         Err(ArchiveError::Io(_))
     ));
+}
+
+/// Zip DOS times are local wall clock: converting the stored FILETIME back to local
+/// time must give the DOS fields again, whatever the machine's offset is.
+#[cfg(windows)]
+#[test]
+fn zip_dos_time_is_read_as_local_time() {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
+
+    for (y, mo, d, h, mi, s) in [(2023, 1, 15, 12, 30, 44), (2023, 7, 15, 12, 30, 44), (2008, 3, 1, 9, 5, 2)] {
+        let dos = zip::DateTime::from_date_and_time(y, mo, d, h, mi, s).unwrap();
+        let ticks = zip_time(dos) as u64;
+        let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+        let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+        unsafe {
+            FileTimeToSystemTime(&ft, &mut utc).unwrap();
+            SystemTimeToTzSpecificLocalTimeEx(None, &utc, &mut local).unwrap();
+        }
+        let got = (local.wYear, local.wMonth as u8, local.wDay as u8, local.wHour as u8, local.wMinute as u8, local.wSecond as u8);
+        assert_eq!(got, (y, mo, d, h, mi, s), "round trip through the local zone");
+    }
+    // the wall-clock helper itself stays zone-free
+    let dos = zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).unwrap();
+    assert_eq!(zip_wall_seconds(dos), 315_532_800);
 }

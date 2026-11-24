@@ -319,11 +319,45 @@ fn filetime_from_unix(seconds: u64) -> i64 {
     FILETIME_UNIX_EPOCH.saturating_add(seconds.saturating_mul(10_000_000))
 }
 
-/// A zip DOS timestamp (`DateTime` is a local wall clock) as FILETIME ticks.
-fn zip_time(time: zip::DateTime) -> i64 {
+/// A zip DOS timestamp as FILETIME ticks (UTC). DOS time has no zone: it is the
+/// wall clock of whoever wrote the archive, so it is read as local time and
+/// converted to UTC, which is the clock tar and 7z entries already carry.
+pub(crate) fn zip_time(time: zip::DateTime) -> i64 {
+    let local = FILETIME_UNIX_EPOCH.saturating_add(zip_wall_seconds(time).saturating_mul(10_000_000));
+    local_to_utc(local)
+}
+
+/// DOS date and time as seconds since 1970-01-01 on the same wall clock.
+pub(crate) fn zip_wall_seconds(time: zip::DateTime) -> i64 {
     let days = days_from_civil(i64::from(time.year()), u32::from(time.month()), u32::from(time.day()));
-    let seconds = days * 86_400 + i64::from(time.hour()) * 3_600 + i64::from(time.minute()) * 60 + i64::from(time.second());
-    FILETIME_UNIX_EPOCH.saturating_add(seconds.saturating_mul(10_000_000))
+    days * 86_400 + i64::from(time.hour()) * 3_600 + i64::from(time.minute()) * 60 + i64::from(time.second())
+}
+
+/// Local wall clock (as FILETIME ticks read in UTC calendar maths) to real UTC,
+/// using the system zone rules in force on that date. Falls back to the input when
+/// the zone API fails (and off Windows, where a zip time is taken as UTC).
+#[cfg(windows)]
+fn local_to_utc(ticks: i64) -> i64 {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime, TzSpecificLocalTimeToSystemTimeEx};
+    let Ok(raw) = u64::try_from(ticks) else { return ticks };
+    let ft = FILETIME { dwLowDateTime: raw as u32, dwHighDateTime: (raw >> 32) as u32 };
+    let (mut local, mut utc, mut out) = (SYSTEMTIME::default(), SYSTEMTIME::default(), FILETIME::default());
+    // SAFETY: plain Win32 calls on locals; a None zone means the current system zone.
+    let ok = unsafe {
+        FileTimeToSystemTime(&ft, &mut local).is_ok()
+            && TzSpecificLocalTimeToSystemTimeEx(None, &local, &mut utc).is_ok()
+            && SystemTimeToFileTime(&utc, &mut out).is_ok()
+    };
+    if !ok {
+        return ticks;
+    }
+    (i64::from(out.dwHighDateTime) << 32) | i64::from(out.dwLowDateTime)
+}
+
+#[cfg(not(windows))]
+fn local_to_utc(ticks: i64) -> i64 {
+    ticks
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's

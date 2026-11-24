@@ -1115,6 +1115,7 @@ dependencies = [
  "flate2",
  "sevenz-rust2",
  "tar",
+ "windows",
  "zip",
 ]
 

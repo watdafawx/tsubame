@@ -16,6 +16,11 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 tar = { version = "0.4", default-features = false }
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
 
+# Zip stores DOS wall-clock times: converting them to UTC needs the system time zone.
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = ["Win32_Foundation", "Win32_System_Time"]
+
 [dev-dependencies]
 # Test-only: build real .7z fixtures. `compress` (the LZMA encoder) is not in the
 # release build, only in test builds, so it costs the exe nothing.
