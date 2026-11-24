@@ -1,0 +1,21 @@
+# Sample previewer plugin built with tsubame-plugin-sdk. See docs/plugin-authoring.md.
+[plugin]
+id = "dev.tsubame.sample-csv-summary"
+name = "Sample: CSV summary"
+version = "0.1.0"
+api = "0.1"
+component = "sample_csv_summary.wasm"
+description = "Shows the row and column counts, the header and the first rows of a .csv file."
+
+# The one thing this plugin needs: read the file it is asked to preview.
+# `$input` covers the paths of the current call and nothing else, so it can not
+# read any other file. No write access, no network, no processes.
+[capabilities]
+paths = [{ path = "$input", access = "read" }]
+max_memory_mb = 32
+timeout_ms = 1000
+
+[[previewer]]
+id = "summary"
+title = "CSV summary"
+extensions = ["csv"]
