@@ -1,0 +1,288 @@
+//! Security review P5.P3: proofs of concept for `docs/security/plughost-review.md`.
+//!
+//! Every test here is `#[ignore]` and **passes while the weakness is present**.
+//! The test name starts with the finding's id. When a finding is fixed, turn
+//! its test into a regression test (flip the assertion, drop the `#[ignore]`).
+//!
+//! Run them: `cargo test -p tsubame-plughost --test security_poc -- --ignored --nocapture`
+//!
+//! These need no wasm guest: they drive the public API of the manifest, the
+//! path policy, the protocol and the client. The PoCs that need a real host
+//! and a guest are at the end of `tests/host.rs`.
+
+use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tsubame_ext_api::{Cell, Node};
+use tsubame_plughost::caps::{self, Access, Capabilities, PathGrant, PathPolicy, Root, Scope};
+use tsubame_plughost::client::{CallError, HostIo, HostProcess, Launcher, Options, Plugin, Status};
+use tsubame_plughost::manifest::{Kind, Manifest};
+use tsubame_plughost::proto::{self, Info, Load};
+
+fn manifest(plugin: &str, caps: &str) -> String {
+    format!("[plugin]\n{plugin}\napi = \"0.1\"\ncomponent = \"p.wasm\"\n{caps}\n[[column]]\nid = \"c\"\nlabel = \"C\"\n")
+}
+
+// ---- PH-01: a `*` grant, or a UNC prefix, reaches the network with `network = false` -------------
+
+#[test]
+#[ignore = "PoC PH-01: passes while UNC paths are allowed without the network capability"]
+fn ph01_unc_paths_pass_the_policy_without_the_network_capability() {
+    let caps = Capabilities { paths: vec![PathGrant { scope: Scope::Any, access: Access::ReadWrite }], ..Capabilities::default() };
+    assert!(!caps.network, "the plugin was never given the network");
+    assert_eq!(caps.summary()[0], "Read and change any file on this computer", "what the user was told");
+    let mut policy = PathPolicy::new(&caps);
+    for path in [
+        // SMB to any server: Windows sends the user's NTLM response to it.
+        "\\\\attacker.example\\share\\x",
+        // WebDAV redirector: an HTTP request whose URL carries data out.
+        "\\\\attacker.example@80\\dav\\c2VjcmV0LWRhdGE",
+        "\\\\attacker.example@SSL\\DavWWWRoot\\x",
+        // Loopback SMB: admin shares and named pipes of local services.
+        "\\\\127.0.0.1\\C$\\Windows\\win.ini",
+        "\\\\localhost\\pipe\\some-local-service",
+        "\\\\?\\UNC\\attacker.example\\share\\x",
+    ] {
+        let (norm, roots) = policy.check(path, Access::ReadWrite).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+        // `Root::Any` means `host.rs` opens `norm` with no further check.
+        assert_eq!(roots, [Root::Any], "{path}");
+        assert!(norm.starts_with("\\\\"), "{norm}");
+    }
+
+    // The manifest accepts a UNC folder as a grant while `network` stays false.
+    let m = Manifest::parse(&manifest(
+        "id = \"com.example.x\"\nname = \"X\"\nversion = \"1.0.0\"",
+        "[capabilities]\nnetwork = false\npaths = [{ path = \"//attacker.example/share\", access = \"read\" }]",
+    ))
+    .unwrap();
+    let c = m.capabilities("C:\\p", "C:\\d").unwrap();
+    assert!(!c.network);
+    assert_eq!(c.summary()[0], "Read files in \\\\attacker.example\\share");
+    assert!(!c.summary().iter().any(|l| l.contains("network")));
+}
+
+// ---- PH-09: reserved device names the lexical check misses ---------------------------------------
+
+#[test]
+#[ignore = "PoC PH-09: passes while COM\u{b9}/LPT\u{b2} style device names are accepted"]
+fn ph09_superscript_device_names_are_accepted() {
+    // Windows reserves COM1-9, LPT1-9 and also the superscript digits 1, 2 and 3
+    // ("Naming Files, Paths, and Namespaces"). `is_device_name` only knows ASCII digits.
+    for p in ["C:\\a\\COM\u{b9}", "C:\\a\\COM\u{b2}", "C:\\a\\LPT\u{b3}", "C:\\a\\com\u{b9}.txt"] {
+        assert!(caps::normalize(p).is_ok(), "{p}");
+    }
+    // the ASCII forms are refused, as intended
+    assert!(caps::normalize("C:\\a\\COM1").is_err());
+}
+
+// ---- PH-10: two plugins, one cache file ----------------------------------------------------------
+
+#[test]
+#[ignore = "PoC PH-10: passes while `<id>-<version>.cwasm` is ambiguous"]
+fn ph10_two_plugins_map_to_the_same_cwasm_name() {
+    let a = Manifest::parse(&manifest("id = \"a.b-1.0.0\"\nname = \"A\"\nversion = \"2.0.0\"", "")).unwrap();
+    let b = Manifest::parse(&manifest("id = \"a.b\"\nname = \"B\"\nversion = \"1.0.0-2.0.0\"", "")).unwrap();
+    assert_ne!(a.id, b.id);
+    // `host::install::install` writes `<out_dir>/<id>-<version>.cwasm` (host.rs, `install`).
+    let file = |m: &Manifest| format!("{}-{}.cwasm", m.id, m.version);
+    assert_eq!(file(&a), file(&b));
+    assert_eq!(file(&a), "a.b-1.0.0-2.0.0.cwasm");
+}
+
+// ---- PH-11: what the install prompt would show ---------------------------------------------------
+
+#[test]
+#[ignore = "PoC PH-11: passes while bidi/invisible characters and device-name ids are accepted"]
+fn ph11_manifest_accepts_spoofing_characters_and_device_name_ids() {
+    // U+202E (right-to-left override) and U+200B (zero width space) are not `char::is_control`.
+    let m = Manifest::parse(&manifest("id = \"com.example.x\"\nname = \"Tsubame \u{202e}detsurT\u{200b}\"\nversion = \"1.0.0\"", "")).unwrap();
+    assert!(m.name.contains('\u{202e}') && m.name.contains('\u{200b}'));
+    // The id becomes a file name (`<id>-<version>.cwasm`) and, likely, a data folder name.
+    // `nul.x-1.0.0.cwasm` is the NUL device on Windows 10 and older.
+    for id in ["nul.x", "aux.plugin", "con.fig", "com1.tools", "prn.t"] {
+        let m = Manifest::parse(&manifest(&format!("id = \"{id}\"\nname = \"N\"\nversion = \"1.0.0\""), "")).unwrap();
+        assert_eq!(m.id, id);
+    }
+}
+
+// ---- PH-13: the client allocates far more than a reply's size -------------------------------------
+
+#[test]
+#[ignore = "PoC PH-13: passes while a reply's list count is only checked against the frame size"]
+fn ph13_a_small_reply_makes_the_client_allocate_many_times_its_size() {
+    // A reply of N one-byte nodes (`Indent`). `dec_doc` reserves N * size_of::<Node>().
+    const N: usize = 1 << 20;
+    let mut frame = Vec::with_capacity(N + 16);
+    frame.extend_from_slice(&7u32.to_le_bytes()); // request id
+    frame.push(proto::reply::OK);
+    frame.extend_from_slice(&(N as u32).to_le_bytes());
+    frame.resize(frame.len() + N, 7); // tag 7 = Indent
+    let reply = proto::decode_reply(&frame).unwrap();
+    let mut nodes: Vec<Node> = Vec::new();
+    proto::dec_doc(reply.body.unwrap(), &mut nodes).unwrap();
+    let heap = nodes.capacity() * size_of::<Node>();
+    let ratio = heap / frame.len();
+    println!("PH-13: {} byte reply -> {} bytes of Vec<Node> ({}x); a {} MiB frame -> {} MiB", frame.len(), heap, ratio, proto::MAX_FRAME >> 20, (proto::MAX_FRAME * ratio) >> 20);
+    assert!(ratio >= 24, "ratio {ratio}");
+
+    // The same for a column reply: the count is compared with the request only after decoding.
+    let mut frame = Vec::with_capacity(N + 16);
+    frame.extend_from_slice(&7u32.to_le_bytes());
+    frame.push(proto::reply::OK);
+    frame.extend_from_slice(&(N as u32).to_le_bytes());
+    frame.resize(frame.len() + N, 0); // tag 0 = Cell::Empty
+    let mut cells: Vec<Cell> = Vec::new();
+    let n = proto::dec_cells(proto::decode_reply(&frame).unwrap().body.unwrap(), &mut cells).unwrap();
+    assert_eq!(n, N, "a caller that asked for 1 path gets {N} cells decoded before it can compare");
+    println!("PH-13: cells: {} byte reply -> {} bytes", frame.len(), cells.capacity() * size_of::<Cell>());
+}
+
+// ---- a scripted host for the client PoCs ---------------------------------------------------------
+
+struct Script {
+    data: Vec<u8>,
+    pos: usize,
+    consumed: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Read for Script {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // After the script the "host" says nothing more until it is killed.
+        while self.pos == self.data.len() {
+            if self.stop.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let n = buf.len().min(self.data.len() - self.pos);
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        self.consumed.fetch_add(n, Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+struct Sink;
+impl Write for Sink {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct Proc(Arc<AtomicBool>);
+impl HostProcess for Proc {
+    fn kill(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    fn wait(&mut self, _: Duration) -> bool {
+        true
+    }
+}
+
+/// A host that ignores its input and plays `script` once.
+struct Scripted {
+    script: Vec<u8>,
+    consumed: Arc<AtomicUsize>,
+}
+
+impl Launcher for Scripted {
+    fn launch(&self) -> io::Result<HostIo> {
+        let stop = Arc::new(AtomicBool::new(false));
+        Ok(HostIo {
+            input: Box::new(Sink),
+            output: Box::new(Script { data: self.script.clone(), pos: 0, consumed: self.consumed.clone(), stop: stop.clone() }),
+            process: Box::new(Proc(stop)),
+        })
+    }
+}
+
+fn load(timeout_ms: u32) -> Load {
+    Load {
+        plugin_id: "test.poc".into(),
+        version: "1.0.0".into(),
+        component: "C:\\none.cwasm".into(),
+        sha256: [0; 32],
+        caps: Capabilities { timeout_ms, ..Capabilities::default() },
+        entrypoints: vec![(Kind::Column, "c".into())],
+    }
+}
+
+/// Hello, then the answer to `Load` (the client's first request id is 1).
+fn greeting() -> Vec<u8> {
+    let mut s = proto::enc_hello();
+    s.extend(proto::enc_ok_info(1, &Info { id: "test.poc".into(), version: "1.0.0".into(), entrypoints: vec![(Kind::Column, "c".into())] }).unwrap());
+    s
+}
+
+// ---- PH-14: frames nobody asked for pile up in the app --------------------------------------------
+
+#[test]
+#[ignore = "PoC PH-14: passes while the client reads and queues replies without a pending request"]
+fn ph14_unsolicited_frames_are_read_and_queued_without_limit() {
+    const FLOOD_FRAMES: usize = 48;
+    const FRAME: usize = 1 << 20;
+    let mut script = greeting();
+    script.extend(proto::enc_ok_cells(2, &[Cell::Int(1)]).unwrap()); // the answer to the one real call
+    for _ in 0..FLOOD_FRAMES {
+        script.extend_from_slice(&(FRAME as u32).to_le_bytes());
+        script.extend_from_slice(&999u32.to_le_bytes());
+        script.push(proto::reply::OK);
+        script.resize(script.len() + FRAME - proto::HEADER, 0);
+    }
+    let total = script.len();
+    let consumed = Arc::new(AtomicUsize::new(0));
+    let plugin = Plugin::new(load(2_000), Scripted { script, consumed: consumed.clone() }, Options::default());
+    let mut out = Vec::new();
+    plugin.column_values("c", &["C:\\a"], &mut out).unwrap();
+    assert_eq!(out, [Cell::Int(1)]);
+    // No call is running now. The reader thread still drains the pipe into an unbounded channel.
+    let end = Instant::now() + Duration::from_secs(10);
+    while consumed.load(Ordering::SeqCst) < total && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let got = consumed.load(Ordering::SeqCst);
+    println!("PH-14: the idle client took {} MiB of frames it never asked for", got >> 20);
+    assert_eq!(got, total, "all {FLOOD_FRAMES} unsolicited frames were read and are held in memory");
+    assert_eq!(plugin.status(), Status::Running, "and the host is still considered healthy");
+    // Only the next call notices (a stale frame answers it) and kills the host.
+    assert!(matches!(plugin.column_values("c", &["C:\\a"], &mut out), Err(CallError::Protocol(_))));
+}
+
+// ---- PH-15: every other method waits behind a running call ----------------------------------------
+
+#[test]
+#[ignore = "PoC PH-15: passes while `status()` blocks for as long as a plugin call runs"]
+fn ph15_status_blocks_behind_a_call_in_flight() {
+    // The host loads fine, then never answers the call.
+    let plugin = Arc::new(Plugin::new(load(1_500), Scripted { script: greeting(), consumed: Arc::new(AtomicUsize::new(0)) }, Options::default()));
+    let p = plugin.clone();
+    let worker = std::thread::spawn(move || p.column_values("c", &["C:\\a"], &mut Vec::new()));
+    std::thread::sleep(Duration::from_millis(200));
+    // What a UI thread would do to draw a "plugin is running" badge, or `stop_if_idle` on a timer tick.
+    let t0 = Instant::now();
+    let _ = plugin.status();
+    let blocked = t0.elapsed();
+    println!("PH-15: status() returned after {blocked:?} (the plugin's timeout_ms is 1500)");
+    assert!(blocked >= Duration::from_millis(1_000), "{blocked:?}");
+    assert_eq!(worker.join().unwrap(), Err(CallError::Timeout));
+}
+
+// ---- PH-17: an error message that repeats the plugin's file ---------------------------------------
+
+#[test]
+#[ignore = "PoC PH-17: passes while a manifest error echoes the untrusted line, escape codes included"]
+fn ph17_a_manifest_error_repeats_untrusted_input_unbounded_and_unescaped() {
+    // One 60 KB line with a terminal escape sequence in it and a syntax error at its end.
+    let esc = char::from(27);
+    let text = format!("x = {esc}[2J{esc}[31mFAKE OUTPUT {}", "A".repeat(60_000));
+    let e = Manifest::parse(&text).unwrap_err();
+    println!("PH-17: a {} byte manifest gives a {} byte error message", text.len(), e.0.len());
+    // `tsubame-plugc` prints this with eprintln!; the app would show it in a dialog or a log.
+    assert!(e.0.len() > 60_000, "the whole line is repeated");
+    assert!(e.0.contains(esc), "with its control characters");
+}
