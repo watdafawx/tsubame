@@ -7,6 +7,7 @@
 //! | [`caps`] | capabilities and the path rules | app, host |
 //! | [`proto`] | the framed protocol over the host's stdin/stdout | app, host |
 //! | [`client`] | [`client::Plugin`]: lazy start, deadlines, kill on hang, fault limit | app |
+//! | `launcher` (Windows) | `JobLauncher`: job object, cleared environment, refuses an elevated app | app |
 //! | [`adapters`] | entry points as `tsubame-ext-api` providers | app |
 //! | [`cache`] | bounded cache of column values | app |
 //! | [`host`] | wasmtime, limits, the `host` imports, the serve loop (feature `host`) | `tsubame-plughost.exe` |
@@ -19,6 +20,8 @@ pub mod adapters;
 pub mod cache;
 pub mod caps;
 pub mod client;
+#[cfg(windows)]
+pub mod launcher;
 #[cfg(feature = "host")]
 pub mod host;
 pub mod manifest;

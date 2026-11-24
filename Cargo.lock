@@ -1149,6 +1149,7 @@ dependencies = [
  "tsubame-ext-api",
  "wasmtime",
  "wat",
+ "windows",
  "wit-component",
  "wit-parser",
 ]
