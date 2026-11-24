@@ -217,6 +217,8 @@ pub fn init(hwnd: HWND) -> bool {
 pub fn attach(a: &mut App, hwnd: HWND, registered: bool) {
     a.ops.hwnd = hwnd.0 as isize;
     a.ops.registered = registered;
+    ARCHIVE_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
+    crate::archive_ui::set_conflict_asker(ask_extract_conflict);
 }
 
 /// WM_DESTROY: no more drops; pending clipboard data is already flushed.
@@ -279,11 +281,35 @@ pub fn on_ops_timer(hwnd: HWND) {
 
 /// Yes = replace, No = keep both, Cancel = skip; for the rest of the job too.
 fn ask_conflict(hwnd: HWND, target: &Path) -> Choice {
+    ask_conflict_box(hwnd, target, "Yes: replace it (the old one goes to the Recycle Bin)")
+}
+
+/// The window the extract thread's question belongs to (set by `attach`).
+static ARCHIVE_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Extracting from an archive onto an existing file: the same question as a
+/// copy, asked from the extract thread (the UI thread keeps painting). The answer
+/// always applies to the rest of the extraction.
+fn ask_extract_conflict(target: &Path) -> tsubame_core::archive::ConflictAnswer {
+    use tsubame_core::archive::ConflictChoice;
+    let h = HWND(ARCHIVE_HWND.load(std::sync::atomic::Ordering::Relaxed) as *mut _);
+    let c = ask_conflict_box(h, target, "Yes: replace it (overwrites the old one)");
+    (
+        match c {
+            Choice::Replace => ConflictChoice::Replace,
+            Choice::KeepBoth => ConflictChoice::KeepBoth,
+            Choice::Skip => ConflictChoice::Skip,
+        },
+        true,
+    )
+}
+
+fn ask_conflict_box(hwnd: HWND, target: &Path, yes_line: &str) -> Choice {
     let text = format!(
         "\"{}\" already exists in
 {}
 
-Yes: replace it (the old one goes to the Recycle Bin)
+{yes_line}
 No: keep both (the new one gets a number)
 Cancel: skip it
 
@@ -308,6 +334,9 @@ static DELETES: Mutex<Vec<DeleteResult>> = Mutex::new(Vec::new());
 fn start_delete(a: &mut App, paths: Vec<String>, permanent: bool) {
     if paths.is_empty() {
         return;
+    }
+    if paths.iter().any(|p| crate::archive_ui::is_archive_path(p)) {
+        return status(a, crate::archive_ui::READ_ONLY_MSG);
     }
     // Settings > General: with "Delete permanently" chosen, Delete is permanent and Shift+Delete recycles
     let permanent = permanent != !a.view.prefs.general.delete_to_recycle;
@@ -471,6 +500,9 @@ fn copy_files(a: &mut App, paths: Vec<String>, cut: bool) {
     if paths.is_empty() {
         return;
     }
+    if cut && paths.iter().any(|p| crate::archive_ui::is_archive_path(p)) {
+        return status(a, crate::archive_ui::READ_ONLY_MSG);
+    }
     let n = paths.len();
     let msg = format!("{} {n} {} to the clipboard", if cut { "Cut" } else { "Copied" }, plural(n));
     clip(a, ClipJob::SetFiles { paths: paths.into_iter().map(PathBuf::from).collect(), cut }, ClipCtx::Set(msg));
@@ -489,6 +521,9 @@ pub fn path_text(paths: &[String]) -> String {
 }
 
 fn paste(a: &mut App, folder: String) {
+    if crate::archive_ui::is_archive_path(&folder) {
+        return status(a, crate::archive_ui::READ_ONLY_MSG);
+    }
     a.ops.staged += 1;
     let staging = std::env::temp_dir().join("Tsubame").join(format!("paste-{}-{}", std::process::id(), a.ops.staged));
     status(a, "Reading the clipboard...");
@@ -606,10 +641,10 @@ pub fn on_key(hwnd: HWND, vk: u16, m: Mods) -> bool {
         }
         if a.view.tab().is_archive() {
             match act {
-                KeyAct::Delete { .. } => status(a, "Archives are read-only \u{2014} cannot delete inside an archive"),
-                KeyAct::Paste => status(a, "Archives are read-only \u{2014} cannot paste into an archive"),
-                KeyAct::Cut => status(a, "Archives are read-only \u{2014} cannot cut from an archive"),
-                KeyAct::NewFolder => status(a, "Archives are read-only \u{2014} cannot create folders inside an archive"),
+                KeyAct::Delete { .. } => status(a, crate::archive_ui::READ_ONLY_MSG),
+                KeyAct::Paste => status(a, crate::archive_ui::READ_ONLY_MSG),
+                KeyAct::Cut => status(a, crate::archive_ui::READ_ONLY_MSG),
+                KeyAct::NewFolder => status(a, crate::archive_ui::READ_ONLY_MSG),
                 KeyAct::Copy => status(a, "Archives are read-only \u{2014} use 'Extract selected from archive' to extract"),
                 KeyAct::CopyPath => {
                     let t = path_text(&a.view.tab().selected_paths(MAX_ITEMS));
@@ -719,6 +754,9 @@ fn open_properties(paths: Vec<String>) {
 }
 
 fn new_item(a: &mut App, file: bool) {
+    if a.view.tab().is_archive() {
+        return status(a, crate::archive_ui::READ_ONLY_MSG);
+    }
     let Some(folder) = active_folder(a) else { return };
     let t = a.view.tab();
     let mut taken = HashSet::new();
@@ -930,7 +968,7 @@ fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_
     if crate::archive_ui::is_archive_path(&t.folder)
         && matches!(act, "file.cut" | "file.delete" | "file.rename" | "file.paste" | "x.new-folder" | "x.new-file")
     {
-        status(a, "Archives are read-only \u{2014} extract first");
+        status(a, crate::archive_ui::READ_ONLY_MSG);
         return;
     }
     if matches!(act, "file.cut" | "file.delete" | "file.rename") && paths.iter().any(|p| crate::ctxui::is_root(p)) {
@@ -1155,13 +1193,23 @@ impl DropEvents for Drops {
                 with(|a| drop_into(a, &info.paths, folder, e, rejected));
                 e
             }
-            _ => EFFECT_NONE,
+            _ => {
+                with(|a| {
+                    if std::mem::take(&mut a.view.drop_read_only) {
+                        status(a, crate::archive_ui::READ_ONLY_MSG);
+                    }
+                });
+                EFFECT_NONE
+            }
         }
     }
 }
 
 /// A drop (or paste) of `paths` into `folder` with effect `e`.
 fn drop_into(a: &mut App, paths: &[PathBuf], folder: String, e: u32, rejected: usize) {
+    if crate::archive_ui::is_archive_path(&folder) {
+        return status(a, crate::archive_ui::READ_ONLY_MSG);
+    }
     if e == EFFECT_LINK {
         clip(a, ClipJob::Links { targets: paths.to_vec(), folder: PathBuf::from(&folder) }, ClipCtx::Links { folder });
         return;
