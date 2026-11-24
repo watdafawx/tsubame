@@ -284,6 +284,7 @@ impl View {
     fn toggle_palette(&mut self, ui: &mut Ui) {
         if self.palette.take().is_some() {
             ui.capture_keys = false;
+            self.refocus_list_after_overlay(ui);
             return;
         }
         let data = self.palette_data();
@@ -345,6 +346,24 @@ impl View {
             self.palette = Some(p);
         } else {
             ui.capture_keys = false;
+            self.refocus_list_after_overlay(ui);
+        }
+    }
+
+    /// An overlay closed: hand the keyboard back to the list (Alt+Enter, Ctrl+C ...),
+    /// unless the command it ran put the focus in a field of its own.
+    pub(super) fn refocus_list_after_overlay(&mut self, ui: &Ui) {
+        let in_field = self.editing
+            || self.rename.is_some()
+            || self.batch.is_some()
+            || self.search.is_some()
+            || self.palette.is_some()
+            || self.ctx.is_some()
+            || self.tab().settings
+            || ui.has_focus(pid(self.live, ID_FILTER))
+            || ui.has_focus(pid(self.live, ID_PATH_EDIT));
+        if !in_field {
+            self.focus_list = true;
         }
     }
 
