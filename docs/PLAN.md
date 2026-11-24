@@ -172,7 +172,7 @@ Each one gets a mock first where it has UI.
 |---|---|---|
 | F1 | Global search: MFT/USN index (admin) with a plain parallel walk fallback; separately, an Everything IPC search provider | Done (built-in extension `tsubame.ext.global_search`, `src/search_ui.rs`) |
 | F2 | Preview pane: image, text/code, media info, hex; Quick Look on Space | Done (built-in extension `tsubame.ext.preview`, `src/preview_ui.rs`, `docs/preview-mock.md`) |
-| F3 | Archive VFS (zip, 7z, tar) browse and extract | Done (built-in extension `tsubame.vfs.archive`, `src/archive_ui.rs`) |
+| F3 | Archive VFS (zip, 7z, tar) browse and extract | Done (built-in extension `tsubame.vfs.archive`, `src/archive_ui.rs`). Follow-up accepted 2026-11-24: status-bar message for blocked actions, overwrite prompt (skip, replace, rename) |
 | F4 | Batch rename with live preview | Done in U3 as a built-in; not yet on the extension registry |
 | F5 | Folder sizes column (background, cached), git status column, checksum command | Done (built-in extensions `tsubame.ext.folder_sizes`, `tsubame.ext.checksum`, `tsubame.column.git`; `crates/tsubame-win/src/meta/`) |
 | F6 | Miller columns view, tree view, tags and colours, file-age colouring | Not done |
@@ -183,7 +183,7 @@ Each one gets a mock first where it has UI.
 |---|---|---|
 | P1 | WIT interface from `tsubame-ext-api`, capability manifest, `tsubame-plughost` lifecycle (lazy start, kill on hang), IPC | Done (`docs/wasm-plugins.md`) |
 | P2 | Guest SDK crate, two sample plugins (a column, a previewer), plugin author docs | Not done (no SDK crate or author guide yet; `plugins/sample-column` is a working guest to copy) |
-| P3 | Security review of P1 | Not done |
+| P3 | Security review of P1; set a `tsubame-plughost.exe` size budget (suggest < 12 MB) and explain the old 1.00 MB figure | Not done (accepted 2026-11-24) |
 
 ### P6. Ship
 
@@ -194,6 +194,9 @@ Each one gets a mock first where it has UI.
 | Set as default file manager, opt-in and fail-safe (`docs/default-file-manager.md`) | Done |
 | Shell helper process, only if the leak gate shows shell extensions leaking | Not done |
 | Decide on a second `Canvas` backend for Linux/macOS | Not done |
+| Release gate: scripted rig QA checklist (preview, Quick Look, search, archive, columns, mouse, context menu, idle CPU) run before every tag | Not done (accepted 2026-11-24) |
+| Release gate: short manual real-mouse list in `docs/release.md` for input that synthetic tests cannot cover (Back/Forward buttons) | Not done (accepted 2026-11-24) |
+| Release gate: Defender and SmartScreen smoke test on a clean VM for each unsigned release | Not done (accepted 2026-11-24) |
 
 ## 8. Open decisions (defaults apply if nobody answers)
 
@@ -215,7 +218,7 @@ Kept current as work lands: every measurement surprise, QA finding or improvemen
 | 2026-11-24 | List keyboard focus is lost after inline-rename Esc and after the command palette closes (`Ctrl+Shift+F`, `Alt+Enter` stop working until a row is clicked). | Fix in progress |
 | 2026-11-24 | First breadcrumb click out of an archive was swallowed once. | Fix in progress (cause unknown) |
 | 2026-11-24 | `archive.extract_here`, `archive.extract_selected`, `file.checksum`, `folder.calc_sizes` have no default key binding. | Fix in progress |
-| 2026-11-24 | Delete and rename inside an archive are blocked silently; extract overwrites existing files without asking. | *Proposed:* status-bar message for blocked actions, overwrite prompt (skip, replace, rename) |
+| 2026-11-24 | Delete and rename inside an archive are blocked silently; extract overwrites existing files without asking. | Accepted: tracked under P4.F3 follow-up |
 | 2026-11-24 | Mouse Back/Forward buttons passed only 1 of 7 synthetic-input tries. Source handles them; `Alt+Left/Right` work. | Needs one check on a real mouse |
 | 2026-11-24 | Preview pane default shows 564 px wide at 200% scale (config default is 320 DIP, so about 640 px). | Check the DIP to px conversion |
 
