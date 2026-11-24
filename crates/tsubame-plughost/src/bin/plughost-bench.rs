@@ -2,10 +2,14 @@
 //!
 //!   plughost-bench run <host.exe> <plugin folder> <file.cwasm> [--runs N] [--paths N]
 //!       start-up time, batch round trips on the plugin's first column, clean shutdown
-//!   plughost-bench mock hang|silent|exit
+//!   plughost-bench mock hang|silent|exit|spawn|env
 //!       stands in for the host in the tests: says hello and accepts the load, then
 //!       never answers a call (`hang`) or exits on the first call (`exit`); `silent`
-//!       says nothing at all
+//!       says nothing at all; `spawn` and `env` print one line about what the process
+//!       could do or was given (containment probes), then idle
+//!   plughost-bench owner <host.exe> <work dir>
+//!       owner-death probe: starts `<host.exe> mock hang` in a `JobLauncher`, prints its pid,
+//!       then idles until killed
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -76,6 +80,29 @@ fn run(host: &str, plugin_dir: &str, cwasm: &str, runs: usize, n_paths: usize) -
 
 fn mock(mode: &str) -> io::Result<()> {
     let (mut input, mut output) = (io::stdin().lock(), io::stdout().lock());
+    if mode == "spawn" {
+        // Containment probe: try to start a child, report the outcome as one line, then idle.
+        let r = std::process::Command::new(std::env::current_exe()?).arg("mock").arg("silent").spawn();
+        let line = match r {
+            Ok(mut c) => {
+                let _ = c.kill();
+                "spawn-ok".to_string()
+            }
+            Err(e) => format!("spawn-err {e}"),
+        };
+        writeln!(output, "{line}")?;
+        output.flush()?;
+        std::thread::sleep(Duration::from_secs(600));
+        return Ok(());
+    }
+    if mode == "env" {
+        // Containment probe: the environment and folder the host was started with.
+        let vars: Vec<String> = std::env::vars().map(|(k, _)| k.to_ascii_uppercase()).collect();
+        writeln!(output, "env {} cwd {}", vars.join(","), std::env::current_dir()?.display())?;
+        output.flush()?;
+        std::thread::sleep(Duration::from_secs(600));
+        return Ok(());
+    }
     if mode == "silent" {
         std::thread::sleep(Duration::from_secs(600));
         return Ok(());
@@ -97,13 +124,29 @@ fn mock(mode: &str) -> io::Result<()> {
     output.flush()
 }
 
+/// Owner-death probe for the tests: start a mock host in a `JobLauncher`, print its pid, idle.
+/// The test kills this process and checks that the host is gone with it.
+#[cfg(windows)]
+fn owner(host: &str, dir: &str) -> io::Result<()> {
+    let launcher = tsubame_plughost::launcher::JobLauncher::new(host, dir, 64)?
+        .with_elevation_check(|| false)
+        .with_args(vec!["mock".into(), "hang".into()]);
+    let (_io, pid) = launcher.launch_with_pid()?;
+    println!("{pid}");
+    io::stdout().flush()?;
+    std::thread::sleep(Duration::from_secs(600));
+    Ok(())
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let num = |flag: &str, default: usize| a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(default);
     let result = match (a.get(1).map(String::as_str), a.get(2), a.get(3), a.get(4)) {
         (Some("run"), Some(host), Some(dir), Some(cwasm)) => run(host, dir, cwasm, num("--runs", 300), num("--paths", 100)),
         (Some("mock"), Some(mode), _, _) => mock(mode).map_err(|e| e.to_string()),
-        _ => Err("usage: plughost-bench run <host.exe> <plugin folder> <file.cwasm> [--runs N] [--paths N] | mock hang|silent|exit".into()),
+        #[cfg(windows)]
+        (Some("owner"), Some(host), Some(dir), _) => owner(host, dir).map_err(|e| e.to_string()),
+        _ => Err("usage: plughost-bench run <host.exe> <plugin folder> <file.cwasm> [--runs N] [--paths N] | mock hang|silent|exit|spawn|env | owner <host.exe> <work dir>".into()),
     };
     if let Err(e) = result {
         eprintln!("plughost-bench: {e}");

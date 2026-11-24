@@ -1011,3 +1011,22 @@ fn ph06_a_hard_link_reads_and_overwrites_a_file_outside_the_grant() {
     assert_eq!(column(&p, "write", &[&alias]).unwrap(), [Cell::Int(0)]);
     assert_eq!(std::fs::read_to_string(&secret).unwrap(), "hi", "the file outside the grant was replaced");
 }
+
+// ---- the app's launcher (PH-07, tier 1) ---------------------------------------------------------
+
+/// The real host, started the way the app starts it: in a job, with a cleared environment.
+#[cfg(windows)]
+#[test]
+fn the_real_host_runs_inside_the_job_launcher() {
+    use tsubame_plughost::launcher::JobLauncher;
+    let t = Temp::new("job-launcher");
+    let caps = Capabilities { max_memory_mb: 8, ..Capabilities::default() };
+    let launcher = JobLauncher::new(HOST_EXE, &t.0, caps.max_memory_mb).unwrap().with_elevation_check(|| false);
+    let p = Plugin::new(load_for(&t, full_cwasm(), caps, true), launcher, options());
+    assert_eq!(column(&p, "echo", &[r"C:\a"]).unwrap(), [Cell::Text(r"C:\a".into())]);
+    // The plugin's own cap trips before the job's limit (cap + overhead) does.
+    assert_eq!(column(&p, "grow", &[r"C:\a"]), Err(CallError::Memory));
+    assert_eq!(column(&p, "echo", &[r"C:\b"]).unwrap().len(), 1);
+    assert_eq!(p.stats().kills, 0);
+    p.shutdown();
+}

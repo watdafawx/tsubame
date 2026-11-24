@@ -49,12 +49,18 @@ pub trait HostProcess: Send {
     fn wait(&mut self, timeout: Duration) -> bool;
 }
 
-/// Starts hosts. The app uses [`ProcessLauncher`]; tests plug in their own.
+/// Starts hosts. The app uses `crate::launcher::JobLauncher` (job object, cleared
+/// environment, refuses an elevated app); tests use [`ProcessLauncher`] or their own.
 pub trait Launcher: Send + Sync {
     fn launch(&self) -> io::Result<HostIo>;
 }
 
 /// Starts `tsubame-plughost.exe` with piped stdin and stdout and no window.
+///
+/// **Test-only.** It applies no containment at all: the host gets the app's whole
+/// environment, current folder and inheritable handles, and nothing limits its
+/// processes or memory or ends it when the app dies (PH-07). The app must use
+/// `crate::launcher::JobLauncher`.
 pub struct ProcessLauncher {
     pub exe: PathBuf,
     pub args: Vec<OsString>,

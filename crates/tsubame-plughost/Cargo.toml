@@ -61,3 +61,13 @@ wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime
 wat = "=1.261.0"
 wit-component = "0.261"
 wit-parser = "0.261"
+
+# The Windows launcher (`client::JobLauncher`): job object, token elevation check.
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+]

@@ -24,6 +24,7 @@ author guide (`docs/plugin-authoring.md`) are P5.P2 and are done;
 | Capabilities and path rules | `src/caps.rs` | app, host |
 | Protocol | `src/proto.rs` | app, host |
 | Supervisor client (`Plugin`) | `src/client.rs` | app |
+| Host containment: `JobLauncher` (Windows) | `src/launcher.rs` | app |
 | Entry points as `tsubame-ext-api` providers | `src/adapters.rs`, `src/cache.rs` | app |
 | Host: wasmtime, limits, imports, serve loop | `src/host.rs`, `src/main.rs` | `tsubame-plughost.exe` |
 | Install step | `src/host.rs` (`install`), `src/bin/tsubame-plugc.rs` | `tsubame-plugc.exe` |
@@ -374,6 +375,32 @@ Rules:
 - `PROTOCOL VERSION` (`proto::VERSION`, now 1) changes with any change to this
   table. App and host ship together, so there is no negotiation.
 
+## Containment: `JobLauncher` (PH-07, tier 1)
+
+The app starts hosts with `launcher::JobLauncher` (Windows only). It is the
+only launcher meant for shipped code. `client::ProcessLauncher` applies none of
+the below and is **test-only**: the host would get the app's whole environment,
+working folder and inheritable handles, and survive the app.
+
+| Measure | What it gives |
+|---|---|
+| Job object per host, `KILL_ON_JOB_CLOSE` | the host dies with the app, even when the app is killed; a host stuck in a slow share read can not outlive it |
+| `ActiveProcessLimit = 1` | the host can not start a child process |
+| Process memory limit = `max_memory_mb` + 192 MiB (`HOST_OVERHEAD_MB`) | backstop for what the wasm limiter does not count (PH-08); the plugin's own cap trips first |
+| UI restrictions | no desktop switching, display settings, `ExitWindows`, global atoms, system parameters, clipboard, or USER handles of other processes |
+| Assigned to the job before `launch` returns | before the client sends `Load`, so before any plugin code ran; if the assignment fails the host is killed and the start fails |
+| Cleared environment (only `SystemRoot`), fixed working folder, absolute exe path | no tokens in variables, no dependence on the app's current folder or `PATH` |
+| Refuses to start when the app is elevated | `io::ErrorKind::PermissionDenied`, no process is created. A host must never run with an administrator token. The check is `launcher::is_elevated` (fails closed); tests inject their own with `with_elevation_check` |
+
+```rust
+let launcher = JobLauncher::new(host_exe_abs, work_dir_abs, caps.max_memory_mb)?;
+```
+
+Not covered yet (tier 2/3, `docs/security/plughost-review.md` card L): restricted
+token or low integrity, AppContainer, an explicit inheritable-handle list (the
+standard library spawns with `bInheritHandles = TRUE`), process mitigation
+policies.
+
 ## Using it from the app (not wired yet)
 
 ```rust
@@ -381,7 +408,8 @@ let manifest = Manifest::load(&plugin_dir)?;
 let caps = manifest.capabilities(plugin_dir_str, data_dir_str)?;
 // cwasm and sha256 come from the install step's record
 let load = Load::new(&manifest, &cwasm, sha256, caps);
-let plugin = Arc::new(Plugin::new(load, ProcessLauncher::new(host_exe), Options::default()));
+let launcher = JobLauncher::new(host_exe, work_dir, caps.max_memory_mb)?;   // not ProcessLauncher: that is test-only
+let plugin = Arc::new(Plugin::new(load, launcher, Options::default()));
 adapters::contribute(&manifest, &plugin, contributions);   // inside Extension::contribute
 ```
 
@@ -424,6 +452,7 @@ has not been measured again.
 | Client against an in-memory host: lazy start, chunks, kill on hang, late reply, crash, fault limit, bad hello, wrong id, paging, threads | `client.rs` (15) |
 | Cache caps and eviction | `cache.rs` (4) |
 | SHA-256 vectors | `sha256.rs` (2) |
+| `JobLauncher`: elevated app refused, relative paths refused, job limits applied and queried back, host in the job when `launch` returns, owner killed (`TerminateProcess`) takes the host with it, a host that tries to start a child fails (and succeeds under `ProcessLauncher`), cleared environment and fixed folder, the real host under the job | `launcher.rs` (5), `tests/launcher.rs` (4), `tests/host.rs` |
 | Real host exe: round trip, 5,001 paths in 3 calls, epoch interrupt, kill of a hung process, memory cap, traps, hash and identity checks, partial exports, file grants, junction, every entry point through the adapters, exe size | `tests/host.rs` (19) |
 
 The end-to-end guest is WebAssembly text in the test file, turned into a
