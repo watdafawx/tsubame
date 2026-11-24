@@ -18,6 +18,7 @@ pub mod bitmap;
 pub mod defaultfm;
 pub mod dnd;
 pub mod enumerate;
+pub mod lagtrace;
 pub mod meta;
 pub mod places;
 pub mod preview;

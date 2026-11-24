@@ -170,9 +170,16 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
     if opts.debug_delay_ms > 0 {
         unsafe { Sleep(opts.debug_delay_ms) };
     }
-    let built = match build(host, paths, opts) {
+    let t_total = Instant::now();
+    let trace = crate::lagtrace::on();
+    let built = match build(host, paths, opts, generation, trace) {
         Ok(b) => b,
-        Err(e) => return batch(Part::Failed(e), [0; 3]),
+        Err(e) => {
+            if trace {
+                crate::lagtrace::record("ctx.worker.failed", Some(t_total.elapsed().as_secs_f64() * 1000.0), format_args!("gen={generation} err={e}"), true);
+            }
+            return batch(Part::Failed(e), [0; 3]);
+        }
     };
     let Built { cm, hmenu, host, pidls, bind_us, query_us } = built;
     menu::set_handlers(Some(&cm));
@@ -181,6 +188,9 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
     let mut ctx = Walk { cm: &cm, host, icon_px: opts.icon_px.clamp(8, 64), drawn: 0, subs: Vec::new() };
     let top = ctx.level(hmenu, false, 0);
     let walk_us = t.elapsed().as_micros() as u64;
+    if trace {
+        crate::lagtrace::record("ctx.worker.walk_top", Some(walk_us as f64 / 1000.0), format_args!("gen={generation} items={} ownerdraw_drawn={}", top.len(), ctx.drawn), false);
+    }
     let timing = [bind_us, query_us, walk_us];
     // false: the pool gave this worker up while it built; release at once
     let mut alive = emit(batch(Part::Native(build_native(&top, &mut icons)), timing));
@@ -210,8 +220,11 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
             let classes: Vec<(packaged::ItemClass, String)> = if opts.background { vec![(packaged::ItemClass::Background, String::new())] } else { paths.iter().map(|p| packaged::class_of(p)).collect() };
             // a CLSID the classic menu already lists as a verb is not made again
             let skip: Vec<String> = top.iter().filter_map(|r| r.verb.as_deref()).filter(|v| v.starts_with('{')).map(packaged::norm_clsid).collect();
-            let raw = s.top(&classes, &skip);
+            let raw = s.top(&classes, &skip, generation);
             let us = t.elapsed().as_micros() as u64;
+            if trace {
+                crate::lagtrace::record("ctx.worker.pkg_total", Some(us as f64 / 1000.0), format_args!("gen={generation} rows={} skipped={}", raw.len(), s.skipped), false);
+            }
             if !raw.is_empty() {
                 let before = icons.len();
                 let items = build_native(&raw, &mut icons);
@@ -228,6 +241,9 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
     // Free PIDLs before waiting for the user's pick.
     drop(pidls);
     if alive {
+        if trace {
+            crate::lagtrace::record("ctx.worker.complete", Some(t_total.elapsed().as_secs_f64() * 1000.0), format_args!("gen={generation}"), true);
+        }
         // every row is in: the UI ends its loading line
         emit(batch(Part::Complete, timing));
     }
@@ -360,7 +376,7 @@ pub fn query_flags(opts: &CtxOpts) -> u32 {
     f
 }
 
-fn build(host: Option<HWND>, paths: &[String], opts: &CtxOpts) -> Result<Built, String> {
+fn build(host: Option<HWND>, paths: &[String], opts: &CtxOpts, generation: u64, trace: bool) -> Result<Built, String> {
     let host = host.ok_or("no host window")?;
     if paths.is_empty() {
         return Err("no paths".into());
@@ -370,12 +386,25 @@ fn build(host: Option<HWND>, paths: &[String], opts: &CtxOpts) -> Result<Built, 
     }
     let t = Instant::now();
     let pidls = parse(paths)?;
+    let parse_us = t.elapsed().as_micros() as u64;
+    if trace {
+        crate::lagtrace::record("ctx.worker.parse_pidls", Some(parse_us as f64 / 1000.0), format_args!("gen={generation} paths={}", paths.len()), false);
+    }
+    let t_bind = Instant::now();
     let cm = if opts.background { menu::background_menu(pidls.0[0], host) } else { menu::item_menu(&pidls, host) }?;
+    let bind_only_us = t_bind.elapsed().as_micros() as u64;
     let bind_us = t.elapsed().as_micros() as u64;
+    if trace {
+        crate::lagtrace::record("ctx.worker.bind", Some(bind_only_us as f64 / 1000.0), format_args!("gen={generation} bg={}", opts.background), false);
+    }
     let hmenu = unsafe { CreatePopupMenu() }.map_err(|e| format!("CreatePopupMenu {:?}", e.code()))?;
     let t = Instant::now();
     let hr = unsafe { cm.QueryContextMenu(hmenu, 0, ID_FIRST, ID_LAST, query_flags(opts)) };
     let query_us = t.elapsed().as_micros() as u64;
+    if trace {
+        let items = if hr.is_ok() { unsafe { GetMenuItemCount(Some(hmenu)) } } else { -1 };
+        crate::lagtrace::record("ctx.worker.query_ctx_menu", Some(query_us as f64 / 1000.0), format_args!("gen={generation} items={items} ok={}", hr.is_ok()), false);
+    }
     if hr.is_err() {
         unsafe {
             let _ = DestroyMenu(hmenu);

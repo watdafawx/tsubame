@@ -554,7 +554,10 @@ impl FolderSizeWorker {
 
     /// Cancel everything, join the threads and drop the receiver.
     pub fn shutdown(mut self) {
-        self.stop();
+        self.signal_stop();
+        for handle in self.threads.drain(..) {
+            let _ = handle.join();
+        }
     }
 
     fn token_for(&self, generation: u64) -> Arc<AtomicBool> {
@@ -570,7 +573,7 @@ impl FolderSizeWorker {
         token
     }
 
-    fn stop(&mut self) {
+    fn signal_stop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
         for (_, token) in lock(&self.shared.tokens).drain(..) {
             token.store(true, Ordering::Release);
@@ -582,15 +585,14 @@ impl FolderSizeWorker {
             }
         }
         self.shared.cv.notify_all();
-        for handle in self.threads.drain(..) {
-            let _ = handle.join();
-        }
     }
 }
 
 impl Drop for FolderSizeWorker {
     fn drop(&mut self) {
-        self.stop();
+        // Cancel and detach: never stall the UI thread or window teardown on a
+        // deep directory walk.
+        self.signal_stop();
     }
 }
 

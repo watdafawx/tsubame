@@ -11,11 +11,13 @@
 //! `IsClipboardFormatAvailable`, everything else is data.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tsubame_config::ContextMenu;
 use tsubame_config::menu::{self, MenuEntry, Target as Kind};
 use tsubame_ui::widgets::menu::{A11yReq, A11ySnap, EDIT_DELETE, EDIT_DOWN, EDIT_ENTRY, EDIT_GROUP, EDIT_GROUP_BASE, EDIT_GROUP_NATIVE, EDIT_GROUP_NEW, EDIT_HIDE, EDIT_PIN, EDIT_SETTINGS, EDIT_UP, SubLoad, menu as draw_menu};
 use tsubame_ui::{Canvas, Id, MenuRow, MenuSource, MenuState, MenuStyle, Pt, Rect, RowIcon, RowKind, Theme, Ui};
+use tsubame_win::lagtrace;
 use tsubame_win::shell::ctxmodel::{self, IconCache, ItemKind, ItemSource, LoadState, MenuBatch, MenuItem, MenuModel, Part, Route, SubLoads, SubState, flag};
 use tsubame_win::shell::{CtxHandle, CtxOpts, Pool, Request};
 use tsubame_win::uia;
@@ -42,10 +44,19 @@ thread_local! {
     static NEXT_GEN: Cell<u64> = const { Cell::new(1) };
 }
 
+/// Set once any shell context menu has loaded in this process. On the very
+/// first (cold) open, shell extension DLL loading routinely takes hundreds of
+/// ms, so holding the popup invisible for the 60 ms grace window only adds
+/// dead input lag before showing Tsubame's own rows.
+static SHELL_WARMED: AtomicBool = AtomicBool::new(false);
+
 /// The right button went down / the menu key was pressed: the menu's
 /// "input to first paint" clock starts here.
 pub fn note_input() {
     INPUT_AT.with(|c| c.set(Some(Instant::now())));
+    if lagtrace::on() {
+        lagtrace::record("ctx.input", None, format_args!("cold={}", !SHELL_WARMED.load(Ordering::Relaxed)), false);
+    }
 }
 
 fn take_input() -> Instant {
@@ -64,10 +75,18 @@ fn env_u32(name: &str) -> u32 {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
 }
 
-/// Reveal grace duration (`TSUBAME_CTX_GRACE_MS`, default [`REVEAL_GRACE_MS`];
-/// `0` reveals immediately with the loading line).
-pub fn grace_duration() -> Duration {
-    let ms = std::env::var("TSUBAME_CTX_GRACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(REVEAL_GRACE_MS).min(2000);
+/// Reveal grace for a cold (`!SHELL_WARMED`) vs warm menu. An explicit
+/// `TSUBAME_CTX_GRACE_MS` always wins; otherwise cold first opens reveal
+/// immediately (0 ms) so Tsubame's own rows appear on the next frame instead
+/// of sitting blank for 60 ms while shell DLLs load.
+pub fn grace_for(cold: bool) -> Duration {
+    let env_ms = std::env::var("TSUBAME_CTX_GRACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok());
+    let ms = match env_ms {
+        Some(v) => v,
+        None if cold => 0,
+        None => REVEAL_GRACE_MS,
+    }
+    .min(2000);
     Duration::from_millis(ms)
 }
 
@@ -402,11 +421,16 @@ pub fn clipboard_has_files() -> bool {
 impl CtxMenu {
     /// Builds the menu (own rows now) and asks a worker for the shell's.
     pub fn open(target: Target, menu: ContextMenu, dual: bool, paste_ok: bool, icon_px: u32, pool: &mut Pool) -> CtxMenu {
+        let trace = lagtrace::on();
+        let t_prep = trace.then(Instant::now);
         let (tsubame, user) = own_parts(&target, &menu.entries, dual);
         let generation = next_gen();
         let state = MenuState::new(target.anchor, target.keyboard);
         let tag_new = !menu.items.is_empty();
-        let grace = grace_duration();
+        let cold = !SHELL_WARMED.load(Ordering::Relaxed);
+        let grace = grace_for(cold);
+        let paths_n = target.paths.len();
+        let bg = target.background;
         let mut m = CtxMenu {
             generation,
             tag_new,
@@ -448,6 +472,14 @@ impl CtxMenu {
         };
         m.learn_from(&m.model.tsubame.clone());
         m.submit(pool);
+        if let Some(t) = t_prep {
+            let since_input = m.input_at.elapsed().as_secs_f64() * 1000.0;
+            lagtrace::record("ctx.open", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!("gen={generation} cold={cold} grace_ms={} paths={paths_n} bg={bg} since_input_ms={since_input:.3}", grace.as_millis()), false);
+            if m.revealed {
+                let reason = if cold { "cold_immediate" } else { "zero_grace" };
+                lagtrace::record("ctx.ui.reveal", Some(since_input), format_args!("gen={generation} reason={reason}"), false);
+            }
+        }
         m
     }
 
@@ -649,8 +681,28 @@ impl CtxMenu {
                 let complete = matches!(part, Part::Complete);
                 let native = matches!(part, Part::Native(_));
                 let packaged = matches!(part, Part::Packaged(_));
+                let failed_now = matches!(part, Part::Failed(_));
+                if native || complete {
+                    SHELL_WARMED.store(true, Ordering::Relaxed);
+                }
                 if complete {
-                    self.revealed = true;
+                    let was = std::mem::replace(&mut self.revealed, true);
+                    if !was && lagtrace::on() {
+                        lagtrace::record("ctx.ui.reveal", Some(self.input_at.elapsed().as_secs_f64() * 1000.0), format_args!("gen={} reason=complete since_open_ms={:.3}", self.generation, self.asked_at.elapsed().as_secs_f64() * 1000.0), false);
+                    }
+                }
+                if lagtrace::on() {
+                    let pname = match &part {
+                        Part::Native(_) => "native",
+                        Part::Icons(_) => "icons",
+                        Part::Packaged(_) => "packaged",
+                        Part::Submenu { .. } => "submenu",
+                        Part::Complete => "complete",
+                        Part::Failed(_) => "failed",
+                        _ => "other",
+                    };
+                    let since_input = self.input_at.elapsed().as_secs_f64() * 1000.0;
+                    lagtrace::record("ctx.ui.batch", None, format_args!("gen={} part={pname} since_input_ms={since_input:.3} revealed={}", self.generation, self.is_revealed()), failed_now);
                 }
                 self.model.apply(MenuBatch { part, ..b });
                 self.dirty = true;
@@ -789,7 +841,17 @@ impl CtxMenu {
         if !self.open || !self.is_revealed() {
             return;
         }
-        self.revealed = true;
+        let was_revealed = std::mem::replace(&mut self.revealed, true);
+        if !was_revealed && lagtrace::on() {
+            let reason = if self.model.error.is_some() || self.shown() == LoadState::Failed {
+                "failed"
+            } else if self.model.complete {
+                "complete"
+            } else {
+                "grace_expired"
+            };
+            lagtrace::record("ctx.ui.reveal", Some(self.input_at.elapsed().as_secs_f64() * 1000.0), format_args!("gen={} reason={reason} since_open_ms={:.3}", self.generation, self.asked_at.elapsed().as_secs_f64() * 1000.0), false);
+        }
         if self.dirty {
             self.items = self.model.rows(&self.menu);
             self.dirty = false;
@@ -891,12 +953,27 @@ impl CtxMenu {
     /// Called after Canvas::end, so timings include submitting the frame.
     pub fn presented(&mut self) {
         if !self.open || !self.revealed { return; }
-        self.first_paint.get_or_insert_with(|| self.input_at.elapsed());
-        if self.model.state == LoadState::Ready {
-            self.top_items.get_or_insert_with(|| self.input_at.elapsed());
+        let trace = lagtrace::on();
+        if self.first_paint.is_none() {
+            let d = self.input_at.elapsed();
+            self.first_paint = Some(d);
+            if trace {
+                lagtrace::record("ctx.ui.first_paint", Some(d.as_secs_f64() * 1000.0), format_args!("gen={} rows={} complete={} loading={}", self.generation, self.items.len(), self.model.complete, self.loading()), false);
+            }
         }
-        if self.model.complete && self.model.error.is_none() {
-            self.all_items.get_or_insert_with(|| self.input_at.elapsed());
+        if self.model.state == LoadState::Ready && self.top_items.is_none() {
+            let d = self.input_at.elapsed();
+            self.top_items = Some(d);
+            if trace {
+                lagtrace::record("ctx.ui.top_items_paint", Some(d.as_secs_f64() * 1000.0), format_args!("gen={} rows={}", self.generation, self.items.len()), false);
+            }
+        }
+        if self.model.complete && self.model.error.is_none() && self.all_items.is_none() {
+            let d = self.input_at.elapsed();
+            self.all_items = Some(d);
+            if trace {
+                lagtrace::record("ctx.ui.all_items_paint", Some(d.as_secs_f64() * 1000.0), format_args!("gen={} rows={}", self.generation, self.items.len()), true);
+            }
         }
     }
 
@@ -1883,5 +1960,13 @@ mod tests {
         assert!(c.is_revealed());
         assert!(c.loading());
         assert_eq!(c.next_tick_ms(), Some(TICK_MS));
+    }
+
+    #[test]
+    fn cold_first_menu_uses_zero_grace_and_warm_uses_reveal_grace() {
+        if std::env::var_os("TSUBAME_CTX_GRACE_MS").is_none() {
+            assert_eq!(grace_for(true), Duration::ZERO);
+            assert_eq!(grace_for(false), Duration::from_millis(REVEAL_GRACE_MS));
+        }
     }
 }

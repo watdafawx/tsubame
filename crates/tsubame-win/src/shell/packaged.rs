@@ -18,9 +18,9 @@
 
 use super::ctxmodel::RawItem;
 use crate::bitmap;
+use crate::lagtrace;
 use crate::wide;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Command ids of packaged items: never inside the HMENU's `ID_FIRST..=ID_LAST`
@@ -236,22 +236,50 @@ fn scan() -> Vec<Handler> {
     out
 }
 
+struct CacheSlot {
+    data: Option<(Instant, Arc<Vec<Handler>>)>,
+    refreshing: bool,
+    scanning: bool,
+    wake_now: bool,
+}
+
 struct CacheState {
-    slot: Mutex<Option<(Instant, Arc<Vec<Handler>>)>>,
-    refreshing: AtomicBool,
+    slot: Mutex<CacheSlot>,
+    cv: Condvar,
 }
 
 impl CacheState {
     fn new() -> Arc<Self> {
-        Arc::new(CacheState { slot: Mutex::new(None), refreshing: AtomicBool::new(false) })
+        Arc::new(CacheState {
+            slot: Mutex::new(CacheSlot { data: None, refreshing: false, scanning: false, wake_now: false }),
+            cv: Condvar::new(),
+        })
     }
 }
 
-struct RefreshGuard(Arc<CacheState>);
+struct RefreshGuard {
+    cache: Arc<CacheState>,
+    owns_scan: bool,
+}
 
 impl Drop for RefreshGuard {
     fn drop(&mut self) {
-        self.0.refreshing.store(false, Ordering::Release);
+        let mut g = self.cache.slot.lock().unwrap_or_else(|e| e.into_inner());
+        g.refreshing = false;
+        if self.owns_scan {
+            g.scanning = false;
+        }
+        self.cache.cv.notify_all();
+    }
+}
+
+struct ScanOnlyGuard(Arc<CacheState>);
+
+impl Drop for ScanOnlyGuard {
+    fn drop(&mut self) {
+        let mut g = self.0.slot.lock().unwrap_or_else(|e| e.into_inner());
+        g.scanning = false;
+        self.0.cv.notify_all();
     }
 }
 
@@ -264,29 +292,67 @@ fn spawn_refresh<F>(cache: Arc<CacheState>, delay: Duration, ttl: Duration, scan
 where
     F: FnOnce() -> Vec<Handler> + Send + 'static,
 {
-    if cache.refreshing.swap(true, Ordering::AcqRel) {
-        return false;
+    {
+        let mut g = cache.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if g.refreshing {
+            return false;
+        }
+        g.refreshing = true;
+        g.wake_now = false;
     }
     let bg = cache.clone();
     let res = std::thread::Builder::new().name("tsubame-pkg-scan".into()).spawn(move || {
-        let _guard = RefreshGuard(bg.clone());
+        let mut guard = RefreshGuard { cache: bg.clone(), owns_scan: false };
         unsafe {
             let _ = windows::Win32::System::Threading::SetThreadPriority(
                 windows::Win32::System::Threading::GetCurrentThread(),
                 windows::Win32::System::Threading::THREAD_PRIORITY_BELOW_NORMAL,
             );
         }
-        if !delay.is_zero() {
-            std::thread::sleep(delay);
-            if bg.slot.lock().unwrap().as_ref().is_some_and(|(at, _)| at.elapsed() < ttl) {
+        if lagtrace::on() {
+            lagtrace::record("pkg.prewarm.start", None, format_args!("delay_ms={}", delay.as_millis()), false);
+        }
+        {
+            let mut g = bg.slot.lock().unwrap_or_else(|e| e.into_inner());
+            if !delay.is_zero() {
+                let deadline = Instant::now() + delay;
+                while !g.wake_now && g.data.is_none() {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    let (next, res) = bg.cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner());
+                    g = next;
+                    if res.timed_out() {
+                        break;
+                    }
+                }
+            }
+            if g.data.as_ref().is_some_and(|(at, _)| at.elapsed() < ttl) || g.scanning {
                 return;
             }
+            g.scanning = true;
+            guard.owns_scan = true;
         }
+        let t = Instant::now();
         let h = Arc::new(scan_fn());
-        *bg.slot.lock().unwrap() = Some((Instant::now(), h));
+        let scan_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let count = h.len();
+        {
+            let mut g = bg.slot.lock().unwrap_or_else(|e| e.into_inner());
+            g.data = Some((Instant::now(), h));
+            g.scanning = false;
+            guard.owns_scan = false;
+            bg.cv.notify_all();
+        }
+        if lagtrace::on() {
+            lagtrace::record("pkg.prewarm.done", Some(scan_ms), format_args!("handlers={count}"), false);
+        }
     });
     if res.is_err() {
-        cache.refreshing.store(false, Ordering::Release);
+        let mut g = cache.slot.lock().unwrap_or_else(|e| e.into_inner());
+        g.refreshing = false;
+        cache.cv.notify_all();
         return false;
     }
     true
@@ -296,18 +362,35 @@ fn handlers_with<F>(cache: &Arc<CacheState>, ttl: Duration, scan_fn: F) -> (Arc<
 where
     F: FnOnce() -> Vec<Handler> + Send + 'static,
 {
-    let cached = cache.slot.lock().unwrap().clone();
-    if let Some((at, h)) = cached {
-        if at.elapsed() >= ttl {
+    let mut g = cache.slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, h)) = g.data.clone() {
+        let stale = at.elapsed() >= ttl;
+        let refreshing = g.refreshing;
+        drop(g);
+        if stale && !refreshing {
             // Never block a live right-click on manifest disk I/O: return the
             // stale cache immediately and refresh once on a background thread.
             spawn_refresh(cache.clone(), Duration::ZERO, ttl, scan_fn);
         }
         return (h, false);
     }
-    // Cold cache (e.g. click before pre-warm finished): scan once outside the lock.
+    // Cold cache: if prewarm is already mid-scan, join it instead of scanning
+    // every AppxManifest.xml a second time in parallel.
+    if g.scanning {
+        g = cache.cv.wait_while(g, |s| s.scanning && s.data.is_none()).unwrap_or_else(|e| e.into_inner());
+        if let Some((_, h)) = g.data.clone() {
+            return (h, true);
+        }
+    }
+    g.scanning = true;
+    g.wake_now = true;
+    cache.cv.notify_all();
+    drop(g);
+
+    let _guard = ScanOnlyGuard(cache.clone());
     let h = Arc::new(scan_fn());
-    *cache.slot.lock().unwrap() = Some((Instant::now(), h.clone()));
+    let mut g = cache.slot.lock().unwrap_or_else(|e| e.into_inner());
+    g.data = Some((Instant::now(), h.clone()));
     (h, true)
 }
 
@@ -315,7 +398,7 @@ fn prewarm_with<F>(cache: &Arc<CacheState>, delay: Duration, ttl: Duration, scan
 where
     F: FnOnce() -> Vec<Handler> + Send + 'static,
 {
-    if cache.slot.lock().unwrap().as_ref().is_some_and(|(at, _)| at.elapsed() < ttl) {
+    if cache.slot.lock().unwrap_or_else(|e| e.into_inner()).data.as_ref().is_some_and(|(at, _)| at.elapsed() < ttl) {
         return false;
     }
     spawn_refresh(cache.clone(), delay, ttl, scan_fn)
@@ -391,33 +474,60 @@ impl Session {
     /// The top-level packaged items for `classes` (one entry per selected
     /// item), skipping CLSIDs in `skip`. Creates each handler, asks its
     /// state (hidden ones drop out) and walks one level.
-    pub fn top(&mut self, classes: &[(ItemClass, String)], skip: &[String]) -> Vec<RawItem> {
-        let (all, _) = handlers();
+    pub fn top(&mut self, classes: &[(ItemClass, String)], skip: &[String], generation: u64) -> Vec<RawItem> {
+        let trace = lagtrace::on();
+        let t_scan = trace.then(Instant::now);
+        let (all, cold_scan) = handlers();
+        if let Some(t) = t_scan {
+            lagtrace::record("ctx.worker.pkg_scan", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!("gen={generation} cold_scan={cold_scan} handlers={}", all.len()), false);
+        }
         let types: Vec<Vec<String>> = classes.iter().map(|(c, e)| types_for(*c, e)).collect();
         let mut out = Vec::new();
         for clsid in applicable(&all, &types, skip) {
             if self.cmds.len() + self.subs.len() >= MAX_COMMANDS {
                 break;
             }
+            let pkg = all.iter().find(|h| h.clsid == clsid).map(|h| h.package.as_str()).unwrap_or("");
+            let t_clsid = trace.then(Instant::now);
             let w = wide(&clsid);
             let Ok(guid): windows::core::Result<GUID> = (unsafe { CLSIDFromString(PCWSTR(w.as_ptr())) }) else {
                 self.skipped += 1;
+                if let Some(t) = t_clsid {
+                    lagtrace::record("ctx.worker.pkg_clsid", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!("gen={generation} pkg={pkg} clsid={clsid} outcome=bad_guid"), false);
+                }
                 continue;
             };
             let cmd: IExplorerCommand = match unsafe { CoCreateInstance(&guid, None, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER) } {
                 Ok(c) => c,
-                Err(_) => {
+                Err(e) => {
                     self.skipped += 1;
+                    if let Some(t) = t_clsid {
+                        lagtrace::record("ctx.worker.pkg_clsid", Some(t.elapsed().as_secs_f64() * 1000.0), format_args!("gen={generation} pkg={pkg} clsid={clsid} outcome=create_err({:?})", e.code()), false);
+                    }
                     continue;
                 }
             };
+            let create_ms = t_clsid.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+            let t_raw = trace.then(Instant::now);
             match self.raw(&cmd, Some(&clsid)) {
                 Some(mut r) => {
+                    if let (Some(t0), Some(tr), Some(cm)) = (t_clsid, t_raw, create_ms) {
+                        let raw_ms = tr.elapsed().as_secs_f64() * 1000.0;
+                        let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                        lagtrace::record("ctx.worker.pkg_clsid", Some(total_ms), format_args!("gen={generation} pkg={pkg} clsid={clsid} create_ms={cm:.3} raw_ms={raw_ms:.3} outcome=ok"), false);
+                    }
                     // the family keys the user's edits (`windows.pkg:<family>/{clsid}`)
-                    r.package = all.iter().find(|h| h.clsid == clsid).map(|h| h.package.clone()).filter(|p| !p.is_empty());
+                    r.package = (!pkg.is_empty()).then(|| pkg.to_string());
                     out.push(r)
                 }
-                None => self.skipped += 1,
+                None => {
+                    self.skipped += 1;
+                    if let (Some(t0), Some(tr), Some(cm)) = (t_clsid, t_raw, create_ms) {
+                        let raw_ms = tr.elapsed().as_secs_f64() * 1000.0;
+                        let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                        lagtrace::record("ctx.worker.pkg_clsid", Some(total_ms), format_args!("gen={generation} pkg={pkg} clsid={clsid} create_ms={cm:.3} raw_ms={raw_ms:.3} outcome=skipped"), false);
+                    }
+                }
             }
         }
         out
@@ -596,14 +706,14 @@ mod tests {
 
     #[test]
     fn stale_cache_returns_immediately_and_refreshes_once_in_background() {
-        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::mpsc;
 
         let cache = CacheState::new();
         let old = vec![Handler { package: "old".into(), ty: "*".into(), clsid: TERM.into() }];
         let fresh = vec![Handler { package: "fresh".into(), ty: "*".into(), clsid: TERM.into() }];
         let ttl = Duration::from_secs(5);
-        *cache.slot.lock().unwrap() = Some((Instant::now() - Duration::from_secs(10), Arc::new(old.clone())));
+        cache.slot.lock().unwrap().data = Some((Instant::now() - Duration::from_secs(10), Arc::new(old.clone())));
 
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -638,10 +748,10 @@ mod tests {
         // Unblock background refresh and verify cache updates cleanly.
         let _ = release_tx.send(());
         let wait = Instant::now();
-        while cache.refreshing.load(Ordering::Acquire) && wait.elapsed() < Duration::from_secs(2) {
+        while cache.slot.lock().unwrap().refreshing && wait.elapsed() < Duration::from_secs(2) {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(!cache.refreshing.load(Ordering::Acquire));
+        assert!(!cache.slot.lock().unwrap().refreshing);
 
         let calls3 = calls.clone();
         let (got3, scanned3) = handlers_with(&cache, ttl, move || {
@@ -660,12 +770,49 @@ mod tests {
         let expected_bg = expected.clone();
         assert!(prewarm_with(&cache, Duration::ZERO, SCAN_TTL, move || expected_bg));
         let wait = Instant::now();
-        while cache.slot.lock().unwrap().is_none() && wait.elapsed() < Duration::from_secs(2) {
+        while cache.slot.lock().unwrap().data.is_none() && wait.elapsed() < Duration::from_secs(2) {
             std::thread::sleep(Duration::from_millis(5));
         }
         let (got, scanned) = handlers_with(&cache, SCAN_TTL, || panic!("should hit pre-warmed cache"));
         assert!(!scanned);
         assert_eq!(*got, expected);
+    }
+
+    #[test]
+    fn cold_caller_joins_in_flight_prewarm_without_duplicate_scan() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let cache = CacheState::new();
+        let expected = vec![Handler { package: "joined".into(), ty: "*".into(), clsid: TERM.into() }];
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let c_bg = calls.clone();
+        let exp_bg = expected.clone();
+        assert!(prewarm_with(&cache, Duration::ZERO, SCAN_TTL, move || {
+            c_bg.fetch_add(1, Ordering::SeqCst);
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            exp_bg
+        }));
+        started_rx.recv_timeout(Duration::from_secs(2)).expect("prewarm started");
+
+        let cache_fg = cache.clone();
+        let c_fg = calls.clone();
+        let fg = std::thread::spawn(move || {
+            handlers_with(&cache_fg, SCAN_TTL, move || {
+                c_fg.fetch_add(1, Ordering::SeqCst);
+                panic!("cold caller must join active prewarm instead of scanning twice")
+            })
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = release_tx.send(());
+        let (got, cold) = fg.join().expect("caller joined");
+        assert!(cold);
+        assert_eq!(*got, expected);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only one scan ran");
     }
 
     /// Manual probe: `TSUBAME_PKG_PROBE=<path> cargo test -p tsubame-win probe -- --ignored --nocapture`.
@@ -697,6 +844,6 @@ mod tests {
                 }
             }
         }
-        println!("top {:?}", s.top(&[class_of(&path)], &[]).iter().map(|r| r.text.clone()).collect::<Vec<_>>());
+        println!("top {:?}", s.top(&[class_of(&path)], &[], 0).iter().map(|r| r.text.clone()).collect::<Vec<_>>());
     }
 }
