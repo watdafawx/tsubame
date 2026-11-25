@@ -383,8 +383,18 @@ fn burst_of_10k_files_is_a_few_batches() {
     let fx = Fixture::new("burst");
     let wt = watch(&fx.path, Options::default());
     let t0 = Instant::now();
+    // A window also closes 60 ms after the last event, so a write that stalls longer than that
+    // (a busy disk, a virus scanner, a loaded parallel test run) may end one batch early. Count
+    // those stalls so the batch ceiling below allows for them instead of assuming a smooth writer.
+    let mut stalls = 0usize;
+    let mut last = Instant::now();
     for i in 0..10_000 {
         fs::write(fx.file(&format!("file_{i:05}.txt")), b"payload").unwrap();
+        let now = Instant::now();
+        if now - last > Duration::from_millis(40) {
+            stalls += 1;
+        }
+        last = now;
     }
     let created_in = t0.elapsed();
     // Wait for the last file's create, not for a quiet gap: a stall between two
@@ -414,9 +424,9 @@ fn burst_of_10k_files_is_a_few_batches() {
     assert_eq!(created.len(), 10_000);
     assert!(bs.iter().flat_map(|b| b.iter()).all(|c| matches!(c.kind, ChangeKind::Created | ChangeKind::Modified)));
     assert!(total < 10_500, "{total} changes");
-    // one batch per max_delay (250 ms) at most, plus the tail
-    let ceiling = (created_in.as_millis() / 250) as usize + 3;
-    assert!(bs.len() <= ceiling, "{} batches for {created_in:?}", bs.len());
+    // one batch per max_delay (250 ms) at most, plus the tail, plus one per writer stall
+    let ceiling = (created_in.as_millis() / 250) as usize + 3 + stalls;
+    assert!(bs.len() <= ceiling, "{} batches for {created_in:?} ({stalls} writer stalls)", bs.len());
 }
 
 #[test]

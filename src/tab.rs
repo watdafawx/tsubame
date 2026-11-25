@@ -1205,7 +1205,7 @@ mod tests {
         let t0 = Instant::now();
         while !ok(t) {
             t.pump();
-            assert!(t0.elapsed() < Duration::from_secs(5), "{what}: not seen in time");
+            assert!(t0.elapsed() < Duration::from_secs(30), "{what}: not seen in time");
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -1267,6 +1267,11 @@ mod tests {
         t.set_visible(true);
         t.start(dir.to_str().unwrap(), wake());
         wait_done(&mut t);
+        // The watcher arms off the UI thread; files written before its first read is armed
+        // are never reported (`watched()` says so). Under a loaded parallel run the listing
+        // can finish long before that, so writing right away lost the whole burst and the
+        // wait below ran into its deadline. Arm first, like the test above.
+        pump_until(&mut t, "watcher armed", |t| t.watched());
         for i in 0..200 {
             std::fs::write(dir.join(format!("n{i:03}.txt")), b"x").unwrap();
         }

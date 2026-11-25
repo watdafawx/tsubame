@@ -538,8 +538,16 @@ mod tests {
     fn pool_ctxmenu_preempts_queued_icons() {
         let mut pool = Pool::new(1, 0, 0x8001);
         // Hold the single worker so subsequent jobs accumulate in the queue.
-        let hold = pool.submit(Request::Hang { ms: 200 });
-        std::thread::sleep(Duration::from_millis(40));
+        // The hold must really be running before the rest is queued, else a CtxMenu pushed to
+        // the front could overtake it. A fixed sleep was not enough on a loaded machine, so
+        // wait until the worker took it off the queue; the hold is long enough to outlast the
+        // submits below even when this thread is starved.
+        let hold = pool.submit(Request::Hang { ms: 1000 });
+        let t0 = Instant::now();
+        while !pool.shared.queue.lock().unwrap().is_empty() {
+            assert!(t0.elapsed() < Duration::from_secs(20), "the worker never took the hold job");
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let mut icons = Vec::new();
         for ext in [".txt", ".rs", ".md", ".json"] {
             icons.push(pool.submit(Request::Icon { src: IconSource::Ext(ext.into()), size: 16 }).id);
