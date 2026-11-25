@@ -67,6 +67,7 @@ mod memdiag;
 mod meta_ui;
 mod miller;
 mod nav;
+mod nav_menu;
 mod ole_glue;
 mod ops;
 mod overlay;
@@ -204,6 +205,15 @@ struct App {
     closing: bool,
     /// `save_flush(..., true)` already ran on `WM_CLOSE`
     saved_on_close: bool,
+    /// Pre-fullscreen style and placement while F11 borderless fullscreen is active.
+    fullscreen: Option<FullscreenSaved>,
+}
+
+#[derive(Clone, Copy)]
+struct FullscreenSaved {
+    style: i32,
+    placement: WINDOWPLACEMENT,
+    maximized: bool,
 }
 
 thread_local! {
@@ -296,6 +306,10 @@ fn work_areas() -> Vec<tsubame_config::WorkArea> {
 
 /// The current window geometry, as the config and session store it.
 fn window_state(hwnd: HWND) -> tsubame_config::WindowState {
+    if let Some(saved) = with(|a| a.fullscreen).flatten() {
+        let r = saved.placement.rcNormalPosition;
+        return tsubame_config::WindowState { x: r.left, y: r.top, w: (r.right - r.left).max(1), h: (r.bottom - r.top).max(1), maximized: saved.maximized };
+    }
     let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
     let maximized = unsafe { IsZoomed(hwnd).as_bool() };
     if unsafe { GetWindowPlacement(hwnd, &mut wp) }.is_ok() {
@@ -604,6 +618,7 @@ fn main() {
                 ops: Default::default(),
                 closing: false,
                 saved_on_close: false,
+                fullscreen: None,
             })
         });
         with(|a| shellops::attach(a, hwnd, drop_target));
@@ -714,7 +729,7 @@ fn arm_watch(hwnd: HWND, a: &mut App) {
 /// ~10 FPS), or while a submenu hover delay is pending. An idle menu and no
 /// menu: no timer (0 wake-ups).
 pub(crate) fn arm_ctx(hwnd: HWND, a: &mut App) {
-    let want = a.view.ctx.as_ref().and_then(|c| c.next_tick_ms());
+    let want = a.view.ctx.as_ref().and_then(|c| c.next_tick_ms()).or_else(|| a.view.nav_menu_tick_ms());
     match want {
         Some(ms) if a.ctx_timer != Some(ms) => {
             unsafe { SetTimer(Some(hwnd), ctxui::TIMER_ID, ms, None) };
@@ -1260,9 +1275,12 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
         });
         sync_caret(hwnd, a, out.text_focus);
         let open = std::mem::take(&mut a.view.open_paths);
-        (cap, ime, menu, open, a.view.win_cmd.take(), a.view.quit)
+        let new_wins = std::mem::take(&mut a.view.open_windows);
+        let exe = a.view.env.exe.clone();
+        let portable = a.view.env.portable;
+        (cap, ime, menu, open, new_wins, exe, portable, a.view.win_cmd.take(), a.view.quit)
     });
-    let Some((cap, ime, menu, open, win_cmd, quit)) = r else { return };
+    let Some((cap, ime, menu, open, new_wins, exe, portable, win_cmd, quit)) = r else { return };
     match cap {
         Some(true) => unsafe {
             SetCapture(hwnd);
@@ -1285,16 +1303,26 @@ fn after_frame(hwnd: HWND, out: tsubame_ui::Output) {
     for p in open {
         places::open_async(p);
     }
+    for dir in new_wins {
+        view::spawn_new_window(&exe, dir, portable);
+    }
     match win_cmd {
         Some(view::WinCmd::Minimize) => unsafe {
             let _ = ShowWindow(hwnd, SW_MINIMIZE);
         },
-        Some(view::WinCmd::MaxRestore) => unsafe {
-            let _ = ShowWindow(hwnd, if IsZoomed(hwnd).as_bool() { SW_RESTORE } else { SW_MAXIMIZE });
-        },
+        Some(view::WinCmd::MaxRestore) => {
+            if with(|a| a.fullscreen.is_some()).unwrap_or(false) {
+                toggle_fullscreen(hwnd);
+            } else {
+                unsafe {
+                    let _ = ShowWindow(hwnd, if IsZoomed(hwnd).as_bool() { SW_RESTORE } else { SW_MAXIMIZE });
+                }
+            }
+        }
         Some(view::WinCmd::Close) => unsafe {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         },
+        Some(view::WinCmd::ToggleFullscreen) => toggle_fullscreen(hwnd),
         None => {}
     }
     if quit {
@@ -1447,6 +1475,47 @@ fn button_event(hwnd: HWND, msg: u32, lp: LPARAM) {
     push(hwnd, ev);
 }
 
+/// Borderless fullscreen toggle (F11): covers the whole monitor (including
+/// taskbar) and restores the previous style, placement and maximized state.
+/// Esc never calls this.
+fn toggle_fullscreen(hwnd: HWND) {
+    let leaving = with(|a| a.fullscreen.take()).flatten();
+    if let Some(saved) = leaving {
+        with(|a| a.view.fullscreen = false);
+        unsafe {
+            SetWindowLongW(hwnd, GWL_STYLE, saved.style);
+            let _ = SetWindowPlacement(hwnd, &saved.placement);
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            if saved.maximized && !IsZoomed(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+        }
+        invalidate(hwnd);
+        return;
+    }
+    let mut placement = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    let (style, maximized, mon_rect) = unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE);
+        let _ = GetWindowPlacement(hwnd, &mut placement);
+        let maximized = IsZoomed(hwnd).as_bool();
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let ok = GetMonitorInfoW(hmon, &mut mi).as_bool();
+        (style, maximized, ok.then_some(mi.rcMonitor))
+    };
+    let Some(r) = mon_rect else { return };
+    with(|a| {
+        a.fullscreen = Some(FullscreenSaved { style, placement, maximized });
+        a.view.fullscreen = true;
+    });
+    unsafe {
+        let strip = (WS_OVERLAPPEDWINDOW | WS_MAXIMIZE).0 as i32;
+        SetWindowLongW(hwnd, GWL_STYLE, style & !strip);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+    invalidate(hwnd);
+}
+
 /// Frameless window: where a point (screen px) counts as caption or border.
 fn hit_test(hwnd: HWND, lp: LPARAM) -> LRESULT {
     let mut p = POINT { x: lo(lp), y: hi(lp) };
@@ -1457,12 +1526,18 @@ fn hit_test(hwnd: HWND, lp: LPARAM) -> LRESULT {
     }
     let zoomed = unsafe { IsZoomed(hwnd).as_bool() };
     let r = with(|a| {
+        if a.fullscreen.is_some() {
+            return (1.0, false, true);
+        }
         let s = a.gfx.dpi / 96.0;
         let pt = Pt::new(p.x as f32 / s, p.y as f32 / s);
         let caption = pt.y < a.ui.theme.height_titlebar && !a.ui.over_widget(pt);
-        (s, caption)
+        (s, caption, false)
     });
-    let Some((s, caption)) = r else { return LRESULT(HTCLIENT as isize) };
+    let Some((s, caption, fullscreen)) = r else { return LRESULT(HTCLIENT as isize) };
+    if fullscreen {
+        return LRESULT(HTCLIENT as isize);
+    }
     let b = (RESIZE_BORDER * s) as i32;
     if !zoomed {
         let (l, t, rr, bb) = (p.x < b, p.y < b, p.x >= rc.right - b, p.y >= rc.bottom - b);
@@ -1499,7 +1574,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_ERASEBKGND => LRESULT(1),
             // no system title bar or frame: the client area is the whole window
             WM_NCCALCSIZE if wp.0 != 0 => {
-                if IsZoomed(hwnd).as_bool() {
+                let fs = with(|a| a.fullscreen.is_some()).unwrap_or(false);
+                if !fs && IsZoomed(hwnd).as_bool() {
                     // maximized: the window overhangs the monitor by the frame; pull it in
                     let p = &mut *(lp.0 as *mut NCCALCSIZE_PARAMS);
                     let dpi = GetDpiForWindow(hwnd);
@@ -1868,6 +1944,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 with(|a| {
                     if let Some(c) = a.view.ctx.as_mut() {
                         c.run_a11y_requests();
+                    } else if a.view.nav_menu_open() {
+                        a.view.run_nav_menu_a11y();
                     } else if a.view.tags.picker_open() {
                         // the tags picker's rows (a popup, not a context menu)
                         for r in tsubame_win::uia::take_requests() {

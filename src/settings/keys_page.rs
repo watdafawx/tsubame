@@ -469,10 +469,10 @@ mod tests {
     fn a_free_chord_binds_at_once() {
         let mut km = KeyMap::defaults();
         let mut rec = Rec::new(CMD_NEW_TAB, 1);
-        assert_eq!(on_key(&mut rec, &mut km, Key::Char('N'), CT), RecOut::Changed);
+        assert_eq!(on_key(&mut rec, &mut km, Key::Char('J'), CT), RecOut::Changed);
         assert_eq!(km.chords(CMD_NEW_TAB).len(), 2);
         assert_eq!(km.label(CMD_NEW_TAB), "Ctrl+T");
-        assert_eq!(chord_text(km.chords(CMD_NEW_TAB)[1]), "Ctrl+N");
+        assert_eq!(chord_text(km.chords(CMD_NEW_TAB)[1]), "Ctrl+J");
     }
 
     #[test]

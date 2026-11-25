@@ -32,6 +32,13 @@ impl<T> Tabs<T> {
         self.active = self.items.len() - 1;
         self.active
     }
+    /// Inserts a tab at `index` (clamped to the end) and activates it.
+    pub fn insert(&mut self, index: usize, t: T) -> usize {
+        let i = index.min(self.items.len());
+        self.items.insert(i, t);
+        self.active = i;
+        i
+    }
     pub fn activate(&mut self, i: usize) {
         if i < self.items.len() {
             self.active = i;
@@ -83,6 +90,49 @@ impl<T> Tabs<T> {
         } else {
             self.active
         };
+    }
+}
+
+/// Maximum closed tabs remembered per window for Ctrl+Shift+T (`tab.reopen`).
+pub const CLOSED_TAB_CAP: usize = 20;
+
+/// Bounded LIFO stack of recently closed tabs (per window). Pushing past `cap`
+/// drops the oldest entry so memory stays bounded.
+#[derive(Clone, Debug)]
+pub struct ClosedStack<T> {
+    items: Vec<T>,
+    cap: usize,
+}
+
+impl<T> Default for ClosedStack<T> {
+    fn default() -> Self {
+        Self::with_cap(CLOSED_TAB_CAP)
+    }
+}
+
+impl<T> ClosedStack<T> {
+    pub fn with_cap(cap: usize) -> Self {
+        Self { items: Vec::new(), cap }
+    }
+    pub fn push(&mut self, item: T) {
+        if self.cap == 0 {
+            return;
+        }
+        if self.items.len() >= self.cap {
+            self.items.remove(0);
+        }
+        self.items.push(item);
+    }
+    pub fn pop(&mut self) -> Option<T> {
+        self.items.pop()
+    }
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 }
 
@@ -149,5 +199,36 @@ mod tests {
         t.move_tab(9, 0);
         t.move_tab(1, 1);
         assert_eq!(t.items, vec![2, 4, 1, 3, 0]);
+    }
+
+    #[test]
+    fn closed_stack_is_lifo_and_bounded_to_cap() {
+        let mut s = ClosedStack::default();
+        assert!(s.is_empty());
+        for i in 0..25usize {
+            s.push(i);
+        }
+        assert_eq!(s.len(), CLOSED_TAB_CAP);
+        assert_eq!(s.pop(), Some(24));
+        assert_eq!(s.pop(), Some(23));
+        let mut rest = Vec::new();
+        while let Some(v) = s.pop() {
+            rest.push(v);
+        }
+        // oldest 0..5 were evicted; last popped is 5
+        assert_eq!(rest.last(), Some(&5));
+        assert_eq!(rest.len(), CLOSED_TAB_CAP - 2);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn insert_places_at_clamped_index_and_activates() {
+        let mut t = tabs(3); // [0, 1, 2]
+        assert_eq!(t.insert(1, 99), 1);
+        assert_eq!(t.items, vec![0, 99, 1, 2]);
+        assert_eq!(t.active, 1);
+        assert_eq!(t.insert(99, 100), 4);
+        assert_eq!(t.items, vec![0, 99, 1, 2, 100]);
+        assert_eq!(t.active, 4);
     }
 }

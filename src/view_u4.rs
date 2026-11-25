@@ -380,6 +380,7 @@ impl View {
             || self.search.is_some()
             || self.palette.is_some()
             || self.ctx.is_some()
+            || self.nav_menu_open()
             || self.tab().settings
             || ui.has_focus(pid(self.live, ID_FILTER))
             || ui.has_focus(pid(self.live, ID_PATH_EDIT));

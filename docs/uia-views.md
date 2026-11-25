@@ -12,7 +12,8 @@ covers the file views: file rows, Tree, Miller columns, and the tags picker.
 | Tree rows (Details in Tree mode) | Tree | TreeItem: level, position in set, size of set | SelectionItem, ExpandCollapse, Invoke, Value |
 | Folders-only Tree pane | Tree | TreeItem, same as above | SelectionItem, ExpandCollapse, Invoke |
 | Miller column `i` | List (one per column) | ListItem: name, value, selected | SelectionItem, Invoke, Value |
-| Tags picker | menu-style rows (CM10 snapshot) | row name, toggled state | Invoke (and Toggle) |
+| Path bar chevrons (`PART_CRUMBS`) | List (`"Path bar"`) | ListItem: `"Subfolders of <name>"`, path | Invoke, ExpandCollapse, Value |
+| Tags picker & navigation menus | menu-style rows (CM10 snapshot) | row name, toggled state (`"Back history"`, `"Forward history"`, `"Subfolders of <name>"`) | Invoke (and Toggle) |
 
 - **Name** of a file row is the file name, plus `, tags: A, B` when it has tags
   (`tags::model::a11y_name`). **Value** is `type, size, modified`, plus the age

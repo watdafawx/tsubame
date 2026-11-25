@@ -990,6 +990,11 @@ fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_
                 a.view.open_in_new_tab(p);
             }
         }
+        "window.open-selected" => {
+            for p in paths.iter().filter(|p| t.folders.contains(p)) {
+                a.view.open_windows.push(p.clone());
+            }
+        }
         "x.other-pane" => {
             if let Some(d) = &one_dir {
                 a.view.open_in_other_pane(d);

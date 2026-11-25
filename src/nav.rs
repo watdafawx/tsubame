@@ -60,6 +60,26 @@ impl History {
             None
         }
     }
+    /// Up to `limit` entries behind the current position, most recent first: `(history_index, path)`.
+    pub fn back_entries(&self, limit: usize) -> Vec<(usize, &str)> {
+        let start = self.pos.saturating_sub(limit);
+        (start..self.pos).rev().map(|i| (i, self.entries[i].as_str())).collect()
+    }
+    /// Up to `limit` entries ahead of the current position, nearest first: `(history_index, path)`.
+    pub fn forward_entries(&self, limit: usize) -> Vec<(usize, &str)> {
+        let start = self.pos + 1;
+        let end = (start + limit).min(self.entries.len());
+        (start..end).map(|i| (i, self.entries[i].as_str())).collect()
+    }
+    /// Jumps directly to history slot `index` (from the Back/Forward dropdown).
+    pub fn go_to(&mut self, index: usize) -> Option<&str> {
+        if index < self.entries.len() && index != self.pos {
+            self.pos = index;
+            Some(&self.entries[self.pos])
+        } else {
+            None
+        }
+    }
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -232,6 +252,36 @@ mod tests {
             steps += 1;
         }
         assert_eq!(steps, HISTORY_CAP - 1);
+    }
+
+    #[test]
+    fn history_dropdown_entries_and_direct_jump() {
+        let mut h = History::new("C:\\0");
+        for i in 1..=20 {
+            h.push(&format!("C:\\{i}"));
+        }
+        // at index 20: back_entries(15) returns 19..=5 (15 entries, most recent first)
+        let back = h.back_entries(15);
+        assert_eq!(back.len(), 15);
+        assert_eq!(back[0], (19, "C:\\19"));
+        assert_eq!(back[14], (5, "C:\\5"));
+        assert!(h.forward_entries(15).is_empty());
+
+        // jump directly to index 10
+        assert_eq!(h.go_to(10), Some("C:\\10"));
+        assert_eq!(h.current(), "C:\\10");
+        assert_eq!(h.go_to(10), None, "already at index 10");
+        assert_eq!(h.go_to(999), None, "out of bounds");
+
+        // back has 9..=0 (10 entries), forward has 11..=20 (10 entries)
+        let b2 = h.back_entries(15);
+        assert_eq!(b2.len(), 10);
+        assert_eq!(b2[0], (9, "C:\\9"));
+        assert_eq!(b2[9], (0, "C:\\0"));
+        let f2 = h.forward_entries(15);
+        assert_eq!(f2.len(), 10);
+        assert_eq!(f2[0], (11, "C:\\11"));
+        assert_eq!(f2[9], (20, "C:\\20"));
     }
 
     fn labels(p: &str) -> Vec<String> {

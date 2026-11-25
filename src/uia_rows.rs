@@ -32,6 +32,8 @@ use crate::tree::{Kind, TreeModel};
 pub const PART_LIST: u32 = 1;
 /// The folders-only Tree pane.
 pub const PART_PANE: u32 = 2;
+/// Path bar breadcrumb chevrons (each invokes/expands its subfolder menu).
+pub const PART_CRUMBS: u32 = 3;
 /// Miller column `i` is `PART_MILLER + i` (at most 13 live columns).
 pub const PART_MILLER: u32 = 16;
 
@@ -389,6 +391,49 @@ pub fn miller(g: &Geo, ls: &ListState, range: (usize, usize), col: &Column, acti
     }
     let desc = format!("{}, {}", col.path, counts(total, 0));
     push(VSurface { key: g.key, tree: false, name: g.title.to_string(), desc, rect: px(g.area), focused: active && g.focused, multi: false, size: total as u32, items });
+}
+
+// ---- Path bar breadcrumb chevrons --------------------------------------------
+
+/// One breadcrumb chevron published to UIA while a screen reader listens.
+pub struct CrumbUia {
+    pub index: usize,
+    pub label: String,
+    pub path: String,
+    pub rect: Rect,
+    pub expanded: bool,
+}
+
+/// Publishes the visible breadcrumb chevrons as a `PART_CRUMBS` surface.
+pub fn crumbs(slot: usize, bar: Rect, chevrons: &[CrumbUia]) {
+    let items: Vec<VItem> = chevrons
+        .iter()
+        .enumerate()
+        .map(|(pos, c)| VItem {
+            key: c.index as u64,
+            name: format!("Subfolders of {}", c.label),
+            value: c.path.clone(),
+            kind: "Breadcrumb chevron".into(),
+            rect: px(c.rect),
+            pos: pos as u32 + 1,
+            expand: if c.expanded { Expand::Expanded } else { Expand::Collapsed },
+            selectable: false,
+            invokable: true,
+            ..Default::default()
+        })
+        .collect();
+    let size = items.len() as u32;
+    push(VSurface {
+        key: skey(slot, PART_CRUMBS),
+        tree: false,
+        name: "Path bar".into(),
+        desc: format!("{size} folder segment{}", if size == 1 { "" } else { "s" }),
+        rect: px(bar),
+        focused: false,
+        multi: false,
+        size,
+        items,
+    });
 }
 
 #[cfg(test)]
