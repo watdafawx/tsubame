@@ -18,6 +18,7 @@
 pub mod clipboard;
 mod dataobject;
 pub mod formats;
+pub mod image;
 
 pub use dataobject::{DataObject, read_hglobal, to_hglobal};
 pub use formats::{EFFECT_COPY, EFFECT_LINK, EFFECT_MOVE, EFFECT_NONE};

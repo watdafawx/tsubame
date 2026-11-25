@@ -30,6 +30,8 @@ pub enum ClipJob {
     Read { staging: PathBuf, cap: u64, consume_cut: bool },
     /// Shortcuts (`.lnk`) to `targets` in `folder` (Alt-drop).
     Links { targets: Vec<PathBuf>, folder: PathBuf },
+    /// The clipboard's picture saved as `<base>.png` (a free name) in `folder`.
+    SaveImage { folder: PathBuf, base: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +42,8 @@ pub enum ClipReply {
     Read(Result<ClipRead, String>),
     /// the file names of the shortcuts made, in order
     Links(Result<Vec<String>, String>),
+    /// the file name of the saved picture
+    Image(Result<String, String>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -52,6 +56,8 @@ pub struct ClipRead {
     pub staging: Option<PathBuf>,
     /// virtual items skipped (unsafe name, over the cap, read error)
     pub skipped: usize,
+    /// no files, but a picture (PNG, DIB): `SaveImage` can make a file of it
+    pub image: bool,
 }
 
 pub fn run(job: ClipJob) -> ClipReply {
@@ -60,6 +66,7 @@ pub fn run(job: ClipJob) -> ClipReply {
         ClipJob::SetText(s) => ClipReply::Set(set(DataObject::text(&s))),
         ClipJob::Read { staging, cap, consume_cut } => ClipReply::Read(read(&staging, cap, consume_cut)),
         ClipJob::Links { targets, folder } => ClipReply::Links(make_links(&targets, &folder)),
+        ClipJob::SaveImage { folder, base } => ClipReply::Image(save_image(&folder, &base)),
     }
 }
 
@@ -109,21 +116,31 @@ fn pump_wait(ms: u32) {
     }
 }
 
-pub fn read(staging: &Path, cap: u64, consume_cut: bool) -> Result<ClipRead, String> {
-    let seq = unsafe { GetClipboardSequenceNumber() };
+/// The clipboard's data object (retries while another process holds it open).
+fn clipboard_object() -> Result<IDataObject, String> {
     // CLIPBRD_E_CANT_OPEN: another process (clipboard history, a clipboard
     // listener) has it open right after a change; retry briefly like `set`
     let mut tries = 0;
-    let obj = loop {
+    loop {
         match unsafe { OleGetClipboard() } {
-            Ok(o) => break o,
+            Ok(o) => return Ok(o),
             Err(e) if e.code() == windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN && tries < 10 => {
                 tries += 1;
                 pump_wait(20);
             }
             Err(e) => return Err(format!("OleGetClipboard {:?}", e.code())),
         }
-    };
+    }
+}
+
+/// Saves the clipboard's picture as `<base>.png` in `folder`.
+pub fn save_image(folder: &Path, base: &str) -> Result<String, String> {
+    super::image::save_clipboard_image(&clipboard_object()?, folder, base)
+}
+
+pub fn read(staging: &Path, cap: u64, consume_cut: bool) -> Result<ClipRead, String> {
+    let seq = unsafe { GetClipboardSequenceNumber() };
+    let obj = clipboard_object()?;
     let info = read_info(&obj);
     let effect = match info.preferred {
         Some(e) if e & formats::EFFECT_MOVE != 0 && e & formats::EFFECT_COPY == 0 => formats::EFFECT_MOVE,
@@ -138,6 +155,7 @@ pub fn read(staging: &Path, cap: u64, consume_cut: bool) -> Result<ClipRead, Str
         // staged files are ours: always a copy, never a cut
         out.effect = formats::EFFECT_COPY;
     }
+    out.image = info.paths.is_empty() && info.virtual_items.is_empty() && super::image::has_image(&obj);
     if consume_cut && effect == formats::EFFECT_MOVE && !info.paths.is_empty() {
         // a cut pastes once: Explorer empties it after an optimized move too
         unsafe {
@@ -260,6 +278,13 @@ pub fn make_links(targets: &[PathBuf], folder: &Path) -> Result<Vec<String>, Str
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| format!("ShellLink {:?}", e.code()))?;
             let tw = crate::wide(&t.to_string_lossy());
             link.SetPath(PCWSTR(tw.as_ptr())).map_err(|e| format!("SetPath {:?}", e.code()))?;
+            // a file's shortcut starts in the file's folder (like Explorer's)
+            if t.is_file()
+                && let Some(dir) = t.parent()
+            {
+                let dw = crate::wide(&dir.to_string_lossy());
+                let _ = link.SetWorkingDirectory(PCWSTR(dw.as_ptr()));
+            }
             let pf: IPersistFile = link.cast().map_err(|e| format!("IPersistFile {:?}", e.code()))?;
             let dw = crate::wide(&dest.to_string_lossy());
             pf.Save(PCWSTR(dw.as_ptr()), true).map_err(|e| format!("Save {:?}", e.code()))?;

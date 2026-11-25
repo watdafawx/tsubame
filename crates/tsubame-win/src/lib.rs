@@ -26,6 +26,7 @@ pub mod preview;
 pub mod procinfo;
 pub mod search;
 pub mod shell;
+pub mod shellnew;
 pub mod tz;
 pub mod uia;
 pub mod watch;
