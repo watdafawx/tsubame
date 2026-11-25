@@ -206,7 +206,7 @@ mod reg {
         if ty != REG_SZ && ty != REG_EXPAND_SZ {
             return None;
         }
-        let w: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let w: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         let s = String::from_utf16_lossy(&w).trim_end_matches('\0').to_string();
         // REG_EXPAND_SZ: %SystemRoot% and friends
         Some(if ty == REG_EXPAND_SZ { expand(&s) } else { s })
