@@ -11,7 +11,7 @@
 //! `IsClipboardFormatAvailable`, everything else is data.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use tsubame_config::ContextMenu;
 use tsubame_config::menu::{self, MenuEntry, Target as Kind};
@@ -31,10 +31,18 @@ pub const TIMER_ID: usize = 11;
 /// Loading spinner repaint interval (~10 FPS; avoids 30 FPS full-window
 /// repaints while waiting on a slow shell handler).
 pub const TICK_MS: u32 = 100;
-/// Hold painting a fresh menu briefly so a normal warm shell query (~25 ms)
-/// paints complete in one crisp frame with zero "Loading…" flash or jump.
-/// `TSUBAME_CTX_GRACE_MS=0` disables the grace window (immediate reveal).
-pub const REVEAL_GRACE_MS: u64 = 60;
+/// Loading line animation interval (~30 FPS). Runs only while the line is
+/// on screen (after [`LOADING_SHOW_MS`]); a smooth sweep, not a 10 FPS stutter.
+pub const ANIM_MS: u32 = 33;
+/// Hold painting a fresh menu until the shell's rows are in, at most this
+/// long: a warm shell answers in ~20 to 130 ms, and a menu revealed with only
+/// Tsubame's rows would resize and move when the shell's rows arrive. Past
+/// the cap the menu shows with space reserved for them ([`CtxMenu::reserve`]).
+/// `TSUBAME_CTX_GRACE_MS=0` disables the hold (immediate reveal).
+pub const REVEAL_GRACE_MS: u64 = 200;
+/// The same hold for a cold shell (no pre-warm yet: DLLs load, ~400 ms to 1 s):
+/// long enough that a typical cold menu still shows complete in one frame.
+pub const COLD_GRACE_MS: u64 = 450;
 const SPIN_MS: u128 = 1200;
 pub const FAIL_TEXT: &str = "Some items could not load";
 const STATUS_KEY: u64 = 0x0057_a7a5_0001;
@@ -49,6 +57,38 @@ thread_local! {
 /// ms, so holding the popup invisible for the 60 ms grace window only adds
 /// dead input lag before showing Tsubame's own rows.
 static SHELL_WARMED: AtomicBool = AtomicBool::new(false);
+
+/// The startup pre-warm: not asked, asked (a worker is loading the shell
+/// handlers), or done.
+static WARM: AtomicU8 = AtomicU8::new(WARM_NONE);
+const WARM_NONE: u8 = 0;
+const WARM_PENDING: u8 = 1;
+const WARM_DONE: u8 = 2;
+
+/// The pre-warm worker answered (`Payload::Warm`): the shell handlers are
+/// loaded, so the first menu is a warm one.
+pub fn note_warm_done() {
+    WARM.store(WARM_DONE, Ordering::Relaxed);
+}
+
+/// The shell's handlers are loaded (a menu or the pre-warm got through).
+pub fn shell_warm() -> bool {
+    SHELL_WARMED.load(Ordering::Relaxed) || WARM.load(Ordering::Relaxed) == WARM_DONE
+}
+
+/// A menu opened now will be answered fast, so it is worth holding it for
+/// (warm, or the pre-warm is working on it right now). A cold unwarmed first
+/// menu takes ~0.4 to 1 s: it is held up to [`COLD_GRACE_MS`], then shown with space reserved.
+pub fn worth_holding() -> bool {
+    shell_warm() || WARM.load(Ordering::Relaxed) == WARM_PENDING
+}
+
+/// Size (width, height) of the last complete top level per kind (background,
+/// item), DIPs: the next menu of that kind reserves it while its shell rows are coming.
+static LAST_SIZE: std::sync::Mutex<[[f32; 2]; 2]> = std::sync::Mutex::new([[0.0; 2]; 2]);
+
+/// Shell rows a menu with no memory reserves room for.
+const DEFAULT_SHELL_ROWS: f32 = 6.0;
 
 /// The right button went down / the menu key was pressed: the menu's
 /// "input to first paint" clock starts here.
@@ -75,15 +115,15 @@ fn env_u32(name: &str) -> u32 {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
 }
 
-/// Reveal grace for a cold (`!SHELL_WARMED`) vs warm menu. An explicit
-/// `TSUBAME_CTX_GRACE_MS` always wins; otherwise cold first opens reveal
-/// immediately (0 ms) so Tsubame's own rows appear on the next frame instead
-/// of sitting blank for 60 ms while shell DLLs load.
+/// Reveal grace for a cold vs warm menu. An explicit `TSUBAME_CTX_GRACE_MS`
+/// always wins; otherwise both hold until the shell's rows are in (cold: a
+/// longer cap), because a menu shown with only Tsubame's rows jumps when the
+/// shell's arrive.
 pub fn grace_for(cold: bool) -> Duration {
     let env_ms = std::env::var("TSUBAME_CTX_GRACE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok());
     let ms = match env_ms {
         Some(v) => v,
-        None if cold => 0,
+        None if cold => COLD_GRACE_MS,
         None => REVEAL_GRACE_MS,
     }
     .min(2000);
@@ -111,7 +151,8 @@ fn warmable(folder: &str) -> bool {
 /// below normal priority, so the first right click does not wait for DLLs
 /// (cold `QueryContextMenu` ~1 s, warm ~15 ms). Nothing comes back to draw.
 pub fn prewarm(pool: &mut Pool, folder: &str, icon_px: u32) {
-    if warmable(folder) {
+    if warmable(folder) && !shell_warm() {
+        WARM.store(WARM_PENDING, Ordering::Relaxed);
         pool.submit(Request::CtxWarm { folder: folder.to_string(), icon_px });
     }
 }
@@ -216,6 +257,11 @@ pub struct CtxMenu {
     /// CM10: the system colours when Windows High Contrast is on (read once
     /// per menu); None inside: the app's theme
     hc: Option<Option<Theme>>,
+    /// Height the top level keeps while the shell's rows are coming (DIPs; 0:
+    /// estimate from the row size). Set from [`LAST_H`] when the menu opens.
+    pub reserve: [f32; 2],
+    /// the top level's rect at the first painted frame (the log compares it with the final one)
+    first_rect: Option<Rect>,
 }
 
 /// What the UI Automation side was last given (CM10).
@@ -459,7 +505,7 @@ impl CtxMenu {
         let generation = next_gen();
         let state = MenuState::new(target.anchor, target.keyboard);
         let tag_new = !menu.items.is_empty();
-        let cold = !SHELL_WARMED.load(Ordering::Relaxed);
+        let cold = !worth_holding();
         let grace = grace_for(cold);
         let paths_n = target.paths.len();
         let bg = target.background;
@@ -501,6 +547,8 @@ impl CtxMenu {
             icon_px,
             a11y: A11yOut::default(),
             hc: None,
+            reserve: LAST_SIZE.lock().map(|g| g[usize::from(!bg)]).unwrap_or([0.0; 2]),
+            first_rect: None,
         };
         m.learn_from(&m.model.tsubame.clone());
         m.submit(pool);
@@ -854,10 +902,19 @@ impl CtxMenu {
         }
         let now = self.now_ms();
         let hover = self.state.deadline().map(|dl| dl.saturating_sub(now).clamp(1, 1000) as u32);
-        if self.loading() || self.subs.loading(now) {
-            return Some(hover.map_or(TICK_MS, |h| h.min(TICK_MS)));
+        let tick = if self.loading() {
+            // the line shows after LOADING_SHOW_MS: one wake-up for its start, then it animates
+            let waited = self.asked_at.elapsed().as_millis();
+            Some(if waited < LOADING_SHOW_MS { (LOADING_SHOW_MS - waited).max(1) as u32 } else { ANIM_MS })
+        } else if self.subs.loading(now) {
+            Some(TICK_MS)
+        } else {
+            None
+        };
+        match (tick, hover) {
+            (Some(t), Some(h)) => Some(t.min(h)),
+            (t, h) => t.or(h),
         }
-        hover
     }
 
     /// The menu's tick timer must run: the reveal grace window, loading line,
@@ -889,6 +946,10 @@ impl CtxMenu {
             self.dirty = false;
         }
         let loading = self.loading();
+        // rows still to come: keep room for them, so they fill in without a resize or move
+        let settled = self.model.complete || self.model.error.is_some();
+        self.state.reserve_w = if settled { 0.0 } else { self.reserve[0] };
+        self.state.reserve_h = if settled { 0.0 } else { self.reserve_px(ui) };
         let waited = self.asked_at.elapsed().as_millis();
         let phase = (loading && waited >= LOADING_SHOW_MS).then(|| (waited % SPIN_MS) as f32 / SPIN_MS as f32);
         let alt = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x12) } < 0;
@@ -955,6 +1016,16 @@ impl CtxMenu {
         }
     }
 
+    /// The height the top level reserves while loading: the last complete menu
+    /// of this kind, else the rows drawn so far plus a typical shell block.
+    fn reserve_px(&self, ui: &Ui) -> f32 {
+        if self.reserve[1] > 0.0 {
+            return self.reserve[1];
+        }
+        let m = tsubame_ui::widgets::menu::Metrics::new(&ui.theme);
+        (self.items.len() as f32 + DEFAULT_SHELL_ROWS) * m.row + 2.0 * (m.pad + 1.0)
+    }
+
     /// CM10: hands the screen reader this frame's menu when it changed.
     fn publish_a11y(&mut self, closed: bool) {
         let Some(snap) = self.state.a11y.take() else { return };
@@ -990,6 +1061,7 @@ impl CtxMenu {
         if self.first_paint.is_none() {
             let d = self.input_at.elapsed();
             self.first_paint = Some(d);
+            self.first_rect = self.state.levels.first().map(|l| l.rect);
             if trace {
                 lagtrace::record("ctx.ui.first_paint", Some(d.as_secs_f64() * 1000.0), format_args!("gen={} rows={} complete={} loading={}", self.generation, self.items.len(), self.model.complete, self.loading()), false);
             }
@@ -1004,6 +1076,11 @@ impl CtxMenu {
         if self.model.complete && self.model.error.is_none() && self.all_items.is_none() {
             let d = self.input_at.elapsed();
             self.all_items = Some(d);
+            if let (Some(lv), Ok(mut g)) = (self.state.levels.first(), LAST_SIZE.lock())
+                && lv.rect.h > 0.0
+            {
+                g[usize::from(!self.target.background)] = [lv.rect.w, lv.rect.h];
+            }
             if trace {
                 lagtrace::record("ctx.ui.all_items_paint", Some(d.as_secs_f64() * 1000.0), format_args!("gen={} rows={}", self.generation, self.items.len()), true);
             }
@@ -1019,7 +1096,9 @@ impl CtxMenu {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let kind = if self.target.background { "background" } else { "item" };
-            let _ = writeln!(f, "{kind}: {}", self.timing_line());
+            let rect = |r: Option<Rect>| r.map_or("-".to_string(), |r| format!("{:.0},{:.0} {:.0}x{:.0}", r.x, r.y, r.w, r.h));
+            let fin = self.state.levels.first().map(|l| l.rect);
+            let _ = writeln!(f, "{kind}: {}; rect first [{}] final [{}] {}", self.timing_line(), rect(self.first_rect), rect(fin), if self.first_rect == fin { "STABLE" } else { "JUMP" });
         }
     }
 
@@ -1481,7 +1560,7 @@ mod tests {
             handle: None, ticket: 0, state: MenuState::default(), open: false,
             input_at: Instant::now(), asked_at: Instant::now(), grace: Duration::ZERO, revealed: true, first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: Some("properties".into()), invoked: false, invoke_result: None,
-            items: vec![], dirty: false, paste_ok: false, icon_px: 16, a11y: A11yOut::default(), hc: None,
+            items: vec![], dirty: false, paste_ok: false, icon_px: 16, a11y: A11yOut::default(), hc: None, reserve: [0.0; 2], first_rect: None,
         };
         let failed = |generation| MenuBatch { generation, part: Part::Failed("bind failed".into()), timing: [0; 3] };
         c.apply(failed(1));
@@ -1617,7 +1696,7 @@ mod tests {
             handle: None, ticket: 0, state: MenuState::default(), open: true,
             input_at: Instant::now(), asked_at: Instant::now(), grace: Duration::ZERO, revealed: true, first_paint: None, top_items: None, all_items: None, subs: SubLoads::default(), sub_latency: None, clock: Instant::now(),
             picked: None, retry: false, pending_verb: None, invoked: false, invoke_result: None,
-            items: vec![], dirty: true, paste_ok: true, icon_px: 16, a11y: A11yOut::default(), hc: None,
+            items: vec![], dirty: true, paste_ok: true, icon_px: 16, a11y: A11yOut::default(), hc: None, reserve: [0.0; 2], first_rect: None,
         };
         c.items = c.model.rows(&c.menu);
         c
@@ -1993,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn grace_window_falls_back_to_loading_at_10fps_when_shell_is_slow() {
+    fn grace_window_falls_back_to_loading_when_shell_is_slow() {
         let mut c = test_menu(vec![]);
         c.grace = Duration::from_millis(60);
         c.revealed = false;
@@ -2002,11 +2081,12 @@ mod tests {
         c.model.complete = false;
         c.model.state = LoadState::Loading;
 
-        // Grace expired while shell is still loading -> reveal own rows + 10 FPS spinner.
+        // Grace expired while shell is still loading -> reveal own rows; the
+        // loading line is not up yet (LOADING_SHOW_MS), so one wake-up for its start.
         assert!(c.is_revealed());
         assert!(c.loading());
-        assert_eq!(c.next_tick_ms(), Some(TICK_MS));
-        assert_eq!(TICK_MS, 100);
+        let first = c.next_tick_ms().expect("loading line start armed");
+        assert!((1..=(LOADING_SHOW_MS as u32 - 80 + 5)).contains(&first), "wake-up for the line's start, not a 10 FPS poll: {first}");
 
         let mut ui = Ui::new(tsubame_ui::DARK);
         let mut g = tsubame_ui::TestCanvas::new(800.0, 600.0);
@@ -2014,7 +2094,7 @@ mod tests {
         c.paint(&mut ui, &mut g, Rect::new(0.0, 0.0, 800.0, 600.0));
         let _ = ui.end_frame();
         c.presented();
-        assert!(!g.ops.is_empty(), "own rows + loading indicator paint after grace expires");
+        assert!(!g.ops.is_empty(), "own rows paint after grace expires");
         assert!(c.first_paint.is_some());
         assert!(c.all_items.is_none());
 
@@ -2026,7 +2106,26 @@ mod tests {
     }
 
     #[test]
-    fn zero_grace_reveals_immediately_with_loading_tick() {
+    fn loading_line_animates_smoothly_only_while_visible() {
+        let mut c = test_menu(vec![]);
+        c.grace = Duration::ZERO;
+        c.revealed = true;
+        c.model.complete = false;
+        c.model.state = LoadState::Loading;
+        // before the line shows: a single wake-up for its start, never a poll
+        c.asked_at = Instant::now();
+        assert!(c.next_tick_ms().unwrap() > ANIM_MS, "no animation ticks while the line is hidden");
+        // while it shows: ~30 FPS
+        c.asked_at = Instant::now() - Duration::from_millis(LOADING_SHOW_MS as u64 + 50);
+        assert_eq!(c.next_tick_ms(), Some(ANIM_MS));
+        const { assert!(ANIM_MS <= 34) };
+        // done: no timer
+        c.model.complete = true;
+        assert_eq!(c.next_tick_ms(), None);
+    }
+
+    #[test]
+    fn zero_grace_reveals_immediately_with_loading_start_tick() {
         let mut c = test_menu(vec![]);
         c.grace = Duration::ZERO;
         c.revealed = true;
@@ -2035,14 +2134,98 @@ mod tests {
 
         assert!(c.is_revealed());
         assert!(c.loading());
-        assert_eq!(c.next_tick_ms(), Some(TICK_MS));
+        assert!(c.next_tick_ms().is_some());
     }
 
     #[test]
-    fn cold_first_menu_uses_zero_grace_and_warm_uses_reveal_grace() {
+    fn cold_first_menu_uses_the_longer_hold_and_warm_uses_reveal_grace() {
         if std::env::var_os("TSUBAME_CTX_GRACE_MS").is_none() {
-            assert_eq!(grace_for(true), Duration::ZERO);
+            assert_eq!(grace_for(true), Duration::from_millis(COLD_GRACE_MS));
             assert_eq!(grace_for(false), Duration::from_millis(REVEAL_GRACE_MS));
         }
+    }
+
+    fn shell_rows(n: u32) -> Vec<MenuItem> {
+        (0..n).map(|i| MenuItem { id: 10 + i, key: format!("windows.verb:v{i}"), verb: Some(format!("v{i}")), ..MenuItem::command(ItemSource::Native, &format!("Shell verb {i}"), "") }).collect()
+    }
+
+    fn paint_frame(c: &mut CtxMenu, ui: &mut Ui, g: &mut tsubame_ui::TestCanvas, bounds: Rect) -> Rect {
+        ui.begin_frame((bounds.w, bounds.h));
+        c.paint(ui, g, bounds);
+        let _ = ui.end_frame();
+        c.presented();
+        c.state.levels[0].rect
+    }
+
+    /// Opens a menu revealed at once (cold, own rows only), paints it, then
+    /// delivers `n` shell rows with Complete and paints again. Returns the
+    /// rect at first reveal and the final one.
+    fn reveal_then_fill(anchor: Pt, background: bool, n: u32, reserve_w: f32, reserve: f32, bounds: Rect) -> (Rect, Rect) {
+        let mut c = test_menu(vec![]);
+        c.target.background = background;
+        c.target.anchor = anchor;
+        c.state = MenuState::new(anchor, false);
+        c.reserve = [reserve_w, reserve];
+        c.grace = Duration::ZERO;
+        c.revealed = true;
+        c.model.complete = false;
+        c.model.state = LoadState::Loading;
+        let mut ui = Ui::new(tsubame_ui::DARK);
+        let mut g = tsubame_ui::TestCanvas::new(bounds.w, bounds.h);
+        let first = paint_frame(&mut c, &mut ui, &mut g, bounds);
+        let generation = c.generation;
+        c.apply(MenuBatch { generation, part: Part::Native(shell_rows(n)), timing: [0; 3] });
+        c.apply(MenuBatch { generation, part: Part::Complete, timing: [0; 3] });
+        let last = paint_frame(&mut c, &mut ui, &mut g, bounds);
+        (first, last)
+    }
+
+    #[test]
+    fn menu_rect_is_identical_at_first_reveal_and_when_the_shell_rows_arrive() {
+        let bounds = Rect::new(0.0, 0.0, 800.0, 600.0);
+        // anchors: free space, right edge, bottom edge, bottom-right corner
+        let anchors = [Pt::new(100.0, 60.0), Pt::new(790.0, 60.0), Pt::new(100.0, 590.0), Pt::new(795.0, 595.0), Pt::new(400.0, 300.0)];
+        for background in [true, false] {
+            for anchor in anchors {
+                // the complete size is what the previous menu of this kind remembered
+                let (_, done) = reveal_then_fill(anchor, background, 8, 0.0, 0.0, bounds);
+                let (first, last) = reveal_then_fill(anchor, background, 8, done.w, done.h, bounds);
+                assert_eq!(first, last, "bg={background} anchor={anchor:?}: no resize or move when rows arrive");
+                assert_eq!(last, done, "bg={background} anchor={anchor:?}: same as the menu without a reveal-early step");
+            }
+        }
+    }
+
+    #[test]
+    fn without_a_reserve_the_menu_would_jump_near_the_bottom() {
+        // the control: why the reserve exists (own rows fit below the anchor, the full menu does not)
+        let bounds = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let (first, last) = reveal_then_fill(Pt::new(100.0, 400.0), true, 12, 0.0, 1.0, bounds);
+        assert_ne!(first, last, "own rows alone open downwards, the full menu flips up");
+    }
+
+    #[test]
+    fn default_reserve_keeps_the_flip_choice_for_a_typical_shell_block() {
+        // no memory of an earlier menu: the estimate (own rows + a typical shell block)
+        // decides the flip, so a menu near the bottom opens up and stays put
+        let bounds = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let (first, last) = reveal_then_fill(Pt::new(100.0, 500.0), true, 8, 0.0, 0.0, bounds);
+        assert_eq!(first.x, last.x);
+        assert!(first.b() <= 592.0 && last.b() <= 592.0, "both stay inside the bounds");
+        assert!(first.y < 500.0, "opened upwards from the start: {first:?}");
+    }
+
+    #[test]
+    fn warm_state_decides_whether_a_fresh_menu_is_held() {
+        // a pre-warmed (or pending) shell is held for; a cold one is shown at once
+        WARM.store(WARM_NONE, Ordering::Relaxed);
+        if !SHELL_WARMED.load(Ordering::Relaxed) {
+            assert!(!worth_holding());
+        }
+        WARM.store(WARM_PENDING, Ordering::Relaxed);
+        assert!(worth_holding());
+        note_warm_done();
+        assert!(shell_warm() && worth_holding());
+        WARM.store(WARM_NONE, Ordering::Relaxed);
     }
 }

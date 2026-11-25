@@ -1091,6 +1091,11 @@ pub fn on_reply(a: &mut App, r: Reply) -> (Option<Reply>, bool) {
             }
             (None, repaint)
         }
+        // the startup pre-warm is done: the first menu is a warm one
+        Payload::Warm => {
+            crate::ctxui::note_warm_done();
+            (Some(r), false)
+        }
         _ => (Some(r), false),
     }
 }
