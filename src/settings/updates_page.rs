@@ -1,7 +1,7 @@
 //! Settings > Updates: this copy's version, the check, the download, roll back. The state is
 //! the updater's (`updates::snapshot`); this page only draws it and asks for things.
 
-use super::lay::{Look, Pg, button, button_in, fit};
+use super::lay::{Look, Pg, button, button_in, fit, wrap};
 use super::{C_UPDATES, Cx};
 use crate::updates::{self, OffReason, Phase};
 use tsubame_update::Channel;
@@ -122,30 +122,52 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
 
     pg.section("This copy");
-    let mut c = pg.card_h(84.0 + 52.0, 52.0);
-    // version block
+    // Version block. Wide: text left, "Check now" on the right. Narrow: the button
+    // goes under the text, and the status line wraps (3 lines at most, then an
+    // ellipsis with the full text in a tooltip).
+    let (line, ok) = status_line(&snap.phase, &last);
+    let lay = VersionLayout::new(pg.g, &t, pg.w, &line, ok);
+    let mut c = pg.card_h(lay.h + 52.0, 52.0);
+    let mut tip: Option<(tsubame_ui::Pt, String)> = None;
     {
-        let r = Rect::new(c.r.x, c.r.y, c.r.w, 84.0);
+        let r = Rect::new(c.r.x, c.r.y, c.r.w, lay.h);
         let logo = Rect::new(r.x + 16.0, r.y + 20.0, 44.0, 44.0);
         pg.g.round(logo, t.radius_lg, tsubame_ui::theme::BRAND_NAVY);
         pg.g.text("\u{2197}", logo, f(22.0).b().c(), tsubame_ui::theme::BRAND_CREAM);
-        pg.g.text(&format!("Tsubame {}", snap.running), Rect::new(r.x + 74.0, r.y + 14.0, 400.0, 22.0), f(t.font_size_lg + 2.0).b(), t.text);
+        let title_font = f(t.font_size_lg + 2.0).b();
+        let title = fit(pg.g, &format!("Tsubame {}", snap.running), title_font, lay.text_w);
+        pg.g.text(&title, Rect::new(r.x + TEXT_X, r.y + 14.0, lay.text_w, 22.0), title_font, t.text);
         let how = build_line(cx.env.portable, crate::buildinfo::build_channel(), crate::buildinfo::short_commit());
-        pg.g.text(&how, Rect::new(r.x + 74.0, r.y + 37.0, 400.0, 16.0), t.font_small(), t.text_dim);
-        let (line, ok) = status_line(&snap.phase, &last);
-        let line = fit(pg.g, &line, t.font(), r.w - 74.0 - 170.0);
+        let how = fit(pg.g, &how, t.font_small(), lay.text_w);
+        pg.g.text(&how, Rect::new(r.x + TEXT_X, r.y + 37.0, lay.text_w, 16.0), t.font_small(), t.text_dim);
+        let indent = if ok { ICON_W } else { 0.0 };
         if ok {
-            pg.g.text("\u{E73E}", Rect::new(r.x + 74.0, r.y + 56.0, 16.0, 18.0), f(12.0).icon().c(), t.accent);
+            pg.g.text("\u{E73E}", Rect::new(r.x + TEXT_X, r.y + 56.0, 16.0, 18.0), f(12.0).icon().c(), t.accent);
         }
-        pg.g.text(&line, Rect::new(r.x + 74.0 + if ok { 20.0 } else { 0.0 }, r.y + 56.0, r.w - 250.0, 18.0), t.font().b(), t.text);
+        for (i, l) in lay.lines.iter().enumerate() {
+            pg.g.text(l, Rect::new(r.x + TEXT_X + indent, r.y + 56.0 + i as f32 * LINE_H, lay.text_w - indent, 18.0), t.font().b(), t.text);
+        }
+        if lay.cut {
+            let area = Rect::new(r.x + TEXT_X, r.y + 56.0, lay.text_w, lay.lines.len() as f32 * LINE_H);
+            let m = pg.ui.mouse();
+            if area.contains_pt(m) {
+                tip = Some((m, line.clone()));
+            }
+        }
         let busy = matches!(snap.phase, Phase::Checking | Phase::Downloading { .. });
         let allowed = updates::manual_check_allowed(crate::updates::current_env()) && !busy;
         let primary = !matches!(snap.phase, Phase::Available(_));
-        if button(pg.ui, pg.g, ID_CHECK, r.r() - 16.0, r.y + 28.0, "Check now", if primary { Look::Primary } else { Look::Normal }, allowed, true).0 {
+        let look = if primary { Look::Primary } else { Look::Normal };
+        let clicked = if lay.wide {
+            button(pg.ui, pg.g, ID_CHECK, r.r() - 16.0, r.y + 28.0, "Check now", look, allowed, true).0
+        } else {
+            button(pg.ui, pg.g, ID_CHECK, r.x + TEXT_X, r.y + 56.0 + lay.lines.len() as f32 * LINE_H + 6.0, "Check now", look, allowed, false).0
+        };
+        if clicked {
             updates::check_now();
         }
     }
-    c.restart_at(c.r.y + 84.0);
+    c.restart_at(c.r.y + lay.h);
     let nightly = Channel::from_config(&cx.prefs.updates.channel) == Channel::Nightly;
     let downloading = matches!(snap.phase, Phase::Downloading { .. });
     if downloading {
@@ -207,12 +229,76 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     if !matches!(snap.phase, Phase::Available(_)) {
         st.confirm_roll &= pg.ui.active().is_none() || pg.ui.is_active(ID_ROLL);
     }
+    // drawn last so nothing paints over it
+    if let Some((at, text)) = tip {
+        let lines = wrap(pg.g, &text, t.font_small(), 380.0);
+        let rest: Vec<&str> = lines.iter().skip(1).map(String::as_str).collect();
+        crate::overlay::tooltip(pg.g, &t, pg.ui.size(), at, lines.first().map_or("", String::as_str), &rest);
+    }
+}
+
+/// Left edge of the text next to the logo, inside the card.
+const TEXT_X: f32 = 74.0;
+/// Width of the check mark in front of an "ok" status line.
+const ICON_W: f32 = 20.0;
+const LINE_H: f32 = 18.0;
+/// Status lines shown before the rest is cut with an ellipsis.
+const MAX_LINES: usize = 3;
+/// Room the text needs beside the button before the button drops under it.
+const MIN_TEXT_W: f32 = 320.0;
+
+/// Where the version block puts its text and the "Check now" button for a card `w` wide.
+struct VersionLayout {
+    /// button on the right of the text (else under it)
+    wide: bool,
+    /// width of every text line
+    text_w: f32,
+    /// the status line, wrapped (the last one ends in an ellipsis when `cut`)
+    lines: Vec<String>,
+    cut: bool,
+    /// height of the block (the card adds its rows below)
+    h: f32,
+}
+
+impl VersionLayout {
+    fn new(g: &mut dyn tsubame_ui::Canvas, t: &tsubame_ui::Theme, w: f32, status: &str, ok: bool) -> VersionLayout {
+        let bw = g.measure("Check now", t.font().b()) + 28.0;
+        let beside = w - TEXT_X - 16.0 - bw - 16.0;
+        let wide = beside >= MIN_TEXT_W;
+        let text_w = if wide { beside } else { (w - TEXT_X - 16.0).max(120.0) };
+        let (lines, cut) = wrap_status(g, status, t.font().b(), text_w - if ok { ICON_W } else { 0.0 });
+        let n = lines.len().max(1) as f32;
+        let mut h = 56.0 + n * LINE_H + 10.0;
+        if !wide {
+            h += t.height_button + 6.0;
+        }
+        VersionLayout { wide, text_w, lines, cut, h }
+    }
+}
+
+/// `s` wrapped to `w`, at most `MAX_LINES` lines; true when text was cut.
+fn wrap_status(g: &mut dyn tsubame_ui::Canvas, s: &str, font: tsubame_ui::Font, w: f32) -> (Vec<String>, bool) {
+    let mut lines = wrap(g, s, font, w);
+    // one word wider than the line: fit() cuts it
+    for l in lines.iter_mut() {
+        if g.measure(l, font) > w {
+            *l = fit(g, l, font, w);
+        }
+    }
+    if lines.len() <= MAX_LINES {
+        return (lines, false);
+    }
+    lines.truncate(MAX_LINES);
+    let last = lines.pop().unwrap_or_default();
+    lines.push(fit(g, &format!("{last}\u{2026}"), font, w));
+    (lines, true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::updates::Info;
+    use tsubame_ui::Canvas;
 
     #[test]
     fn the_status_line_says_it_in_plain_words() {
@@ -224,6 +310,37 @@ mod tests {
         let a = Phase::Available(Info { version: "0.2.0".into(), channel: Channel::Stable, notes_url: String::new(), in_place_ok: true, size: 1 });
         assert!(status_line(&a, "x").0.contains("0.2.0"));
         assert_eq!(mb(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn the_version_block_wraps_under_a_width_and_keeps_the_button_off_the_text() {
+        let long = "Can\u{2019}t reach the update server right now. Tsubame will try again later \u{b7} last checked 3 days ago";
+        for t in [tsubame_ui::Theme::dark(), tsubame_ui::Theme::light()] {
+            let mut g = tsubame_ui::TestCanvas::new(1000.0, 800.0);
+            // wide: the button sits right of the text, a short line stays on one line
+            let wide = VersionLayout::new(&mut g, &t, 860.0, "You\u{2019}re up to date \u{b7} last checked today", true);
+            assert!(wide.wide && wide.lines.len() == 1 && !wide.cut);
+            // narrow: the button drops under the text and the block grows by its height
+            let narrow = VersionLayout::new(&mut g, &t, 480.0, long, false);
+            assert!(!narrow.wide);
+            assert!(narrow.h >= 56.0 + narrow.lines.len() as f32 * LINE_H + t.height_button);
+            // nothing is wider than its box, at any width
+            for w in [300.0, 420.0, 480.0, 520.0, 700.0, 860.0] {
+                let lay = VersionLayout::new(&mut g, &t, w, long, false);
+                assert!(lay.lines.len() <= MAX_LINES && !lay.lines.is_empty());
+                for l in &lay.lines {
+                    assert!(g.measure(l, t.font().b()) <= lay.text_w + 0.5, "{w}: {l:?}");
+                }
+                if lay.wide {
+                    // button left edge stays right of the text
+                    let bw = g.measure("Check now", t.font().b()) + 28.0;
+                    assert!(w - 16.0 - bw >= TEXT_X + lay.text_w, "{w}");
+                }
+            }
+            // a very narrow card cuts and says so
+            let tiny = VersionLayout::new(&mut g, &t, 200.0, long, false);
+            assert!(tiny.cut && tiny.lines.last().unwrap().ends_with('\u{2026}'));
+        }
     }
 
     #[test]

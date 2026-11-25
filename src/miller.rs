@@ -1623,7 +1623,7 @@ mod tests {
     #[test]
     fn a_deep_missing_path_ends_in_one_denied_card() {
         let d = fixture("deepmiss");
-        let mut m = model(&d.join("nope").join("deeper").join("deepest"));
+        let m = model(&d.join("nope").join("deeper").join("deepest"));
         let first_bad = (0..m.len()).find(|&i| matches!(m.col(i).unwrap().state, State::Denied(_))).expect("one column is denied");
         assert_eq!(m.len(), first_bad + 1, "the columns after the first failure are dropped");
         let last = m.len() - 1;

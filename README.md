@@ -18,7 +18,7 @@ What exists today:
 - **File operations:** copy, move, delete (Recycle Bin or permanent), rename, batch rename with a pattern preview, drag and drop (OLE), and undo/redo across all of them.
 - **Context menu:** drawn by Tsubame, with Tsubame's own actions first and the installed Windows shell extensions loaded in the background. Your own entries can be added in Settings, and a Nilesoft Shell `shell.nss` can be imported (read only). The classic Windows menu stays one click away.
 - **Command palette** (Ctrl+K or Ctrl+Shift+P): fuzzy-find commands, jump to a path, filter the folder, switch between open tabs.
-- **Settings tab** (Ctrl+,): 19 colour themes with accent colours, row density, rebindable keys, update settings, and the default-file-manager switch.
+- **Settings tab** (Ctrl+,): 19 colour themes with accent colours, row density, rebindable keys ([every default key](docs/keys.md)), update settings, and the default-file-manager switch.
 - **Default file manager (opt-in):** a per-user registry verb so that opening a folder from other apps starts Tsubame. It is off by default, needs no administrator rights, and has a Remove button. It does not replace Explorer for drives, the Recycle Bin or Win+E. Details: [docs/default-file-manager.md](docs/default-file-manager.md).
 - **Updates:** checks GitHub Releases at most once a day, verifies an ed25519-signed manifest and SHA-256 hashes, and installs only when you restart. Updates can be turned off. Details: [docs/updater.md](docs/updater.md).
 - **Command line:** open folders or files, `--new-tab`, `--new-window`, `--select <path>`, `--portable`, `--config <file>`. A second launch hands its paths to the running window. Details: [docs/config.md](docs/config.md).
