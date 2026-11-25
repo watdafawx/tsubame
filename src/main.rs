@@ -128,6 +128,11 @@ const OPS_TIMER: usize = 8;
 /// `gpu_park_after()` (`Gfx::park`: the NVIDIA driver wakes ~100/s while a
 /// device exists). Armed only while a GPU target exists.
 const PARK_TIMER: usize = 9;
+/// One-shot, a moment after the first frame: loads the shell-extension DLLs
+/// of the folder's context menus on a worker (`ctxui::prewarm`), so the first
+/// right click is as fast as the later ones. Never repeats.
+const CTX_WARM_TIMER: usize = 12;
+const CTX_WARM_MS: u32 = 400;
 const OPS_MS: u32 = 60;
 const CARET_MS: u32 = 530;
 /// The blink stops (caret solid) after this long without input.
@@ -932,6 +937,10 @@ unsafe fn on_paint(hwnd: HWND) {
         updates::on_ready();
         let auto = with(|a| a.saver.config.config.updates.auto_check).unwrap_or(false);
         updates::auto_check(auto);
+        // a measurement run times the cold paths itself; `TSUBAME_CTX_WARM=0` turns it off (A/B)
+        if with(|a| a.bench.is_none() && a.stress.is_none() && a.gate.is_none() && a.timing.is_none()).unwrap_or(false) && ctxui::warm_enabled() {
+            unsafe { SetTimer(Some(hwnd), CTX_WARM_TIMER, CTX_WARM_MS, None) };
+        }
         if with(|a| a.bench.is_some()).unwrap_or(false) {
             unsafe { SetTimer(Some(hwnd), bench::TIMER_ID, bench::TICK_MS, None) };
         }
@@ -1624,6 +1633,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_TIMER if wp.0 == leak::TIMER_ID => {
                 on_gate(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == CTX_WARM_TIMER => {
+                let _ = KillTimer(Some(hwnd), CTX_WARM_TIMER);
+                with(|a| {
+                    let icon_px = ((16.0 * a.view.dpi / 96.0 * (a.ui.theme.font_size_sm / 12.0).max(1.0)).round() as u32).clamp(16, 64);
+                    ctxui::prewarm(&mut a.pool, &a.view.tab().path, icon_px);
+                });
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == ctxui::TIMER_ID => {

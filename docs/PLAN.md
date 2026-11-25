@@ -201,6 +201,12 @@ Each one gets a mock first where it has UI.
 2. **MFT search needs admin.** Default: optional elevated helper, off until enabled; the Everything provider and the walk fallback need no admin.
 3. **Linux/macOS.** Default: not before P6.
 
+## 9. Findings log (newest first)
+
+| Date | Finding | Action |
+|---|---|---|
+| 2026-11-25 | First right click showed a thin loading bar and the shell rows ~0.6 to 0.8 s late; later clicks were fine. Cause: cold `QueryContextMenu` (~1 s in `ctxmenu_dump`, 16 ms warm) loads every shell-extension DLL on first use; the own rows were never the problem (first paint ~2 ms, Paste state is a synchronous clipboard-format probe). Rig, release, first background menu: top level 561 ms / all rows 797 ms before, 122 / 125 ms after. | `Request::CtxWarm`: one worker job 400 ms after the first frame (below-normal priority, background + item menu of the open folder, packaged scan too) loads the handlers; the loading bar shows only after 200 ms (`ctxui::LOADING_SHOW_MS`). Off with `TSUBAME_CTX_WARM=0`; `TSUBAME_CTX_LOG=<file>` logs menu timings. Cold start unchanged (timer is armed after the first paint, one-shot, killed when it fires). Shots: `docs/shots/ctx-first-*-{before,after}.png`. |
+
 ## Sources
 
 - File Pilot roadmap and release notes: https://filepilot.tech/roadmap

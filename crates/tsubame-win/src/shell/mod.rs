@@ -67,6 +67,11 @@ pub enum Request {
     /// `Closed`. The worker keeps the menu until `handle` picks or closes.
     /// Build it with [`Request::ctx`].
     CtxMenu { paths: Vec<String>, generation: u64, opts: CtxOpts, session: Arc<ctxmenu::CtxSession> },
+    /// Loads the shell-extension DLLs the background and item menus of
+    /// `folder` need (a cold first `QueryContextMenu` takes ~1 s, a warm one
+    /// ~15 ms), then drops the menus. Run once after startup at below-normal
+    /// priority; answers `Payload::Warm`.
+    CtxWarm { folder: String, icon_px: u32 },
     /// Simulates a hung shell call: `Sleep(ms)` without pumping.
     Hang { ms: u32 },
 }
@@ -84,7 +89,7 @@ impl Request {
             Request::Menu { .. } => K_MENU,
             Request::Hang { .. } => K_HANG,
             Request::Clip(_) => K_CLIP,
-            Request::CtxMenu { .. } => K_CTX,
+            Request::CtxMenu { .. } | Request::CtxWarm { .. } => K_CTX,
         }
     }
 }
@@ -122,6 +127,8 @@ pub enum Payload {
     Clip(crate::dnd::clipboard::ClipReply),
     /// one batch of an own-drawn menu (several per request)
     Ctx(ctxmodel::MenuBatch),
+    /// the pre-warm finished (nothing to show)
+    Warm,
     Hang,
 }
 
@@ -481,6 +488,17 @@ fn run(req: Request, host: Option<HWND>, ui: HWND, emit: &dyn Fn(Payload) -> boo
         Request::Menu { paths, x, y, extended, auto_close, owner, opts } => Payload::Menu(menu::show(host, &paths, x, y, extended, auto_close, owner, ui, &opts)),
         Request::Clip(job) => Payload::Clip(crate::dnd::clipboard::run(job)),
         Request::CtxMenu { paths, generation, opts, session } => Payload::Ctx(ctxmenu::run(host, ui, &paths, generation, &opts, &session, &|b| emit(Payload::Ctx(b)), waiting)),
+        Request::CtxWarm { folder, icon_px } => {
+            // the worker is a normal-priority thread: warm below it so a first
+            // folder's icons and the UI thread's frames win
+            unsafe {
+                let th = GetCurrentThread();
+                let _ = SetThreadPriority(th, THREAD_PRIORITY_BELOW_NORMAL);
+                ctxmenu::warm(host, &folder, icon_px);
+                let _ = SetThreadPriority(th, THREAD_PRIORITY_NORMAL);
+            }
+            Payload::Warm
+        }
         Request::Hang { ms } => {
             unsafe { Sleep(ms) };
             Payload::Hang

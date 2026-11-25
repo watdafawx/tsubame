@@ -63,6 +63,30 @@ pub fn own_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("TSUBAME_NATIVE_MENU").map(|v| v.trim() != "1").unwrap_or(true))
 }
 
+/// `TSUBAME_CTX_WARM=0` skips the startup pre-warm (A/B timing runs).
+pub fn warm_enabled() -> bool {
+    own_enabled() && std::env::var("TSUBAME_CTX_WARM").map(|v| v.trim() != "0").unwrap_or(true)
+}
+
+/// A filesystem folder the shell can bind (a drive path or a UNC path).
+fn warmable(folder: &str) -> bool {
+    let b = folder.as_bytes();
+    (b.len() >= 3 && b[1] == b':' && b[2] == b'\\' && b[0].is_ascii_alphabetic()) || folder.starts_with(r"\\")
+}
+
+/// Asks a shell worker to load the context-menu handlers of `folder` once,
+/// below normal priority, so the first right click does not wait for DLLs
+/// (cold `QueryContextMenu` ~1 s, warm ~15 ms). Nothing comes back to draw.
+pub fn prewarm(pool: &mut Pool, folder: &str, icon_px: u32) {
+    if warmable(folder) {
+        pool.submit(Request::CtxWarm { folder: folder.to_string(), icon_px });
+    }
+}
+
+/// The loading line stays hidden this long: a menu the shell fills within it
+/// (a warm worker: ~20 ms) never flashes a bar.
+pub const LOADING_SHOW_MS: u128 = 200;
+
 /// What was right-clicked.
 #[derive(Clone, Debug, Default)]
 pub struct Target {
@@ -740,7 +764,8 @@ impl CtxMenu {
             self.dirty = false;
         }
         let loading = self.loading();
-        let phase = loading.then(|| (self.asked_at.elapsed().as_millis() % SPIN_MS) as f32 / SPIN_MS as f32);
+        let waited = self.asked_at.elapsed().as_millis();
+        let phase = (loading && waited >= LOADING_SHOW_MS).then(|| (waited % SPIN_MS) as f32 / SPIN_MS as f32);
         let alt = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x12) } < 0;
         let now = self.now_ms();
         // CM10: one atomic load until a screen reader has asked for the provider
@@ -840,8 +865,21 @@ impl CtxMenu {
         if self.model.state == LoadState::Ready {
             self.top_items.get_or_insert_with(|| self.input_at.elapsed());
         }
-        if self.model.complete && self.model.error.is_none() {
-            self.all_items.get_or_insert_with(|| self.input_at.elapsed());
+        if self.model.complete && self.model.error.is_none() && self.all_items.is_none() {
+            self.all_items = Some(self.input_at.elapsed());
+            self.log_timing();
+        }
+    }
+
+    /// `TSUBAME_CTX_LOG=<file>`: appends [`CtxMenu::timing_line`] once the menu is complete
+    /// (A/B timing runs; off by default, no file access otherwise).
+    fn log_timing(&self) {
+        static FILE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let Some(path) = FILE.get_or_init(|| std::env::var("TSUBAME_CTX_LOG").ok().filter(|v| !v.is_empty())) else { return };
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let kind = if self.target.background { "background" } else { "item" };
+            let _ = writeln!(f, "{kind}: {}", self.timing_line());
         }
     }
 
@@ -1328,6 +1366,35 @@ mod tests {
         let bg_rows = tsubame_rows(&e, Kind::Background, "", 1, false);
         let bg = labels(&bg_rows);
         assert_eq!(bg, ["Paste", "New folder", "New text file", "Copy as path", "Open terminal here", "Refresh", "--", ctxmodel::CLASSIC_LABEL]);
+    }
+
+    /// First right click on empty space: every static row exists before the
+    /// shell answers (no batch applied), and the loading line is not due yet.
+    #[test]
+    fn background_menu_is_complete_before_any_shell_batch() {
+        let mut menu = ContextMenu::default();
+        menu.entries = tsubame_config::menu::effective(&menu.entries);
+        let t = Target { paths: vec![r"C:\x".into()], folders: vec![r"C:\x".into()], folder: r"C:\x".into(), background: true, ..Default::default() };
+        let (tsubame, user) = own_parts(&t, &menu.entries, false);
+        let m = MenuModel::new(1, tsubame, user);
+        assert_eq!(m.state, LoadState::Loading, "nothing from the shell yet");
+        assert!(m.native.is_empty() && m.packaged.is_empty());
+        let rows = m.rows(&menu);
+        let l = labels(&rows);
+        for want in ["Paste", "New folder", "New text file", "Copy as path", "Open terminal here", "Refresh", ctxmodel::CLASSIC_LABEL] {
+            assert!(l.contains(&want), "{want} missing: {l:?}");
+        }
+        assert!(LOADING_SHOW_MS >= 150, "a warm worker answers inside it");
+    }
+
+    #[test]
+    fn prewarm_only_for_bindable_folders() {
+        assert!(warmable(r"C:\Users\x"));
+        assert!(warmable(r"d:\"));
+        assert!(warmable(r"\\server\share\dir"));
+        assert!(!warmable("This PC"));
+        assert!(!warmable(""));
+        assert!(!warmable("C:"));
     }
 
     #[test]
