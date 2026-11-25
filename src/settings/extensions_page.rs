@@ -5,6 +5,7 @@
 //! the column menu, so only feature extensions are listed here.
 
 use super::age_card;
+use super::miller_card;
 use super::Cx;
 use super::lay::Pg;
 use tsubame_ext_api::Tier;
@@ -51,4 +52,5 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         }
     }
     age_card::paint(pg, &mut st.age, cx);
+    miller_card::paint(pg, cx);
 }

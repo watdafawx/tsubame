@@ -10,6 +10,7 @@ pub mod lay;
 
 mod advanced;
 mod age_card;
+mod miller_card;
 mod appearance;
 mod defaultfm_page;
 mod extensions_page;
