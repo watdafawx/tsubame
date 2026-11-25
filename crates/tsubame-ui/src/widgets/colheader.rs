@@ -23,6 +23,10 @@ pub struct HeaderResponse {
     /// the left edge of column `.0` is being dragged to x `.1` (relative to
     /// the header's left edge)
     pub resize: Option<(usize, f32)>,
+    /// right click released on column `.0` at this point
+    pub context: Option<(usize, crate::geom::Pt)>,
+    /// double click on the right edge of column `.0`: fit it to its content
+    pub auto_fit: Option<usize>,
 }
 
 /// Width of the grab zone on a column's left edge.
@@ -62,6 +66,9 @@ pub fn column_header(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, cols: 
         if it.clicked == Some(Button::Left) {
             clicked = Some(i);
         }
+        if it.clicked == Some(Button::Right) {
+            resp.context = Some((i, it.click_pos));
+        }
         if it.hovered && ui.active().is_none_or(|a| a == id.with(i as u64)) {
             hot = Some(i);
         }
@@ -71,9 +78,22 @@ pub fn column_header(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, cols: 
         let grab = Rect::new(edge - GRAB / 2.0, body.y, GRAB, body.h);
         let hid = id.child("grip").with(i as u64);
         let it = ui.interact(hid, grab, Sense::click().cursor(Cursor::SizeWE));
-        if it.active {
+        if it.pressed.is_some_and(|p| p.double && p.button == Button::Left) {
+            // the grip is the left edge of column i: the right edge of i - 1
+            resp.auto_fit = Some(i - 1);
+        } else if it.active {
             resp.resize = Some((i, ui.mouse().x - rect.x));
             ui.request_repaint();
+        }
+    }
+    // the right edge of the last column: double click fits it (no drag)
+    if let Some(&(x, w)) = spans.iter().take(cols.len()).next_back()
+        && cols.len() >= 2
+    {
+        let grab = Rect::new(rect.x + x + w - GRAB, body.y, GRAB, body.h);
+        let it = ui.interact(id.child("grip").with(cols.len() as u64), grab, Sense::click().cursor(Cursor::SizeWE));
+        if it.pressed.is_some_and(|p| p.double && p.button == Button::Left) {
+            resp.auto_fit = Some(cols.len() - 1);
         }
     }
     resp.sort = clicked;

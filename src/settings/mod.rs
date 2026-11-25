@@ -92,7 +92,7 @@ impl Page {
     /// Words the "Find a setting" box looks in (besides the title).
     fn keywords(self) -> &'static str {
         match self {
-            Page::General => "start folder session restore hidden system files delete recycle confirm preview quick look syntax hex",
+            Page::General => "start folder session restore hidden system files extensions type ahead jump filter delete recycle confirm preview quick look syntax hex",
             Page::Appearance => "theme dark light colour color accent density zebra font size rows",
             Page::ContextMenu => "right click menu custom command nilesoft import submenu",
             Page::Keys => "keyboard shortcuts keybindings hotkeys rebind chord",

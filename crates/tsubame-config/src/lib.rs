@@ -292,6 +292,52 @@ impl Default for Panes {
     }
 }
 
+/// `[view]`: how a folder is drawn and how typing in it behaves (Explorer parity).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewConfig {
+    /// Width of one grid cell in DIPs, 48 to 256 in steps of 8 (Ctrl+wheel, Ctrl+Plus / Ctrl+Minus).
+    /// Out of range or off-step values are clamped and snapped when read.
+    #[serde(default = "default_grid_size")]
+    pub grid_size: u32,
+    /// Typing in the list starts the filter (the old behaviour). Off: typing jumps to the first
+    /// name that starts with the typed letters, like Explorer; Ctrl+F opens the filter.
+    pub type_ahead_filters: bool,
+    /// Show the extension of files. Off: names are drawn without it (folders unchanged);
+    /// rename still edits the full name and sorting uses the real name.
+    #[serde(default = "yes")]
+    pub show_extensions: bool,
+}
+
+impl ViewConfig {
+    pub const GRID_MIN: u32 = 48;
+    pub const GRID_MAX: u32 = 256;
+    pub const GRID_STEP: u32 = 8;
+    /// `grid_size` clamped to the range and snapped to the step.
+    pub fn grid_size_dip(&self) -> f32 {
+        Self::snap_grid(self.grid_size as f32) as f32
+    }
+    /// Nearest allowed grid size for `v` DIPs.
+    pub fn snap_grid(v: f32) -> u32 {
+        let v = v.clamp(Self::GRID_MIN as f32, Self::GRID_MAX as f32);
+        let steps = ((v - Self::GRID_MIN as f32) / Self::GRID_STEP as f32).round() as u32;
+        Self::GRID_MIN + steps * Self::GRID_STEP
+    }
+}
+
+fn default_grid_size() -> u32 {
+    DEFAULT_GRID_SIZE
+}
+
+/// `[view] grid_size` default: the old small-thumbnail cell.
+pub const DEFAULT_GRID_SIZE: u32 = 96;
+
+impl Default for ViewConfig {
+    fn default() -> Self {
+        ViewConfig { grid_size: DEFAULT_GRID_SIZE, type_ahead_filters: false, show_extensions: true }
+    }
+}
+
 /// `[tags]`: P4.F6 tags and colours (`tsubame.ext.tags`). The tags
 /// themselves live in `tags.db` next to this file, not here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -606,6 +652,7 @@ pub struct Config {
     pub general: General,
     pub appearance: Appearance,
     pub panes: Panes,
+    pub view: ViewConfig,
     pub preview: PreviewConfig,
     pub tags: TagsConfig,
     pub tree: TreeConfig,
@@ -627,6 +674,7 @@ impl Default for Config {
             general: General::default(),
             appearance: Appearance::default(),
             panes: Panes::default(),
+            view: ViewConfig::default(),
             preview: PreviewConfig::default(),
             tags: TagsConfig::default(),
             tree: TreeConfig::default(),
@@ -1242,6 +1290,30 @@ maximized = true
         assert!(c.extensions.disabled.is_empty());
         assert_eq!(c.window, WindowState { x: 0, y: 0, w: 1120, h: 720, maximized: false });
         assert_eq!(c.start_folder(), StartFolder::Last);
+    }
+
+    #[test]
+    fn the_view_section_defaults_snap_and_round_trip() {
+        let c = Config::default();
+        assert_eq!(c.view, ViewConfig::default());
+        assert_eq!((c.view.grid_size, c.view.type_ahead_filters, c.view.show_extensions), (96, false, true));
+        assert_eq!(ViewConfig::snap_grid(10.0), 48);
+        assert_eq!(ViewConfig::snap_grid(9999.0), 256);
+        assert_eq!(ViewConfig::snap_grid(101.0), 104);
+        assert_eq!(ViewConfig::snap_grid(100.0), 104, "halfway rounds up");
+        let c: Config = toml::from_str("[view]
+grid_size = 130
+type_ahead_filters = true
+show_extensions = false
+").unwrap();
+        assert_eq!(c.view.grid_size_dip(), 128.0, "off-step values snap when read");
+        assert!(c.view.type_ahead_filters && !c.view.show_extensions);
+        let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.view, c.view);
+        let partial: Config = toml::from_str("[view]
+type_ahead_filters = true
+").unwrap();
+        assert_eq!((partial.view.grid_size, partial.view.show_extensions), (96, true));
     }
 
     #[test]

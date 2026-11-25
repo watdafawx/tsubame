@@ -121,6 +121,17 @@ impl GridState {
     pub fn cancel_band(&mut self) {
         self.band = None;
     }
+    /// Changes the cell size (zoom) and keeps the top visible row on screen:
+    /// the scroll is re-based on the same first cell at the new height.
+    pub fn set_cell_size(&mut self, w: f32, h: f32) {
+        if w == self.cell_w && h == self.cell_h {
+            return;
+        }
+        let row = (self.scroll / self.cell_h.max(1.0) as f64).floor().max(0.0);
+        self.cell_w = w;
+        self.cell_h = h;
+        self.scroll = row * h as f64;
+    }
     /// Index of the first cell on the top visible row.
     pub fn top_index(&self) -> usize {
         (self.scroll / self.cell_h.max(1.0) as f64).floor() as usize * self.cols.max(1)
@@ -243,6 +254,9 @@ pub struct GridResponse {
     pub context_key: bool,
     pub scrolled: bool,
     pub cursor_moved: bool,
+    /// Ctrl + wheel notches over the grid this frame (+1 = away from the user);
+    /// the grid does not scroll for them, the app zooms
+    pub zoom: f32,
 }
 
 /// The grid in `rect`, with its scrollbar on the right.
@@ -279,8 +293,12 @@ pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridSt
 
     // wheel: a fixed step per notch, no smoothing
     if it.wheel.1 != 0.0 {
-        let step = (ui.theme.wheel_lines() * ui.theme.height_list_row).max(ch * 0.6) as f64;
-        st.set_scroll(st.scroll - it.wheel.1 as f64 * step, len);
+        if it.wheel_mods.ctrl {
+            resp.zoom = it.wheel.1;
+        } else {
+            let step = (ui.theme.wheel_lines() * ui.theme.height_list_row).max(ch * 0.6) as f64;
+            st.set_scroll(st.scroll - it.wheel.1 as f64 * step, len);
+        }
     }
 
     // mouse

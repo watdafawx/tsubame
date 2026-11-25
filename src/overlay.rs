@@ -85,11 +85,17 @@ pub struct MenuItem<'a> {
     /// draw a separator line above
     pub sep_before: bool,
     pub danger: bool,
+    /// a checkbox row: `Some(on)` draws a check mark slot before the label
+    pub checked: Option<bool>,
 }
 
 impl<'a> MenuItem<'a> {
     pub fn new(label: &'a str, keys: &'a str) -> MenuItem<'a> {
-        MenuItem { label, keys, enabled: true, sep_before: false, danger: false }
+        MenuItem { label, keys, enabled: true, sep_before: false, danger: false, checked: None }
+    }
+    pub fn check(mut self, on: bool) -> Self {
+        self.checked = Some(on);
+        self
     }
     pub fn off(mut self, off: bool) -> Self {
         self.enabled = !off;
@@ -151,7 +157,11 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, at: Pt, items: &[MenuItem])
         } else {
             t.text
         };
-        c.text(item.label, Rect::new(r.x + 10.0, r.y, r.w - 20.0, r.h), t.font(), col);
+        let lead = if item.checked.is_some() { 26.0 } else { 0.0 };
+        if item.checked == Some(true) {
+            c.text("\u{E73E}", Rect::new(r.x + 8.0, r.y, 16.0, r.h), f(12.0).icon().c(), if item.enabled { t.accent } else { t.text_disabled });
+        }
+        c.text(item.label, Rect::new(r.x + 10.0 + lead, r.y, r.w - 20.0 - lead, r.h), t.font(), col);
         if !item.keys.is_empty() {
             keycap_right(c, &t, r.r() - 6.0, r.y + r.h / 2.0, item.keys);
         }

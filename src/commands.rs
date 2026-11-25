@@ -75,6 +75,11 @@ pub const CMD_PANE_TREE: u32 = 82;
 pub const CMD_VIEW_MILLER: u32 = 83;
 /// F6 file-age colouring (`tsubame.ext.file_age`)
 pub const CMD_AGE_COLOURS: u32 = 70;
+// B10-A Explorer basics (ids 100-119)
+pub const CMD_VIEW_ZOOM_IN: u32 = 100;
+pub const CMD_VIEW_ZOOM_OUT: u32 = 101;
+pub const CMD_SELECT_INVERT: u32 = 102;
+pub const CMD_VIEW_EXTENSIONS: u32 = 103;
 // F4 batch rename (id kept clear of the other P4 batches in flight)
 pub const CMD_BATCH_RENAME: u32 = 72;
 
@@ -109,7 +114,11 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_VIEW_DETAILS, "view.details", "Details view", ["Ctrl+Shift+1"], GF),
     cmd!(CMD_VIEW_GRID_SMALL, "view.grid-small", "Small thumbnails", ["Ctrl+Shift+2"], GF),
     cmd!(CMD_VIEW_GRID_LARGE, "view.grid-large", "Large thumbnails", ["Ctrl+Shift+3"], GF),
+    cmd!(CMD_VIEW_ZOOM_IN, "view.zoom-in", "Bigger icons (Ctrl+wheel up)", ["Ctrl+=", "Ctrl+Shift+="], GF),
+    cmd!(CMD_VIEW_ZOOM_OUT, "view.zoom-out", "Smaller icons (Ctrl+wheel down)", ["Ctrl+-"], GF),
+    cmd!(CMD_VIEW_EXTENSIONS, "view.extensions", "Show file extensions", [], G),
     cmd!(CMD_SELECT_ALL, "select.all", "Select all", ["Ctrl+A"], F),
+    cmd!(CMD_SELECT_INVERT, "select.invert", "Invert selection", ["Ctrl+Shift+A"], F),
     cmd!(CMD_ESCAPE, "select.escape", "Clear filter, then selection", ["Esc"], F),
     cmd!(CMD_BACKSPACE_UP, "nav.backspace-up", "Up one folder (Backspace)", ["Backspace"], F),
     cmd!(CMD_RENAME, "file.rename", "Rename (several items: batch rename)", ["F2"], F),
@@ -318,7 +327,11 @@ mod tests {
         (CMD_VIEW_DETAILS, &[(Key::Char('1'), CS)], true),
         (CMD_VIEW_GRID_SMALL, &[(Key::Char('2'), CS)], true),
         (CMD_VIEW_GRID_LARGE, &[(Key::Char('3'), CS)], true),
+        (CMD_VIEW_ZOOM_IN, &[(Key::Char('='), CT), (Key::Char('='), CS)], true),
+        (CMD_VIEW_ZOOM_OUT, &[(Key::Char('-'), CT)], true),
+        (CMD_VIEW_EXTENSIONS, &[], true),
         (CMD_SELECT_ALL, &[(Key::Char('A'), CT)], false),
+        (CMD_SELECT_INVERT, &[(Key::Char('A'), CS)], false),
         (CMD_ESCAPE, &[(Key::Escape, NM)], false),
         (CMD_BACKSPACE_UP, &[(Key::Backspace, NM)], false),
         (CMD_RENAME, &[(Key::F(2), NM)], false),
@@ -369,7 +382,7 @@ mod tests {
     fn settings_tab_allowed_before(cmd: u32) -> bool {
         matches!(
             cmd,
-            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS
+            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS | CMD_VIEW_EXTENSIONS
         ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
     }
 
