@@ -131,7 +131,10 @@ mod tests {
         assert_eq!(file_id(&b.to_string_lossy()).unwrap().1, fid, "a rename keeps the id");
         if vol.ids_stable() {
             let p = path_by_id(&vol.root, fid).expect("open by id");
-            assert!(p.eq_ignore_ascii_case(&b.to_string_lossy()), "{p}");
+            // `temp_dir` may hand out the 8.3 short form (RUNNER~1) while the
+            // final path is long: compare against the canonical long path.
+            let want = strip_verbatim(&std::fs::canonicalize(&b).unwrap().to_string_lossy());
+            assert!(p.eq_ignore_ascii_case(&want), "{p} != {want}");
         }
         assert_eq!(strip_verbatim("\\\\?\\UNC\\s\\x"), "\\\\s\\x");
         let _ = std::fs::remove_dir_all(&d);
