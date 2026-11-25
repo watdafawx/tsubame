@@ -181,6 +181,21 @@ Verdict cells are left empty; fill each with PASS, FAIL or UNTESTABLE. Chords ar
 | COL-3 | Select `checksum\payload.bin`; palette → `file.checksum`; paste the clipboard into Notepad; compare with the fixture's printed SHA-256. | Status bar summarises CRC32, MD5, SHA-1 and SHA-256 and the SHA-256 is on the clipboard; it matches the fixture hash. Folder selected: "Select a file (not a folder) to compute checksums". File inside an archive: "Extract the file from the archive first to compute checksums". A second run while one is busy neither crashes nor interleaves output. | |
 | COL-4 | Switch each P4 column off and on live (`tsubame.column.git`, the size column used by folder sizes, plus the P2 columns); sort by Name, Size and Date. | Layout reflows live, freed width goes to Name, sorting still works per column, and disabling a feature removes its badges/values at once with no dropped thread (IDLE-3). | |
 
+### 2.5b Miller columns (`Ctrl+Shift+5`; extension `tsubame.ext.miller`)
+
+| ID | Do | Expect | Result |
+|---|---|---|---|
+| MIL-1 | In a deep folder press `Ctrl+Shift+5`. | One column per folder level, each with a header (name and count); ancestors show the path row with a quiet fill and a 2 px accent bar; the active column has the full selection and the focus ring. | |
+| MIL-2 | Right, Left, Enter, Backspace, Home, End, then type a name prefix. | Right and Enter enter a folder (Enter opens a file); Left and Backspace go to the parent; type-ahead jumps in the active column; Right on a file does nothing. | |
+| MIL-3 | Drill 10 or more levels. | A left cue says how many columns are hidden; at most 12 columns stay live. | |
+| MIL-4 | Drag a column edge; double-click it. | Width follows the mouse (140 to 480 px); double-click returns to 220. | |
+| MIL-5 | Select a text file, a binary file and a folder. | File: info column with type, size, modified, attributes and an excerpt (text or hex); with Preview off a note and a Settings button; folder: its child column. | |
+| MIL-6 | Shrink the window below 560 px. | One column with a parent header and an info strip; Left goes up. | |
+| MIL-7 | Open a very large folder, an empty folder and an unreadable one. | Skeleton after 80 ms and Esc cancels; "This folder is empty"; "Can't open this folder" with Retry. | |
+| MIL-8 | Select a junction, press Follow; try one that loops to an ancestor. | A "Junction or link" card first; Follow opens the target; a loop says so and is not followed. | |
+| MIL-9 | Settings > Extensions: switch Miller off, then on. | Off: the chord does nothing, a Miller tab returns to Details; on: it works again. | |
+| MIL-10 | Idle with Miller open for 20 s. | CPU delta about 0. | |
+
 ### 2.6 Mouse and navigation
 
 | ID | Steps | Expected | Verdict |

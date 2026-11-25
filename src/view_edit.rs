@@ -198,6 +198,11 @@ impl View {
             ui.request_repaint();
             return;
         }
+        if self.miller_showing() {
+            self.ops.message = Some("Rename is not available in Miller columns yet. Switch to Details to rename.".into());
+            ui.request_repaint();
+            return;
+        }
         if self.tab().is_archive() {
             self.ops.message = Some(crate::archive_ui::READ_ONLY_MSG.into());
             ui.request_repaint();

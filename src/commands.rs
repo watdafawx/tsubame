@@ -71,6 +71,8 @@ pub const CMD_TAGS_PICK: u32 = 80;
 /// F6 tree view (`tsubame.ext.tree`)
 pub const CMD_VIEW_TREE: u32 = 81;
 pub const CMD_PANE_TREE: u32 = 82;
+/// F6 Miller columns view (`tsubame.ext.miller`)
+pub const CMD_VIEW_MILLER: u32 = 83;
 /// F6 file-age colouring (`tsubame.ext.file_age`)
 pub const CMD_AGE_COLOURS: u32 = 70;
 // F4 batch rename (id kept clear of the other P4 batches in flight)
@@ -172,6 +174,10 @@ pub static TREE_COMMANDS: &[CommandSpec] = &[
     cmd!(CMD_PANE_TREE, "pane.tree", "Toggle tree pane", ["Shift+Alt+T"], F),
 ];
 
+/// Miller-columns extension (`tsubame.ext.miller`) command. `Ctrl+Shift+3` is
+/// `view.grid-large` and `Ctrl+Shift+4` is `view.tree`, so Miller takes `Ctrl+Shift+5`.
+pub static MILLER_COMMANDS: &[CommandSpec] = &[cmd!(CMD_VIEW_MILLER, "view.miller", "Miller columns view", ["Ctrl+Shift+5"], GF)];
+
 /// Preview extension (`tsubame.ext.preview`) commands.
 pub static PREVIEW_COMMANDS: &[CommandSpec] = &[
     cmd!(CMD_PREVIEW_TOGGLE, "preview.toggle_pane", "Toggle preview pane", ["Alt+P"], F),
@@ -202,6 +208,7 @@ pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
         .chain(PREVIEW_COMMANDS)
         .chain(TAGS_COMMANDS)
         .chain(TREE_COMMANDS)
+        .chain(MILLER_COMMANDS)
         .chain(AGE_COMMANDS)
         .chain(BATCH_RENAME_COMMANDS)
 }
@@ -217,6 +224,7 @@ pub const fn builtin_count() -> usize {
         + PREVIEW_COMMANDS.len()
         + TAGS_COMMANDS.len()
         + TREE_COMMANDS.len()
+        + MILLER_COMMANDS.len()
         + AGE_COMMANDS.len()
         + BATCH_RENAME_COMMANDS.len()
 }
@@ -350,6 +358,7 @@ mod tests {
         (CMD_TAGS_PICK, &[(Key::Char('T'), AL)], false),
         (CMD_VIEW_TREE, &[(Key::Char('4'), CS)], true),
         (CMD_PANE_TREE, &[(Key::Char('T'), AS)], false),
+        (CMD_VIEW_MILLER, &[(Key::Char('5'), CS)], true),
         (CMD_AGE_COLOURS, &[], true),
         (CMD_BATCH_RENAME, &[], false),
     ];

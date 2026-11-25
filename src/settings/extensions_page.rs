@@ -20,6 +20,7 @@ fn describe(id: &str) -> &'static str {
         "tsubame.ext.file_age" => "Colour files by how recently they changed (settings below).",
         "tsubame.ext.batch_rename" => "F2 on several items: pattern bar with live preview, one undo step. Adds Rename N items to the context menu.",
         "tsubame.ext.tags" => "Tags and colours on files (Alt+T picker, marks, sidebar Tags section). Manage them in Settings > Tags.",
+        "tsubame.ext.miller" => "Miller columns view: one column per folder level with an info column (Ctrl+Shift+5).",
         "tsubame.ext.tree" => "Tree view: Details with folders that expand in place (Ctrl+Shift+4), and a folders-only Tree pane (Shift+Alt+T).",
         _ => "",
     }

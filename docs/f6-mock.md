@@ -44,7 +44,7 @@ Miller
 1. Column header (24 px, name and count) on every column or none? **Recommend: show it** (names columns that scroll off-screen; carries the active accent rule).
 2. Sort and filter: pane-wide like Details, or per column? **Recommend: pane-wide.**
 3. Window below 560 px: single-column drill-down, or keep scrolling? **Recommend: drill-down below 560 px, scroll above.**
-4. Keys: Enter enters a folder or opens a file; Right on a file does nothing. View-switch chords `Ctrl+Alt+1..4` (Details, Grid, Miller, Tree) are proposals, no chord is confirmed free. **Recommend: as stated, settle chords in the keybinding pass** (`docs/PLAN.md` section 9).
+4. Keys: Enter enters a folder or opens a file; Right on a file does nothing. View-switch chords `Ctrl+Alt+1..4` (Details, Grid, Miller, Tree) are proposals, no chord is confirmed free. **Built:** the mock's `Ctrl+Alt+3` is stale. `Ctrl+Shift+3` is `view.grid-large` and `Ctrl+Shift+4` is `view.tree`, so Miller is `Ctrl+Shift+5` (`view.miller`). **Recommend: as stated, settle chords in the keybinding pass** (`docs/PLAN.md` section 9).
 
 Tree
 1. Folder tree pane: separate opt-in pane (`Alt+T`) or a sidebar section? **Recommend: separate pane**; the sidebar stays Quick access and Drives.
@@ -72,7 +72,7 @@ F4 on ext-api
 ## Budget implications
 
 - **Zero idle cost for all five.** No timers, no wake-ups. Loading rows and the tag-indexing line are static glyphs and progress fills drawn only when a worker message arrives. Age buckets read the clock once per frame, so a window left idle across midnight keeps stale tints until the next repaint (accepted trade-off).
-- **Memory caps.** Miller: at most 12 live columns, each only a `Vec<u32>` index into the shared store. Tree: 5,000 children per expanded folder, 50,000 live rows, collapse frees children at once, at most 32 watched expanded folders. Tags: 4,096-row LRU of file-id to tags, database soft cap 100,000 tagged items / 16 MB. Age: nothing cached per file.
+- **Memory caps.** Miller: at most 12 live columns. As built, each column has its own `EntryStore` (not an index into one shared store), because every column lists a different folder; each is capped at 100,000 entries. Tree: 5,000 children per expanded folder, 50,000 live rows, collapse frees children at once, at most 32 watched expanded folders. Tags: 4,096-row LRU of file-id to tags, database soft cap 100,000 tagged items / 16 MB. Age: nothing cached per file.
 - **Background work: only tags, plus lazy enumeration for Miller and Tree.** Tags: batched lookups for visible rows, re-keying after watcher rename or move events, a one-time lazy reconcile per volume. Age: none (modified time is already in the 24-byte entry record). No full-disk scans anywhere.
 - **Paint.** Visible rows only; the details p95 < 5 ms budget at 4K is unchanged. Age text colour is a different colour on the same draw call; chip adds one alpha-filled rounded rect per visible row.
 - **Switchable.** All four F6 features and batch rename are built-in extensions (`tsubame.ext.miller`, `tsubame.ext.tree`, `tsubame.ext.tags`, `tsubame.ext.file_age`, `tsubame.ext.batch_rename`); off removes their buttons, commands, columns and settings cleanly.
