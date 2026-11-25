@@ -1,6 +1,7 @@
 //! Measurement client and mock hosts. Not shipped.
 //!
-//!   plughost-bench run <host.exe> <plugin folder> <file.cwasm> [--runs N] [--paths N]
+//!   plughost-bench run <host.exe> <plugin folder> <cache folder> [--runs N] [--paths N]
+//!       (the plugin installed into the cache with `tsubame-plugc`)
 //!       start-up time, batch round trips on the plugin's first column, clean shutdown
 //!   plughost-bench mock hang|silent|exit|spawn|env
 //!       stands in for the host in the tests: says hello and accepts the load, then
@@ -15,9 +16,9 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tsubame_plughost::client::{Options, Plugin, ProcessLauncher};
+use tsubame_plughost::install_record;
 use tsubame_plughost::manifest::Manifest;
 use tsubame_plughost::proto::{self, Info, Load, Request};
-use tsubame_plughost::sha256;
 
 /// Realistic-looking Windows paths (about 70 bytes each).
 fn gen_paths(n: usize) -> Vec<String> {
@@ -35,12 +36,12 @@ fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
 
-fn run(host: &str, plugin_dir: &str, cwasm: &str, runs: usize, n_paths: usize) -> Result<(), String> {
+fn run(host: &str, plugin_dir: &str, cache: &str, runs: usize, n_paths: usize) -> Result<(), String> {
     let manifest = Manifest::load(Path::new(plugin_dir)).map_err(|e| e.to_string())?;
     let column = manifest.columns.first().ok_or("the plugin has no column")?.id.clone();
-    let bytes = std::fs::read(cwasm).map_err(|e| format!("{cwasm}: {e}"))?;
-    let caps = manifest.capabilities(plugin_dir, plugin_dir).map_err(|e| e.to_string())?;
-    let load = Load::new(&manifest, Path::new(cwasm), sha256::sha256(&bytes), caps);
+    let verified = install_record::verify(Path::new(plugin_dir), Path::new(cache), &manifest.id, &manifest.version, &[]).map_err(|e| e.to_string())?;
+    let cwasm_len = std::fs::metadata(&verified.component).map_err(|e| e.to_string())?.len();
+    let load = Load::new(&verified);
     let plugin = Plugin::new(load, ProcessLauncher::new(host), Options::default());
     let owned = gen_paths(n_paths.max(1));
     let paths: Vec<&str> = owned.iter().map(String::as_str).collect();
@@ -67,7 +68,7 @@ fn run(host: &str, plugin_dir: &str, cwasm: &str, runs: usize, n_paths: usize) -
         plugin.column_values(&column, &paths, &mut out).map_err(|e| e.to_string())?;
         call.push(ms(t));
     }
-    println!("{} {} column `{column}`, {} bytes of .cwasm", manifest.id, manifest.version, bytes.len());
+    println!("{} {} column `{column}`, {} bytes of .cwasm", manifest.id, manifest.version, cwasm_len);
     row("start + load + first call", &mut start);
     row("  create process", &mut spawn);
     row("  process start -> hello", &mut hello);
@@ -142,11 +143,11 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let num = |flag: &str, default: usize| a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(default);
     let result = match (a.get(1).map(String::as_str), a.get(2), a.get(3), a.get(4)) {
-        (Some("run"), Some(host), Some(dir), Some(cwasm)) => run(host, dir, cwasm, num("--runs", 300), num("--paths", 100)),
+        (Some("run"), Some(host), Some(dir), Some(cache)) => run(host, dir, cache, num("--runs", 300), num("--paths", 100)),
         (Some("mock"), Some(mode), _, _) => mock(mode).map_err(|e| e.to_string()),
         #[cfg(windows)]
         (Some("owner"), Some(host), Some(dir), _) => owner(host, dir).map_err(|e| e.to_string()),
-        _ => Err("usage: plughost-bench run <host.exe> <plugin folder> <file.cwasm> [--runs N] [--paths N] | mock hang|silent|exit|spawn|env | owner <host.exe> <work dir>".into()),
+        _ => Err("usage: plughost-bench run <host.exe> <plugin folder> <cache folder> [--runs N] [--paths N] | mock hang|silent|exit|spawn|env | owner <host.exe> <work dir>".into()),
     };
     if let Err(e) = result {
         eprintln!("plughost-bench: {e}");

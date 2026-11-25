@@ -14,12 +14,11 @@
 //! Calls on one plugin run one at a time (the host is single threaded); call
 //! from a worker thread, never from the UI thread.
 
-use crate::manifest::Manifest;
 use crate::proto::{self, Dec, ErrKind, Info, Load, ProtoError};
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, MutexGuard};
@@ -217,16 +216,19 @@ pub struct StartTimes {
 }
 
 impl Load {
-    /// The load request for an installed plugin: `component` is the `.cwasm`
-    /// the install step wrote and `sha256` the hash it recorded.
-    pub fn new(manifest: &Manifest, component: &Path, sha256: [u8; 32], caps: crate::caps::Capabilities) -> Load {
+    /// The load request for an installed plugin that
+    /// [`install_record::verify`](crate::install_record::verify) passed: the
+    /// capabilities and the `.cwasm` hash come from its install record, never
+    /// from the live `plugin.toml`.
+    pub fn new(v: &crate::install_record::Verified) -> Load {
         Load {
-            plugin_id: manifest.id.clone(),
-            version: manifest.version.clone(),
-            component: component.to_string_lossy().into_owned(),
-            sha256,
-            caps,
-            entrypoints: manifest.entrypoints(),
+            plugin_id: v.manifest.id.clone(),
+            version: v.manifest.version.clone(),
+            component: v.component.to_string_lossy().into_owned(),
+            sha256: v.cwasm_sha256,
+            caps: v.caps.clone(),
+            entrypoints: v.manifest.entrypoints(),
+            protected: v.protected.clone(),
         }
     }
 }
@@ -833,6 +835,7 @@ mod tests {
             sha256: [0; 32],
             caps: Capabilities { timeout_ms, ..Capabilities::default() },
             entrypoints: vec![(Kind::Column, "c".into())],
+            protected: Vec::new(),
         }
     }
 

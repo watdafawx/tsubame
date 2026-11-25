@@ -14,7 +14,7 @@
 //!   time, checks the handle it got, and does the I/O on that handle.
 //! - **Network, processes.** There is no import for either.
 
-use crate::caps::{self, Access, Capabilities, Denied, PathPolicy, Scope};
+use crate::caps::{self, Access, Capabilities, Denied, PathPolicy, Protected, Scope};
 use crate::manifest::Kind;
 use crate::proto::{self, ErrKind, Info, Load, Request};
 use crate::sha256;
@@ -179,6 +179,7 @@ struct Ctx {
     caps: Capabilities,
     plugin_id: String,
     log_left: u32,
+    protected: Protected,
 }
 
 /// 100 ns steps since 1601-01-01 UTC.
@@ -206,21 +207,34 @@ fn open_error(e: OpenError) -> wit_host::FsError {
 }
 
 impl Ctx {
-    fn new(load: &Load) -> Ctx {
-        Ctx { limits: Limiter::new(load.caps.max_memory_mb), policy: PathPolicy::new(&load.caps), caps: load.caps.clone(), plugin_id: load.plugin_id.clone(), log_left: MAX_LOG_LINES }
+    fn new(load: &Load, protected: &Protected) -> Ctx {
+        Ctx {
+            limits: Limiter::new(load.caps.max_memory_mb),
+            policy: PathPolicy::new(&load.caps),
+            caps: load.caps.clone(),
+            plugin_id: load.plugin_id.clone(),
+            log_left: MAX_LOG_LINES,
+            protected: protected.clone(),
+        }
     }
 
     /// Opens `path` for `want`, or says why not. Two checks: the lexical one
     /// (`PathPolicy`), then `fsopen` opens the path from the folder that
     /// allowed it without following links and checks the handle it got, so a
     /// link, junction, hard link or a swap in between can not lead out of a grant.
+    /// Protected folders are refused on the path as asked (so nothing is created
+    /// there) and again on the final path of the handle.
     fn open(&mut self, path: &str, want: Want) -> Result<std::fs::File, wit_host::FsError> {
-        let access = if matches!(want, Want::Write { .. }) { Access::ReadWrite } else { Access::Read };
+        let write = matches!(want, Want::Write { .. });
+        let access = if write { Access::ReadWrite } else { Access::Read };
         let (norm, roots) = self.policy.check(path, access).map_err(|d| match d {
             Denied::Invalid(_) => wit_host::FsError::InvalidPath,
             Denied::NotGranted => wit_host::FsError::Denied,
         })?;
-        fsopen::open_checked(&norm, &roots, self.caps.network, want).map_err(open_error)
+        if self.protected.denies(&caps::key(&norm), write) {
+            return Err(wit_host::FsError::Denied);
+        }
+        fsopen::open_checked(&norm, &roots, self.caps.network, want, &self.protected).map_err(open_error)
     }
 }
 
@@ -312,6 +326,7 @@ struct Live {
 
 struct Loaded {
     load: Load,
+    protected: Protected,
     pre: InstancePre<Ctx>,
     meta: meta::GuestIndices,
     column: Option<column::GuestIndices>,
@@ -336,11 +351,10 @@ impl Loaded {
         if !load.component.to_ascii_lowercase().ends_with(".cwasm") {
             return Err("the component must be a `.cwasm` written by the install step".into());
         }
-        let size = std::fs::metadata(&load.component).map_err(|e| format!("can not read the component: {e}"))?.len();
-        if size > MAX_COMPONENT_BYTES {
-            return Err(format!("the component is larger than {} MB", MAX_COMPONENT_BYTES >> 20));
-        }
-        let bytes = std::fs::read(&load.component).map_err(|e| format!("can not read the component: {e}"))?;
+        let protected = protected_of(&load)?;
+        protected.check_grants(&load.caps).map_err(|e| e.to_string())?;
+        // Read once, through one handle, at most the cap; hashed and deserialized from this buffer.
+        let bytes = crate::install_record::read_capped(std::path::Path::new(&load.component), MAX_COMPONENT_BYTES).map_err(|e| format!("can not read the component: {e}"))?;
         if sha256::sha256(&bytes) != load.sha256 {
             return Err("the component's hash does not match the one recorded at install".into());
         }
@@ -368,7 +382,7 @@ impl Loaded {
         let command = wants(Kind::Command).then(|| command::GuestIndices::new(&pre).map_err(|e| missing(Kind::Command, e))).transpose()?;
 
         let timeout = Duration::from_millis(u64::from(load.caps.timeout_ms));
-        let mut loaded = Loaded { load, pre, meta, column, previewer, vfs, search, command, timeout, live: None };
+        let mut loaded = Loaded { load, protected, pre, meta, column, previewer, vfs, search, command, timeout, live: None };
         let described = loaded.guarded(watchdog, Vec::new(), |l| l.meta.call_describe(&mut l.store)).map_err(|(_, m)| format!("the component failed to start: {m}"))?;
         let mut info = Info { id: described.id, version: described.version, entrypoints: Vec::with_capacity(described.entrypoints.len()) };
         for e in described.entrypoints {
@@ -391,7 +405,7 @@ impl Loaded {
     }
 
     fn instantiate(&self) -> wasmtime::Result<Live> {
-        let mut store = Store::new(self.pre.engine(), Ctx::new(&self.load));
+        let mut store = Store::new(self.pre.engine(), Ctx::new(&self.load, &self.protected));
         store.limiter(|c| &mut c.limits);
         store.set_hostcall_fuel(HOSTCALL_FUEL);
         store.epoch_deadline_trap();
@@ -410,9 +424,9 @@ impl Loaded {
     }
 
     /// Runs `f` on the live instance under the deadline. `inputs` are the paths
-    /// of this call (what an `$input` grant covers). Any failure drops the
-    /// instance; the next call gets a fresh one.
-    fn guarded<T>(&mut self, watchdog: &Watchdog, inputs: Vec<String>, f: impl FnOnce(&mut Live) -> wasmtime::Result<T>) -> Result<T, Failure> {
+    /// of this call and whether each covers what is under it (what an `$input`
+    /// grant covers). Any failure drops the instance; the next call gets a fresh one.
+    fn guarded<T>(&mut self, watchdog: &Watchdog, inputs: Vec<(String, bool)>, f: impl FnOnce(&mut Live) -> wasmtime::Result<T>) -> Result<T, Failure> {
         let armed = watchdog.arm(self.timeout);
         let result = (|| {
             if self.live.is_none() {
@@ -447,8 +461,8 @@ impl Loaded {
         if self.load.entrypoints.iter().any(|(k, e)| *k == kind && e == id) { Ok(()) } else { fail(ErrKind::Unsupported, format!("{} `{id}`", kind.name())) }
     }
 
-    /// The paths an `$input` grant covers, or nothing when no grant asks.
-    fn inputs(&self, paths: impl FnOnce() -> Vec<String>) -> Vec<String> {
+    /// The paths an `$input` grant covers, `(path, recursive)`, or nothing when no grant asks.
+    fn inputs(&self, paths: impl FnOnce() -> Vec<(String, bool)>) -> Vec<(String, bool)> {
         let uses = self.load.caps.paths.iter().any(|g| g.scope == Scope::Input);
         if uses { paths() } else { Vec::new() }
     }
@@ -459,7 +473,8 @@ impl Loaded {
             Request::Column { column, paths } => {
                 self.declares(Kind::Column, &column)?;
                 let n = paths.len();
-                let inputs = self.inputs(|| paths.clone());
+                // A column sees each path itself, never what is in a folder.
+                let inputs = self.inputs(|| paths.iter().map(|p| (p.clone(), false)).collect());
                 let cells = self.guarded(watchdog, inputs, |l| l.column.as_ref().expect("declared").call_values(&mut l.store, &column, &paths))?;
                 if cells.len() != n {
                     return fail(ErrKind::BadResult, format!("{} values for {n} paths", cells.len()));
@@ -479,7 +494,7 @@ impl Loaded {
             }
             Request::Preview { id: previewer, path, limits } => {
                 self.declares(Kind::Previewer, &previewer)?;
-                let inputs = self.inputs(|| vec![path.clone()]);
+                let inputs = self.inputs(|| vec![(path.clone(), false)]);
                 let lim = wit::Limits { max_bytes: limits.max_bytes, max_px: limits.max_px };
                 let nodes = self
                     .guarded(watchdog, inputs, |l| l.previewer.as_ref().expect("declared").call_preview(&mut l.store, &previewer, &path, lim))?
@@ -536,7 +551,8 @@ impl Loaded {
             }
             Request::Search { id: provider, text, root, limit, cursor } => {
                 self.declares(Kind::Search, &provider)?;
-                let inputs = self.inputs(|| if root.is_empty() { Vec::new() } else { vec![root.clone()] });
+                // A search walks the folder it was asked to search.
+                let inputs = self.inputs(|| if root.is_empty() { Vec::new() } else { vec![(root.clone(), true)] });
                 let q = search::Query { text, root, limit };
                 let page = self
                     .guarded(watchdog, inputs, |l| l.search.as_ref().expect("declared").call_find(&mut l.store, &provider, &q, cursor.as_deref()))?
@@ -550,9 +566,11 @@ impl Loaded {
             }
             Request::Command { name, folder, selection, part, parts } => {
                 self.declares(Kind::Command, &name)?;
+                // What the user selected, with everything in selected folders; the
+                // folder it runs in only itself (look at it, list it).
                 let inputs = self.inputs(|| {
-                    let mut v = selection.clone();
-                    v.push(folder.clone());
+                    let mut v: Vec<(String, bool)> = selection.iter().map(|p| (p.clone(), true)).collect();
+                    v.push((folder.clone(), false));
                     v
                 });
                 let cx = command::Context { folder, selection, part, parts };
@@ -567,11 +585,33 @@ impl Loaded {
     }
 }
 
+/// The folders of a `Load` the plugin may not write (`load.protected`), and
+/// the ones it may not touch at all: the component's own folder, and every
+/// protected folder that holds the component (the cache, with the other
+/// plugins' images and install records).
+fn protected_of(load: &Load) -> Result<Protected, String> {
+    let comp = caps::normalize(&load.component).map_err(|e| format!("the component's path: {e}"))?;
+    let ck = caps::key(&comp);
+    let folder = match comp.rsplit_once('\\') {
+        Some((d, _)) if d.len() == 2 => format!("{d}\\"),
+        Some((d, _)) => d.to_string(),
+        None => return Err("the component's path has no folder".into()),
+    };
+    let mut sealed = vec![folder];
+    for p in &load.protected {
+        let n = caps::normalize(p).map_err(|e| format!("a protected folder: {e}"))?;
+        if caps::is_under(&ck, &caps::key(&n)) {
+            sealed.push(n);
+        }
+    }
+    Protected::new(&load.protected, &sealed).map_err(|e| format!("a protected folder: {e}"))
+}
+
 /// What an `$input` grant covers for a vfs call: the path, and the file it
 /// goes through (`C:\a.zip` for `C:\a.zip\inner\x`), which is what the
-/// provider has to read.
-fn vfs_inputs(path: &str) -> Vec<String> {
-    let mut out = vec![path.to_string()];
+/// provider has to read. Neither covers what is under it.
+fn vfs_inputs(path: &str) -> Vec<(String, bool)> {
+    let mut out = vec![(path.to_string(), false)];
     if let Ok(norm) = caps::normalize(path) {
         let mut at = norm.as_str();
         while let Some((parent, _)) = at.rsplit_once('\\') {
@@ -579,7 +619,7 @@ fn vfs_inputs(path: &str) -> Vec<String> {
                 break;
             }
             if std::fs::metadata(parent).is_ok_and(|m| m.is_file()) {
-                out.push(parent.to_string());
+                out.push((parent.to_string(), false));
                 break;
             }
             at = parent;
@@ -637,21 +677,10 @@ pub fn serve(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
 #[cfg(feature = "compiler")]
 pub mod install {
     use super::engine_config;
-    use crate::manifest::Manifest;
-    use crate::sha256;
-    use std::path::{Path, PathBuf};
+    use crate::install_record::{self, MAX_WASM_BYTES, RECORD_FILE, Stored};
+    use crate::manifest::{MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest};
+    use std::path::Path;
     use wasmtime::Engine;
-
-    /// Largest `.wasm` a package may ship.
-    pub const MAX_WASM_BYTES: u64 = 64 << 20;
-
-    pub struct Installed {
-        pub manifest: Manifest,
-        /// The `.cwasm` that was written.
-        pub component: PathBuf,
-        /// Its SHA-256: store it, and pass it in every `Load`.
-        pub sha256: [u8; 32],
-    }
 
     /// Compiles `.wasm` bytes to the `.cwasm` bytes the host loads.
     pub fn compile(wasm: &[u8]) -> Result<Vec<u8>, String> {
@@ -660,23 +689,22 @@ pub mod install {
     }
 
     /// Checks the manifest in `plugin_dir`, compiles the component it names and
-    /// writes `<out_dir>/<id>-<version>.cwasm`. `out_dir` must be a folder only
-    /// the app writes to.
-    pub fn install(plugin_dir: &Path, out_dir: &Path) -> Result<Installed, String> {
-        let manifest = Manifest::load(plugin_dir).map_err(|e| e.to_string())?;
-        let source = plugin_dir.join(&manifest.component);
-        let size = std::fs::metadata(&source).map_err(|e| format!("{}: {e}", source.display()))?.len();
-        if size > MAX_WASM_BYTES {
-            return Err(format!("{} is larger than {} MB", source.display(), MAX_WASM_BYTES >> 20));
+    /// writes `<cache>\<id>\<version>\component.cwasm` and the install record
+    /// next to it ([`install_record::store`]). `cache` must be a folder only
+    /// the app writes to; `data_dir` is the plugin's `$data` folder;
+    /// `protected` are the app's own folders (settings, exe folder), which no
+    /// grant may reach into. Each file is read once, at most its size limit,
+    /// and the bytes that were checked are the ones that are hashed.
+    pub fn install(plugin_dir: &Path, cache: &Path, data_dir: Option<&Path>, protected: &[String]) -> Result<Stored, String> {
+        let read = |p: &Path, limit: u64| install_record::read_capped(p, limit).map_err(|e| format!("{}: {e}", p.display()));
+        let manifest_bytes = read(&plugin_dir.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)?;
+        let manifest = Manifest::parse(std::str::from_utf8(&manifest_bytes).map_err(|_| format!("{MANIFEST_FILE}: not UTF-8"))?).map_err(|e| e.to_string())?;
+        // Before the (slow) compile: a version is installed once.
+        if install_record::install_dir(cache, &manifest.id, &manifest.version).join(RECORD_FILE).symlink_metadata().is_ok() {
+            return Err(format!("{} {} is already installed; remove its folder in the cache to install it again", manifest.id, manifest.version));
         }
-        let wasm = std::fs::read(&source).map_err(|e| format!("{}: {e}", source.display()))?;
+        let wasm = read(&plugin_dir.join(&manifest.component), MAX_WASM_BYTES)?;
         let cwasm = compile(&wasm)?;
-        std::fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-        let component = out_dir.join(format!("{}-{}.cwasm", manifest.id, manifest.version));
-        // Write beside the target and rename, so a half-written file is never loaded.
-        let tmp = out_dir.join(format!("{}-{}.cwasm.tmp", manifest.id, manifest.version));
-        std::fs::write(&tmp, &cwasm).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &component).map_err(|e| format!("{}: {e}", component.display()))?;
-        Ok(Installed { manifest, component, sha256: sha256::sha256(&cwasm) })
+        install_record::store(plugin_dir, cache, data_dir, protected, &manifest_bytes, &wasm, &cwasm).map_err(|e| e.to_string())
     }
 }

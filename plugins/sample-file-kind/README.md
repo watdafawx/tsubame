@@ -10,7 +10,7 @@ Sample **column** plugin for Tsubame, built with `tsubame-plugin-sdk`.
 It only reads path text, so `plugin.toml` has no `[capabilities]`: no file
 access, no network, no processes, default limits (64 MB, 2000 ms).
 
-Build the `.cwasm` (needs `rustup target add wasm32-wasip2`):
+Build and install it: the `.cwasm` and its install record (needs `rustup target add wasm32-wasip2`):
 
 ```
 pwsh plugins\build-plugin.ps1 plugins\sample-file-kind

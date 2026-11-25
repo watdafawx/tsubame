@@ -17,7 +17,7 @@ use tsubame_ext_api::{Cell, Hit, Limits, Node, VfsEntry};
 
 pub const MAGIC: [u8; 4] = *b"TSPH";
 /// Bumped on any change to the frames below.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 /// Largest frame either side accepts (the bytes after the length prefix).
 pub const MAX_FRAME: usize = 16 << 20;
 /// Most paths in one call (`docs/spike-wasm.md`: caps the guest's memory high-water mark).
@@ -268,7 +268,15 @@ pub struct Load {
     pub caps: Capabilities,
     /// The entry points the manifest declares.
     pub entrypoints: Vec<(Kind, String)>,
+    /// Folders the plugin may never write, whatever it was granted (security
+    /// review PH-02). The host also refuses every access (read too) under the
+    /// component's own folder and under any of these that holds the component
+    /// (the cache). Since protocol version 2.
+    pub protected: Vec<String>,
 }
+
+/// Most protected folders one `Load` may name.
+pub const MAX_PROTECTED: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
@@ -357,6 +365,10 @@ pub fn enc_load(id: u32, l: &Load) -> Result<Vec<u8>, ProtoError> {
     e.buf.extend_from_slice(&l.sha256);
     enc_caps(&mut e, &l.caps);
     enc_entrypoints(&mut e, &l.entrypoints);
+    e.u32(l.protected.len() as u32);
+    for p in &l.protected {
+        e.str(p);
+    }
     e.finish()
 }
 
@@ -411,7 +423,16 @@ pub fn decode_request(frame: &[u8]) -> Result<(u32, Request), ProtoError> {
             let (plugin_id, version, component) = (d.string()?, d.string()?, d.string()?);
             let sha256: [u8; 32] = d.take(32)?.try_into().unwrap();
             let caps = dec_caps(&mut d)?;
-            Request::Load(Load { plugin_id, version, component, sha256, caps, entrypoints: dec_entrypoints(&mut d)? })
+            let entrypoints = dec_entrypoints(&mut d)?;
+            let n = d.count(4)?;
+            if n > MAX_PROTECTED {
+                return Err(ProtoError("too many protected folders"));
+            }
+            let mut protected = Vec::with_capacity(n);
+            for _ in 0..n {
+                protected.push(d.string()?);
+            }
+            Request::Load(Load { plugin_id, version, component, sha256, caps, entrypoints, protected })
         }
         op::COLUMN => Request::Column { column: d.string()?, paths: dec_paths(&mut d)? },
         op::PREVIEW => Request::Preview { id: d.string()?, path: d.string()?, limits: Limits { max_bytes: d.u64()?, max_px: d.u32()? } },
@@ -723,6 +744,7 @@ mod tests {
                 ],
             },
             entrypoints: vec![(Kind::Column, "a".into()), (Kind::Command, "b".into())],
+            protected: vec!["C:\\Apps\\Tsubame".into(), "C:\\cache".into()],
         };
         assert_eq!(round(enc_load(1, &load).unwrap()), (1, Request::Load(load)));
         assert_eq!(

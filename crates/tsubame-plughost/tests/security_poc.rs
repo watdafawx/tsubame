@@ -3,8 +3,8 @@
 //! A test that is `#[ignore]` **passes while its weakness is present**. The
 //! test name starts with the finding's id. When a finding is fixed, its test
 //! becomes a regression test (assertion flipped, `#[ignore]` dropped, the
-//! exploit setup kept): PH-01, PH-09, PH-13 b, PH-16 and PH-17 are fixed and run
-//! in the normal suite.
+//! exploit setup kept): PH-01, PH-02, PH-03, PH-09, PH-10, PH-12, PH-13 b, PH-16,
+//! PH-17 and PH-18 are fixed and run in the normal suite.
 //!
 //! Run the open PoCs: `cargo test -p tsubame-plughost --test security_poc -- --ignored --nocapture`
 //!
@@ -13,13 +13,15 @@
 //! and a guest are at the end of `tests/host.rs`.
 
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tsubame_ext_api::{Cell, Doc, Hit, Limits, Node, Query, VfsEntry};
 use tsubame_plughost::adapters::{WasmColumn, WasmPreviewer, WasmSearch, WasmVfs};
-use tsubame_plughost::caps::{self, Access, Capabilities, Denied, PathError, PathGrant, PathPolicy, Root, Scope};
+use tsubame_plughost::caps::{self, Access, Capabilities, Denied, PathError, PathGrant, PathPolicy, Protected, Root, Scope};
 use tsubame_plughost::client::{CallError, HostIo, HostProcess, Launcher, Options, Plugin, Status};
+use tsubame_plughost::install_record;
 use tsubame_plughost::manifest::{Kind, Manifest, ProviderDecl};
 use tsubame_plughost::proto::{self, Info, Load};
 
@@ -34,7 +36,7 @@ fn manifest(plugin: &str, caps: &str) -> String {
 fn ph01_unc_paths_pass_the_policy_without_the_network_capability() {
     let caps = Capabilities { paths: vec![PathGrant { scope: Scope::Any, access: Access::ReadWrite }], ..Capabilities::default() };
     assert!(!caps.network, "the plugin was never given the network");
-    assert_eq!(caps.summary()[0], "Read and change any file on this computer", "what the user was told");
+    assert_eq!(caps.summary()[0], "Read and change any file on this computer: full control of your files", "what the user was told");
     let mut policy = PathPolicy::new(&caps);
     for (path, want) in [
         // SMB to any server: Windows would send the user's NTLM response to it.
@@ -70,7 +72,7 @@ fn ph01_unc_paths_pass_the_policy_without_the_network_capability() {
         "[capabilities]\nnetwork = true\npaths = [{ path = \"//attacker.example/share\", access = \"read\" }]",
     ))
     .unwrap();
-    let c = m.capabilities("C:\\p", "C:\\d").unwrap();
+    let c = m.capabilities("C:\\p", "C:\\d", &Protected::default()).unwrap();
     assert_eq!(c.summary()[0], "Read files on the server attacker.example: \\\\attacker.example\\share");
 }
 
@@ -89,17 +91,169 @@ fn ph09_superscript_device_names_are_accepted() {
 }
 
 // ---- PH-10: two plugins, one cache file ----------------------------------------------------------
+// Fixed: one folder per id and version, `<cache>\<id>\<version>\component.cwasm`.
 
 #[test]
-#[ignore = "PoC PH-10: passes while `<id>-<version>.cwasm` is ambiguous"]
 fn ph10_two_plugins_map_to_the_same_cwasm_name() {
     let a = Manifest::parse(&manifest("id = \"a.b-1.0.0\"\nname = \"A\"\nversion = \"2.0.0\"", "")).unwrap();
     let b = Manifest::parse(&manifest("id = \"a.b\"\nname = \"B\"\nversion = \"1.0.0-2.0.0\"", "")).unwrap();
     assert_ne!(a.id, b.id);
-    // `host::install::install` writes `<out_dir>/<id>-<version>.cwasm` (host.rs, `install`).
-    let file = |m: &Manifest| format!("{}-{}.cwasm", m.id, m.version);
-    assert_eq!(file(&a), file(&b));
-    assert_eq!(file(&a), "a.b-1.0.0-2.0.0.cwasm");
+    // The old name, `<id>-<version>.cwasm`, was the same for both.
+    assert_eq!(format!("{}-{}.cwasm", a.id, a.version), format!("{}-{}.cwasm", b.id, b.version));
+    let cache = Path::new("C:\\cache");
+    let dir = |m: &Manifest| install_record::install_dir(cache, &m.id, &m.version);
+    assert_ne!(dir(&a), dir(&b));
+    assert_eq!(dir(&a), Path::new("C:\\cache\\a.b-1.0.0\\2.0.0"));
+    assert_eq!(dir(&b), Path::new("C:\\cache\\a.b\\1.0.0-2.0.0"));
+}
+
+// ---- PH-02, PH-03, PH-18: the install record ---------------------------------------------------------
+// Fixed: the install step writes a record (hashes and the approved capabilities) once; every start
+// checks the package against it and takes the capabilities from it, never from the live plugin.toml.
+
+/// A folder that is removed when the test ends.
+struct Temp(PathBuf);
+
+impl Temp {
+    fn new(name: &str) -> Temp {
+        let dir = std::env::temp_dir().join(format!("tsubame-poc-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Temp(dir)
+    }
+}
+
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+const WASM: &[u8] = b"\0asm stand-in: never compiled here";
+const CWASM: &[u8] = b"stand-in for a compiled image";
+
+/// A package in `<t>\pkg` with `caps`, installed into `<t>\cache`.
+fn installed(t: &Temp, caps: &str) -> Result<(PathBuf, PathBuf, String), install_record::RecordError> {
+    let pkg = t.0.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    let text = manifest("id = \"com.example.poc\"\nname = \"PoC\"\nversion = \"1.0.0\"", caps);
+    std::fs::write(pkg.join("plugin.toml"), &text).unwrap();
+    std::fs::write(pkg.join("p.wasm"), WASM).unwrap();
+    let cache = t.0.join("cache");
+    install_record::store(&pkg, &cache, Some(&t.0.join("data")), &[], text.as_bytes(), WASM, CWASM)?;
+    Ok((pkg, cache, text))
+}
+
+fn verify(pkg: &Path, cache: &Path) -> Result<install_record::Verified, install_record::RecordError> {
+    install_record::verify(pkg, cache, "com.example.poc", "1.0.0", &[])
+}
+
+#[test]
+fn ph03_editing_plugin_toml_after_install_refuses_the_load() {
+    let t = Temp::new("edit-manifest");
+    let (pkg, cache, text) = installed(&t, "[capabilities]\npaths = [{ path = \"$input\", access = \"read\" }]").unwrap();
+    let v = verify(&pkg, &cache).unwrap();
+    let load = Load::new(&v);
+    assert_eq!(load.caps.paths, [PathGrant { scope: Scope::Input, access: Access::Read }]);
+    assert_eq!(load.sha256, tsubame_plughost::sha256::sha256(CWASM));
+    assert!(load.component.ends_with("cache\\com.example.poc\\1.0.0\\component.cwasm"), "{}", load.component);
+    assert_eq!(load.protected.len(), 2, "the package and the cache: {:?}", load.protected);
+
+    // After approval, the package asks for everything.
+    let grown = text.replace("access = \"read\" }]", "access = \"read\" }, { path = \"*\", access = \"read-write\" }]");
+    assert_ne!(grown, text);
+    std::fs::write(pkg.join("plugin.toml"), &grown).unwrap();
+    let e = verify(&pkg, &cache).unwrap_err();
+    assert!(e.0.contains("plugin.toml changed since it was installed"), "{e}");
+
+    // Put back, the load works again; a changed `.wasm` is refused the same way.
+    std::fs::write(pkg.join("plugin.toml"), &text).unwrap();
+    assert!(verify(&pkg, &cache).is_ok());
+    std::fs::write(pkg.join("p.wasm"), b"\0asm another component").unwrap();
+    let e = verify(&pkg, &cache).unwrap_err();
+    assert!(e.0.contains("the component (.wasm) changed"), "{e}");
+}
+
+#[test]
+fn ph03_the_record_is_written_once() {
+    let t = Temp::new("once");
+    let (pkg, cache, text) = installed(&t, "").unwrap();
+    let record = cache.join("com.example.poc\\1.0.0\\install.toml");
+    let before = std::fs::read(&record).unwrap();
+    // Installing over it (with a package that asks for more) is refused, and the record is untouched.
+    let more = text.replace("component = \"p.wasm\"", "component = \"p.wasm\"\n[capabilities]\nnetwork = true");
+    let e = install_record::store(&pkg, &cache, None, &[], more.as_bytes(), WASM, b"other image").unwrap_err();
+    assert!(e.0.contains("already installed"), "{e}");
+    assert_eq!(std::fs::read(&record).unwrap(), before);
+    assert_eq!(std::fs::read(cache.join("com.example.poc\\1.0.0\\component.cwasm")).unwrap(), CWASM);
+    // A record from another plugin, copied in, is refused.
+    let other = t.0.join("cache\\com.example.other\\1.0.0");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::copy(&record, other.join("install.toml")).unwrap();
+    let e = install_record::verify(&pkg, &cache, "com.example.other", "1.0.0", &[]).unwrap_err();
+    assert!(e.0.contains("for another plugin"), "{e}");
+}
+
+#[test]
+fn ph02_a_grant_that_reaches_the_package_or_the_cache_is_refused_at_install() {
+    let t = Temp::new("protected");
+    std::fs::create_dir_all(t.0.join("pkg")).unwrap();
+    std::fs::create_dir_all(t.0.join("cache")).unwrap();
+    let real = |p: &str| install_record::real_dir(&t.0.join(p)).unwrap();
+    for (grant, why) in [
+        (format!("{{ path = '{}', access = \"read-write\" }}", real("pkg")), "its own package, read-write"),
+        (format!("{{ path = '{}', access = \"read-write\" }}", real("")), "a parent of the package, read-write"),
+        (format!("{{ path = '{}', access = \"read\" }}", real("cache")), "the cache, even read only"),
+    ] {
+        let e = installed(&t, &format!("[capabilities]\npaths = [{grant}]")).unwrap_err();
+        assert!(e.0.contains("reaches into a folder of Tsubame's own"), "{why}: {e}");
+    }
+    assert!(!t.0.join("cache\\com.example.poc").exists(), "nothing was written");
+    // `$plugin` (read only) is fine.
+    let (pkg, cache, _) = installed(&t, "[capabilities]\npaths = [{ path = \"$plugin\", access = \"read\" }]").unwrap();
+    let v = verify(&pkg, &cache).unwrap();
+    assert_eq!(v.caps.paths, [PathGrant { scope: Scope::Prefix(real("pkg")), access: Access::Read }]);
+}
+
+#[test]
+fn ph18_an_oversized_manifest_or_record_is_not_read_in_full() {
+    let t = Temp::new("oversized");
+    let (pkg, cache, text) = installed(&t, "").unwrap();
+    let mut big = text.clone();
+    big.push_str(&format!("# {}\n", "x".repeat(70_000)));
+    std::fs::write(pkg.join("plugin.toml"), &big).unwrap();
+    assert!(Manifest::load(&pkg).unwrap_err().0.contains("larger than"));
+    assert!(verify(&pkg, &cache).unwrap_err().0.contains("larger than"));
+    std::fs::write(pkg.join("plugin.toml"), &text).unwrap();
+    let record = cache.join("com.example.poc\\1.0.0\\install.toml");
+    let mut r = std::fs::read_to_string(&record).unwrap();
+    r.push_str(&format!("# {}\n", "x".repeat(70_000)));
+    std::fs::write(&record, r).unwrap();
+    assert!(verify(&pkg, &cache).unwrap_err().0.contains("not installed"));
+}
+
+// ---- PH-12: what `$input` covers ---------------------------------------------------------------------
+// Fixed: inputs are scoped per entry point. A column or a preview gets the path itself, a
+// command its selection (recursive) and the folder it runs in (flat), a search its root.
+
+#[test]
+fn ph12_a_flat_input_folder_does_not_cover_its_tree() {
+    let c = Capabilities { paths: vec![PathGrant { scope: Scope::Input, access: Access::ReadWrite }], ..Capabilities::default() };
+    let mut p = PathPolicy::new(&c);
+    // A column over the profile folder: each row is only the path itself.
+    p.set_inputs(vec![("C:\\Users\\u\\.ssh".into(), false), ("C:\\Users\\u\\Documents".into(), false)]);
+    assert!(p.check("C:\\Users\\u\\.ssh", Access::Read).is_ok());
+    assert_eq!(p.check("C:\\Users\\u\\.ssh\\id_ed25519", Access::Read), Err(Denied::NotGranted));
+    assert_eq!(p.check("C:\\Users\\u\\Documents\\a\\b.txt", Access::Read), Err(Denied::NotGranted));
+    // A command on one selected file: the folder it runs in can be looked at, nothing in it changed.
+    p.set_inputs(vec![("C:\\w\\a.txt".into(), true), ("C:\\w".into(), false)]);
+    assert!(p.check("C:\\w\\a.txt", Access::ReadWrite).is_ok());
+    assert!(p.check("C:\\w", Access::Read).is_ok());
+    assert_eq!(p.check("C:\\w\\b.txt", Access::ReadWrite), Err(Denied::NotGranted));
+    assert_eq!(p.check("C:\\w\\sub\\c.txt", Access::Read), Err(Denied::NotGranted));
+    // A selected folder is the user's choice: everything in it.
+    p.set_inputs(vec![("C:\\w\\sub".into(), true), ("C:\\w".into(), false)]);
+    assert!(p.check("C:\\w\\sub\\deep\\c.txt", Access::ReadWrite).is_ok());
 }
 
 // ---- PH-11: what the install prompt would show ---------------------------------------------------
@@ -221,6 +375,7 @@ fn load(timeout_ms: u32) -> Load {
         sha256: [0; 32],
         caps: Capabilities { timeout_ms, ..Capabilities::default() },
         entrypoints: entrypoints(),
+        protected: Vec::new(),
     }
 }
 

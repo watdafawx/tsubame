@@ -4,7 +4,8 @@
 //! | Module | What | Used by |
 //! |---|---|---|
 //! | [`manifest`] | `plugin.toml`: identity, entry points, capabilities | app, install step |
-//! | [`caps`] | capabilities and the path rules | app, host |
+//! | [`caps`] | capabilities, the path rules, protected folders | app, host |
+//! | [`install_record`] | the install record: approved capabilities and the hashes, checked on every start | app, install step |
 //! | [`proto`] | the framed protocol over the host's stdin/stdout | app, host |
 //! | [`client`] | [`client::Plugin`]: lazy start, deadlines, kill on hang, fault limit | app |
 //! | `launcher` (Windows) | `JobLauncher`: job object, cleared environment, refuses an elevated app | app |
@@ -25,6 +26,7 @@ pub mod client;
 pub mod launcher;
 #[cfg(feature = "host")]
 pub mod host;
+pub mod install_record;
 pub mod manifest;
 pub mod proto;
 pub mod sanitize;

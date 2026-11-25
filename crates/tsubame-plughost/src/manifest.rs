@@ -6,7 +6,7 @@
 //! that is not written down, and what is written down is what the user is
 //! shown at install.
 
-use crate::caps::{self, Access, Capabilities, PathGrant, Scope};
+use crate::caps::{self, Access, Capabilities, PathGrant, Protected, Scope};
 use serde::Deserialize;
 use std::fmt;
 use std::path::Path;
@@ -485,20 +485,18 @@ impl Manifest {
         })
     }
 
-    /// Reads `plugin.toml` from a plugin folder.
+    /// Reads `plugin.toml` from a plugin folder (at most [`MAX_MANIFEST_BYTES`],
+    /// counted on what is read, not on a size looked up before).
     pub fn load(dir: &Path) -> Result<Manifest, ManifestError> {
-        let path = dir.join(MANIFEST_FILE);
-        let meta = std::fs::metadata(&path).map_err(|e| ManifestError(format!("can not read: {e}")))?;
-        if meta.len() > MAX_MANIFEST_BYTES {
-            return err(format!("larger than {MAX_MANIFEST_BYTES} bytes"));
-        }
-        let text = std::fs::read_to_string(&path).map_err(|e| ManifestError(format!("can not read: {e}")))?;
+        let bytes = crate::install_record::read_capped(&dir.join(MANIFEST_FILE), MAX_MANIFEST_BYTES).map_err(|e| ManifestError(format!("can not read: {e}")))?;
+        let text = String::from_utf8(bytes).map_err(|_| ManifestError("not UTF-8".into()))?;
         Manifest::parse(&text)
     }
 
     /// The capabilities for this machine: `$plugin` and `$data` become the two
-    /// folders given (absolute paths).
-    pub fn capabilities(&self, plugin_dir: &str, data_dir: &str) -> Result<Capabilities, ManifestError> {
+    /// folders given (absolute paths). A grant that reaches into a `protected`
+    /// folder is refused (security review PH-02).
+    pub fn capabilities(&self, plugin_dir: &str, data_dir: &str, protected: &Protected) -> Result<Capabilities, ManifestError> {
         let dir = |what: &str, p: &str| caps::normalize(p).map_err(|e| ManifestError(format!("{what} folder `{p}`: {e}")));
         let mut paths = Vec::with_capacity(self.paths.len());
         for d in &self.paths {
@@ -513,6 +511,7 @@ impl Manifest {
         }
         let c = Capabilities { network: self.network, run_processes: self.run_processes, max_memory_mb: self.max_memory_mb, timeout_ms: self.timeout_ms, paths };
         c.validate().map_err(|e| ManifestError(e.to_string()))?;
+        protected.check_grants(&c).map_err(|e| ManifestError(e.to_string()))?;
         Ok(c)
     }
 
@@ -617,12 +616,12 @@ keys = ["Ctrl+Alt+E"]
             ]
         );
 
-        let c = m.capabilities("C:\\Apps\\Tsubame\\plugins\\com.example.exif", "C:/Users/u/AppData/Roaming/Tsubame/plugin-data/com.example.exif").unwrap();
+        let c = m.capabilities("C:\\Apps\\Tsubame\\plugins\\com.example.exif", "C:/Users/u/AppData/Roaming/Tsubame/plugin-data/com.example.exif", &Protected::default()).unwrap();
         assert_eq!(c.paths[0], PathGrant { scope: Scope::Input, access: Access::Read });
         assert_eq!(c.paths[1], PathGrant { scope: Scope::Prefix("C:\\Apps\\Tsubame\\plugins\\com.example.exif".into()), access: Access::Read });
         assert_eq!(c.paths[2], PathGrant { scope: Scope::Prefix("C:\\Users\\u\\AppData\\Roaming\\Tsubame\\plugin-data\\com.example.exif".into()), access: Access::ReadWrite });
         assert_eq!(c.paths[3].scope, Scope::Prefix("D:\\Photos\\Library".into()));
-        assert!(m.capabilities("relative", "C:\\d").is_err());
+        assert!(m.capabilities("relative", "C:\\d", &Protected::default()).is_err());
     }
 
     #[test]
@@ -632,7 +631,7 @@ keys = ["Ctrl+Alt+E"]
         assert!(m.paths.is_empty());
         assert_eq!(m.max_memory_mb, caps::DEFAULT_MEMORY_MB);
         assert_eq!(m.timeout_ms, caps::DEFAULT_TIMEOUT_MS);
-        assert_eq!(m.capabilities("C:\\p", "C:\\d").unwrap(), Capabilities::default());
+        assert_eq!(m.capabilities("C:\\p", "C:\\d", &Protected::default()).unwrap(), Capabilities::default());
     }
 
     /// `MIN` with one line replaced or a block appended.
@@ -669,11 +668,11 @@ keys = ["Ctrl+Alt+E"]
         rejects("", "[capabilities]\nnetwork = false\npaths = [{ path = \"\\\\\\\\?\\\\UNC\\\\nas\\\\share\\\\x\", access = \"read\" }]\n", "on another computer");
         rejects("", "[capabilities]\nnetwork = true\npaths = [{ path = \"//nas@80/dav\", access = \"read\" }]\n", "not allowed");
         let m = with("", "[capabilities]\nnetwork = true\npaths = [{ path = \"//nas/share\", access = \"read\" }]\n").unwrap();
-        let c = m.capabilities("C:\\p", "C:\\d").unwrap();
+        let c = m.capabilities("C:\\p", "C:\\d", &Protected::default()).unwrap();
         assert_eq!(c.summary()[0], "Read files on the server nas: \\\\nas\\share");
         // `$data` and `$plugin` on a share are network paths too
         let m = with("", "[capabilities]\npaths = [{ path = \"$data\", access = \"read-write\" }]\n").unwrap();
-        assert!(m.capabilities("C:\\p", "\\\\nas\\profiles\\data").unwrap_err().0.contains("needs `network = true`"));
+        assert!(m.capabilities("C:\\p", "\\\\nas\\profiles\\data", &Protected::default()).unwrap_err().0.contains("needs `network = true`"));
     }
 
     #[test]
@@ -707,7 +706,7 @@ keys = ["Ctrl+Alt+E"]
         // the wide grants are valid, and are what the user is shown
         let m = with("", &p("*", "read-write")).unwrap();
         assert_eq!(m.paths[0], DeclaredPath { location: Location::Any, access: Access::ReadWrite });
-        assert_eq!(m.capabilities("C:\\p", "C:\\d").unwrap().summary()[0], "Read and change any file on this computer");
+        assert_eq!(m.capabilities("C:\\p", "C:\\d", &Protected::default()).unwrap().summary()[0], "Read and change any file on this computer: full control of your files");
     }
 
     #[test]

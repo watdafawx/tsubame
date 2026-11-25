@@ -18,7 +18,7 @@ max_memory_mb = 32
 timeout_ms = 1000
 ```
 
-Build the `.cwasm` (needs `rustup target add wasm32-wasip2`):
+Build and install it: the `.cwasm` and its install record (needs `rustup target add wasm32-wasip2`):
 
 ```
 pwsh plugins\build-plugin.ps1 plugins\sample-csv-summary
