@@ -16,11 +16,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tsubame_ext_api::{Cell, ColumnProvider, Doc, Limits, Node, Previewer};
 use tsubame_plughost::adapters::{WasmColumn, WasmPreviewer};
-use tsubame_plughost::caps::Capabilities;
+use tsubame_plughost::caps::{Capabilities, Protected};
 use tsubame_plughost::client::{Options, Plugin, ProcessLauncher, Status};
 use tsubame_plughost::manifest::Manifest;
+use tsubame_plughost::install_record;
 use tsubame_plughost::proto::Load;
-use tsubame_plughost::sha256;
 
 const HOST_EXE: &str = env!("CARGO_BIN_EXE_tsubame-plughost");
 
@@ -51,6 +51,7 @@ fn wasm_target_available() -> bool {
 struct Sample {
     manifest: Manifest,
     dir: PathBuf,
+    wasm: Vec<u8>,
     cwasm: Vec<u8>,
 }
 
@@ -78,7 +79,7 @@ fn build(name: &'static str, cell: &'static OnceLock<Option<Sample>>) -> Option<
         let wasm = std::fs::read(target.join("wasm32-wasip2/release").join(&manifest.component)).expect("the build wrote the component the manifest names");
         let engine = wasmtime::Engine::new(&tsubame_plughost::host::engine_config()).expect("engine");
         let cwasm = engine.precompile_component(&wasm).expect("the component compiles");
-        Some(Sample { manifest, dir, cwasm })
+        Some(Sample { manifest, dir, wasm, cwasm })
     });
     cell.get().and_then(|s| s.as_ref())
 }
@@ -115,14 +116,22 @@ impl Drop for Temp {
     }
 }
 
-/// Starts a plugin with the capabilities its manifest asks for, or `caps` instead.
+/// Installs the sample the way the app does (a package folder, the install
+/// record in a cache folder), checks it against its record and starts it with
+/// the capabilities the record holds, or `caps` instead.
 fn start(s: &Sample, t: &Temp, caps: Option<Capabilities>) -> Arc<Plugin> {
-    let file = t.0.join("plugin.cwasm");
-    std::fs::write(&file, &s.cwasm).unwrap();
-    let data = t.0.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-    let caps = caps.unwrap_or_else(|| s.manifest.capabilities(s.dir.to_str().unwrap(), data.to_str().unwrap()).expect("the manifest's capabilities are valid"));
-    let load = Load::new(&s.manifest, &file, sha256::sha256(&s.cwasm), caps);
+    let pkg = t.0.join("package");
+    std::fs::create_dir_all(&pkg).unwrap();
+    let manifest_bytes = std::fs::read(s.dir.join("plugin.toml")).unwrap();
+    std::fs::write(pkg.join("plugin.toml"), &manifest_bytes).unwrap();
+    std::fs::write(pkg.join(&s.manifest.component), &s.wasm).unwrap();
+    let (cache, data) = (t.0.join("cache"), t.0.join("data"));
+    install_record::store(&pkg, &cache, Some(&data), &[], &manifest_bytes, &s.wasm, &s.cwasm).expect("the sample installs");
+    let verified = install_record::verify(&pkg, &cache, &s.manifest.id, &s.manifest.version, &[]).expect("the install record matches");
+    let mut load = Load::new(&verified);
+    if let Some(c) = caps {
+        load.caps = c;
+    }
     // Generous start-up: the first start of a host on a busy machine is slow.
     let opts = Options { start_timeout: Duration::from_secs(30), ..Options::default() };
     Arc::new(Plugin::new(load, ProcessLauncher::new(HOST_EXE), opts))
@@ -138,7 +147,7 @@ fn values(col: &WasmColumn, paths: &[&str]) -> Vec<Cell> {
 fn the_file_kind_sample_fills_two_typed_columns() {
     let Some(s) = file_kind() else { return };
     // it asks for nothing
-    assert_eq!(s.manifest.capabilities("C:\\p", "C:\\d").unwrap(), Capabilities::default());
+    assert_eq!(s.manifest.capabilities("C:\\p", "C:\\d", &Protected::default()).unwrap(), Capabilities::default());
     let t = Temp::new("kind");
     let p = start(s, &t, None);
 
@@ -176,7 +185,7 @@ fn texts(doc: &Doc) -> Vec<String> {
 fn the_csv_sample_summarizes_a_file_it_was_handed() {
     let Some(s) = csv_summary() else { return };
     // its whole capability list: read the files it is asked about
-    let caps = s.manifest.capabilities("C:\\p", "C:\\d").unwrap();
+    let caps = s.manifest.capabilities("C:\\p", "C:\\d", &Protected::default()).unwrap();
     assert_eq!(caps.paths.len(), 1);
     assert!(!caps.network && !caps.run_processes);
 

@@ -43,7 +43,10 @@ impl Access {
 pub enum Scope {
     /// This folder (normalized, see [`normalize`]) and everything under it.
     Prefix(String),
-    /// The paths handed to the current call, and everything under them.
+    /// The paths handed to the current call. What a call hands over depends
+    /// on the entry point (see [`INPUT_SCOPE`]): a column or a preview gets only
+    /// the path itself, a command its selection and the folders under it, a
+    /// search the folder searched and everything under it.
     Input,
     /// Every path.
     Any,
@@ -82,6 +85,8 @@ pub enum CapError {
     Duplicate(String),
     /// A prefix grant on a network share (UNC) without `network = true`.
     NetworkPath(String),
+    /// A grant that reaches into one of Tsubame's own folders ([`Protected`]).
+    Protected(String),
 }
 
 impl fmt::Display for CapError {
@@ -93,6 +98,7 @@ impl fmt::Display for CapError {
             CapError::BadPrefix(p) => write!(f, "path grant `{p}` is not a normalized absolute path"),
             CapError::Duplicate(p) => write!(f, "path grant `{p}` is listed twice"),
             CapError::NetworkPath(p) => write!(f, "path grant `{p}` is on another computer; a network path needs `network = true`"),
+            CapError::Protected(p) => write!(f, "path grant `{p}` reaches into a folder of Tsubame's own (its settings, the plugin's package or the compiled plugins)"),
         }
     }
 }
@@ -141,8 +147,9 @@ impl Capabilities {
         for g in &self.paths {
             let verb = if g.access == Access::ReadWrite { "Read and change" } else { "Read" };
             out.push(match &g.scope {
+                Scope::Any if g.access == Access::ReadWrite => "Read and change any file on this computer: full control of your files".to_string(),
                 Scope::Any => format!("{verb} any file on this computer"),
-                Scope::Input => format!("{verb} the files and folders you use it on"),
+                Scope::Input => format!("{verb} {INPUT_SCOPE}"),
                 Scope::Prefix(p) if is_unc(p) => format!("{verb} files on the server {}: {p}", unc_server(p)),
                 Scope::Prefix(p) => format!("{verb} files in {p}"),
             });
@@ -157,6 +164,11 @@ impl Capabilities {
         out
     }
 }
+
+/// What an `$input` grant reaches, in the words of the install prompt.
+pub const INPUT_SCOPE: &str = "the files you use it on: for a column or a preview only that file or folder (a folder's \
+names, not what is in them), for a command what you selected (with everything in selected folders), for a search \
+the folder searched (with everything in it)";
 
 // ---- path normalization --------------------------------------------------------------
 
@@ -334,6 +346,75 @@ fn parent(k: &str) -> Option<&str> {
     Some(if i == 2 { &k[..3] } else { &k[..i] })
 }
 
+// ---- protected folders -----------------------------------------------------------------
+
+/// Folders a plugin may never change, whatever it was granted (security
+/// review PH-02): Tsubame's own folders, the plugin's package, the cache of
+/// compiled components. Some of them are also **sealed**: the plugin may not
+/// even look into them (the cache, which holds the `.cwasm` images and the
+/// install records). The host checks the final path of every handle it opens
+/// against both lists; [`Protected::check_grants`] refuses grants that would
+/// reach into them before anything runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Protected {
+    /// Normalized folders.
+    no_write: Vec<String>,
+    /// Keys of `no_write` plus `sealed`.
+    no_write_keys: Vec<String>,
+    sealed_keys: Vec<String>,
+}
+
+impl Protected {
+    /// `no_write` and `sealed` are absolute folders, ideally real paths (links
+    /// resolved): the host compares them with the final path of what it opens.
+    /// A sealed folder is also not writable.
+    pub fn new(no_write: &[String], sealed: &[String]) -> Result<Protected, PathError> {
+        let mut p = Protected::default();
+        for s in sealed {
+            let n = normalize(s)?;
+            p.sealed_keys.push(key(&n));
+            if !p.no_write.iter().any(|w| key(w) == key(&n)) {
+                p.no_write.push(n);
+            }
+        }
+        for w in no_write {
+            let n = normalize(w)?;
+            if !p.no_write.iter().any(|x| key(x) == key(&n)) {
+                p.no_write.push(n);
+            }
+        }
+        p.no_write_keys = p.no_write.iter().map(|n| key(n)).collect();
+        Ok(p)
+    }
+
+    /// The folders that may not be written (sealed ones included), normalized.
+    pub fn no_write(&self) -> &[String] {
+        &self.no_write
+    }
+
+    /// True when a plugin may not open the file whose final path is `k` (a
+    /// [`key`]) for writing (`write`), or at all.
+    pub fn denies(&self, k: &str, write: bool) -> bool {
+        self.sealed_keys.iter().any(|s| is_under(k, s)) || (write && self.no_write_keys.iter().any(|w| is_under(k, w)))
+    }
+
+    /// Refuses a folder grant that reaches into a protected folder: a
+    /// read-write one that is inside or above any of them, and any one that is
+    /// inside or above a sealed folder. `*` can not be refused here; the host
+    /// refuses each path under it instead.
+    pub fn check_grants(&self, caps: &Capabilities) -> Result<(), CapError> {
+        let overlaps = |a: &str, b: &str| is_under(a, b) || is_under(b, a);
+        for g in &caps.paths {
+            let Scope::Prefix(p) = &g.scope else { continue };
+            let k = key(p);
+            if self.sealed_keys.iter().any(|s| overlaps(&k, s)) || (g.access == Access::ReadWrite && self.no_write_keys.iter().any(|w| overlaps(&k, w))) {
+                return Err(CapError::Protected(p.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
 // ---- the policy ------------------------------------------------------------------------
 
 /// A folder that allows a path.
@@ -366,9 +447,9 @@ pub struct PathPolicy {
     input: Option<Access>,
     any: Option<Access>,
     /// The current call's paths as handed over; turned into `inputs` on first use.
-    pending: Vec<String>,
-    /// key, normalized path; sorted by key.
-    inputs: Vec<(String, String)>,
+    pending: Vec<(String, bool)>,
+    /// key, normalized path, recursive; sorted by key.
+    inputs: Vec<(String, String, bool)>,
 }
 
 impl PathPolicy {
@@ -394,9 +475,11 @@ impl PathPolicy {
         self.input.is_some()
     }
 
-    /// Replaces the paths of the current call. Cheap: they are only looked at
-    /// if the plugin touches a file.
-    pub fn set_inputs(&mut self, paths: Vec<String>) {
+    /// Replaces the paths of the current call. Each is `(path, recursive)`: a
+    /// recursive input covers the path and everything under it, a flat one only
+    /// the path itself (a folder can then be looked at and listed, but nothing
+    /// in it opened). Cheap: they are only looked at if the plugin touches a file.
+    pub fn set_inputs(&mut self, paths: Vec<(String, bool)>) {
         self.pending = paths;
         self.inputs.clear();
     }
@@ -405,12 +488,13 @@ impl PathPolicy {
         if self.pending.is_empty() {
             return;
         }
-        for p in self.pending.drain(..) {
+        for (p, recursive) in self.pending.drain(..) {
             if let Ok(n) = normalize(&p) {
-                self.inputs.push((key(&n), n));
+                self.inputs.push((key(&n), n, recursive));
             }
         }
-        self.inputs.sort_by(|a, b| a.0.cmp(&b.0));
+        // The same path twice: the recursive one sorts first and is kept.
+        self.inputs.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
         self.inputs.dedup_by(|a, b| a.0 == b.0);
     }
 
@@ -431,15 +515,21 @@ impl PathPolicy {
             }
         }
         // A UNC path can only meet an input that is itself UNC: `parent` stops at the share root.
+        // The path itself may be any input; a folder above it only a recursive one.
         if self.input.is_some_and(|a| a.covers(want)) {
             self.settle();
             let mut at = Some(k.as_str());
+            let mut exact = true;
             while let Some(a) = at {
                 if let Ok(i) = self.inputs.binary_search_by(|e| e.0.as_str().cmp(a)) {
-                    roots.push(Root::Input(self.inputs[i].1.clone()));
-                    break;
+                    let (_, n, recursive) = &self.inputs[i];
+                    if exact || *recursive {
+                        roots.push(Root::Input(n.clone()));
+                        break;
+                    }
                 }
                 at = parent(a);
+                exact = false;
             }
         }
         if roots.is_empty() { Err(Denied::NotGranted) } else { Ok((norm, roots)) }
@@ -551,7 +641,7 @@ mod tests {
         assert!(!c.network && !c.run_processes && c.paths.is_empty());
         assert_eq!(c.validate(), Ok(()));
         let mut p = PathPolicy::new(&c);
-        p.set_inputs(vec!["C:\\a\\b.txt".into()]);
+        p.set_inputs(vec![("C:\\a\\b.txt".into(), true)]);
         assert_eq!(p.check("C:\\a\\b.txt", Access::Read), Err(Denied::NotGranted));
         assert_eq!(p.check("C:\\", Access::Read), Err(Denied::NotGranted));
     }
@@ -583,7 +673,12 @@ mod tests {
         let mut p = PathPolicy::new(&caps(vec![PathGrant { scope: Scope::Input, access: Access::Read }]));
         assert!(p.uses_inputs());
         assert_eq!(p.check("C:\\a\\one.txt", Access::Read), Err(Denied::NotGranted));
-        p.set_inputs(vec!["C:\\a\\one.txt".into(), "C:\\dir".into(), "not absolute".into(), "c:\\A\\ONE.txt".into()]);
+        p.set_inputs(vec![
+            ("C:\\a\\one.txt".into(), false),
+            ("C:\\dir".into(), true),
+            ("not absolute".into(), true),
+            ("c:\\A\\ONE.txt".into(), false),
+        ]);
         assert_eq!(p.check("c:\\a\\ONE.TXT", Access::Read).unwrap().1, vec![Root::Input("C:\\a\\one.txt".into())]);
         // under an input folder
         assert_eq!(p.check("C:\\dir\\deep\\x", Access::Read).unwrap().1, vec![Root::Input("C:\\dir".into())]);
@@ -592,15 +687,32 @@ mod tests {
         assert_eq!(p.check("C:\\a", Access::Read), Err(Denied::NotGranted));
         assert_eq!(p.check("C:\\a\\one.txt", Access::ReadWrite), Err(Denied::NotGranted));
         // the next call replaces the set
-        p.set_inputs(vec!["C:\\b\\x".into()]);
+        p.set_inputs(vec![("C:\\b\\x".into(), true)]);
         assert_eq!(p.check("C:\\a\\one.txt", Access::Read), Err(Denied::NotGranted));
         assert!(p.check("C:\\b\\x", Access::Read).is_ok());
         p.set_inputs(Vec::new());
         assert_eq!(p.check("C:\\b\\x", Access::Read), Err(Denied::NotGranted));
         // a drive root as input covers the drive
-        p.set_inputs(vec!["D:\\".into()]);
+        p.set_inputs(vec![("D:\\".into(), true)]);
         assert!(p.check("D:\\x\\y", Access::Read).is_ok());
         assert_eq!(p.check("E:\\x", Access::Read), Err(Denied::NotGranted));
+    }
+
+    #[test]
+    fn flat_inputs_cover_only_the_path() {
+        let mut p = PathPolicy::new(&caps(vec![PathGrant { scope: Scope::Input, access: Access::Read }]));
+        p.set_inputs(vec![("C:\\dir".into(), false), ("D:\\".into(), false)]);
+        assert_eq!(p.check("C:\\dir", Access::Read).unwrap().1, vec![Root::Input("C:\\dir".into())]);
+        assert_eq!(p.check("C:\\dir\\x", Access::Read), Err(Denied::NotGranted));
+        assert_eq!(p.check("C:\\dir\\deep\\x", Access::Read), Err(Denied::NotGranted));
+        assert!(p.check("D:\\", Access::Read).is_ok());
+        assert_eq!(p.check("D:\\x", Access::Read), Err(Denied::NotGranted));
+        // a recursive input of a folder above still covers it
+        p.set_inputs(vec![("C:\\dir\\sub".into(), false), ("C:\\dir".into(), true)]);
+        assert_eq!(p.check("C:\\dir\\sub\\x", Access::Read).unwrap().1, vec![Root::Input("C:\\dir".into())]);
+        // the same path flat and recursive: recursive wins
+        p.set_inputs(vec![("C:\\dir".into(), false), ("c:\\DIR".into(), true)]);
+        assert!(p.check("C:\\dir\\x", Access::Read).is_ok());
     }
 
     #[test]
@@ -639,10 +751,32 @@ mod tests {
 
         // an input on a share covers that share's tree, with or without the network
         let mut p = PathPolicy::new(&caps(vec![PathGrant { scope: Scope::Input, access: Access::Read }, any(Access::Read)]));
-        p.set_inputs(vec!["\\\\nas\\media\\films".into(), "C:\\local".into()]);
+        p.set_inputs(vec![("\\\\nas\\media\\films".into(), true), ("C:\\local".into(), true)]);
         assert_eq!(p.check("\\\\nas\\media\\films\\a.mkv", Access::Read).unwrap().1, vec![Root::Input("\\\\nas\\media\\films".into())]);
         assert_eq!(p.check("\\\\nas\\media\\other.mkv", Access::Read), Err(Denied::NotGranted));
         assert_eq!(p.check("\\\\nas\\media", Access::Read), Err(Denied::NotGranted));
+    }
+
+    #[test]
+    fn protected_folders() {
+        let p = Protected::new(&["C:\\Plugins\\x".into(), "C:\\App".into()], &["C:\\Cache".into()]).unwrap();
+        assert_eq!(p.no_write(), ["C:\\Cache", "C:\\Plugins\\x", "C:\\App"]);
+        // sealed: nothing at all
+        assert!(p.denies("c:\\cache", false) && p.denies("c:\\cache\\a\\1.0.0\\install.toml", false));
+        // no-write: reads are fine
+        assert!(!p.denies("c:\\plugins\\x\\plugin.toml", false) && p.denies("c:\\plugins\\x\\plugin.toml", true));
+        assert!(!p.denies("c:\\cachex\\a", true) && !p.denies("c:\\plugins\\y", true));
+
+        let g = |path: &str, access| caps(vec![prefix(path, access)]);
+        assert_eq!(p.check_grants(&g("C:\\Plugins\\x", Access::Read)), Ok(()), "$plugin read");
+        assert_eq!(p.check_grants(&g("C:\\Plugins\\x", Access::ReadWrite)), Err(CapError::Protected("C:\\Plugins\\x".into())));
+        assert_eq!(p.check_grants(&g("C:\\Plugins", Access::ReadWrite)), Err(CapError::Protected("C:\\Plugins".into())), "above");
+        assert_eq!(p.check_grants(&g("C:\\App\\settings", Access::ReadWrite)), Err(CapError::Protected("C:\\App\\settings".into())), "inside");
+        assert_eq!(p.check_grants(&g("C:\\Cache\\a", Access::Read)), Err(CapError::Protected("C:\\Cache\\a".into())));
+        assert_eq!(p.check_grants(&g("C:\\", Access::Read)), Err(CapError::Protected("C:\\".into())));
+        assert_eq!(p.check_grants(&g("D:\\Work", Access::ReadWrite)), Ok(()));
+        assert_eq!(p.check_grants(&caps(vec![PathGrant { scope: Scope::Any, access: Access::ReadWrite }])), Ok(()), "the host refuses per path");
+        assert!(Protected::new(&["relative".into()], &[]).is_err());
     }
 
     #[test]
@@ -680,7 +814,10 @@ mod tests {
             ..Capabilities::default()
         };
         let s = c.summary();
-        assert_eq!(s[0], "Read the files and folders you use it on");
+        assert_eq!(s[0], format!("Read {INPUT_SCOPE}"));
+        assert!(s[0].contains("for a column or a preview only that file or folder"));
+        assert!(s[0].contains("for a command what you selected"));
+        assert!(s[0].contains("for a search the folder searched"));
         assert_eq!(s[1], "Read and change files in C:\\Out");
         assert_eq!(s[2], "Use the network");
         assert_eq!(s.len(), 4);

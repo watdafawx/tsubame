@@ -1,5 +1,6 @@
 <#
-Builds a plugin from this folder into a `.cwasm`, the file Tsubame loads.
+Builds a plugin from this folder and installs it into a cache folder: the
+`.cwasm` Tsubame loads and the install record that pins it.
 
   pwsh plugins\build-plugin.ps1 plugins\sample-file-kind
   pwsh plugins\build-plugin.ps1 plugins\sample-csv-summary -Out C:\temp\plugin-cache
@@ -9,7 +10,11 @@ Steps:
      (needs: rustup target add wasm32-wasip2)
   2. copies the component named by `component` in plugin.toml next to plugin.toml
   3. runs tsubame-plugc, which checks plugin.toml and writes
-     <Out>\<id>-<version>.cwasm and prints its SHA-256
+     <Out>\<id>\<version>\component.cwasm and the install record
+     <Out>\<id>\<version>\install.toml (hashes and the approved capabilities)
+
+A version is installed once: to rebuild it, delete <Out>\<id>\<version> first
+(-Force does that). -Data is the plugin's `$data` folder, if it asks for one.
 
 tsubame-plugc is looked for in -Plugc, then target\release\tsubame-plugc.exe
 and target\debug\tsubame-plugc.exe of the repo; if neither exists it is built
@@ -20,6 +25,8 @@ and target\debug\tsubame-plugc.exe of the repo; if neither exists it is built
 param(
     [Parameter(Mandatory, Position = 0)][string]$Plugin,
     [string]$Out,
+    [string]$Data,
+    [switch]$Force,
     [string]$Plugc,
     [string]$Cargo = 'cargo'
 )
@@ -68,6 +75,19 @@ if (-not $Plugc) {
     try { Invoke-Native @($Cargo, 'build', '--release', '-p', 'tsubame-plughost', '--features', 'compiler', '--bin', 'tsubame-plugc') } finally { Pop-Location }
     $Plugc = Join-Path $repo 'target\release\tsubame-plugc.exe'
 }
-Invoke-Native @($Plugc, $dir, $Out)
-$cwasm = Get-ChildItem $Out -Filter '*.cwasm' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-Write-Host ("cwasm size {0:N0} bytes" -f $cwasm.Length)
+$id = $null; $version = $null
+foreach ($line in Get-Content $manifest) {
+    if (-not $id -and $line -match '^\s*id\s*=\s*"([^"]+)"') { $id = $Matches[1] }
+    if (-not $version -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1] }
+}
+if ($Force -and $id -and $version) {
+    $installed = Join-Path $Out (Join-Path $id $version)
+    if (Test-Path $installed) { Remove-Item -Recurse -Force $installed }
+}
+$plugcArgs = @($Plugc, $dir, $Out)
+if ($Data) { $plugcArgs += $Data }
+$out = & $plugcArgs[0] @($plugcArgs[1..($plugcArgs.Length - 1)])
+if ($LASTEXITCODE -ne 0) { throw "failed: $($plugcArgs -join ' ')" }
+$out | ForEach-Object { Write-Host $_ }
+$file = $out | Where-Object { $_ -match '^file\s+(.+)$' } | ForEach-Object { $Matches[1].Trim() } | Select-Object -First 1
+if ($file) { Write-Host ("cwasm size {0:N0} bytes" -f (Get-Item $file).Length) }

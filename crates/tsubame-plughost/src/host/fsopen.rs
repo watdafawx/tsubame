@@ -19,18 +19,22 @@
 //!    with `FILE_CREATE` and `FILE_OPEN_REPARSE_POINT`: a name that appears in
 //!    between makes the create fail, it is never followed.
 //! 4. The final path of the opened handle must lie under the final path of the
-//!    folder. Under a folder or input grant, a file with more than one hard
+//!    folder. Under a folder or input grant (and for any write), a file with more than one hard
 //!    link is refused (read, write and stat): its other names may be outside.
 //! 5. The caller does all I/O on the returned handle.
 //!
 //! A path that is exactly the folder of a grant, or exactly an input path, is
 //! opened as given, links followed: the user handed over that very path.
 //!
+//! Protected folders (security review PH-02): the final path of every handle
+//! is checked against them too, so a grant, a link or `*` can not reach the
+//! cache, the install records or the plugin's own package.
+//!
 //! Network: a root that may not be remote (`*` always, a folder grant without
 //! `network = true`) is refused before anything is opened when it is on a
 //! network drive, and any handle whose final path is UNC is refused.
 
-use crate::caps::{self, Root};
+use crate::caps::{self, Protected, Root};
 use std::fs::File;
 
 /// What the caller will do with the handle.
@@ -61,8 +65,9 @@ pub struct Entry {
 
 /// Opens `norm` (a [`caps::normalize`]d path) for `want` under one of `roots`
 /// (what [`caps::PathPolicy::check`] returned for it). `network` is the
-/// plugin's network capability.
-pub fn open_checked(norm: &str, roots: &[Root], network: bool, want: Want) -> Result<File, OpenError> {
+/// plugin's network capability. A handle whose final path `protected` denies
+/// for `want` is refused.
+pub fn open_checked(norm: &str, roots: &[Root], network: bool, want: Want, protected: &Protected) -> Result<File, OpenError> {
     let k = caps::key(norm);
     // The path itself first (it may follow links), the folder grants next, `*` last.
     let mut order: Vec<&Root> = roots.iter().collect();
@@ -73,7 +78,7 @@ pub fn open_checked(norm: &str, roots: &[Root], network: bool, want: Want) -> Re
     });
     let mut err = OpenError::Denied;
     for root in order {
-        match imp::open_under(norm, &k, root, network, want) {
+        match imp::open_under(norm, &k, root, network, want, protected) {
             Ok(f) => return Ok(f),
             Err(e) => err = e,
         }
@@ -89,7 +94,7 @@ pub fn read_dir(dir: &File, skip: usize, max: usize) -> Result<Vec<Entry>, OpenE
 #[cfg(windows)]
 mod imp {
     use super::{Entry, OpenError, Want};
-    use crate::caps::{self, Root};
+    use crate::caps::{self, Protected, Root};
     use std::fs::File;
     use std::io;
     use std::mem::{offset_of, size_of, zeroed};
@@ -301,7 +306,7 @@ mod imp {
         unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
     }
 
-    pub(super) fn open_under(norm: &str, k: &str, root: &Root, network: bool, want: Want) -> Result<File, OpenError> {
+    pub(super) fn open_under(norm: &str, k: &str, root: &Root, network: bool, want: Want, protected: &Protected) -> Result<File, OpenError> {
         let (root_path, remote_ok, folder) = match root {
             // A drive path (the policy never gives `*` a UNC path); its drive root is the folder.
             Root::Any if !caps::is_unc(norm) && norm.len() >= 3 => (&norm[..3], false, false),
@@ -316,7 +321,9 @@ mod imp {
         if !remote_ok && (caps::is_unc(root_path) || is_remote_drive(root_path)) {
             return Err(OpenError::Denied);
         }
+        let write = matches!(want, Want::Write { .. });
         let local = |fin: &str| if !remote_ok && caps::is_unc(fin) { Err(OpenError::Denied) } else { Ok(()) };
+        let allowed = |fin: &str| if protected.denies(fin, write) { Err(OpenError::Denied) } else { Ok(()) };
 
         if rk == k {
             // Exactly the path the grant names: opened as given.
@@ -326,7 +333,9 @@ mod imp {
                 Want::Write { .. } => open_path(norm, want.access(), OPEN_ALWAYS, 0),
             }
             .map_err(from_io)?;
-            local(&final_key(&h)?)?;
+            let real = final_key(&h)?;
+            local(&real)?;
+            allowed(&real)?;
             return Ok(File::from(h));
         }
 
@@ -348,11 +357,12 @@ mod imp {
         let verdict = (|| {
             let real = final_key(&h)?;
             local(&real)?;
+            allowed(&real)?;
             // The folder chain can still be moved while it is open: the handle says where it ended up.
             if !caps::is_under(&real, &root_real) {
                 return Err(OpenError::Denied);
             }
-            if folder && want != Want::List && links(&h)? > 1 {
+            if (folder || write) && want != Want::List && links(&h)? > 1 {
                 return Err(OpenError::Denied);
             }
             Ok(())
@@ -427,10 +437,10 @@ mod imp {
 mod imp {
     //! The host only runs on Windows. Elsewhere every file import is denied.
     use super::{Entry, OpenError, Want};
-    use crate::caps::Root;
+    use crate::caps::{Protected, Root};
     use std::fs::File;
 
-    pub(super) fn open_under(_: &str, _: &str, _: &Root, _: bool, _: Want) -> Result<File, OpenError> {
+    pub(super) fn open_under(_: &str, _: &str, _: &Root, _: bool, _: Want, _: &Protected) -> Result<File, OpenError> {
         Err(OpenError::Denied)
     }
 

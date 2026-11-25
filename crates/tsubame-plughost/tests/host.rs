@@ -15,6 +15,7 @@ use tsubame_plughost::adapters::{WasmColumn, WasmPreviewer, WasmSearch, WasmVfs}
 use tsubame_plughost::caps::{Access, Capabilities, PathGrant, Scope};
 use tsubame_plughost::client::{CallError, Options, Plugin, ProcessLauncher, Stats, Status};
 use tsubame_plughost::manifest::{Kind, ProviderDecl};
+use tsubame_plughost::install_record;
 use tsubame_plughost::proto::Load;
 use tsubame_plughost::sha256;
 
@@ -156,7 +157,7 @@ impl Image {
     }
 }
 
-const COLUMNS: [&str; 11] = ["echo", "len", "hang", "grow", "read", "write", "short", "trap", "caps", "info", "dir"];
+const COLUMNS: [&str; 12] = ["echo", "len", "hang", "grow", "read", "write", "short", "trap", "caps", "info", "dir", "kid"];
 
 fn entrypoints(full: bool) -> Vec<(Kind, &'static str)> {
     let mut eps: Vec<(Kind, &str)> = COLUMNS.iter().map(|c| (Kind::Column, *c)).collect();
@@ -209,7 +210,7 @@ fn guest_wat(id: &str, full: bool) -> String {
   (func $values (export "tsubame:plugin/column@0.1.0#values")
         (param $cp i32) (param $cl i32) (param $pp i32) (param $n i32) (result i32)
     (local $cells i32) (local $i i32) (local $c i32) (local $sp i32) (local $sl i32)
-    (local $mode i32) (local $ret i32) (local $count i32)
+    (local $mode i32) (local $ret i32) (local $count i32) (local $np i32)
     (local.set $mode (i32.load8_u (local.get $cp)))
     ;; h: never returns
     (if (i32.eq (local.get $mode) (i32.const 104)) (then (loop $spin (br $spin))))
@@ -283,6 +284,22 @@ fn guest_wat(id: &str, full: bool) -> String {
                 (else
                   (call $int (local.get $c) (i64.sub (i64.const -1) (i64.extend_i32_u (i32.load8_u (i32.const 444)))))))
               (br $cell)))
+          ;; k: the first 16 bytes of `<path>\a`, a file inside the path it was given, or -(1 + error code)
+          (if (i32.eq (local.get $mode) (i32.const 107))
+            (then
+              (local.set $np (call $alloc (i32.add (local.get $sl) (i32.const 2)) (i32.const 1)))
+              (memory.copy (local.get $np) (local.get $sp) (local.get $sl))
+              (i32.store8 (i32.add (local.get $np) (local.get $sl)) (i32.const 92))
+              (i32.store8 (i32.add (i32.add (local.get $np) (local.get $sl)) (i32.const 1)) (i32.const 97))
+              (call $read (local.get $np) (i32.add (local.get $sl) (i32.const 2)) (i64.const 0) (i32.const 16) (i32.const 256))
+              (if (i32.eqz (i32.load8_u (i32.const 256)))
+                (then
+                  (i32.store8 (local.get $c) (i32.const 1))
+                  (i32.store offset=8 (local.get $c) (i32.load (i32.const 260)))
+                  (i32.store offset=12 (local.get $c) (i32.load (i32.const 264))))
+                (else
+                  (call $int (local.get $c) (i64.sub (i64.const -1) (i64.extend_i32_u (i32.load8_u (i32.const 260)))))))
+              (br $cell)))
           ;; anything else: the path itself as text
           (i32.store8 (local.get $c) (i32.const 1))
           (i32.store offset=8 (local.get $c) (local.get $sp))
@@ -351,9 +368,15 @@ fn precompile(component: &[u8]) -> Vec<u8> {
     engine.precompile_component(component).expect("the component compiles")
 }
 
+/// The full guest as a package ships it (a component, `.wasm`).
+fn full_component() -> &'static [u8] {
+    static C: OnceLock<Vec<u8>> = OnceLock::new();
+    C.get_or_init(|| componentize(&guest_wat("test.fixture", true), "plugin"))
+}
+
 fn full_cwasm() -> &'static [u8] {
     static C: OnceLock<Vec<u8>> = OnceLock::new();
-    C.get_or_init(|| precompile(&componentize(&guest_wat("test.fixture", true), "plugin")))
+    C.get_or_init(|| precompile(full_component()))
 }
 
 fn column_cwasm() -> &'static [u8] {
@@ -395,8 +418,12 @@ fn options() -> Options {
     Options { start_timeout: Duration::from_secs(30), ..Options::default() }
 }
 
+/// A `Load` for `cwasm` written to `<temp>\cache` (which the host then seals),
+/// without an install record: the host side only.
 fn load_for(temp: &Temp, cwasm: &[u8], caps: Capabilities, full: bool) -> Load {
-    let file = temp.0.join("fixture.cwasm");
+    let cache = temp.0.join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let file = cache.join("fixture.cwasm");
     std::fs::write(&file, cwasm).unwrap();
     Load {
         plugin_id: "test.fixture".into(),
@@ -405,6 +432,7 @@ fn load_for(temp: &Temp, cwasm: &[u8], caps: Capabilities, full: bool) -> Load {
         sha256: sha256::sha256(cwasm),
         caps,
         entrypoints: entrypoints(full).into_iter().map(|(k, id)| (k, id.to_string())).collect(),
+        protected: Vec::new(),
     }
 }
 
@@ -896,7 +924,8 @@ fn release_exe_is_small() {
 // A test that is `#[ignore]` **passes while its weakness is present**; run those with
 // `cargo test -p tsubame-plughost --test host -- --ignored --nocapture ph`.
 // Fixed findings keep their PoC as a regression test: same exploit setup, the
-// assertion flipped, run in the normal suite (PH-01, PH-04, PH-05, PH-06).
+// assertion flipped, run in the normal suite (PH-01, PH-02, PH-03, PH-04, PH-05,
+// PH-06, PH-12).
 // The PoCs that need no guest are in `tests/security_poc.rs`.
 
 /// PH-01 (fixed): with a `*` grant and `network = false` the host used to open
@@ -935,23 +964,120 @@ fn a_unc_folder_grant_without_the_network_is_refused_by_the_host() {
     }
 }
 
-/// PH-03: the SHA-256 in `Load` is the only thing between a file on disk and
-/// `Component::deserialize`. Whoever can write the `.cwasm` **and** the place
-/// the hash is kept gets their image deserialized and run. The PoC only
-/// changes a string in the image's data (machine code is just as unchecked).
+/// The fixture's `plugin.toml`, declaring what the full guest exports.
+fn fixture_manifest(caps: &str) -> String {
+    let mut m = format!("[plugin]\nid = \"test.fixture\"\nname = \"Fixture\"\nversion = \"1.0.0\"\napi = \"0.1\"\ncomponent = \"plugin.wasm\"\n\n{caps}\n");
+    for c in COLUMNS {
+        m.push_str(&format!("[[column]]\nid = \"{c}\"\nlabel = \"{c}\"\n"));
+    }
+    m.push_str("[[previewer]]\nid = \"doc\"\ntitle = \"Doc\"\nextensions = [\"png\"]\n[[previewer]]\nid = \"fail\"\ntitle = \"Fail\"\nextensions = [\"png\"]\n");
+    m.push_str("[[vfs]]\nid = \"zip\"\ntitle = \"Zip\"\nextensions = [\"zip\"]\n[[search]]\nid = \"find\"\ntitle = \"Find\"\n[[command]]\nname = \"run\"\ntitle = \"Run\"\n");
+    m
+}
+
+/// Installs the fixture the way the app does: package in `<t>\pkg`, record in `<t>\cache`.
+fn install_fixture(t: &Temp, caps: &str) -> (PathBuf, PathBuf) {
+    let pkg = t.0.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    let text = fixture_manifest(caps);
+    std::fs::write(pkg.join("plugin.toml"), &text).unwrap();
+    std::fs::write(pkg.join("plugin.wasm"), full_component()).unwrap();
+    let cache = t.0.join("cache");
+    install_record::store(&pkg, &cache, Some(&t.0.join("data")), &[], text.as_bytes(), full_component(), full_cwasm()).expect("the fixture installs");
+    (pkg, cache)
+}
+
+/// Starts an installed fixture from its record.
+fn start_installed(pkg: &Path, cache: &Path) -> Plugin {
+    let v = install_record::verify(pkg, cache, "test.fixture", "1.0.0", &[]).expect("the record matches");
+    Plugin::new(Load::new(&v), ProcessLauncher::new(HOST_EXE), options())
+}
+
+/// PH-03 (fixed): the SHA-256 in `Load` was the only thing between a file on
+/// disk and `Component::deserialize`, and nothing kept it. Now it comes from
+/// the install record, written once, in a folder no plugin can reach. A
+/// `.cwasm` changed on disk after install no longer matches and is refused
+/// before it is deserialized; the record can not be rewritten to match.
 #[test]
-#[ignore = "PoC PH-03: passes while a re-hashed, modified .cwasm is accepted"]
 fn ph03_a_modified_cwasm_with_a_matching_hash_is_deserialized_and_run() {
     let t = Temp::new("poc-rehash");
-    let mut image = full_cwasm().to_vec();
+    let (pkg, cache) = install_fixture(&t, "");
+    let p = start_installed(&pkg, &cache);
+    assert_eq!(column(&p, "echo", &["C:\\a"]).unwrap(), [Cell::Text("C:\\a".into())]);
+    p.shutdown();
+
+    // The attacker changes the image on disk ...
+    let file = cache.join("test.fixture\\1.0.0\\component.cwasm");
+    let mut image = std::fs::read(&file).unwrap();
     let at = image.windows(12).position(|w| w == b"test.fixture").expect("the fixture's id is in the image");
     image[at..at + 12].copy_from_slice(b"evil.fixture");
-    // The attacker rewrites the recorded hash as well (here: `load_for` hashes what it is given).
-    let mut load = load_for(&t, &image, Capabilities::default(), true);
-    load.plugin_id = "evil.fixture".into();
-    let p = Plugin::new(load, ProcessLauncher::new(HOST_EXE), options());
-    // The modified image loads, describes itself with the modified id and answers calls.
-    assert_eq!(column(&p, "echo", &["C:\\a"]).unwrap(), [Cell::Text("C:\\a".into())]);
+    std::fs::write(&file, &image).unwrap();
+    // ... and can not re-record its hash: the record is written once.
+    let text = std::fs::read(pkg.join("plugin.toml")).unwrap();
+    let e = install_record::store(&pkg, &cache, None, &[], &text, full_component(), &image).unwrap_err();
+    assert!(e.0.contains("already installed"), "{e}");
+    let p = start_installed(&pkg, &cache);
+    match column(&p, "echo", &["C:\\a"]) {
+        Err(CallError::Load(m)) => assert!(m.contains("hash does not match"), "{m}"),
+        other => panic!("the modified image must not load: {other:?}"),
+    }
+}
+
+/// PH-02 (fixed): a plugin with read-write `*` could overwrite its own
+/// `.cwasm`, its install record and its `plugin.toml`. Now the host refuses
+/// every write under the package and the cache, and every access to the
+/// cache, on the final path of the handle, whatever the grant.
+#[test]
+fn ph02_a_read_write_any_grant_can_not_touch_the_cache_or_the_package() {
+    let t = Temp::new("poc-protected");
+    let (pkg, cache) = install_fixture(&t, "[capabilities]\npaths = [{ path = \"*\", access = \"read-write\" }]");
+    let p = start_installed(&pkg, &cache);
+    let s = |p: &Path| p.to_str().unwrap().to_string();
+    let manifest = s(&pkg.join("plugin.toml"));
+    let record = s(&cache.join("test.fixture\\1.0.0\\install.toml"));
+    let image = s(&cache.join("test.fixture\\1.0.0\\component.cwasm"));
+    let new_in_cache = s(&cache.join("planted.txt"));
+    let before = (std::fs::read(&manifest).unwrap(), std::fs::read(&record).unwrap(), std::fs::read(&image).unwrap());
+    assert_eq!(column(&p, "write", &[&manifest, &record, &image, &new_in_cache, &s(&pkg.join("new.txt"))]).unwrap(), [DENIED; 5]);
+    assert_eq!(column(&p, "read", &[&record, &image]).unwrap(), [DENIED, DENIED]);
+    assert_eq!(column(&p, "info", &[&s(&cache)]).unwrap(), [DENIED]);
+    assert_eq!(column(&p, "dir", &[&s(&cache.join("test.fixture"))]).unwrap(), [DENIED]);
+    // the package can still be read, and everything else written
+    assert_eq!(column(&p, "read", &[&manifest]).unwrap(), [Cell::Text("[plugin]id = \"t".into())], "the line break is cleaned out of the cell");
+    let elsewhere = t.path("elsewhere.txt");
+    assert_eq!(column(&p, "write", &[&elsewhere]).unwrap(), [Cell::Int(0)]);
+    // A hard link to the record from outside the cache is another name of the same file: refused.
+    let alias = t.path("alias.toml");
+    if std::fs::hard_link(&record, &alias).is_ok() {
+        assert_eq!(column(&p, "write", &[&alias]).unwrap(), [DENIED]);
+        std::fs::remove_file(&alias).unwrap();
+    }
+    assert_eq!((std::fs::read(&manifest).unwrap(), std::fs::read(&record).unwrap(), std::fs::read(&image).unwrap()), before);
+    assert!(!Path::new(&new_in_cache).exists() && !pkg.join("new.txt").exists());
+
+    // A client that hands over an overlapping folder grant is refused by the host itself.
+    let mut load = load_for(&t, full_cwasm(), caps(vec![grant(Scope::Prefix(install_record::real_dir(&pkg).unwrap()), Access::ReadWrite)]), true);
+    load.protected = vec![install_record::real_dir(&pkg).unwrap()];
+    match column(&Plugin::new(load, ProcessLauncher::new(HOST_EXE), options()), "echo", &["C:\\a"]) {
+        Err(CallError::Load(m)) => assert!(m.contains("reaches into a folder of Tsubame's own"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// PH-12 (fixed): a column given a folder used to have its whole tree. Now a
+/// column (and a previewer) gets the path itself: a folder can be looked at
+/// and listed, nothing in it opened.
+#[test]
+fn ph12_a_column_sees_a_folder_but_not_what_is_in_it() {
+    let t = Temp::new("poc-input-scope");
+    t.write("dir\\a", "secret");
+    let dir = t.path("dir");
+    let p = plugin(&t, caps(vec![grant(Scope::Input, Access::Read)]));
+    assert_eq!(column(&p, "kid", &[&dir]).unwrap(), [DENIED], "a file inside the folder it was given");
+    assert_eq!(column(&p, "dir", &[&dir]).unwrap(), [Cell::Int(1)], "the folder's names");
+    assert_eq!(column(&p, "info", &[&dir]).unwrap(), [Cell::Int(1_000_000_000)], "the folder itself");
+    // the file, handed over itself, is readable
+    assert_eq!(column(&p, "read", &[&t.path("dir\\a")]).unwrap(), [Cell::Text("secret".into())]);
 }
 
 /// PH-04 (fixed): a dangling file symlink inside a read-write grant. The old
