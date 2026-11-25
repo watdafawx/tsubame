@@ -190,11 +190,28 @@ Verdict cells are left empty; fill each with PASS, FAIL or UNTESTABLE. Chords ar
 | MIL-3 | Drill 10 or more levels. | A left cue says how many columns are hidden; at most 12 columns stay live. | |
 | MIL-4 | Drag a column edge; double-click it. | Width follows the mouse (140 to 480 px); double-click returns to 220. | |
 | MIL-5 | Select a text file, a binary file and a folder. | File: info column with type, size, modified, attributes and an excerpt (text or hex); with Preview off a note and a Settings button; folder: its child column. | |
-| MIL-6 | Shrink the window below 560 px. | One column with a parent header and an info strip; Left goes up. | |
+| MIL-6 | Shrink the window below 560 px (a body 300 px tall or more), select a file. | One column with a parent header; the whole info column (type, size, modified, attributes, location, excerpt) under the list. A short window shows the 52 px strip instead. Left goes up. | |
 | MIL-7 | Open a very large folder, an empty folder and an unreadable one. | Skeleton after 80 ms and Esc cancels; "This folder is empty"; "Can't open this folder" with Retry. | |
 | MIL-8 | Select a junction, press Follow; try one that loops to an ancestor. | A "Junction or link" card first; Follow opens the target; a loop says so and is not followed. | |
 | MIL-9 | Settings > Extensions: switch Miller off, then on. | Off: the chord does nothing, a Miller tab returns to Details; on: it works again. | |
 | MIL-10 | Idle with Miller open for 20 s. | CPU delta about 0. | |
+| MIL-11 | Select a row, press `F2`, type a new name, Enter. Then click a selected row, wait half a second, click it again. | Inline editor on the row in its column; the entry shows under the new name and is selected again. The slow second click opens the editor; Esc cancels it. | |
+| MIL-12 | Click a row, Ctrl+click two more, Shift+click another; Ctrl+A; Shift+Down/Up; Esc. | A set in the active column only (no child or info column beside it); the status bar counts items and bytes; Esc collapses to the focused row. | |
+| MIL-13 | With a set, right-click a row of it; then Ctrl+C, open another folder, Ctrl+V; also Del. | The menu and the clipboard actions work on the whole set; right-click on a row outside the set acts on that row only. | |
+| MIL-14 | Drag a file (and a set) onto a folder row of the active column, onto a folder row of an earlier column, and onto empty space of a column. | Accent outline on the target row or column; the tooltip says Move/Copy to the folder; Ctrl copies, Shift moves; the column's own folder says "Already in this folder". | |
+| MIL-15 | Click the "Path" field, type a path that does not exist, Enter. | Back in the previous folder with a status message "Can't open ...", and the path field keeps the text selected with an error line. | |
+| MIL-16 | Open a link or a folder you cannot read whose card text is long. | The card text wraps over several lines (at most 10); Retry or Follow sit below it. | |
+| MIL-17 | Settings > Extensions > Miller columns: move the slider, press Default. | Columns without a width of their own change width live (140 to 480, steps of 10); a dragged column keeps its width. | |
+| MIL-18 | Real mouse: double-click the edge of a dragged column. | Width goes back to the default and stays there (it must not snap back while the button is still down). | |
+
+### 2.5c Tree rows (`Ctrl+Shift+4`; extension `tsubame.ext.tree`)
+
+| ID | Do | Expect | Result |
+|---|---|---|---|
+| TRE-1 | Select a row, `F2`, type, Enter; then slow second click on a row. | Inline editor on the row (after the chevron and icon), duplicate names are refused as in Details; the renamed row is selected again; Esc cancels. | |
+| TRE-2 | Click, Ctrl+click, Shift+click, Shift+arrows, Ctrl+A, Esc. | Rows join and leave the set; the status bar counts them; Esc clears. Right-click on a row of the set menus the whole set. | |
+| TRE-3 | Drag a row (or a set) onto a folder row, onto a file row inside another folder, onto empty space. | Folder row: into it; file row: into its own folder; empty space: the tab's folder. Modifier keys as in Details. | |
+| TRE-4 | Hold a drag on a collapsed folder row for about 1 s. | The folder opens under the drag; moving away before 650 ms opens nothing. | |
 
 ### 2.6 Mouse and navigation
 

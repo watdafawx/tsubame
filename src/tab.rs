@@ -881,6 +881,36 @@ impl Tab {
         self.store.view().len()
     }
 
+    /// Rows selected, whichever view shows them (Details, Tree rows or Miller's active column).
+    pub fn sel_total(&self) -> usize {
+        if self.miller_on && let Some(m) = &self.miller {
+            return m.sel_count();
+        }
+        if self.tree_on && let Some(m) = &self.tree {
+            return m.sel_count();
+        }
+        self.sel.count()
+    }
+
+    /// Selected bytes (folders count 0), whichever view shows them.
+    pub fn sel_bytes_total(&self) -> u64 {
+        if self.miller_on && let Some(m) = &self.miller {
+            return m.sel_bytes().min(u128::from(u64::MAX)) as u64;
+        }
+        if self.tree_on && let Some(m) = &self.tree {
+            return m.selected_total_size(Some(&self.store));
+        }
+        self.sel.total_size().min(u64::MAX as u128) as u64
+    }
+
+    /// The keyboard cursor row of the list (Miller: of its active column).
+    pub fn cursor_row(&self) -> usize {
+        if self.miller_on && let Some(m) = &self.miller {
+            return m.active_col().map_or(0, |c| c.list.cursor);
+        }
+        self.list.cursor
+    }
+
     /// Full path of the entry at view position `pos`, and whether it is a folder.
     pub fn entry_at(&self, pos: usize) -> Option<(String, bool)> {
         if self.miller_on && let Some(m) = &self.miller {
@@ -898,7 +928,7 @@ impl Tab {
     /// Paths of up to `n` selected entries in view order (for the shell menu).
     pub fn selected_paths(&self, n: usize) -> Vec<String> {
         if self.miller_on && let Some(m) = &self.miller {
-            return m.selected_path().into_iter().take(n).collect();
+            return m.selected_paths().into_iter().take(n).collect();
         }
         if self.tree_on && let Some(m) = &self.tree {
             return m.selected_paths(n, Some(&self.store));

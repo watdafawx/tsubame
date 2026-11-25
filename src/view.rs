@@ -327,6 +327,8 @@ pub struct View {
     last_click: Option<(usize, u64)>,
     /// the only selected row at the end of the last two frames
     sole_hist: [Option<usize>; 2],
+    /// a drag rests on this collapsed Tree folder since then (it opens after `HOVER_OPEN`)
+    hover_open: Option<(String, std::time::Instant)>,
     /// modifier keys held now (main sets it each frame)
     pub cur_mods: Mods,
     /// main runs the file-operation poll timer
@@ -444,6 +446,7 @@ impl View {
             press: None,
             last_click: None,
             sole_hist: [None, None],
+            hover_open: None,
             cur_mods: Mods::default(),
             ops_timer: false,
             side_target: None,
@@ -911,27 +914,48 @@ impl View {
         // a typed path that failed to open: back to the old folder, error shown
         if let Some((id, prev, typed)) = self.edit_nav.take() {
             let wake = self.wake.clone();
-            match self.tabs.items.iter_mut().find(|t| t.id == id) {
-                Some(t) if matches!(t.load, Load::Failed(_)) => {
-                    let msg = match &t.load {
-                        Load::Failed(m) => m.clone(),
-                        _ => String::new(),
-                    };
-                    t.history.undo_push();
-                    t.start(&prev, wake);
-                    let is_active = self.tabs.items[self.tabs.active].id == id;
-                    if is_active {
-                        self.editing = true;
-                        self.edit_frames = 0;
-                        self.path_text.set_text(&typed);
-                        self.path_text.select_all();
-                        self.path_error = Some(format!("Can't open \"{typed}\": {msg}"));
-                        self.focus_list = false;
-                        self.focus_path = true;
-                    }
+            // Details: the tab's own listing failed. Miller: the last column of the new chain cannot be listed.
+            let (failed, busy) = match self.tabs.items.iter().find(|t| t.id == id) {
+                Some(t) if t.miller_rows() => {
+                    let m = t.miller.as_ref();
+                    (m.and_then(|m| m.failed_goto()).map(|(_, why)| why), m.is_some_and(|m| m.loading()))
                 }
-                Some(t) if t.is_loading() => self.edit_nav = Some((id, prev, typed)),
-                _ => {}
+                Some(t) => (
+                    match &t.load {
+                        Load::Failed(m) => Some(m.clone()),
+                        _ => None,
+                    },
+                    t.is_loading(),
+                ),
+                None => (None, false),
+            };
+            if let Some(msg) = failed {
+                if let Some(t) = self.tabs.items.iter_mut().find(|t| t.id == id) {
+                    t.history.undo_push();
+                    if let Some(m) = t.miller.as_mut() {
+                        m.clear_goto_from();
+                        // the columns moved before the listing failed: Recent took the dead folder
+                        for dead in [t.path.as_str(), m.active_path(), typed.as_str()] {
+                            if !dead.eq_ignore_ascii_case(&prev) {
+                                self.side.drop_recent(dead);
+                            }
+                        }
+                    }
+                    t.start(&prev, wake);
+                }
+                self.ops.message = Some(format!("Can't open \"{typed}\": {msg}. Back in the previous folder."));
+                let is_active = self.tabs.items[self.tabs.active].id == id;
+                if is_active {
+                    self.editing = true;
+                    self.edit_frames = 0;
+                    self.path_text.set_text(&typed);
+                    self.path_text.select_all();
+                    self.path_error = Some(format!("Can't open \"{typed}\": {msg}"));
+                    self.focus_list = false;
+                    self.focus_path = true;
+                }
+            } else if busy {
+                self.edit_nav = Some((id, prev, typed));
             }
         }
         changed
@@ -1164,7 +1188,13 @@ impl View {
             CMD_VIEW_GRID_LARGE => self.set_mode(ViewMode::GridLarge),
             CMD_SELECT_ALL => {
                 let t = self.tab_mut();
-                t.sel.select_all(&t.store);
+                if t.miller_on && let Some(m) = t.miller.as_mut() {
+                    m.select_all();
+                } else if t.tree_on && let Some(m) = t.tree.as_mut() {
+                    m.select_all(Some(&t.store));
+                } else {
+                    t.sel.select_all(&t.store);
+                }
             }
             CMD_ESCAPE => {
                 if self.cancel_edits() {
@@ -1173,7 +1203,14 @@ impl View {
                     self.filter.set_text("");
                     self.tab_mut().set_filter("");
                 } else {
-                    self.tab_mut().sel.clear();
+                    let t = self.tab_mut();
+                    if t.miller_on && let Some(m) = t.miller.as_mut() {
+                        m.collapse_selection();
+                    } else if t.tree_on && let Some(m) = t.tree.as_mut() {
+                        m.clear_selection();
+                    } else {
+                        t.sel.clear();
+                    }
                 }
             }
             CMD_RENAME => self.begin_rename(ui),
@@ -1757,9 +1794,10 @@ impl View {
     /// else just `row` (at most 64).
     pub fn menu_paths(&self, row: usize) -> Vec<String> {
         let t = self.tab();
-        if t.miller_rows() {
-            // one selected entry: the row that was pressed became it
-            return t.entry_at(row).map(|e| vec![e.0]).unwrap_or_default();
+        if let Some(m) = t.miller.as_ref().filter(|_| t.miller_rows()) {
+            // a row of the selection: all of it; else the row that was pressed (it became the selection)
+            let in_sel = m.active_col().is_some_and(|c| c.store.at(row).is_some_and(|id| c.row_selected(id)));
+            return if in_sel { t.selected_paths(64) } else { t.entry_at(row).map(|e| vec![e.0]).unwrap_or_default() };
         }
         if t.tree_on
             && let Some(m) = t.tree.as_ref()
@@ -1939,7 +1977,7 @@ impl View {
     /// The cursor row when it is the only selected one (slow-click rename).
     fn sole_row(&self) -> Option<usize> {
         let t = self.tab();
-        (t.sel.count() == 1).then_some(t.list.cursor)
+        (t.sel_total() == 1).then_some(t.cursor_row())
     }
 
     /// Two panes: the title bar on top, the sidebar down the left, the panes
@@ -2598,8 +2636,8 @@ impl View {
             failed: matches!(tab.load, Load::Failed(_)),
             shown: tab.shown(),
             total: if (tab.tree_on && tab.tree.is_some()) || tab.miller_rows() { tab.shown() } else { tab.store.len() },
-            selected: if tab.miller_rows() { usize::from(tab.selected_paths(1).len() == 1) } else { tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.count(), |m| m.sel_count()) },
-            selected_bytes: if let Some(m) = tab.miller.as_ref().filter(|_| tab.miller_on) { m.info().map_or(0, |i| i.size) } else { tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.total_size().min(u64::MAX as u128) as u64, |m| m.selected_total_size(Some(&tab.store))) },
+            selected: tab.sel_total(),
+            selected_bytes: tab.sel_bytes_total(),
             free: self.side.volume_of(&tab.path),
             other_side: hints.then_some(side),
             batch: self.batch.is_some() && self.batch_slot == self.live,
@@ -4766,7 +4804,8 @@ mod tests {
         while !ok(r) {
             r.v.pump();
             r.frame();
-            assert!(t0.elapsed() < Duration::from_secs(10), "{what}: {:?}", r.c.texts());
+            // generous: the full suite runs hundreds of these in parallel and a watcher can be slow to arm
+            assert!(t0.elapsed() < Duration::from_secs(30), "{what}: {:?}", r.c.texts());
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -4848,13 +4887,14 @@ mod tests {
     }
 
     #[test]
-    fn miller_mode_blocks_rename_and_leaving_it_lists_the_folder_again() {
+    fn miller_mode_renames_inline_and_leaving_it_lists_the_folder_again() {
         let mut r = Rig::new("millerleave");
         r.key(Key::Char('5'), Mods::CTRL_SHIFT);
         tree_wait(&mut r, "columns list", |r| r.v.tab().miller.as_ref().is_some_and(|m| !m.loading() && m.active_shown() > 0));
         r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.rename.is_some(), "F2 renames inline in Miller columns");
+        r.key(Key::Escape, Mods::NONE);
         assert!(r.v.rename.is_none());
-        assert!(r.v.ops.message.as_deref().is_some_and(|m| m.contains("Miller")));
         r.key(Key::Char('1'), Mods::CTRL_SHIFT);
         assert_eq!(r.v.mode, ViewMode::Details);
         tree_wait(&mut r, "details lists again", |r| r.v.tab().miller.is_none() && r.v.tab().shown() == 3);
@@ -4874,4 +4914,7 @@ mod tests {
         r.key(Key::Char('5'), Mods::CTRL_SHIFT);
         assert_eq!(r.v.mode, ViewMode::Miller, "and back with it");
     }
+
+    #[path = "../../view_f6_tests.rs"]
+    mod f6;
 }

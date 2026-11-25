@@ -30,8 +30,8 @@
 use crate::nav;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
-use tsubame_core::{EntryId, EntryInput, EntryStore, FOLDER, FilterMode, HIDDEN, READONLY, REPARSE, SYSTEM, Sort};
-use tsubame_ui::ListState;
+use tsubame_core::{EntryId, EntryInput, EntryStore, FOLDER, FilterMode, HIDDEN, READONLY, REPARSE, SYSTEM, Selection, Sort};
+use tsubame_ui::{ListState, Rect};
 use tsubame_win::enumerate::{Batch, CancelToken, Done, Enumerator, Message, Wake};
 use tsubame_win::watch::{self, DirWatcher, Gone, Options as WatchOptions};
 
@@ -133,6 +133,9 @@ pub struct Column {
     /// the selected entry: a path row (columns left of the active one) or the
     /// selection of the active column
     pub sel: Option<EntryId>,
+    /// the rows of a multi-selection (Ctrl/Shift click, Ctrl+A, Shift+arrows) in
+    /// the active column. Fewer than two rows: `sel` alone is the selection.
+    pub multi: Selection,
     pub list: ListState,
     /// own width in DIPs; 0 = the default
     pub width: f32,
@@ -169,6 +172,7 @@ impl Column {
             store,
             state,
             sel: None,
+            multi: Selection::new(),
             list: ListState::new(22.0),
             width,
             total: 0,
@@ -212,6 +216,21 @@ impl Column {
     /// Entries the running first listing has delivered so far.
     pub fn delivered(&self) -> usize {
         self.load.as_ref().map_or(0, |l| l.total)
+    }
+
+    /// Several rows are selected (the column has no child column and no info then).
+    pub fn is_multi(&self) -> bool {
+        self.multi.count() > 1
+    }
+
+    /// Row `id` is selected (the full selection of the active column).
+    pub fn row_selected(&self, id: EntryId) -> bool {
+        if self.is_multi() { self.multi.contains(id) } else { self.sel == Some(id) }
+    }
+
+    /// Rows selected in this column.
+    pub fn sel_count(&self) -> usize {
+        if self.is_multi() { self.multi.count() } else { usize::from(self.sel.is_some()) }
     }
 
     /// Position in the view of the selected entry.
@@ -310,7 +329,26 @@ pub struct MillerModel {
     pub reveal: bool,
     /// narrow window: the list shown is the active column only (set by the view each frame)
     pub dirty: bool,
+    /// the rows area each column was painted in last frame (presses, drops and the rename field hit-test it)
+    pub hits: Vec<ColHit>,
+    /// a double-click on the grip of this column reset its width: the press is still held, so the drag must not take the width back until it is released
+    pub grip_hold: Option<usize>,
+    /// the active folder before the last `goto` that built new columns (a typed path that fails goes back to it)
+    goto_from: Option<String>,
+    /// (folder, name, since): select this entry once it shows up (after a rename)
+    pick: Option<(String, String, Instant)>,
 }
+
+/// Where one column's rows were painted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColHit {
+    pub col: usize,
+    /// the rows area (scrollbar excluded)
+    pub rows: Rect,
+}
+
+/// How long a renamed entry is waited for.
+const PICK_FOR: Duration = Duration::from_secs(5);
 
 impl MillerModel {
     /// A model showing `path` as its active column; the ancestors are the path rows.
@@ -338,6 +376,10 @@ impl MillerModel {
             hscroll: 0.0,
             reveal: true,
             dirty: true,
+            hits: Vec::new(),
+            grip_hold: None,
+            goto_from: None,
+            pick: None,
         };
         m.goto(path);
         m
@@ -454,6 +496,8 @@ impl MillerModel {
     /// becomes the active one.
     pub fn goto(&mut self, path: &str) {
         self.synced = path.to_string();
+        let from = self.cols.get(self.active).filter(|c| c.state == State::Done).map(|c| c.path.clone());
+        self.goto_from = None;
         if let Some(j) = self.cols.iter().position(|c| same_path(&c.path, path)) {
             self.active = j;
             self.reveal = true;
@@ -477,6 +521,10 @@ impl MillerModel {
         }
         self.dropped = dropped;
         let keep = self.cols.len();
+        if chain.len() > keep {
+            // new columns will list: a typed path that fails on one goes back to `from`
+            self.goto_from = from;
+        }
         for p in chain.iter().skip(keep) {
             let mut c = Column::new(p.clone(), State::Loading, self.hide, self.sort, 0.0);
             c.started = Instant::now();
@@ -590,6 +638,7 @@ impl MillerModel {
             changed |= self.pump_col(i);
         }
         changed |= self.pump_excerpt();
+        changed |= self.try_pick();
         // the skeleton becomes due after 80 ms
         let now = Instant::now();
         for c in &mut self.cols {
@@ -703,7 +752,16 @@ impl MillerModel {
         let Load { mut store, total, capped, .. } = load;
         store.end_stream();
         let first = c.published.is_none();
+        // a multi-selection follows its names across the refresh
+        let multi_names: Vec<Vec<u16>> = if !first && c.is_multi() { c.store.view().iter().filter(|id| c.multi.contains(**id)).filter_map(|id| c.store.name(*id).map(<[u16]>::to_vec)).collect() } else { Vec::new() };
         let old = std::mem::replace(&mut c.store, store);
+        if !multi_names.is_empty() {
+            let ids: Vec<EntryId> = multi_names.iter().filter_map(|n| c.store.find(n)).collect();
+            c.multi = Selection::new();
+            c.multi.replace_with(&c.store, ids);
+        } else {
+            c.multi = Selection::new();
+        }
         c.total = total;
         c.capped = capped;
         c.state = State::Done;
@@ -730,6 +788,13 @@ impl MillerModel {
             // a refresh: the selection follows its name
             let found = old.name(old_id).and_then(|n| c.store.find(n));
             c.sel = found;
+            c.multi.focus = found;
+            if c.multi.count() < 2 {
+                match found.and_then(|_| c.sel_pos()) {
+                    Some(p) => c.multi.single(&c.store, p),
+                    None => c.multi.clear(),
+                }
+            }
             if found.is_none() {
                 self.cols.truncate(i + 1);
                 self.info = None;
@@ -773,7 +838,7 @@ impl MillerModel {
         let Some(col) = self.cols.get_mut(c) else { return false };
         let Some(id) = col.store.at(pos) else { return false };
         col.list.cursor = pos;
-        let same = col.sel == Some(id) && active == c && (has_child || has_info || !col.is_folder_at(pos));
+        let same = col.sel == Some(id) && active == c && !col.is_multi() && (has_child || has_info || !col.is_folder_at(pos));
         if same {
             return false;
         }
@@ -786,12 +851,224 @@ impl MillerModel {
         true
     }
 
+    // ---- multi-selection ------------------------------------------------------------
+
+    /// Makes `c` the active column holding its single selection in `multi`
+    /// (the anchor of a Shift range, the first row of a Ctrl toggle).
+    fn prepare_multi(&mut self, c: usize) -> bool {
+        if c >= self.cols.len() || self.cols[c].state != State::Done {
+            return false;
+        }
+        if self.active != c {
+            self.set_active(c);
+        }
+        let col = &mut self.cols[c];
+        if !col.is_multi() {
+            match col.sel_pos() {
+                Some(p) => col.multi.single(&col.store, p),
+                None => col.multi.clear(),
+            }
+        }
+        true
+    }
+
+    /// Shift+click / Shift+arrow: the rows from the anchor to `pos`.
+    pub fn extend_to(&mut self, c: usize, pos: usize) -> bool {
+        if !self.prepare_multi(c) || self.cols[c].store.at(pos).is_none() {
+            return false;
+        }
+        let col = &mut self.cols[c];
+        col.multi.extend(&col.store, pos);
+        col.list.cursor = pos;
+        self.after_multi(c);
+        true
+    }
+
+    /// Ctrl+click / Ctrl+Space: row `pos` joins or leaves the selection.
+    pub fn toggle_at(&mut self, c: usize, pos: usize) -> bool {
+        if !self.prepare_multi(c) || self.cols[c].store.at(pos).is_none() {
+            return false;
+        }
+        let col = &mut self.cols[c];
+        col.multi.toggle(&col.store, pos);
+        col.list.cursor = pos;
+        self.after_multi(c);
+        true
+    }
+
+    /// Ctrl+A: every shown row of the active column.
+    pub fn select_all(&mut self) -> bool {
+        let c = self.active;
+        if !self.prepare_multi(c) {
+            return false;
+        }
+        let col = &mut self.cols[c];
+        col.multi.select_all(&col.store);
+        if col.multi.focus.is_none() {
+            col.multi.focus = col.sel.or_else(|| col.store.at(0));
+        }
+        if let Some(p) = col.multi.focus.and_then(|f| col.store.view().iter().position(|v| *v == f)) {
+            col.list.cursor = p;
+        }
+        self.after_multi(c);
+        true
+    }
+
+    /// Esc on a multi-selection: back to the focused row alone. False when nothing was multi.
+    pub fn collapse_selection(&mut self) -> bool {
+        let a = self.active;
+        let Some(col) = self.cols.get(a) else { return false };
+        if !col.is_multi() {
+            return false;
+        }
+        let pos = col.sel_pos().unwrap_or(col.list.cursor.min(col.shown().saturating_sub(1)));
+        self.select_pos(a, pos);
+        true
+    }
+
+    /// The multi set changed: the focus row is `sel`, one row is a plain selection, none clears it.
+    fn after_multi(&mut self, c: usize) {
+        let col = &mut self.cols[c];
+        let n = col.multi.count();
+        let chosen: Vec<usize> = if n <= 2 { col.store.view().iter().enumerate().filter(|(_, id)| col.multi.contains(**id)).map(|(p, _)| p).collect() } else { Vec::new() };
+        if n >= 2 {
+            let cursor_id = col.store.at(col.list.cursor).filter(|id| col.multi.contains(*id));
+            col.sel = cursor_id.or(col.multi.focus.filter(|f| col.multi.contains(*f))).or_else(|| col.store.view().iter().copied().find(|id| col.multi.contains(*id)));
+            col.reveal_row = true;
+            self.cols.truncate(c + 1);
+            self.info = None;
+            self.reveal = true;
+            self.dirty = true;
+            self.watch_dirty = true;
+        } else if n == 1 {
+            let pos = chosen[0];
+            col.multi.single(&col.store, pos);
+            col.list.cursor = pos;
+            col.sel = col.store.at(pos);
+            col.reveal_row = true;
+            self.apply_selection(c, pos);
+        } else {
+            col.sel = None;
+            self.cols.truncate(c + 1);
+            self.info = None;
+            self.dirty = true;
+            self.watch_dirty = true;
+        }
+    }
+
+    /// Rows selected in the active column.
+    pub fn sel_count(&self) -> usize {
+        self.active_col().map_or(0, Column::sel_count)
+    }
+
+    /// Bytes of the selected files (folders count 0, like Details).
+    pub fn sel_bytes(&self) -> u128 {
+        let Some(c) = self.active_col() else { return 0 };
+        if c.is_multi() {
+            return c.multi.total_size();
+        }
+        c.sel.and_then(|id| c.store.record(id)).filter(|r| r.flags & FOLDER == 0).map_or(0, |r| u128::from(r.size))
+    }
+
+    /// Full paths of the selected rows of the active column, in view order.
+    pub fn selected_paths(&self) -> Vec<String> {
+        let Some(c) = self.active_col() else { return Vec::new() };
+        if c.is_multi() {
+            return c.store.view().iter().filter(|id| c.multi.contains(**id)).filter_map(|id| c.store.name(*id).map(|n| nav::join(&c.path, &utf8(n)))).collect();
+        }
+        self.selected_path().into_iter().collect()
+    }
+
+    // ---- where the columns were painted ---------------------------------------------------
+
+    /// Column and row under the point (x, y), from the last painted frame.
+    pub fn hit_row(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let h = self.hits.iter().find(|h| h.rows.contains_pt(tsubame_ui::Pt { x, y }))?;
+        let col = self.cols.get(h.col)?;
+        let pos = col.list.row_at_offset(y - h.rows.y);
+        (pos < col.shown()).then_some((h.col, pos))
+    }
+
+    /// The column whose rows area holds the point (a drop on empty space lands in its folder).
+    pub fn hit_col(&self, x: f32, y: f32) -> Option<usize> {
+        self.hits.iter().find(|h| h.rows.contains_pt(tsubame_ui::Pt { x, y })).map(|h| h.col)
+    }
+
+    /// Screen rect of row `pos` of column `c` (clipped to the rows area).
+    pub fn row_rect(&self, c: usize, pos: usize) -> Option<Rect> {
+        let h = self.hits.iter().find(|h| h.col == c)?;
+        let col = self.cols.get(c)?;
+        let top = h.rows.y + col.list.row_top(pos) as f32;
+        let r = Rect { x: h.rows.x, y: top, w: h.rows.w, h: col.list.row_h };
+        (r.y + r.h > h.rows.y && r.y < h.rows.y + h.rows.h).then_some(r)
+    }
+
+    /// The rows area of column `c` as painted.
+    pub fn col_rows(&self, c: usize) -> Option<Rect> {
+        self.hits.iter().find(|h| h.col == c).map(|h| h.rows)
+    }
+
+    // ---- after a rename ----------------------------------------------------------------------
+
+    /// Select the entry `name` of `folder` once it appears (a rename just made it).
+    pub fn want_pick(&mut self, folder: &str, name: &str) {
+        self.pick = Some((folder.to_string(), name.to_string(), Instant::now()));
+        self.dirty = true;
+    }
+
+    fn try_pick(&mut self) -> bool {
+        let Some((folder, name, since)) = self.pick.clone() else { return false };
+        if since.elapsed() > PICK_FOR {
+            self.pick = None;
+            return false;
+        }
+        let Some(ci) = self.cols.iter().position(|c| same_path(&c.path, &folder) && c.state == State::Done) else { return false };
+        let w: Vec<u16> = name.encode_utf16().collect();
+        let Some(id) = self.cols[ci].store.find(&w) else { return false };
+        let Some(pos) = self.cols[ci].store.view().iter().position(|v| *v == id) else { return false };
+        self.pick = None;
+        // not `select_pos`: a rename keeps the entry id, which that call treats as "already
+        // selected" and leaves the info column on the old name
+        let moved = self.active != ci;
+        self.cols[ci].list.cursor = pos;
+        self.cols[ci].sel = self.cols[ci].store.at(pos);
+        self.apply_selection(ci, pos);
+        if moved {
+            self.after_active_change();
+        }
+        self.cols[ci].reveal_row = true;
+        true
+    }
+
+    // ---- a typed path that fails -------------------------------------------------------------
+
+    /// A `goto` built new columns and the last one cannot be listed: the folder
+    /// the user was in and the reason. None while it loads or when it worked.
+    pub fn failed_goto(&self) -> Option<(String, String)> {
+        let prev = self.goto_from.as_ref()?;
+        let last = self.cols.last()?;
+        match &last.state {
+            State::Denied(msg) if last.published.is_none() => Some((prev.clone(), msg.clone())),
+            _ => None,
+        }
+    }
+
+    /// The failed `goto` was handled (or the user moved on).
+    pub fn clear_goto_from(&mut self) {
+        self.goto_from = None;
+    }
+
     /// Column `c` has the selection at `pos`: it is the active column, the
     /// columns after it go, a folder gets its child column, a file its info.
     fn apply_selection(&mut self, c: usize, pos: usize) {
         self.active = c;
+        self.goto_from = None;
         self.cols.truncate(c + 1);
         self.info = None;
+        if let Some(col) = self.cols.get_mut(c) {
+            col.multi.single(&col.store, pos);
+            col.multi.focus = col.sel;
+        }
         let Some(col) = self.cols.get(c) else { return };
         let Some(id) = col.store.at(pos) else { return };
         let (Some(rec), Some(name)) = (col.store.record(id).copied(), col.store.name(id).map(utf8)) else { return };
@@ -883,6 +1160,7 @@ impl MillerModel {
     pub fn ascend(&mut self) -> bool {
         if self.active > 0 {
             self.active -= 1;
+            self.goto_from = None;
             // the column we left stays as the child column of the folder it came from
             let a = self.active;
             if let Some(p) = self.cols[a].sel_pos() {
@@ -927,6 +1205,7 @@ impl MillerModel {
         if i >= self.cols.len() || i == self.active {
             return;
         }
+        self.goto_from = None;
         self.active = i;
         if let Some(p) = self.cols[i].sel_pos() {
             self.cols[i].list.cursor = p;
@@ -1185,7 +1464,7 @@ impl MillerModel {
                 break;
             }
             if let Some(c) = self.cols.get_mut(i) {
-                changed |= watch::apply_batch(&mut c.store, None, &dpath, &b).map(|s| s.changed()).unwrap_or(false);
+                changed |= watch::apply_batch(&mut c.store, Some(&mut c.multi), &dpath, &b).map(|s| s.changed()).unwrap_or(false);
             }
         }
         if changed {
@@ -1817,6 +2096,161 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(m.watched_count() >= 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shift_and_ctrl_build_a_multi_selection_that_cuts_the_child_columns() {
+        let d = fixture("multi");
+        let mut m = model(&d.join("a"));
+        let a = m.active;
+        assert_eq!(names(&m, a), ["a1", "a2", "f.txt"]);
+        assert!(m.extend_to(a, 2), "shift to the last row");
+        assert_eq!(m.sel_count(), 3);
+        assert_eq!(m.len(), a + 1, "no child column beside a set");
+        let p: Vec<String> = m.selected_paths();
+        assert_eq!(p.len(), 3);
+        assert!(p[0].ends_with("a1") && p[2].ends_with("f.txt"), "view order: {p:?}");
+        // ctrl toggles a row out and in
+        assert!(m.toggle_at(a, 1));
+        assert_eq!(m.sel_count(), 2);
+        assert!(!m.selected_paths().iter().any(|x| x.ends_with("a2")));
+        assert!(m.toggle_at(a, 1));
+        assert_eq!(m.sel_count(), 3);
+        // down to one row: a plain selection again (folder: its column returns)
+        assert!(m.toggle_at(a, 2));
+        assert!(m.toggle_at(a, 1));
+        assert_eq!(m.sel_count(), 1);
+        assert!(!m.active_col().unwrap().is_multi() || m.active_col().unwrap().sel_count() == 1);
+        assert!(m.selected_paths()[0].ends_with("a1"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn select_all_and_escape_collapse_to_the_focused_row() {
+        let d = fixture("selall");
+        let mut m = model(&d.join("a"));
+        let a = m.active;
+        assert!(m.select_all());
+        assert_eq!(m.sel_count(), 3);
+        assert_eq!(m.sel_bytes(), 12, "only f.txt has bytes; folders count 0");
+        assert!(m.collapse_selection());
+        assert_eq!(m.sel_count(), 1);
+        assert!(!m.collapse_selection(), "nothing multi left");
+        assert_eq!(m.active, a);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_plain_select_replaces_a_multi_selection() {
+        let d = fixture("plainsel");
+        let mut m = model(&d.join("a"));
+        let a = m.active;
+        m.extend_to(a, 2);
+        assert_eq!(m.sel_count(), 3);
+        assert!(m.select_pos(a, 1), "a click on a row of the set changes the selection");
+        assert_eq!(m.sel_count(), 1);
+        assert!(m.selected_paths()[0].ends_with("a2"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_multi_selection_survives_a_new_file_by_name() {
+        let d = fixture("multiwatch");
+        let mut m = model(&d.join("a"));
+        let a = m.active;
+        m.extend_to(a, 2);
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(d.join("a").join("a0.txt"), b"y").unwrap();
+        let t0 = Instant::now();
+        loop {
+            m.pump(false);
+            if names(&m, a).iter().any(|n| n == "a0.txt") {
+                break;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "no watcher batch: {:?}", names(&m, a));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(m.sel_count(), 3, "the new file is not selected, the three stay");
+        let p = m.selected_paths();
+        assert!(p.iter().all(|x| !x.ends_with("a0.txt")), "{p:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hit_row_maps_a_point_in_the_painted_rows_to_column_and_row() {
+        let d = fixture("hit");
+        let mut m = model(&d.join("a"));
+        let a = m.active;
+        let rh = m.col(a).unwrap().list.row_h;
+        assert!(rh > 0.0);
+        m.hits.clear();
+        m.hits.push(ColHit { col: a, rows: Rect::new(100.0, 50.0, 200.0, 300.0) });
+        assert_eq!(m.hit_row(150.0, 50.0 + rh * 1.5), Some((a, 1)));
+        assert_eq!(m.hit_row(150.0, 50.0 + 1.0), Some((a, 0)));
+        assert_eq!(m.hit_row(150.0, 50.0 + rh * 10.0), None, "below the last row is no row");
+        assert_eq!(m.hit_col(150.0, 50.0 + rh * 10.0), Some(a), "but it is the column");
+        assert_eq!(m.hit_col(10.0, 60.0), None);
+        let r = m.row_rect(a, 2).unwrap();
+        assert_eq!((r.x, r.w), (100.0, 200.0));
+        assert!((r.y - (50.0 + rh * 2.0)).abs() < 0.01);
+        assert_eq!(m.col_rows(a), Some(Rect::new(100.0, 50.0, 200.0, 300.0)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn want_pick_selects_the_named_entry_on_the_next_pump() {
+        let d = fixture("pick");
+        let mut m = model(&d.join("a"));
+        let a = m.active;
+        m.want_pick(&m.col(a).unwrap().path.clone(), "f.txt");
+        m.pump(false);
+        assert!(m.selected_path().unwrap().ends_with("f.txt"));
+        assert!(m.pick.is_none(), "one shot");
+        // a name that never shows up is dropped after PICK_FOR, not kept forever
+        m.want_pick(&m.col(a).unwrap().path.clone(), "ghost.txt");
+        m.pump(false);
+        assert!(m.pick.is_some(), "waits for the listing");
+        assert!(m.selected_path().unwrap().ends_with("f.txt"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn want_pick_refreshes_the_info_column_of_an_already_selected_entry() {
+        // a rename keeps the entry id: the pick must still rebuild the info for the new name
+        let d = fixture("pickinfo");
+        let mut m = model(&d.join("a"));
+        let a = m.active;
+        let folder = m.col(a).unwrap().path.clone();
+        m.want_pick(&folder, "f.txt");
+        m.pump(false);
+        assert!(m.info.as_ref().unwrap().path.ends_with("f.txt"));
+        m.info = None; // stands for the stale info of the old name
+        m.want_pick(&folder, "f.txt");
+        m.pump(false);
+        assert!(m.pick.is_none());
+        assert!(m.info.as_ref().is_some_and(|i| i.path.ends_with("f.txt")), "info rebuilt");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_goto_to_a_missing_folder_reports_the_folder_to_return_to() {
+        let d = fixture("failgoto");
+        let mut m = model(&d.join("a"));
+        let from = m.active_path().to_string();
+        assert!(m.failed_goto().is_none(), "nothing failed yet");
+        let bad = d.join("nope").join("deeper");
+        m.goto(bad.to_str().unwrap());
+        settle(&mut m);
+        let (prev, why) = m.failed_goto().expect("the last column is denied");
+        assert!(same_path(&prev, &from), "{prev} vs {from}");
+        assert!(!why.is_empty());
+        m.clear_goto_from();
+        assert!(m.failed_goto().is_none());
+        // a path that works is no failure
+        m.goto(d.join("b").to_str().unwrap());
+        settle(&mut m);
+        assert!(m.failed_goto().is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

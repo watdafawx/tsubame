@@ -107,6 +107,14 @@ impl View {
         if bits & C_MENU != 0 || packs_changed {
             crate::shellops::set_menu_entries(&self.prefs.context_menu.entries);
         }
+        // Miller's default column width is live: `pump` only runs on a worker wake, so the
+        // slider's change reaches the models here (a column with its own width keeps it)
+        let col_w = self.prefs.miller.sanitized().col_width as f32;
+        for t in &mut self.tabs.items {
+            if let Some(m) = t.miller.as_mut() {
+                m.set_default_width(col_w);
+            }
+        }
         self.config_dirty = true;
         ui.request_repaint();
     }

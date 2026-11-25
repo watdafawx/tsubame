@@ -15,7 +15,7 @@ use tsubame_ui::ListResponse;
 use tsubame_ui::ListState;
 
 /// Chevron hit area: 20 DIPs wide, the full row height.
-const CHEV_W: f32 = 20.0;
+pub(super) const CHEV_W: f32 = 20.0;
 /// Narrow windows: Modified hides under this width, Size under `NARROW_SIZE`.
 pub const NARROW_DATE: f32 = 760.0;
 pub const NARROW_SIZE: f32 = 560.0;
