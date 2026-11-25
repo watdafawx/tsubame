@@ -37,6 +37,16 @@ pub struct Drag {
 }
 
 /// The press that started on a row of the active pane.
+/// Where a drop in a pane is highlighted: a list row, or a rect (Miller's rows and columns).
+#[derive(Clone, Copy)]
+enum DropRow {
+    Row(usize),
+    Rect(Rect),
+}
+
+/// A drag rests this long on a collapsed Tree folder before it opens.
+const HOVER_OPEN: std::time::Duration = std::time::Duration::from_millis(650);
+
 pub struct PressInfo {
     pub pos: Pt,
     /// a slow second click on the only selected row: renames on release
@@ -97,7 +107,10 @@ impl View {
         {
             if let Some(row) = p.collapse {
                 let t = self.tab_mut();
-                if t.tree_on && let Some(m) = t.tree.as_mut() {
+                if t.miller_on && let Some(m) = t.miller.as_mut() {
+                    let a = m.active;
+                    m.select_pos(a, row);
+                } else if t.tree_on && let Some(m) = t.tree.as_mut() {
                     m.select_single(row, Some(&t.store));
                 } else {
                     t.sel.single(&t.store, row);
@@ -115,6 +128,12 @@ impl View {
     pub(super) fn row_at(&self, p: Pt) -> Option<usize> {
         if !self.list_r.contains_pt(p) {
             return None;
+        }
+        if self.miller_showing() {
+            // the row under the pointer, when it is in the active column
+            let m = self.tab().miller.as_ref()?;
+            let (c, pos) = m.hit_row(p.x, p.y)?;
+            return (c == m.active).then_some(pos);
         }
         let n = self.tab().shown();
         if self.mode.is_grid() {
@@ -146,6 +165,7 @@ impl View {
     /// The drag left the window, was dropped or cancelled.
     pub fn drag_leave(&mut self) {
         self.drag = None;
+        self.hover_open = None;
         self.drop_dest = None;
         self.drag_keys = None;
     }
@@ -193,32 +213,27 @@ impl View {
 
     /// F2: renames the cursor row; several selected rows open the batch bar.
     pub fn begin_rename(&mut self, ui: &mut Ui) {
-        if self.tree_rows_on() {
-            self.ops.message = Some("Rename is not available in Tree rows yet. Switch to Details to rename.".into());
-            ui.request_repaint();
-            return;
-        }
-        if self.miller_showing() {
-            self.ops.message = Some("Rename is not available in Miller columns yet. Switch to Details to rename.".into());
-            ui.request_repaint();
-            return;
-        }
         if self.tab().is_archive() {
             self.ops.message = Some(crate::archive_ui::READ_ONLY_MSG.into());
             ui.request_repaint();
             return;
         }
-        if self.tab().sel.count() > 1 {
-            if crate::batchui::is_enabled() {
+        // Tree rows and Miller columns rename the focused row inline; the batch bar is Details' (its names come from one listing)
+        let other_view = self.tree_rows_on() || self.miller_showing();
+        if self.tab().sel_total() > 1 {
+            if other_view {
+                self.ops.message = Some("Batch rename is in Details. Renaming the focused item.".into());
+            } else if crate::batchui::is_enabled() {
                 return self.begin_batch(ui);
+            } else {
+                // extension off: rename the focused item and say so
+                self.ops.message = Some(crate::batchui::OFF_MSG.into());
             }
-            // extension off: rename the focused item and say so
-            self.ops.message = Some(crate::batchui::OFF_MSG.into());
         }
-        let cursor = if self.mode.is_grid() { self.tab().grid.cursor } else { self.tab().list.cursor };
+        let cursor = if self.mode.is_grid() { self.tab().grid.cursor } else { self.tab().cursor_row() };
         let t = self.tab_mut();
         let Some((path, dir)) = t.entry_at(cursor) else { return };
-        if t.sel.count() == 0 {
+        if !other_view && t.sel.count() == 0 {
             t.sel.single(&t.store, cursor);
         }
         self.batch = None;
@@ -250,6 +265,12 @@ impl View {
         if self.rename.is_none() || self.rename_slot != self.live || self.live != self.active {
             return;
         }
+        if self.miller_showing() {
+            return;
+        }
+        if self.tree_rows_on() && self.tab().tree.is_some() {
+            return self.paint_rename_tree(ui, g, t, spans);
+        }
         let tab = &self.tabs.items[self.tabs.active];
         let (path, parent) = {
             let e = self.rename.as_ref().unwrap();
@@ -278,6 +299,79 @@ impl View {
         }
     }
 
+    /// The rename field on a Tree row: over the name, indented like the row.
+    fn paint_rename_tree(&mut self, ui: &mut Ui, g: &mut dyn Canvas, t: &Theme, spans: &crate::cols::Spans) {
+        let path = self.rename.as_ref().map(|e| e.path.clone()).unwrap_or_default();
+        let tab = &self.tabs.items[self.tabs.active];
+        let root = Some(&tab.store);
+        let Some(m) = tab.tree.as_ref() else { return };
+        // the row may be gone (renamed, deleted, its folder collapsed): close the field
+        let Some(row) = m.row_of_path(&path, root) else {
+            self.rename = None;
+            self.focus_list = true;
+            return;
+        };
+        let Some(tr) = m.row(row) else { return };
+        let l = &tab.list;
+        let r = self.list_r;
+        let y = r.y + l.row_top(row) as f32;
+        if y < r.y - 0.5 || y + l.row_h > r.b() + 0.5 {
+            return;
+        }
+        let name_x = r.x + spans[0].0 + 4.0 + crate::tree::indent(tr.depth) + super::treev::CHEV_W + ICON_DIP + 6.0;
+        let x = name_x - 6.0;
+        let w = (r.x + spans[0].0 + spans[0].1 - x - 4.0).max(80.0);
+        let rect = Rect::new(x, y + 1.0, w, l.row_h - 2.0);
+        let sib = m.siblings_of(row, root);
+        let exists = |n: &str| {
+            let w: Vec<u16> = n.encode_utf16().collect();
+            sib.is_some_and(|s| s.find(&w).is_some())
+        };
+        let edit = self.rename.as_mut().unwrap();
+        let out = editing::paint(ui, g, t, pid(self.live, ID_RENAME), rect, edit, &exists);
+        if out != RenameOut::None {
+            self.finish_rename(ui, out);
+        }
+    }
+
+    /// The rename field on a Miller row of the column that lists the entry.
+    pub(super) fn paint_rename_miller(&mut self, ui: &mut Ui, g: &mut dyn Canvas, t: &Theme) {
+        if self.rename.is_none() || self.rename_slot != self.live || self.live != self.active {
+            return;
+        }
+        let (path, parent) = {
+            let e = self.rename.as_ref().unwrap();
+            (e.path.clone(), e.parent.clone())
+        };
+        let tab = &self.tabs.items[self.tabs.active];
+        let Some(m) = tab.miller.as_ref() else { return };
+        let name = crate::dnd::name_of(&path);
+        let w16: Vec<u16> = name.encode_utf16().collect();
+        let found = (0..m.len()).find(|&i| m.col(i).is_some_and(|c| crate::miller::same_path(&c.path, &parent))).and_then(|ci| {
+            let c = m.col(ci)?;
+            let pos = c.store.find(&w16).and_then(|id| c.store.view().iter().position(|v| *v == id))?;
+            Some((ci, pos))
+        });
+        let Some((ci, pos)) = found else {
+            self.rename = None;
+            self.focus_list = true;
+            return;
+        };
+        let Some(row) = m.row_rect(ci, pos) else { return };
+        let x = row.x + 10.0 + ICON_DIP + 8.0 - 6.0;
+        let rect = Rect::new(x, row.y + 1.0, (row.r() - x - 6.0).max(80.0), row.h - 2.0);
+        let store = m.col(ci).map(|c| &c.store);
+        let exists = |n: &str| {
+            let w: Vec<u16> = n.encode_utf16().collect();
+            store.is_some_and(|s| s.find(&w).is_some())
+        };
+        let edit = self.rename.as_mut().unwrap();
+        let out = editing::paint(ui, g, t, pid(self.live, ID_RENAME), rect, edit, &exists);
+        if out != RenameOut::None {
+            self.finish_rename(ui, out);
+        }
+    }
+
     pub(super) fn finish_rename(&mut self, ui: &mut Ui, out: RenameOut) {
         let Some(e) = self.rename.take() else { return };
         self.focus_list = true;
@@ -290,8 +384,15 @@ impl View {
         if self.ops.rename(&e.path, &to, replace) {
             self.ops.message = Some(format!("Renaming to \"{}\"...", e.name()));
             self.tags_moved(&[(e.path.clone(), to.clone())]);
+            // Tree rows and Miller columns select the renamed entry once their listing shows it
+            let t = self.tab_mut();
+            if t.miller_on && let Some(m) = t.miller.as_mut() {
+                m.want_pick(&e.parent, e.name());
+            } else if t.tree_on && let Some(m) = t.tree.as_mut() {
+                m.want_pick(&to);
+            }
         }
-        if out == RenameOut::CommitNext {
+        if out == RenameOut::CommitNext && !self.tree_rows_on() && !self.miller_showing() {
             self.rename_next(ui, &e.path);
         }
         ui.request_repaint();
@@ -517,7 +618,7 @@ impl View {
 
     /// The folder a drop at `m` lands on inside the panes: a folder row, else
     /// the pane's own folder.
-    fn pane_drop_folder(&mut self, m: Pt) -> Option<(usize, String, Option<usize>)> {
+    fn pane_drop_folder(&mut self, m: Pt) -> Option<(usize, String, Option<DropRow>)> {
         let slots: &[usize] = if self.other.is_some() { &[0, 1] } else { &[0] };
         for &slot in slots {
             let hit = if self.other.is_some() { self.pane_rects[slot].contains_pt(m) } else { self.list_r.contains_pt(m) };
@@ -525,10 +626,37 @@ impl View {
                 continue;
             }
             return self.with_pane(slot, |v| {
+                // Miller: a folder row of any column, else the folder of the column under the pointer
+                if v.miller_showing() && let Some(mm) = v.tab().miller.as_ref() {
+                    let hit = mm.hit_row(m.x, m.y);
+                    if let Some(c) = hit.map(|h| h.0).or_else(|| mm.hit_col(m.x, m.y)) {
+                        let col = mm.col(c)?;
+                        if let Some((_, pos)) = hit
+                            && col.is_folder_at(pos)
+                            && let Some(name) = col.entry_name(pos)
+                            && let Some(r) = mm.row_rect(c, pos)
+                        {
+                            return Some((slot, crate::nav::join(&col.path, &name), Some(DropRow::Rect(r))));
+                        }
+                        return mm.col_rows(c).map(|r| (slot, col.path.clone(), Some(DropRow::Rect(r))));
+                    }
+                    return Some((slot, v.tab().path.clone(), None));
+                }
                 let row = v.row_at(m);
+                // Tree rows: a folder row is the target, a file row drops into its own folder
+                if v.tree_rows_on() && let Some(mm) = v.tab().tree.as_ref() {
+                    let root = Some(&v.tab().store);
+                    if let Some(r) = row
+                        && let Some(folder) = mm.drop_folder_of(r, root)
+                    {
+                        let hl = if mm.is_folder(r, root) { Some(r) } else { mm.parent_row(r) };
+                        return Some((slot, folder, hl.map(DropRow::Row)));
+                    }
+                    return Some((slot, v.tab().path.clone(), None));
+                }
                 let folder = row.and_then(|r| v.tab().entry_at(r)).filter(|(_, dir)| *dir).map(|(p, _)| p);
                 match folder {
-                    Some(p) => Some((slot, p, row)),
+                    Some(p) => Some((slot, p, row.map(DropRow::Row))),
                     None => Some((slot, v.tab().path.clone(), None)),
                 }
             });
@@ -583,7 +711,7 @@ impl View {
         let mut dest: Option<String> = None;
         let mut pin: Option<usize> = None;
         let mut tag: Option<u8> = None;
-        let mut over_pane: Option<(usize, Option<usize>)> = None;
+        let mut over_pane: Option<(usize, Option<DropRow>)> = None;
         let mut over_tab = false;
         match side_target {
             Some(crate::sidebar::DropTarget::Pin(k)) => {
@@ -632,7 +760,8 @@ impl View {
         if let (Some((slot, row)), Some(_)) = (over_pane, &dest) {
             let slot_rect = if self.other.is_some() { self.pane_rects[slot] } else { self.list_r };
             let r = match row {
-                Some(r) => self.with_pane(slot, |v| {
+                Some(DropRow::Rect(r)) => r,
+                Some(DropRow::Row(r)) => self.with_pane(slot, |v| {
                     if v.mode.is_grid() {
                         let gs = &v.tab().grid;
                         let (ox, oy) = gs.cell_origin(r);
@@ -645,6 +774,9 @@ impl View {
                 None => slot_rect,
             };
             g.round_stroke(r.pad(-1.0), t.radius_sm, t.accent, 2.0);
+            self.tree_hover_expand(ui, slot, m);
+        } else {
+            self.hover_open = None;
         }
         if let Some(d) = self.drag.as_mut() {
             d.hint.clone_from(&hint);
@@ -658,6 +790,58 @@ impl View {
             && (d.last.x != m.x || d.last.y != m.y)
         {
             d.last = m;
+            ui.request_repaint();
+        }
+    }
+
+    /// A drag rests on a collapsed Tree folder: it opens after `HOVER_OPEN`, so the drop can go deeper.
+    fn tree_hover_expand(&mut self, ui: &mut Ui, slot: usize, m: Pt) {
+        let wake = self.wake.clone();
+        let mut hover = self.hover_open.take();
+        let opened = self.with_pane(slot, |v| {
+            if !v.tree_rows_on() {
+                hover = None;
+                return false;
+            }
+            let Some(i) = v.row_at(m) else {
+                hover = None;
+                return false;
+            };
+            let t = v.tab_mut();
+            let root = Some(&t.store);
+            let Some(mm) = t.tree.as_mut() else {
+                hover = None;
+                return false;
+            };
+            let Some((path, true)) = mm.path_of(i, root) else {
+                hover = None;
+                return false;
+            };
+            if mm.is_expanded(i, root) {
+                hover = None;
+                return false;
+            }
+            match &hover {
+                Some((p, since)) if crate::miller::same_path(p, &path) => {
+                    if since.elapsed() >= HOVER_OPEN {
+                        mm.expand(i, false, root);
+                        hover = None;
+                        return true;
+                    }
+                }
+                _ => {
+                    hover = Some((path, Instant::now()));
+                    // nothing else wakes an idle frame while the pointer rests
+                    let _ = std::thread::Builder::new().name("tsubame-hover-open".into()).stack_size(64 * 1024).spawn(move || {
+                        std::thread::sleep(HOVER_OPEN + std::time::Duration::from_millis(30));
+                        wake();
+                    });
+                }
+            }
+            false
+        });
+        self.hover_open = hover;
+        if opened {
             ui.request_repaint();
         }
     }

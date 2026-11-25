@@ -231,10 +231,16 @@ pub struct TreeModel {
     root_links_done: bool,
     /// the watched set needs recomputing (selection or expansion moved)
     watch_dirty: bool,
+    /// select this entry once its row exists (after a rename)
+    pick: Option<(String, Instant)>,
 }
 
 fn utf8(w: &[u16]) -> String {
     String::from_utf16_lossy(w)
+}
+
+fn lower_u16(c: u16) -> u16 {
+    char::from_u32(u32::from(c)).map_or(c, |ch| lower(ch) as u32 as u16)
 }
 
 fn lower(c: char) -> char {
@@ -310,6 +316,7 @@ impl TreeModel {
             root_links_rx: None,
             root_links_done: false,
             watch_dirty: true,
+            pick: None,
         };
         let mut d = new_dir(root.to_string(), 0, 0, u32::MAX, hide, sort);
         if owns_root {
@@ -551,6 +558,7 @@ impl TreeModel {
             self.pump_root(root);
         }
         self.after_pump(root, root_done);
+        self.try_pick(root);
         self.dirty && !before || self.dirty
     }
 
@@ -1482,6 +1490,56 @@ impl TreeModel {
         }
     }
 
+    /// Row of the entry `path` (an entry row of the dir it lives in), if it is visible.
+    pub fn row_of_path(&self, path: &str, root: Root) -> Option<usize> {
+        let parent = nav::parent(path)?;
+        let name: Vec<u16> = path.trim_end_matches('\\').rsplit('\\').next().unwrap_or("").encode_utf16().collect();
+        (0..self.rows.len()).find(|&i| {
+            let r = self.rows[i];
+            r.kind == Kind::Entry && self.dir_path(r.slot).is_some_and(|d| same_path(d, &parent)) && self.name_at(i, root).is_some_and(|n| n.len() == name.len() && n.iter().zip(&name).all(|(a, b)| a == b || lower_u16(*a) == lower_u16(*b)))
+        })
+    }
+
+    /// The store of the dir that holds row `i` (its siblings), for name checks.
+    pub fn siblings_of<'a>(&'a self, i: usize, root: Root<'a>) -> Option<&'a EntryStore> {
+        let r = self.rows.get(i)?;
+        self.store(r.slot, root)
+    }
+
+    /// The folder a drop on row `i` lands in: a folder row itself, a file row's own folder.
+    pub fn drop_folder_of(&self, i: usize, root: Root) -> Option<String> {
+        let r = self.rows.get(i)?;
+        match r.kind {
+            Kind::Entry => match self.path_of(i, root)? {
+                (p, true) => Some(p),
+                _ => self.dir_path(r.slot).map(str::to_string),
+            },
+            _ => self.dir_path(r.slot).map(str::to_string),
+        }
+    }
+
+    /// Select the entry `path` once its row exists (a rename just made it).
+    pub fn want_pick(&mut self, path: &str) {
+        self.pick = Some((path.to_string(), Instant::now()));
+        self.dirty = true;
+    }
+
+    fn try_pick(&mut self, root: Root) {
+        let Some((path, since)) = self.pick.clone() else { return };
+        if since.elapsed() > Duration::from_secs(5) {
+            self.pick = None;
+            return;
+        }
+        if self.needs_flatten() {
+            self.flatten(root);
+        }
+        if let Some(i) = self.row_of_path(&path, root) {
+            self.pick = None;
+            self.select_single(i, root);
+            self.dirty = true;
+        }
+    }
+
     /// Paths of up to `n` selected rows in row order.
     pub fn selected_paths(&self, n: usize, root: Root) -> Vec<String> {
         (0..self.rows.len()).filter(|&i| self.is_selected(i, root)).take(n).filter_map(|i| self.path_of(i, root).map(|p| p.0)).collect()
@@ -2063,6 +2121,78 @@ mod tests {
         assert_eq!(m.first_child_row(a), Some(a + 1));
         assert_eq!(m.parent_row(a), None);
         assert_eq!(m.first_child_row(row_named(&m, "b")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn row_of_path_finds_an_entry_row_by_full_path_ignoring_case() {
+        let d = fixture("rowofpath");
+        let mut m = model(&d, false);
+        let a = row_named(&m, "a");
+        m.expand(a, false, None);
+        settle(&mut m);
+        let f = d.join("a").join("F.TXT");
+        assert_eq!(m.row_of_path(f.to_str().unwrap(), None), Some(row_named(&m, "f.txt")));
+        assert_eq!(m.row_of_path(d.join("z.txt").to_str().unwrap(), None), Some(row_named(&m, "z.txt")));
+        assert_eq!(m.row_of_path(d.join("a").join("nope").to_str().unwrap(), None), None);
+        // a folder collapsed hides its entries: no row
+        let deep = d.join("a").join("a1").join("deep.txt");
+        assert_eq!(m.row_of_path(deep.to_str().unwrap(), None), None);
+        assert!(m.siblings_of(row_named(&m, "f.txt"), None).is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_drop_on_a_folder_row_goes_into_it_and_on_a_file_row_into_its_folder() {
+        let d = fixture("dropfolder");
+        let mut m = model(&d, false);
+        let a = row_named(&m, "a");
+        m.expand(a, false, None);
+        settle(&mut m);
+        let same = |p: Option<String>, want: &std::path::Path| p.is_some_and(|p| same_path(&p, want.to_str().unwrap()));
+        assert!(same(m.drop_folder_of(row_named(&m, "a1"), None), &d.join("a").join("a1")), "folder row: itself");
+        assert!(same(m.drop_folder_of(row_named(&m, "f.txt"), None), &d.join("a")), "file in a: a");
+        assert!(same(m.drop_folder_of(row_named(&m, "z.txt"), None), &d), "file in the root: the root");
+        assert_eq!(m.drop_folder_of(999, None), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn want_pick_selects_the_row_once_it_shows() {
+        let d = fixture("pick");
+        let mut m = model(&d, false);
+        let a = row_named(&m, "a");
+        m.expand(a, false, None);
+        settle(&mut m);
+        let f = d.join("a").join("f.txt");
+        m.want_pick(f.to_str().unwrap());
+        m.pump(None, false);
+        assert!(m.is_selected(row_named(&m, "f.txt"), None));
+        assert_eq!(m.sel_count(), 1);
+        assert!(m.pick.is_none(), "one shot");
+        // a path that has no row yet is kept while it waits
+        m.want_pick(d.join("a").join("later.txt").to_str().unwrap());
+        m.pump(None, false);
+        assert!(m.pick.is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn ctrl_shift_and_select_all_build_a_set_that_reports_its_paths() {
+        let d = fixture("multi");
+        let mut m = model(&d, false);
+        m.select_single(0, None);
+        m.toggle(2, None);
+        assert_eq!(m.sel_count(), 2);
+        let p = m.selected_paths(64, None);
+        assert!(p[0].ends_with("a") && p[1].ends_with("empty"), "{p:?}");
+        m.select_single(0, None);
+        m.extend(3, None);
+        assert_eq!(m.sel_count(), 4);
+        m.clear_selection();
+        assert_eq!(m.sel_count(), 0);
+        m.select_all(None);
+        assert_eq!(m.sel_count(), 4);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

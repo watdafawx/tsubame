@@ -27,6 +27,8 @@ const GRIP: f32 = 5.0;
 const DRILL_H: f32 = 28.0;
 /// The info strip under the list in the drill-down.
 const STRIP_H: f32 = 52.0;
+/// The drill-down shows the whole info column under the list from this body height.
+const DRILL_INFO_MIN_H: f32 = 300.0;
 /// Horizontal scrollbar height.
 const BAR_H: f32 = 6.0;
 
@@ -194,6 +196,7 @@ impl View {
         let a = self.tabs.active;
         let Some(mut m) = self.tabs.items[a].miller.take() else { return };
         let mut asks = Asks::default();
+        m.hits.clear();
         if body.w < miller::DRILL_BELOW {
             self.paint_drill(ui, g, shell, &mut m, body, t, &mut asks);
         } else {
@@ -203,6 +206,7 @@ impl View {
         if self.tabs.items[a].miller.is_none() {
             self.tabs.items[a].miller = Some(m);
         }
+        self.paint_rename_miller(ui, g, t);
         if asks.pressed {
             if self.other.is_some() && self.live != self.active {
                 self.focus_pane = Some(self.live);
@@ -285,10 +289,15 @@ impl View {
             let it = ui.interact(pid(self.live, ID_MGRIP).with(i as u64), gr, Sense::click().cursor(Cursor::SizeWE));
             if it.pressed.is_some_and(|p| p.double) {
                 m.reset_width(i);
+                // the button is still down: until it is released the drag must not take the width back
+                m.grip_hold = Some(i);
                 ui.request_repaint();
-            } else if it.active {
+            } else if it.active && m.grip_hold != Some(i) {
                 m.set_width(i, ui.mouse().x - cx + GRIP / 2.0);
                 ui.request_repaint();
+            }
+            if !it.active && m.grip_hold == Some(i) {
+                m.grip_hold = None;
             }
             if it.hovered || it.active {
                 g.fill(Rect::new(r.r() - 2.0, sw.y, 2.0, sw.h), t.accent);
@@ -392,21 +401,21 @@ impl View {
                 }
             }
             State::Denied(msg) => {
-                card(g, t, area, "\u{E783}", "Can't open this folder", &msg, true);
-                if text_button(ui, g, t, id_act, Rect::new(area.x + 10.0, area.y + 104.0, 64.0, 24.0), "Retry") {
+                let by = card(g, t, area, "\u{E783}", "Can't open this folder", &msg, true);
+                if text_button(ui, g, t, id_act, Rect::new(area.x + 10.0, by, 64.0, 24.0), "Retry") {
                     m.retry(i);
                     asks.pressed = true;
                 }
             }
             State::Cancelled => {
-                card(g, t, area, "\u{E711}", "Listing cancelled", "Retry reads the folder again.", false);
-                if text_button(ui, g, t, id_act, Rect::new(area.x + 10.0, area.y + 104.0, 64.0, 24.0), "Retry") {
+                let by = card(g, t, area, "\u{E711}", "Listing cancelled", "Retry reads the folder again.", false);
+                if text_button(ui, g, t, id_act, Rect::new(area.x + 10.0, by, 64.0, 24.0), "Retry") {
                     m.retry(i);
                     asks.pressed = true;
                 }
             }
             State::Loop(target) => {
-                card(g, t, area, "\u{E71B}", "Not followed", &format!("This link loops back to {target}."), false);
+                let _ = card(g, t, area, "\u{E71B}", "Not followed", &format!("This link loops back to {target}."), false);
             }
             State::Link => {
                 let target = m.col(i).and_then(|c| c.target.clone());
@@ -414,8 +423,8 @@ impl View {
                     Some(p) => format!("Link to {p}. It opens only when you follow it."),
                     None => "A link. It opens only when you follow it.".to_string(),
                 };
-                card(g, t, area, "\u{E71B}", "Junction or link", &body, false);
-                if text_button(ui, g, t, id_act, Rect::new(area.x + 10.0, area.y + 120.0, 72.0, 24.0), "Follow") {
+                let by = card(g, t, area, "\u{E71B}", "Junction or link", &body, false);
+                if text_button(ui, g, t, id_act, Rect::new(area.x + 10.0, by, 72.0, 24.0), "Follow") {
                     m.follow(i);
                     m.set_active(i);
                     asks.pressed = true;
@@ -464,6 +473,12 @@ impl View {
             c.list.cursor = ls.cursor;
             c.list.view_h = ls.view_h;
             c.list.row_h = ls.row_h;
+        }
+        if let Some(c) = m.col(i)
+            && c.state == State::Done
+        {
+            let rows = Rect::new(area.x, area.y, (area.w - t.layout_scrollbar_width).max(0.0), area.h);
+            m.hits.push(miller::ColHit { col: i, rows });
         }
         if lr.pressed {
             asks.pressed = true;
@@ -605,8 +620,13 @@ impl View {
         let cw = g.measure(&count, t.font_small());
         g.text(&title, Rect::new(tx, head.y, (head.r() - tx - cw - 14.0).max(0.0), head.h), t.font_small().b(), t.text);
         g.text(&count, Rect::new(head.r() - cw - 10.0, head.y, cw + 1.0, head.h), t.font_small(), t.text_dim);
-        let strip = m.shows_info();
-        if strip {
+        let info = m.shows_info();
+        if info && area.h >= DRILL_INFO_MIN_H {
+            // room enough: the whole info column under the list
+            let ir = area.cut_bottom((area.h * 0.55).round());
+            g.fill(Rect::new(ir.x, ir.y, ir.w, 1.0), t.border);
+            self.paint_info(ui, g, shell, m, ir, t, asks);
+        } else if info {
             let s = area.cut_bottom(STRIP_H);
             if let Some(info) = m.info() {
                 g.fill(s, t.panel);
@@ -666,11 +686,55 @@ fn skeleton(g: &mut dyn Canvas, t: &Theme, area: Rect) {
     }
 }
 
-/// A state card: glyph, title, message (wrapped to one line).
-fn card(g: &mut dyn Canvas, t: &Theme, area: Rect, glyph: &str, title: &str, msg: &str, danger: bool) {
+/// Lines of the card's message.
+const CARD_LINE_H: f32 = 16.0;
+const CARD_MAX_LINES: usize = 10;
+
+/// `text` broken into lines no wider than `max_w` (`measure` gives a string's width):
+/// at spaces and newlines, and inside a word wider than a line (a path has no spaces).
+pub(super) fn wrap_text(measure: &mut dyn FnMut(&str) -> f32, text: &str, max_w: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    for para in text.split('\n') {
+        let mut line = String::new();
+        for word in para.split(' ') {
+            let cand = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+            if measure(&cand) <= max_w || (line.is_empty() && word.is_empty()) {
+                line = cand;
+                continue;
+            }
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            let mut cur = String::new();
+            for ch in word.chars() {
+                cur.push(ch);
+                if measure(&cur) > max_w && cur.chars().count() > 1 {
+                    cur.pop();
+                    out.push(std::mem::take(&mut cur));
+                    cur.push(ch);
+                }
+            }
+            line = cur;
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// A state card: glyph, title, message (wrapped to the column). Returns the y under the text.
+fn card(g: &mut dyn Canvas, t: &Theme, area: Rect, glyph: &str, title: &str, msg: &str, danger: bool) -> f32 {
     g.text(glyph, Rect::new(area.x + 10.0, area.y + 12.0, 20.0, 20.0), f(16.0).icon().c(), if danger { t.danger } else { t.text_dim });
     g.text(title, Rect::new(area.x + 36.0, area.y + 12.0, (area.w - 46.0).max(0.0), 20.0), t.font().b(), t.text);
-    g.text(msg, Rect::new(area.x + 10.0, area.y + 40.0, (area.w - 20.0).max(0.0), 56.0), t.font_small(), if danger { t.danger } else { t.text_dim });
+    let font = t.font_small();
+    let w = (area.w - 20.0).max(0.0);
+    let mut lines = wrap_text(&mut |s: &str| g.measure(s, font), msg, w);
+    lines.truncate(CARD_MAX_LINES);
+    let mut y = area.y + 40.0;
+    for l in &lines {
+        g.text(l, Rect::new(area.x + 10.0, y, w, CARD_LINE_H), font, if danger { t.danger } else { t.text_dim });
+        y += CARD_LINE_H;
+    }
+    y + 8.0
 }
 
 /// A small outlined text button. True when clicked.
@@ -701,14 +765,31 @@ impl ListSource for ColRows<'_> {
 
     fn is_selected(&self, i: usize) -> bool {
         // the active column shows the full selection; the others a quiet path row (draw_row)
-        self.active && self.m.col(self.c).is_some_and(|c| c.sel.is_some() && c.store.at(i) == c.sel)
+        self.active && self.m.col(self.c).is_some_and(|c| c.store.at(i).is_some_and(|id| c.row_selected(id)))
     }
 
-    fn select(&mut self, i: usize, _mods: Mods, by: SelectBy) {
-        if by == SelectBy::Space {
-            return;
+    fn select(&mut self, i: usize, mods: Mods, by: SelectBy) {
+        let selected = self.m.col(self.c).is_some_and(|c| c.store.at(i).is_some_and(|id| c.row_selected(id)));
+        let multi = self.active && self.m.col(self.c).is_some_and(|c| c.is_multi());
+        match by {
+            SelectBy::Space if !mods.ctrl => {}
+            SelectBy::Space => {
+                self.m.toggle_at(self.c, i);
+            }
+            SelectBy::Click | SelectBy::Key if mods.shift => {
+                self.m.extend_to(self.c, i);
+            }
+            SelectBy::Click if mods.ctrl => {
+                self.m.toggle_at(self.c, i);
+            }
+            SelectBy::Key if mods.ctrl => {} // Ctrl+arrows move the cursor only
+            // a plain press on a row of a multi-selection waits: it may start a drag
+            SelectBy::Click if multi && selected => super::KEEP_MULTI.with(|k| k.set(Some(i))),
+            SelectBy::RightClick if multi && selected => {}
+            _ => {
+                self.m.select_pos(self.c, i);
+            }
         }
-        self.m.select_pos(self.c, i);
     }
 
     fn draw_row(&mut self, g: &mut dyn Canvas, t: &Theme, i: usize, r: Rect, st: RowState) {
@@ -748,5 +829,44 @@ impl ListSource for ColRows<'_> {
         let color = if row.hidden { t.text_dim } else { crate::packs::name_color(row.name_str(), is_dir).unwrap_or(t.text) };
         let _ = self.mouse;
         g.text(row.name_str(), Rect::new(name_x, r.y, name_w, r.h), t.font(), color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 10 per character.
+    fn ten(s: &str) -> f32 {
+        s.chars().count() as f32 * 10.0
+    }
+
+    #[test]
+    fn text_wraps_at_spaces_and_keeps_every_word() {
+        let lines = wrap_text(&mut ten, "one two three four", 100.0);
+        assert_eq!(lines, ["one two", "three four"]);
+        assert!(lines.iter().all(|l| ten(l) <= 100.0));
+    }
+
+    #[test]
+    fn a_word_wider_than_a_line_breaks_inside() {
+        let path = "C:\\very\\long\\folder\\name";
+        let lines = wrap_text(&mut ten, path, 60.0);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|l| ten(l) <= 60.0), "{lines:?}");
+        assert_eq!(lines.concat(), path, "nothing lost, nothing added");
+    }
+
+    #[test]
+    fn newlines_start_a_new_line_and_empty_text_is_one_empty_line() {
+        assert_eq!(wrap_text(&mut ten, "ab
+cd", 100.0), ["ab", "cd"]);
+        assert_eq!(wrap_text(&mut ten, "", 100.0), [""]);
+    }
+
+    #[test]
+    fn one_char_wider_than_the_line_still_makes_progress() {
+        let lines = wrap_text(&mut ten, "abc", 5.0);
+        assert_eq!(lines.concat(), "abc");
     }
 }
