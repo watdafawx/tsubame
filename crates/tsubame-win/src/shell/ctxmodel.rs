@@ -348,7 +348,7 @@ pub const APP_VERBS: [&str; 5] = ["delete", "cut", "copy", "paste", "rename"];
 
 /// Tsubame built-in command -> the shell verb it replaces in the native part
 /// (so the menu never shows "Copy" twice).
-pub const BUILTIN_VERBS: [(&str, &str); 8] = [("file.open", "open"), ("file.cut", "cut"), ("file.copy", "copy"), ("file.paste", "paste"), ("file.rename", "rename"), ("file.delete", "delete"), ("file.properties", "properties"), ("file.copy-path", "copyaspath")];
+pub const BUILTIN_VERBS: [(&str, &str); 9] = [("file.open", "open"), ("file.cut", "cut"), ("file.copy", "copy"), ("file.paste", "paste"), ("file.rename", "rename"), ("file.delete", "delete"), ("file.properties", "properties"), ("file.copy-path", "copyaspath"), ("file.create-shortcut", "link")];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -1444,6 +1444,14 @@ mod tests {
         let native = build_native(&[verb(raw(9, "Copy as path"), "copyaspath"), raw(10, "7-Zip")], &mut IconCache::new(2));
         let l = labels(&compose(&ts, &native, &[], &cm(entries.clone())));
         assert_eq!(l.iter().filter(|s| *s == "Copy as path").count(), 1, "{l:?}");
+    }
+
+    #[test]
+    fn create_shortcut_is_not_shown_twice() {
+        let native = build_native(&[verb(raw(9, "Create &shortcut"), "link"), raw(10, "7-Zip")], &mut IconCache::new(2));
+        let ours = MenuItem::command(ItemSource::Tsubame, "Create shortcut", "file.create-shortcut");
+        let l = labels(&compose(&[ours], &native, &[], &ContextMenu::default()));
+        assert_eq!(l.iter().filter(|s| *s == "Create shortcut").count(), 1, "{l:?}");
     }
 
     #[test]
