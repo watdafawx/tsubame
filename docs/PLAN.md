@@ -115,7 +115,7 @@ Work is split into phases. Each phase has a gate that is checked before the next
 | P1 | A skeleton you can browse with | Browse, sort, filter, tabs; leak gate runs | Done |
 | P2 | Daily driver: file operations, watcher, shell integration, icons, panes, palette, config | Daily use without data-loss hazards | Done |
 | P3 | Extension registry | Built-in features registered through `tsubame-ext-api` | Done (`docs/extensions.md`, `docs/extension-packs.md`) |
-| P4 | Features as built-in extensions | Each feature switchable | Partial: F1, F2, F3, F5 done as switchable built-ins; F4 still core-only; F6 not started |
+| P4 | Features as built-in extensions | Each feature switchable | Partial: F1, F2, F3, F4, F5 done as switchable built-ins; F6 not started |
 | P5 | Wasm plugins | Host lifecycle, capability manifest, SDK | Partial: P1 and P2 done (`docs/wasm-plugins.md`, `docs/plugin-authoring.md`); P3 security review open |
 | P6 | Ship: installer, updater, default file manager | Signed release a user can install and update | Mostly done; two items open |
 
@@ -173,7 +173,7 @@ Each one gets a mock first where it has UI.
 | F1 | Global search: MFT/USN index (admin) with a plain parallel walk fallback; separately, an Everything IPC search provider | Done (built-in extension `tsubame.ext.global_search`, `src/search_ui.rs`) |
 | F2 | Preview pane: image, text/code, media info, hex; Quick Look on Space | Done (built-in extension `tsubame.ext.preview`, `src/preview_ui.rs`, `docs/preview-mock.md`) |
 | F3 | Archive VFS (zip, 7z, tar) browse and extract | Done (built-in extension `tsubame.vfs.archive`, `src/archive_ui.rs`). Follow-up accepted 2026-11-24: status-bar message for blocked actions, overwrite prompt (skip, replace, rename) |
-| F4 | Batch rename with live preview | Done in U3 as a built-in; not yet on the extension registry |
+| F4 | Batch rename with live preview | Done (built-in extension `tsubame.ext.batch_rename`, `src/batchui.rs`; switchable, default on, not required; pattern engine `src/rename.rs` stays core; Settings > Extensions page) |
 | F5 | Folder sizes column (background, cached), git status column, checksum command | Done (built-in extensions `tsubame.ext.folder_sizes`, `tsubame.ext.checksum`, `tsubame.column.git`; `crates/tsubame-win/src/meta/`) |
 | F6 | Miller columns view, tree view, tags and colours, file-age colouring | Not done |
 
@@ -231,6 +231,7 @@ Kept current as work lands: every measurement surprise, QA finding or improvemen
 | 2026-11-24 | Delete and rename inside an archive are blocked silently; extract overwrites existing files without asking. | Fixed, see next row |
 | 2026-11-24 | Mouse Back/Forward buttons passed only 1 of 7 synthetic-input tries. Source handles them; `Alt+Left/Right` work. | Needs one check on a real mouse |
 | 2026-11-24 | Preview pane default shows 564 px wide at 200% scale (config default is 320 DIP, so about 640 px). | Check the DIP to px conversion |
+| 2026-11-25 | P4.F4 shipped: batch rename is the built-in extension `tsubame.ext.batch_rename` (switchable, default on, not required). Added `file.batch_rename` (id 72, no default key; F2 stays on `file.rename`, which delegates), a "Rename N items" context-menu row, and a new Settings > Extensions page (one switch per optional built-in; live via `set_extension_enabled`). Off: command and menu row gone, open bar closed, F2 on several items renames the focused item inline and the status bar says "Batch rename is switched off (Settings > Extensions). Renaming one item." Engine untouched. Rig (slot 1, debug): on, off and the settings page checked by screenshot; idle CPU 0.016 s over 15 s (one timer tick) | Done |
 
 ## Sources
 

@@ -16,7 +16,7 @@ fn describe(id: &str) -> &'static str {
         "tsubame.ext.checksum" => "Copy CRC32, MD5, SHA-1 and SHA-256 of the selected files.",
         "tsubame.ext.global_search" => "Search every drive (Ctrl+Shift+F).",
         "tsubame.ext.preview" => "Preview pane (Alt+P) and Quick Look (Space / F3).",
-        "tsubame.ext.batch_rename" => "F2 on several items: pattern bar with live old to new preview, one undo step. Adds the Rename N items entry to the context menu and the palette.",
+        "tsubame.ext.batch_rename" => "F2 on several items: pattern bar with live preview, one undo step. Adds Rename N items to the context menu.",
         _ => "",
     }
 }
