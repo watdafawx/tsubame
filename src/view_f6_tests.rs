@@ -366,6 +366,8 @@ fn a_typed_path_that_fails_goes_back_to_the_previous_folder_with_a_message() {
     assert!(r.v.ops.message.as_deref().is_some_and(|m| m.contains("Can't open") && m.contains("previous folder")), "{:?}", r.v.ops.message);
     assert!(r.v.path_error.as_deref().is_some_and(|m| m.contains("Can't open")));
     assert!(r.c.has_text("beta.txt"), "the old folder is on screen: {:?}", r.c.texts());
+    // the dead folder is not left in Recent
+    assert!(!r.v.side.recents.iter().any(|p| p.contains("nope") || p.contains("deeper")), "{:?}", r.v.side.recents);
 }
 
 #[test]

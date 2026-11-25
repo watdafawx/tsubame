@@ -319,6 +319,15 @@ impl Sidebar {
         true
     }
 
+    /// A folder that could not be opened must not stay in Recent.
+    pub fn drop_recent(&mut self, path: &str) -> bool {
+        let n = self.recents.len();
+        self.recents.retain(|p| norm(p) != norm(path));
+        let gone = self.recents.len() != n;
+        self.recents_dirty |= gone;
+        gone
+    }
+
     pub fn clear_recents(&mut self) {
         if !self.recents.is_empty() {
             self.recents.clear();

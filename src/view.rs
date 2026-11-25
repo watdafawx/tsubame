@@ -934,6 +934,12 @@ impl View {
                     t.history.undo_push();
                     if let Some(m) = t.miller.as_mut() {
                         m.clear_goto_from();
+                        // the columns moved before the listing failed: Recent took the dead folder
+                        for dead in [t.path.as_str(), m.active_path(), typed.as_str()] {
+                            if !dead.eq_ignore_ascii_case(&prev) {
+                                self.side.drop_recent(dead);
+                            }
+                        }
                     }
                     t.start(&prev, wake);
                 }
