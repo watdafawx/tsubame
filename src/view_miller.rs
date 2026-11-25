@@ -52,6 +52,17 @@ impl View {
         self.mode == ViewMode::Miller && miller::enabled()
     }
 
+    /// The mode is Miller and the active tab has no model yet: make it.
+    pub(super) fn ensure_miller_now(&mut self) {
+        if !self.miller_rows_on() || self.tab().miller.is_some() {
+            return;
+        }
+        let w = self.prefs.miller.sanitized().col_width as f32;
+        let t = self.tab_mut();
+        t.miller_on = true;
+        t.ensure_miller(w);
+    }
+
     /// Miller columns show in the live tab (the model exists).
     pub(super) fn miller_showing(&self) -> bool {
         self.miller_rows_on() && self.tab().miller.is_some()

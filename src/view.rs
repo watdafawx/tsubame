@@ -2330,6 +2330,9 @@ impl View {
             return;
         }
         let main = self.paint_tree_pane(ui, g, shell, main, t);
+        // the mode was just switched (a key, in this frame): the model is made now, not on the next pump,
+        // which an idle window would never run
+        self.ensure_miller_now();
         if self.miller_showing() {
             self.paint_miller_main(ui, g, shell, main, t);
             return;

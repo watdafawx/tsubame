@@ -689,6 +689,12 @@ impl MillerModel {
         if let Some(e) = done.error {
             if c.published.is_none() {
                 c.state = State::Denied(e.message());
+                // the columns after a folder that cannot open are all the same failure: one card
+                if i + 1 < self.cols.len() {
+                    self.cols.truncate(i + 1);
+                    self.active = self.active.min(i);
+                    self.info = None;
+                }
             } else {
                 self.status = Some(format!("Could not refresh {}: {}", c.path, e.message()));
             }
@@ -1611,6 +1617,18 @@ mod tests {
         assert!(m.col(last).unwrap().is_loading());
         settle(&mut m);
         assert!(matches!(m.col(last).unwrap().state, State::Denied(_)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_deep_missing_path_ends_in_one_denied_card() {
+        let d = fixture("deepmiss");
+        let mut m = model(&d.join("nope").join("deeper").join("deepest"));
+        let first_bad = (0..m.len()).find(|&i| matches!(m.col(i).unwrap().state, State::Denied(_))).expect("one column is denied");
+        assert_eq!(m.len(), first_bad + 1, "the columns after the first failure are dropped");
+        let last = m.len() - 1;
+        assert!(matches!(m.col(last).unwrap().state, State::Denied(_)));
+        assert_eq!(m.active, last, "the keyboard is on the card, so Retry works");
         let _ = std::fs::remove_dir_all(&d);
     }
 
