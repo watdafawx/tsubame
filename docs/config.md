@@ -83,6 +83,10 @@ show_hidden = false
 show_system = false
 confirm_delete = true
 delete_to_recycle = true
+row_tooltips = true          # hover tooltip on Details / Grid rows after ~600 ms
+show_sidebar_onedrive = true # show OneDrive in Quick access when installed
+show_sidebar_wsl = true      # show Linux (WSL) section when WSL is installed
+show_sidebar_recycle = true  # show Recycle Bin in Quick access
 
 [appearance]
 theme = "tsubame-dark"       # "tsubame-dark" | "tsubame-light" ("dark"/"light" too)
@@ -108,7 +112,7 @@ hex_auto_width = true        # 8 bytes/row in docked panes < 420 px, 16 bytes/ro
 direct_hex_binaries = true   # show hex directly for .exe/.dll/.bin/.dat
 
 [sidebar]
-closed = ["network"]         # folded sections: pinned | quick | recent | pc | network
+closed = ["network"]         # folded sections: pinned | quick | recent | pc | network | tags | linux
 
 [[sidebar.pinned]]           # bookmarks, in order; drag between rows to pin
 name = "Work"
@@ -165,6 +169,8 @@ maximized = false
 | `general.restore_session` | `true` | restore tabs when the command line names no path |
 | `general.show_hidden` / `show_system` | `false` | hide rule of every tab; Settings > General, Ctrl+H (live) |
 | `general.confirm_delete` / `delete_to_recycle` | `true` | Delete key: ask first / Recycle Bin vs permanent (Shift+Delete does the other one) |
+| `general.row_tooltips` | `true` | Details and Grid row hover tooltip (~600 ms dwell: Name, Type, Size, Date modified; folders omit Size); Settings > General (live) |
+| `general.show_sidebar_onedrive` / `show_sidebar_wsl` / `show_sidebar_recycle` | `true` | show or hide OneDrive, the Linux (WSL) section, and Recycle Bin in the sidebar; Settings > General (live) |
 | `appearance.theme` | `"tsubame-dark"` | `View::dark`, Ctrl+Shift+L; Settings > Appearance picks any of the 19 themes (live) |
 | `appearance.density` | `"compact"` | row height, Ctrl+Shift+D, Settings > Appearance (live) |
 | `appearance.zebra` | `true` | alternating rows, Ctrl+Shift+Z, Settings > Appearance (live) |
