@@ -1,5 +1,5 @@
 //! Settings, drawn inside a tab (U4): a navigation list on the left, one page on the right.
-//! Pages: General, Appearance, Context menu, Keys, Updates, Default file manager, Advanced.
+//! Pages: General, Appearance, Context menu, Keys, Updates, Default file manager, Extensions, Advanced.
 //!
 //! The state here is built the first time the tab opens and dropped when it closes. Every
 //! change is applied the moment it is made: a page edits `Cx::prefs` (the config) or
@@ -11,6 +11,7 @@ pub mod lay;
 mod advanced;
 mod appearance;
 mod defaultfm_page;
+mod extensions_page;
 mod general;
 mod keys_page;
 mod menu_ed;
@@ -48,11 +49,12 @@ pub enum Page {
     Keys,
     Updates,
     DefaultFm,
+    Extensions,
     Advanced,
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [Page::General, Page::Appearance, Page::ContextMenu, Page::Keys, Page::Updates, Page::DefaultFm, Page::Advanced];
+    pub const ALL: [Page; 8] = [Page::General, Page::Appearance, Page::ContextMenu, Page::Keys, Page::Updates, Page::DefaultFm, Page::Extensions, Page::Advanced];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -62,6 +64,7 @@ impl Page {
             Page::Keys => "Keys",
             Page::Updates => "Updates",
             Page::DefaultFm => "Default file manager",
+            Page::Extensions => "Extensions",
             Page::Advanced => "Advanced",
         }
     }
@@ -74,6 +77,7 @@ impl Page {
             Page::Keys => "\u{E765}",
             Page::Updates => "\u{E896}",
             Page::DefaultFm => "\u{E8B7}",
+            Page::Extensions => "\u{EA86}",
             Page::Advanced => "\u{E90F}",
         }
     }
@@ -87,6 +91,7 @@ impl Page {
             Page::Keys => "keyboard shortcuts keybindings hotkeys rebind chord",
             Page::Updates => "update version check download install rollback signature",
             Page::DefaultFm => "explorer default folder registry win+e shim",
+            Page::Extensions => "extension plugin built-in switch on off batch rename preview archive search checksum folder sizes",
             Page::Advanced => "config folder reset diagnostics log memory portable",
         }
     }
@@ -134,6 +139,8 @@ pub struct Cx<'a> {
     pub rollback: bool,
     /// "Reload packs" on the Advanced page was pressed
     pub reload_packs: bool,
+    /// an extension switch on the Extensions page was flipped: (id, on)
+    pub ext_toggle: Option<(String, bool)>,
     /// a message for the status bar
     pub message: Option<String>,
     /// private bytes of the process, for the Advanced page (the view reads it once a second)
@@ -208,6 +215,7 @@ impl Settings {
                 Page::Keys => keys_page::paint(&mut pg, &mut self.keys, cx),
                 Page::Updates => updates_page::paint(&mut pg, &mut self.upd, cx),
                 Page::DefaultFm => defaultfm_page::paint(&mut pg, &mut self.dfm, cx),
+                Page::Extensions => extensions_page::paint(&mut pg, cx),
                 Page::Advanced => advanced::paint(&mut pg, &mut self.adv, cx),
             }
             end = pg.y;
@@ -294,7 +302,7 @@ mod tests {
         s.find.set_text("update");
         assert_eq!(s.matching(), vec![Page::Updates]);
         s.find.set_text("");
-        assert_eq!(s.matching().len(), 7);
+        assert_eq!(s.matching().len(), 8);
         s.find.set_text("zzz");
         assert!(s.matching().is_empty());
     }

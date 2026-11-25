@@ -1040,6 +1040,9 @@ impl View {
         if !crate::search_ui::is_enabled() {
             self.search = None;
         }
+        if !crate::batchui::is_enabled() {
+            self.batch = None;
+        }
         if !crate::preview_ui::is_enabled() {
             self.preview.pane_open = false;
             self.preview.quick_look = false;
@@ -1049,7 +1052,6 @@ impl View {
 
     /// Switches extension `id` on or off, live, and records it in the config
     /// (`[extensions] disabled`). Its commands leave or rejoin the key map.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_extension_enabled(&mut self, ui: &mut Ui, id: &str, on: bool) -> Result<bool, tsubame_ext_api::Error> {
         let changed = crate::ext::write(|r| r.set_enabled(id, on))?;
         self.prefs.extensions.disabled = crate::ext::read(|r| r.disabled());
@@ -1128,6 +1130,7 @@ impl View {
                 }
             }
             CMD_RENAME => self.begin_rename(ui),
+            CMD_BATCH_RENAME => self.begin_batch(ui),
             CMD_SIDEBAR => {
                 self.side.set_rail(!self.side.rail);
                 self.side_act(ui, Some(Act::Layout));
@@ -4535,5 +4538,55 @@ mod tests {
         // Re-enabling extension restores clean state for subsequent tests.
         assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::preview_ui::EXT_PREVIEW, true), Ok(true));
         r.frame();
+    }
+
+    #[test]
+    fn batch_rename_extension_switches_f2_on_several_items() {
+        let mut r = Rig::new("f4-ext");
+        r.settle();
+        assert!(crate::batchui::is_enabled(), "default on");
+        // on: F2 with two or more selected opens the bar
+        r.key(Key::Char('A'), Mods::CTRL);
+        assert!(r.v.tab().sel.count() > 1);
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.batch.is_some() && r.v.rename.is_none());
+        assert!(r.v.ops.message.as_deref().is_none_or(|m| !m.contains("switched off")));
+        // switching off closes an open bar
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::batchui::EXT_BATCH_RENAME, false), Ok(true));
+        assert!(r.v.batch.is_none(), "an open bar goes with the extension");
+        assert!(!r.v.prefs.extensions.disabled.is_empty());
+        // off: the command is gone, F2 renames the focused item inline and says so
+        assert!(crate::ext::command(crate::commands::CMD_BATCH_RENAME).is_none());
+        r.v.run_command(&mut r.ui, crate::commands::CMD_BATCH_RENAME);
+        assert!(r.v.batch.is_none());
+        r.v.ops.message = None;
+        assert!(r.v.tab().sel.count() > 1);
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.batch.is_none());
+        assert!(r.v.rename.is_some(), "focused item renames inline");
+        assert_eq!(r.v.ops.message.as_deref(), Some(crate::batchui::OFF_MSG));
+        // the context menu loses its entry
+        let rows = crate::ctxui::extras(tsubame_config::menu::Target::Multiple, 3, false);
+        assert!(rows.iter().all(|m| m.action != "file.batch_rename"));
+        r.key(Key::Escape, Mods::NONE);
+        // single item: F2 unchanged and silent
+        r.v.ops.message = None;
+        let t = r.v.tab_mut();
+        t.sel.single(&t.store, 0);
+        t.list.cursor = 0;
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.rename.is_some() && r.v.batch.is_none());
+        assert!(r.v.ops.message.is_none());
+        r.key(Key::Escape, Mods::NONE);
+        // back on: entry and bar return
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::batchui::EXT_BATCH_RENAME, true), Ok(true));
+        assert!(r.v.prefs.extensions.disabled.is_empty());
+        let rows = crate::ctxui::extras(tsubame_config::menu::Target::Multiple, 3, false);
+        let row = rows.iter().find(|m| m.action == "file.batch_rename").expect("entry back");
+        assert_eq!(row.label, "Rename 3 items\u{2026}");
+        assert!(crate::ctxui::extras(tsubame_config::menu::Target::File, 1, false).iter().all(|m| m.action != "file.batch_rename"));
+        r.key(Key::Char('A'), Mods::CTRL);
+        r.v.run_command(&mut r.ui, crate::commands::CMD_BATCH_RENAME);
+        assert!(r.v.batch.is_some(), "file.batch_rename opens the bar");
     }
 }
