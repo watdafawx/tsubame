@@ -1027,7 +1027,15 @@ impl MillerModel {
         let Some(id) = self.cols[ci].store.find(&w) else { return false };
         let Some(pos) = self.cols[ci].store.view().iter().position(|v| *v == id) else { return false };
         self.pick = None;
-        self.select_pos(ci, pos);
+        // not `select_pos`: a rename keeps the entry id, which that call treats as "already
+        // selected" and leaves the info column on the old name
+        let moved = self.active != ci;
+        self.cols[ci].list.cursor = pos;
+        self.cols[ci].sel = self.cols[ci].store.at(pos);
+        self.apply_selection(ci, pos);
+        if moved {
+            self.after_active_change();
+        }
         self.cols[ci].reveal_row = true;
         true
     }
@@ -2204,6 +2212,24 @@ mod tests {
         m.pump(false);
         assert!(m.pick.is_some(), "waits for the listing");
         assert!(m.selected_path().unwrap().ends_with("f.txt"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn want_pick_refreshes_the_info_column_of_an_already_selected_entry() {
+        // a rename keeps the entry id: the pick must still rebuild the info for the new name
+        let d = fixture("pickinfo");
+        let mut m = model(&d.join("a"));
+        let a = m.active;
+        let folder = m.col(a).unwrap().path.clone();
+        m.want_pick(&folder, "f.txt");
+        m.pump(false);
+        assert!(m.info.as_ref().unwrap().path.ends_with("f.txt"));
+        m.info = None; // stands for the stale info of the old name
+        m.want_pick(&folder, "f.txt");
+        m.pump(false);
+        assert!(m.pick.is_none());
+        assert!(m.info.as_ref().is_some_and(|i| i.path.ends_with("f.txt")), "info rebuilt");
         let _ = std::fs::remove_dir_all(&d);
     }
 
