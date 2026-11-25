@@ -829,7 +829,7 @@ impl Sidebar {
             c.round(rr, t.radius_md, t.hover);
         }
         crate::tags::marks::draw(c, tg.mark, tg.rgb, r.x + 12.0 + 8.0, r.y + r.h / 2.0, 11.0);
-        let n = tg.count.to_string();
+        let n = crate::tags::ui::sep(tg.count);
         let cw = c.measure(&n, f(t.font_size_xs)) + 4.0;
         c.text(&n, Rect::new(r.r() - 10.0 - cw, r.y, cw, r.h), f(t.font_size_xs).r(), if tg.on { t.text } else { t.text_dim });
         let font = if tg.on { t.font().b() } else { t.font() };

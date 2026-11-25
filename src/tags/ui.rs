@@ -318,7 +318,7 @@ impl TagsUi {
         let files: Vec<(String, u128)> = files.into_iter().take(MAX_PICK).collect();
         let title = if files.is_empty() {
             "New tag".to_string()
-        } else if files.len() == 1 { format!("Tags for {}", split(&files[0].0).1) } else { format!("{} items selected", files.len()) };
+        } else if files.len() == 1 { format!("Tags for {}", split(&files[0].0).1) } else { format!("{} items selected", sep(files.len())) };
         let mut p = Picker { title, at, focus: 0, edit: Edit::default(), field: TextInput::default(), new: None, fresh: true, masks: vec![None; files.len()], by_ck: HashMap::new(), files: Vec::new(), a11y: false };
         // what is cached answers at once; the rest is one lookup per folder
         let mut ask: HashMap<String, Vec<Row>> = HashMap::new();
@@ -373,7 +373,7 @@ impl TagsUi {
                     let files = std::mem::take(&mut p.files);
                     let n = files.len();
                     self.send(Req::Apply { files, edit: p.edit });
-                    self.say(format!("Tags updated on {n} item{}", if n == 1 { "" } else { "s" }));
+                    self.say(format!("Tags updated on {} item{}", sep(n), if n == 1 { "" } else { "s" }));
                 }
                 Act::None
             }
@@ -829,7 +829,7 @@ impl Picker {
             g.fill(Rect::new(fr.x, fr.y, fr.w, 1.0), t.border);
             let mut fx = fr.x + 8.0;
             for (k, label) in [("Space", "toggle"), ("Enter", "done"), ("Esc", "cancel")] {
-                fx += tsubame_ui::keycap(g, &t, fx, fr.y + 11.0, k) + 4.0;
+                fx = tsubame_ui::keycap(g, &t, fx, fr.y + 11.0, k) + 4.0;
                 let lw = g.measure(label, f(10.0));
                 g.text(label, Rect::new(fx, fr.y, lw + 2.0, fr.h), f(10.0), t.text_dim);
                 fx += lw + 10.0;
@@ -895,7 +895,9 @@ impl Picker {
         }
         let pad = 4.0;
         let ih = t.height_menu_item;
-        let w = t.layout_menu_width;
+        // grows (up to 420) so the "Create ... and apply" row fits its name
+        let create_w = g.measure(&format!("Create \u{201c}{}\u{201d} and apply", nt.name.text.trim()), t.font()) + 30.0 + 100.0 + 2.0 * pad;
+        let w = t.layout_menu_width.max(create_w).min(420.0);
         let h = pad * 2.0 + 20.0 + t.height_field + 6.0 + 20.0 + 8.0 + 30.0 * 2.0 + 4.0 + 8.0 + 20.0 + 9.0 + ih * 2.0;
         let x = self.at.x.clamp(bounds.x + 4.0, (bounds.r() - w - 4.0).max(bounds.x));
         let y = if self.at.y + h > bounds.b() - 4.0 { (self.at.y - h).max(bounds.y + 4.0) } else { self.at.y };
@@ -1104,7 +1106,7 @@ impl TagsUi {
         } else if r.capped {
             format!("{}+ items · Tag results (all folders)", sep(r.hits.len()))
         } else {
-            format!("{} items · Tag results (all folders)", sep(r.hits.len()))
+            format!("{} item{} · Tag results (all folders)", sep(r.hits.len()), if r.hits.len() == 1 { "" } else { "s" })
         })
     }
 

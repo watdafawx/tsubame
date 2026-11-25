@@ -124,7 +124,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             }
         }
         let count = tc.counts.get(d.slot as usize).copied().unwrap_or(0);
-        let look = format!("{} \u{b7} {} \u{b7} {} item{}", model::COLOUR_NAMES[d.colour as usize % COLOURS.len()], if shapes { d.shape.name() } else { "dot" }, count, if count == 1 { "" } else { "s" });
+        let look = format!("{} \u{b7} {} \u{b7} {} item{}", model::COLOUR_NAMES[d.colour as usize % COLOURS.len()], if shapes { d.shape.name() } else { "dot" }, crate::tags::ui::sep(count as usize), if count == 1 { "" } else { "s" });
         pg.g.text(&look, Rect::new(nr.r() + 12.0, row.y, 200.0, row.h), t.font_small(), t.text_dim);
         // order and delete, right-aligned
         let mut x = row.r() - 12.0;
@@ -152,7 +152,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     pg.section("Store");
     let mut c = pg.card(2, 52.0);
     let row = pg.next_row(&mut c);
-    let desc = format!("{} tagged item{} \u{b7} {:.0}% of the 100,000 item / 16 MB cap", tc.items, if tc.items == 1 { "" } else { "s" }, tc.usage * 100.0);
+    let desc = format!("{} tagged item{} \u{b7} {:.0}% of the 100,000 item / 16 MB cap", crate::tags::ui::sep(tc.items), if tc.items == 1 { "" } else { "s" }, tc.usage * 100.0);
     pg.row_text(row, "tags.db", &desc, 120.0, true);
     let bar = Rect::new(row.r() - 16.0 - 100.0, row.y + row.h / 2.0 - 2.0, 100.0, 4.0);
     pg.g.round(bar, 2.0, t.scrollbar);

@@ -240,12 +240,12 @@ pub fn draw_chips(g: &mut dyn Canvas, t: &Theme, defs: &[TagDef], mask: u64, sha
             break;
         }
         let nw = g.measure(&d.name, font);
-        let w = (4.0 + MARK + 4.0 + nw + 5.0).min(room);
+        let w = (4.0 + MARK + 4.0 + nw + 2.0 + 5.0).min(room);
         let chip = Rect::new(x, cy - 8.0, w, 16.0);
         let c = d.rgb(t.is_dark());
         g.round_stroke(chip, 8.0, c, 1.0);
         draw(g, mark_of(d, shapes), c, chip.x + 4.0 + MARK / 2.0, cy, MARK);
-        g.text(&d.name, Rect::new(chip.x + 4.0 + MARK + 4.0, chip.y, (w - 4.0 - MARK - 4.0 - 5.0).max(0.0), chip.h), font, t.text);
+        g.text(&d.name, Rect::new(chip.x + 4.0 + MARK + 4.0, chip.y, (w - 4.0 - MARK - 4.0 - 3.0).max(0.0), chip.h), font, t.text);
         x += w + 4.0;
     }
     if more > 0 {

@@ -135,6 +135,7 @@ impl Store {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -151,9 +152,11 @@ impl Store {
         if vol.stable && fid != 0 { Key::Id { vol: vol.serial, fid } } else { Key::Path(norm(path)) }
     }
 
+    #[cfg(test)]
     pub fn get(&self, key: &Key) -> Option<&Item> {
         self.items.get(key)
     }
+    #[cfg(test)]
     pub fn key_at(&self, path: &str) -> Option<&Key> {
         self.by_path.get(&norm(path))
     }
@@ -299,6 +302,7 @@ impl Store {
         self.defs.iter().fold(0, |m, d| m | d.bit())
     }
 
+    #[cfg(test)]
     pub fn def(&self, slot: u8) -> Option<&TagDef> {
         self.defs.iter().find(|d| d.slot == slot)
     }
@@ -366,6 +370,7 @@ impl Store {
 
     /// The volume was not reconciled with this serial yet (first sight, or
     /// another disk now answers to the same root).
+    #[cfg(test)]
     pub fn vol_changed(&self, vol: &Vol) -> bool {
         self.vols.get(&norm(&vol.root)) != Some(&vol.serial)
     }
@@ -374,6 +379,7 @@ impl Store {
     /// back, replaced files are re-keyed, gone files are marked missing
     /// (never dropped). A changed volume serial re-keys by path.
     /// `progress(done, total)` returning false pauses it (call again).
+    #[cfg(test)]
     pub fn reconcile(&mut self, fs: &dyn Fs, vol: &Vol, progress: &mut dyn FnMut(usize, usize) -> bool) -> Recon {
         let keys = self.reconcile_keys(vol);
         let total = keys.len();
