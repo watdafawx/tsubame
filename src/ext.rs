@@ -69,6 +69,7 @@ pub fn builtin() -> Registry {
     r.add(&crate::meta_ui::ChecksumExtension).expect("checksum extension registers");
     r.add(&crate::search_ui::GlobalSearchExtension).expect("global-search extension registers");
     r.add(&crate::preview_ui::PreviewExtension).expect("preview extension registers");
+    r.add(&crate::age::FileAgeExtension).expect("file-age extension registers");
     r
 }
 
@@ -118,6 +119,7 @@ mod tests {
         assert_eq!(r.is_enabled(crate::meta_ui::EXT_CHECKSUM), Some(true));
         assert_eq!(r.is_enabled(crate::search_ui::EXT_GLOBAL_SEARCH), Some(true));
         assert_eq!(r.is_enabled(crate::preview_ui::EXT_PREVIEW), Some(true));
+        assert_eq!(r.is_enabled(crate::age::EXT_FILE_AGE), Some(true));
         assert!(r.command(crate::commands::CMD_RENAME).is_some());
         assert!(r.command(crate::commands::CMD_GLOBAL_SEARCH).is_some());
         assert!(r.command(crate::commands::CMD_PREVIEW_TOGGLE).is_some());

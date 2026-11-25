@@ -27,6 +27,8 @@ pub struct StatusInfo<'a> {
     pub batch: bool,
     /// something in the message slot ("Undone: rename"), shown instead of the hints
     pub message: Option<&'a str>,
+    /// width kept free at the right edge (the file-age key)
+    pub reserve_right: f32,
 }
 
 /// 12480 -> "12,480"
@@ -94,7 +96,7 @@ pub fn paint(g: &mut dyn Canvas, t: &Theme, r: Rect, i: &StatusInfo, buf: &mut S
         x += w + 24.0;
     }
     let cy = r.y + 1.0 + (r.h - 1.0) / 2.0;
-    let mut right = r.r() - 12.0;
+    let mut right = r.r() - 12.0 - i.reserve_right;
     if i.batch {
         for (key, label) in [("Ctrl+Z", "Undo"), ("Esc", "Cancel"), ("Enter", "Apply")] {
             let lw = g.measure(label, f) + 2.0;
