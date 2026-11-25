@@ -375,51 +375,65 @@ impl Store {
     /// (never dropped). A changed volume serial re-keys by path.
     /// `progress(done, total)` returning false pauses it (call again).
     pub fn reconcile(&mut self, fs: &dyn Fs, vol: &Vol, progress: &mut dyn FnMut(usize, usize) -> bool) -> Recon {
+        let keys = self.reconcile_keys(vol);
+        let total = keys.len();
+        let mut r = Recon::default();
+        for (n, key) in keys.iter().enumerate() {
+            if n % 64 == 0 && !progress(n, total) {
+                r.paused = true;
+                return r;
+            }
+            self.reconcile_one(fs, vol, key, &mut r);
+        }
+        progress(total, total);
+        self.reconcile_done(vol);
+        r
+    }
+
+    /// The items a reconcile of `vol` checks (the worker runs them in slices).
+    pub fn reconcile_keys(&self, vol: &Vol) -> Vec<Key> {
         let root = norm(&vol.root);
         let old_serial = self.vols.get(&root).copied();
-        let keys: Vec<Key> = self
-            .items
+        self.items
             .iter()
             .filter(|(k, it)| match k {
                 Key::Id { vol: v, .. } => *v == vol.serial || ((old_serial != Some(vol.serial) || it.missing) && under(&norm(&it.path), &root)),
                 Key::Path(p) => under(p, &root),
             })
             .map(|(k, _)| k.clone())
-            .collect();
-        let total = keys.len();
-        let mut r = Recon::default();
-        for (n, key) in keys.into_iter().enumerate() {
-            if n % 64 == 0 && !progress(n, total) {
-                r.paused = true;
-                return r;
-            }
-            r.checked += 1;
-            let Some(it) = self.items.get(&key) else { continue };
-            let path = it.path.clone();
-            match key {
-                Key::Id { vol: v, fid } if v == vol.serial && vol.stable => match fs.path_by_id(vol, fid) {
-                    Some(p) => {
-                        if p != path {
-                            r.moved += 1;
-                        }
-                        self.set_hint(&key, &p);
+            .collect()
+    }
+
+    /// Checks one item (gone since the keys were taken: skipped).
+    pub fn reconcile_one(&mut self, fs: &dyn Fs, vol: &Vol, key: &Key, r: &mut Recon) {
+        let Some(it) = self.items.get(key) else { return };
+        r.checked += 1;
+        let path = it.path.clone();
+        match key {
+            Key::Id { vol: v, fid } if *v == vol.serial && vol.stable => match fs.path_by_id(vol, *fid) {
+                Some(p) => {
+                    if p != path {
+                        r.moved += 1;
                     }
-                    None => self.rekey_by_path(fs, vol, &key, &path, &mut r),
-                },
-                Key::Id { .. } => self.rekey_by_path(fs, vol, &key, &path, &mut r),
-                Key::Path(_) => {
-                    if vol.stable && fs.exists(&path) {
-                        self.rekey_by_path(fs, vol, &key, &path, &mut r);
-                    } else {
-                        self.mark(&key, !fs.exists(&path), &mut r);
-                    }
+                    self.set_hint(key, &p);
+                }
+                None => self.rekey_by_path(fs, vol, key, &path, r),
+            },
+            Key::Id { .. } => self.rekey_by_path(fs, vol, key, &path, r),
+            Key::Path(_) => {
+                if vol.stable && fs.exists(&path) {
+                    self.rekey_by_path(fs, vol, key, &path, r);
+                } else {
+                    self.mark(key, !fs.exists(&path), r);
                 }
             }
         }
-        progress(total, total);
-        self.vols.insert(root, vol.serial);
+    }
+
+    /// Records that `vol` was reconciled with its current serial.
+    pub fn reconcile_done(&mut self, vol: &Vol) {
+        self.vols.insert(norm(&vol.root), vol.serial);
         self.dirty = true;
-        r
     }
 
     fn rekey_by_path(&mut self, fs: &dyn Fs, vol: &Vol, key: &Key, path: &str, r: &mut Recon) {
@@ -444,11 +458,11 @@ impl Store {
     }
 
     fn mark(&mut self, key: &Key, missing: bool, r: &mut Recon) {
-        if let Some(it) = self.items.get_mut(key) {
-            if it.missing != missing {
-                it.missing = missing;
-                self.dirty = true;
-            }
+        if let Some(it) = self.items.get_mut(key)
+            && it.missing != missing
+        {
+            it.missing = missing;
+            self.dirty = true;
         }
         if missing {
             r.missing += 1;
@@ -1099,7 +1113,7 @@ pub(crate) mod tests {
         let (made, done, skipped) = t
             .import_json(&text, &mut |p| {
                 n += 1;
-                (p != "C:\\gone").then(|| Key::Id { vol: 1, fid: n })
+                (p != "C:\\gone").then_some(Key::Id { vol: 1, fid: n })
             })
             .unwrap();
         assert_eq!((made, done, skipped), (1, 1, 0));

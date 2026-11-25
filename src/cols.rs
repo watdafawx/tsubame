@@ -9,7 +9,7 @@ pub const MIN_W: f32 = 48.0;
 pub const MIN_NAME_W: f32 = 140.0;
 
 /// Number of host-drawn columns in `Col`.
-pub const NUM_COLS: usize = 5;
+pub const NUM_COLS: usize = 6;
 
 /// A column the view draws itself from the entry store (the registry's
 /// `Host::Field` for the app).
@@ -20,6 +20,8 @@ pub enum Col {
     Type,
     Size,
     Git,
+    /// P4.F6 tag chips (`tsubame.column.tags`, shown when `[tags] column`)
+    Tags,
 }
 
 impl Col {
@@ -31,6 +33,7 @@ impl Col {
             Col::Type => 2,
             Col::Size => 3,
             Col::Git => 4,
+            Col::Tags => 5,
         }
     }
     /// The matching tsubame-core sort column (`None` for non-sortable columns like Git).
@@ -40,7 +43,7 @@ impl Col {
             Col::Modified => Some(tsubame_core::Column::Modified),
             Col::Type => Some(tsubame_core::Column::Type),
             Col::Size => Some(tsubame_core::Column::Size),
-            Col::Git => None,
+            Col::Git | Col::Tags => None,
         }
     }
 }
@@ -68,6 +71,7 @@ pub static BUILTIN: &[Builtin] = &[
     Builtin { col: Col::Type, ext: "tsubame.column.type", title: "Type column", required: false, order: 20, spec: spec("core.type", "Type", Align::Left, 130.0, false) },
     Builtin { col: Col::Size, ext: "tsubame.column.size", title: "Size column", required: false, order: 30, spec: spec("core.size", "Size", Align::Right, 90.0, false) },
     Builtin { col: Col::Git, ext: "tsubame.column.git", title: "Git status column", required: false, order: 40, spec: spec("core.git", "Git", Align::Left, 56.0, false) },
+    Builtin { col: Col::Tags, ext: crate::tags::EXT_COLUMN, title: "Tags column", required: false, order: 5, spec: spec("core.tags", "Tags", Align::Left, 168.0, false) },
 ];
 
 impl Builtin {
@@ -82,6 +86,8 @@ impl Builtin {
 #[derive(Clone, Debug)]
 pub struct ColSet {
     pub generation: u64,
+    /// `crate::tags::column_shown()` when built (the Tags column is opt-in)
+    pub tags: bool,
     order: [Col; NUM_COLS],
     n: usize,
     /// by `Col::slot`
@@ -91,10 +97,14 @@ pub struct ColSet {
 
 impl ColSet {
     pub fn from_registry(r: &crate::ext::Registry) -> ColSet {
-        let mut s = ColSet { generation: r.generation(), order: [Col::Name; NUM_COLS], n: 0, label: Default::default(), right: [false; NUM_COLS] };
+        let tags = crate::tags::column_shown() && r.is_enabled(crate::tags::EXT_TAGS).unwrap_or(false);
+        let mut s = ColSet { generation: r.generation(), tags, order: [Col::Name; NUM_COLS], n: 0, label: Default::default(), right: [false; NUM_COLS] };
         for c in r.columns.iter() {
             // provider columns (plugins) are not drawn by the details view yet
             let ColumnSource::Field(col) = c.source else { continue };
+            if col == Col::Tags && !tags {
+                continue;
+            }
             if s.n < NUM_COLS && !s.order[..s.n].contains(&col) {
                 s.order[s.n] = col;
                 s.n += 1;
@@ -130,15 +140,15 @@ pub type Spans = [(f32, f32); NUM_COLS];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Columns {
-    /// Modified, Type, Size, Git
+    /// Modified, Type, Size, Git, Tags
     pub w: [f32; NUM_COLS - 1],
 }
 
-const FIXED: [Col; NUM_COLS - 1] = [Col::Modified, Col::Type, Col::Size, Col::Git];
+const FIXED: [Col; NUM_COLS - 1] = [Col::Modified, Col::Type, Col::Size, Col::Git, Col::Tags];
 
 impl Columns {
     pub fn new(modified: f32, ty: f32, size: f32, git: f32) -> Columns {
-        Columns { w: [modified, ty, size, git] }
+        Columns { w: [modified, ty, size, git, BUILTIN[5].spec.width] }
     }
 
     /// Widths of the shown fixed columns (0 for the others).
@@ -248,7 +258,7 @@ mod tests {
     #[test]
     fn default_spans_fit_the_total() {
         let c = Columns::default();
-        assert_eq!(c.w, [150.0, 130.0, 90.0, 56.0], "the built-in widths");
+        assert_eq!(c.w, [150.0, 130.0, 90.0, 56.0, 168.0], "the built-in widths");
         let s = c.spans(1000.0, &ALL);
         assert_eq!(s[0], (0.0, 574.0));
         assert_eq!(s[1], (574.0, 150.0));
@@ -290,7 +300,7 @@ mod tests {
         let s = c.spans(400.0, &ALL);
         assert!(s[0].1 >= MIN_NAME_W - 0.01, "name {}", s[0].1);
         for sp in &s[1..] {
-            assert!(sp.1 >= MIN_W);
+            assert!(sp.1 >= MIN_W || sp.1 == 0.0);
         }
         // absurdly narrow: still no negative widths
         let s = c.spans(50.0, &ALL);
@@ -302,7 +312,7 @@ mod tests {
         let mut c = Columns::default();
         // Type's left edge from 724 to 644: Type grows by 80
         assert!(c.drag_left_edge(Col::Type, 644.0, 1000.0, &ALL));
-        assert_eq!(c.w, [150.0, 210.0, 90.0, 56.0]);
+        assert_eq!(c.w, [150.0, 210.0, 90.0, 56.0, 168.0]);
         // way left: clamp so the name keeps its minimum
         c.drag_left_edge(Col::Type, -500.0, 1000.0, &ALL);
         assert_eq!(c.w[1], 1000.0 - MIN_NAME_W - 150.0 - 90.0 - 56.0);

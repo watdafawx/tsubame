@@ -1005,6 +1005,7 @@ fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_
         "x.new-file" => new_item(a, true),
         "x.terminal" => open_terminal(one_dir.unwrap_or_else(|| t.folder.clone())),
         "x.refresh" => a.view.run_command(&mut a.ui, crate::commands::CMD_REFRESH),
+        "tags.pick" => a.view.open_tags_picker(&mut a.ui, None, false),
         id => {
             if let Some(e) = entries.iter().find(|e| e.id == id) {
                 let ctx = MenuCtx { id: 0, paths: t.paths.clone(), folder: t.folder.clone(), background: t.background, extras: Vec::new() };
@@ -1155,6 +1156,8 @@ impl Drops {
         match self.track(pt, keys) {
             Some(DropDest::Folder(f)) => (ole_glue::choose(&info.paths, Path::new(&f), keys, allowed), Some(DropDest::Folder(f))),
             Some(DropDest::Pin(k)) => (if allowed & EFFECT_LINK != 0 { EFFECT_LINK } else { allowed & (EFFECT_COPY | EFFECT_MOVE) }, Some(DropDest::Pin(k))),
+            // never MOVE: the source must not delete what was only tagged
+            Some(DropDest::Tag(s)) => (if allowed & EFFECT_LINK != 0 { EFFECT_LINK } else { allowed & EFFECT_COPY }, Some(DropDest::Tag(s))),
             None => (EFFECT_NONE, None),
         }
     }
@@ -1187,6 +1190,10 @@ impl DropEvents for Drops {
                     Some(p) => a.view.pin_dropped(&p, k),
                     None => status(a, "Only one folder can be pinned at a time"),
                 });
+                e
+            }
+            Some(DropDest::Tag(s)) => {
+                with(|a| a.view.tag_dropped(&info.paths, s));
                 e
             }
             Some(DropDest::Folder(folder)) if e != EFFECT_NONE => {

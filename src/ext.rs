@@ -69,6 +69,7 @@ pub fn builtin() -> Registry {
     r.add(&crate::meta_ui::ChecksumExtension).expect("checksum extension registers");
     r.add(&crate::search_ui::GlobalSearchExtension).expect("global-search extension registers");
     r.add(&crate::preview_ui::PreviewExtension).expect("preview extension registers");
+    r.add(&crate::tags::TagsExtension).expect("tags extension registers");
     r
 }
 

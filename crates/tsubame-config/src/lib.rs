@@ -289,6 +289,25 @@ impl Default for Panes {
     }
 }
 
+/// `[tags]`: P4.F6 tags and colours (`tsubame.ext.tags`). The tags
+/// themselves live in `tags.db` next to this file, not here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TagsConfig {
+    /// Each tag has a shape as well as a colour (colour is never the only
+    /// cue). Off: plain dots.
+    #[serde(default = "yes")]
+    pub shapes: bool,
+    /// The optional Tags column in the details view.
+    pub column: bool,
+}
+
+impl Default for TagsConfig {
+    fn default() -> Self {
+        TagsConfig { shapes: true, column: false }
+    }
+}
+
 /// `[preview]`: the split preview pane and Quick Look (P4.F2).
 ///
 /// Defaults come from `docs/preview-mock.md`: a 320 px pane that starts
@@ -507,6 +526,7 @@ pub struct Config {
     pub appearance: Appearance,
     pub panes: Panes,
     pub preview: PreviewConfig,
+    pub tags: TagsConfig,
     pub sidebar: Sidebar,
     pub updates: Updates,
     pub keys: Keys,
@@ -524,6 +544,7 @@ impl Default for Config {
             appearance: Appearance::default(),
             panes: Panes::default(),
             preview: PreviewConfig::default(),
+            tags: TagsConfig::default(),
             sidebar: Sidebar::default(),
             updates: Updates::default(),
             keys: Keys::default(),

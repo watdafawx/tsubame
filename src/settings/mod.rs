@@ -16,6 +16,7 @@ mod keys_page;
 mod menu_ed;
 mod nss_pick;
 mod nss_sel;
+pub mod tags_page;
 mod updates_page;
 
 use lay::Pg;
@@ -49,10 +50,12 @@ pub enum Page {
     Updates,
     DefaultFm,
     Advanced,
+    /// P4.F6
+    Tags,
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [Page::General, Page::Appearance, Page::ContextMenu, Page::Keys, Page::Updates, Page::DefaultFm, Page::Advanced];
+    pub const ALL: [Page; 8] = [Page::General, Page::Appearance, Page::ContextMenu, Page::Keys, Page::Tags, Page::Updates, Page::DefaultFm, Page::Advanced];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -63,6 +66,7 @@ impl Page {
             Page::Updates => "Updates",
             Page::DefaultFm => "Default file manager",
             Page::Advanced => "Advanced",
+            Page::Tags => "Tags",
         }
     }
 
@@ -75,6 +79,7 @@ impl Page {
             Page::Updates => "\u{E896}",
             Page::DefaultFm => "\u{E8B7}",
             Page::Advanced => "\u{E90F}",
+            Page::Tags => "\u{E8EC}",
         }
     }
 
@@ -88,6 +93,7 @@ impl Page {
             Page::Updates => "update version check download install rollback signature",
             Page::DefaultFm => "explorer default folder registry win+e shim",
             Page::Advanced => "config folder reset diagnostics log memory portable",
+            Page::Tags => "tag tags colour color label mark shape export import",
         }
     }
 
@@ -138,6 +144,8 @@ pub struct Cx<'a> {
     pub message: Option<String>,
     /// private bytes of the process, for the Advanced page (the view reads it once a second)
     pub private_bytes: usize,
+    /// the tag store as the Tags page sees it, and its requests
+    pub tags: tags_page::TagsCx,
 }
 
 pub struct Settings {
@@ -152,6 +160,7 @@ pub struct Settings {
     pub dfm: defaultfm_page::State,
     pub adv: advanced::State,
     pub upd: updates_page::State,
+    pub tags: tags_page::State,
     /// the page was just switched: scroll to the top, rebuild lazily
     fresh: bool,
 }
@@ -162,7 +171,7 @@ pub fn lighten(c: u32, amt: f32) -> u32 {
 
 impl Settings {
     pub fn new(page: Page) -> Settings {
-        Settings { page, find: TextInput::default(), scroll: 0.0, content_h: 0.0, general: Default::default(), appear: Default::default(), keys: Default::default(), menu: Default::default(), dfm: Default::default(), adv: Default::default(), upd: Default::default(), fresh: true }
+        Settings { page, find: TextInput::default(), scroll: 0.0, content_h: 0.0, general: Default::default(), appear: Default::default(), keys: Default::default(), menu: Default::default(), dfm: Default::default(), adv: Default::default(), upd: Default::default(), tags: Default::default(), fresh: true }
     }
 
     pub fn set_page(&mut self, page: Page) {
@@ -209,6 +218,7 @@ impl Settings {
                 Page::Updates => updates_page::paint(&mut pg, &mut self.upd, cx),
                 Page::DefaultFm => defaultfm_page::paint(&mut pg, &mut self.dfm, cx),
                 Page::Advanced => advanced::paint(&mut pg, &mut self.adv, cx),
+                Page::Tags => tags_page::paint(&mut pg, &mut self.tags, cx),
             }
             end = pg.y;
         }
@@ -294,7 +304,7 @@ mod tests {
         s.find.set_text("update");
         assert_eq!(s.matching(), vec![Page::Updates]);
         s.find.set_text("");
-        assert_eq!(s.matching().len(), 7);
+        assert_eq!(s.matching().len(), 8);
         s.find.set_text("zzz");
         assert!(s.matching().is_empty());
     }
