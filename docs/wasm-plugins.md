@@ -6,7 +6,8 @@ is the reference for the four contracts between the parts: the WIT interface,
 the manifest, the capability rules and the protocol on the pipe.
 
 Code: `crates/tsubame-plughost`. Tests: `cargo test -p tsubame-plughost`
-(49 unit tests, 19 end-to-end tests that drive the real host exe).
+(74 unit tests, 29 end-to-end tests that drive the real host exe, plus the
+security PoCs in `tests/security_poc.rs`).
 
 **What exists and what does not.** The host exe, the install step, the
 manifest parser, the protocol and the supervisor client are done and tested.
@@ -27,6 +28,7 @@ author guide (`docs/plugin-authoring.md`) are P5.P2 and are done;
 | Host containment: `JobLauncher` (Windows) | `src/launcher.rs` | app |
 | Entry points as `tsubame-ext-api` providers | `src/adapters.rs`, `src/cache.rs` | app |
 | Host: wasmtime, limits, imports, serve loop | `src/host.rs`, `src/main.rs` | `tsubame-plughost.exe` |
+| Install record (write once, verify before each start) | `src/install_record.rs` | app, install step |
 | Install step | `src/host.rs` (`install`), `src/bin/tsubame-plugc.rs` | `tsubame-plugc.exe` |
 | Bench client and mock hosts | `src/bin/plughost-bench.rs` | not shipped |
 
@@ -47,22 +49,34 @@ the size test below catches that.
 
 ## Lifecycle
 
-1. **Install.** `tsubame-plugc <plugin folder> <cache folder>` checks
-   `plugin.toml`, compiles the `.wasm` it names and writes
-   `<cache folder>/<id>-<version>.cwasm` (temp file, then rename). It prints
-   the file's SHA-256. The app stores that hash with the plugin and shows the
-   user `Capabilities::summary()` before it enables the plugin.
-2. **Nothing runs.** `Plugin::new` starts no process and no thread. The
+1. **Install.** `tsubame-plugc <plugin folder> <cache folder> [<data folder>]`
+   checks `plugin.toml`, compiles the `.wasm` it names and writes
+   `<cache folder>/<id>/<version>/component.cwasm`, then the install record
+   `install.toml` next to it. The record holds the SHA-256 of `plugin.toml`, of
+   the `.wasm` and of the `.cwasm`, the wasmtime version and the capabilities
+   as resolved at install. It is written once (`create_new`, then a hard link
+   to the final name, which fails if one exists): a version that is installed
+   can not be installed again over itself; delete its folder first. The app
+   shows the user `Capabilities::summary()` before it enables the plugin.
+   A grant that reaches into the plugin's package or the cache folder is
+   refused here (PH-02).
+2. **Verify.** Before each start, `install_record::verify` reads the record,
+   hashes `plugin.toml` and the `.wasm` again and refuses the load if either
+   changed ("... changed since it was installed; install the plugin again to
+   approve the change"). The capabilities come from the record, not from the
+   file on disk, so editing `plugin.toml` after install grants nothing.
+   `Load::new(&verified)` builds the `Load`.
+3. **Nothing runs.** `Plugin::new` starts no process and no thread. The
    adapters answer `accepts` from the manifest. A session that never uses a
    wasm plugin pays nothing.
-3. **First call.** The client starts one host process for the plugin (stdin and
+4. **First call.** The client starts one host process for the plugin (stdin and
    stdout piped, no console window), waits for the host's hello, and sends
-   `Load`: the `.cwasm` path, its hash, the capabilities and the declared entry
-   points. The host checks all of it, instantiates the component, calls
+   `Load`: the `.cwasm` path, its hash, the capabilities, the declared entry
+   points and the protected folders. The host checks all of it, instantiates the component, calls
    `meta.describe` and answers with what the component says it is.
-4. **Calls.** One request, one reply, one at a time per plugin. Callers are
+5. **Calls.** One request, one reply, one at a time per plugin. Callers are
    worker threads; the client serializes them.
-5. **Stop.** `shutdown`, `stop_if_idle(duration)` or dropping the `Plugin`
+6. **Stop.** `shutdown`, `stop_if_idle(duration)` or dropping the `Plugin`
    sends `Shutdown`, closes the host's stdin and waits up to 500 ms for the
    process to exit before killing it. The next call starts a new host. There
    is no idle timer: the app calls `stop_if_idle` from events it already has.
@@ -194,7 +208,7 @@ names the field:
 
 | `path` | Covers | Notes |
 |---|---|---|
-| `$input` | the paths handed to the current call and everything under them | changes with every call. For a vfs call it also covers the file the path goes through (`C:\a.zip` for `C:\a.zip\inner\x`) |
+| `$input` | the paths handed to the current call; what is under them only where the call works on a tree | changes with every call. Column and previewer: the path itself (a folder can be looked at and listed, nothing in it opened). Vfs: the path and the file it goes through (`C:\a.zip` for `C:\a.zip\inner\x`). Search: the root and everything under it. Command: the selection and everything under it, plus the current folder itself |
 | `$data` | the plugin's own data folder | the app creates it; resolved in `Manifest::capabilities` |
 | `$plugin` | the folder the plugin is installed in | read only |
 | an absolute folder | that folder and everything under it | a folder on another computer (`\\server\share`) needs `network = true`; the prompt names the server |
@@ -204,9 +218,30 @@ names the field:
 share, the plugin needs `network = true`. A path in `$input` may be on a share;
 the user picked it.
 
-`Manifest::capabilities(plugin_dir, data_dir)` turns the manifest into the
-`Capabilities` that go into `Load`. `Capabilities::summary()` gives one line
-per grant for the install prompt ("Read the files and folders you use it on").
+`Manifest::capabilities(plugin_dir, data_dir, protected)` turns the manifest
+into the `Capabilities` that the install record keeps. `Capabilities::summary()`
+gives one line per grant for the install prompt ("Read the files and folders
+you use it on: a column or previewer sees only the item itself, a command the
+items you select and what is in them, a search the folder it searches"). A
+read-write `*` grant reads "Read and change any file on this computer: full
+control of your files".
+
+### Protected folders
+
+No grant reaches Tsubame's own folders. `Load` names them (`protected`): the
+app's settings, the plugin's package and the cache with the compiled plugins.
+The host adds the folder of the `.cwasm` itself.
+
+| Folder | Read | Write |
+|---|---|---|
+| the plugin's package, the app's settings | yes, if granted | never |
+| the cache (compiled plugins, install records) | never | never |
+
+The host checks this twice per open: on the normalized path, and on the final
+path of the handle, so a junction, symlink or hard link that leads into a
+protected folder is refused too. A `Load` whose grants overlap a protected
+folder (read-write anywhere in one, any access in the cache) is refused
+outright; `*` is allowed and refused per path.
 
 ## Capability enforcement
 
@@ -262,8 +297,10 @@ checked; nothing opens the path a second time.
   the final path of the grant's folder, and must not be on another computer
   unless the grant allows it.
 - Under a folder grant (and `$input` folders), a file with more than one hard
-  link is refused for every call except `read-dir`. A path the call was given
-  exactly is opened as the user named it, links followed.
+  link is refused for every call except `read-dir`; under `*` it is refused
+  for every write. A path the call was given exactly is opened as the user
+  named it, links followed, and its final path is then checked against the
+  protected folders.
 - A new file is created relative to its folder's handle, and deleted again if
   the handle check fails. `write-file` truncates only after every check.
 - `read-dir` lists through the folder's handle; a link to a folder is listed as
@@ -288,10 +325,18 @@ Known limits, for the security review (P5.P3):
   stdin). A job object owned by the app would close this; the client is
   `std` only and does not create one.
 - `Component::deserialize` trusts its input. The host only passes it the bytes
-  whose SHA-256 matches the hash the client sent, and it hashes the same
-  buffer it deserializes, so the file can not be swapped in between. This is
-  only as strong as the place the app keeps the hash and the cache folder:
-  both must be writable by the app alone.
+  whose SHA-256 matches the hash in the install record, and it hashes the same
+  buffer it deserializes, so the file can not be swapped in between. No plugin
+  can reach the cache, and the record is written once. The record is not
+  signed: it is only as strong as the cache folder's ACL, which must leave it
+  writable by the app (the user) alone.
+- On an exact path given to a write (`OPEN_ALWAYS`), the final-path check runs
+  after the open, so a link that leads into a protected folder can leave an
+  empty new file there before the write is refused. Nothing is written into
+  it.
+- `verify` hashes the `.wasm` (up to 64 MiB) on every start.
+- `tsubame-plugc` has no time or memory bound of its own; the app must run it
+  in a job (PH-18).
 
 ## The WIT interface
 
@@ -372,7 +417,7 @@ taken for the next call's.
 
 | Kind | Name | Body |
 |---|---|---|
-| 1 | `Load` | plugin id, version, component path, sha256 (32 bytes), capabilities, entry points |
+| 1 | `Load` | plugin id, version, component path, sha256 (32 bytes), capabilities, entry points, `list<string>` protected folders (at most 64) |
 | 2 | `Column` | column id, `list<string>` paths |
 | 3 | `Preview` | previewer id, path, max-bytes u64, max-px u32 |
 | 4 | `VfsList` | vfs id, path, `option<string>` cursor |
@@ -395,7 +440,8 @@ timeout_ms:u32 list<grant>`, a grant being a scope tag (0 prefix + string,
 Rules:
 
 - The host says `Hello` before it reads anything. A client that sees another
-  protocol version refuses the host.
+  protocol version refuses the host. The version is 2 (2 added `protected` to
+  `Load`).
 - `Load` comes first and once. A call before it gets `NotLoaded`, a second
   `Load` gets `BadRequest`.
 - Decoding never trusts a length. Every read is bounds checked, a list count is
@@ -435,13 +481,14 @@ policies.
 ## Using it from the app (not wired yet)
 
 ```rust
-let manifest = Manifest::load(&plugin_dir)?;
-let caps = manifest.capabilities(plugin_dir_str, data_dir_str)?;
-// cwasm and sha256 come from the install step's record
-let load = Load::new(&manifest, &cwasm, sha256, caps);
-let launcher = JobLauncher::new(host_exe, work_dir, caps.max_memory_mb)?;   // not ProcessLauncher: that is test-only
+// at install, after the user approved Capabilities::summary():
+//   tsubame-plugc <plugin dir> <cache dir> [<data dir>]   (in a job)
+// before each start:
+let v = install_record::verify(&plugin_dir, &cache_dir, id, version, &[settings_dir])?;
+let load = Load::new(&v);   // the hash, the caps and the protected folders come from the record
+let launcher = JobLauncher::new(host_exe, work_dir, v.caps.max_memory_mb)?;   // not ProcessLauncher: that is test-only
 let plugin = Arc::new(Plugin::new(load, launcher, Options::default()));
-adapters::contribute(&manifest, &plugin, contributions);   // inside Extension::contribute
+adapters::contribute(&v.manifest, &plugin, contributions);   // inside Extension::contribute
 ```
 
 ## Measurements
@@ -450,7 +497,7 @@ Release build with the root profile, wasmtime 50.0.2.
 
 | | S3 spike | Now |
 |---|---|---|
-| `tsubame-plughost.exe`, runtime only | 896,512 B (0.86 MB) | **1,051,136 B (1.00 MB)** |
+| `tsubame-plughost.exe`, runtime only | 896,512 B (0.86 MB) | **1,070,592 B (1.02 MB)** |
 
 The 155 KB are the `host` imports, the limiter and watchdog, the bindings for
 five export interfaces, the typed protocol and SHA-256. The test
@@ -477,14 +524,17 @@ has not been measured again.
 
 | What | Where |
 |---|---|
-| Manifest: a full file, defaults deny, each rejection | `manifest.rs` (11) |
-| Path rules: normalize, reject list, prefix / input / any grants | `caps.rs` (10) |
+| Manifest: a full file, defaults deny, each rejection | `manifest.rs` (12) |
+| Path rules: normalize, reject list, prefix / input / any grants, flat and recursive inputs, protected folders | `caps.rs` (14) |
+| Install record: round trip, wasmtime version matches `Cargo.toml`, refusals | `install_record.rs` (3) |
 | Protocol: every message round trip, bad lengths, malformed bodies, chunking | `proto.rs` (7) |
 | Client against an in-memory host: lazy start, chunks, kill on hang, late reply, crash, fault limit, bad hello, wrong id, paging, threads | `client.rs` (15) |
 | Cache caps and eviction | `cache.rs` (4) |
 | SHA-256 vectors | `sha256.rs` (2) |
 | `JobLauncher`: elevated app refused, relative paths refused, job limits applied and queried back, host in the job when `launch` returns, owner killed (`TerminateProcess`) takes the host with it, a host that tries to start a child fails (and succeeds under `ProcessLauncher`), cleared environment and fixed folder, the real host under the job | `launcher.rs` (5), `tests/launcher.rs` (4), `tests/host.rs` |
-| Real host exe: round trip, 5,001 paths in 3 calls, epoch interrupt, kill of a hung process, memory cap, traps, hash and identity checks, partial exports, file grants, junction, every entry point through the adapters, exe size | `tests/host.rs` (19) |
+| Real host exe: round trip, 5,001 paths in 3 calls, epoch interrupt, kill of a hung process, memory cap, traps, hash and identity checks, partial exports, file grants, junction, protected folders, flat column inputs, a changed `.cwasm` refused, every entry point through the adapters, exe size | `tests/host.rs` (29) |
+| Samples built, installed through the record and run | `tests/samples.rs` (4) |
+| Security review PoCs, fixed ones flipped into regression tests | `tests/security_poc.rs` (21, 4 still ignored) |
 
 The end-to-end guest is WebAssembly text in the test file, turned into a
 component by `wit-component` against the real WIT file and compiled with the

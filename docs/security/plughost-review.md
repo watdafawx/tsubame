@@ -121,6 +121,11 @@ The table above is the review as written. Fixes since:
 | PH-05 | fixed (Card B) | The name is looked up once; the checks run on the opened handle (`GetFinalPathNameByHandleW` against the grant folder's final path) and all I/O uses that handle. The swap race in `ph05` no longer leaks (thousands of reads during hundreds of swaps, 0 outside). |
 | PH-06 | fixed (Card B) | Under a folder grant a file with `nNumberOfLinks > 1` is refused for read, stat and write (decision: reads too, fail closed). A path the call was given exactly is exempt: the user named that file. |
 | PH-09 | fixed (Card A) | `COM¹ COM² COM³ LPT¹ LPT² LPT³` are device names. |
+| PH-02 | fixed (Card C) | `Load` carries `protected` folders (protocol version 2): the app's settings, the plugin's package and the cache. The host adds the `.cwasm`'s own folder. Writes under any of them and every access to the cache are refused whatever the grant, on the normalized path and again on the final path of the handle (`caps::Protected`, `fsopen::open_checked`), so links into them fail too; under `*` a write to a file with more than one hard link is refused. A grant that overlaps them is refused at install (`Manifest::capabilities`) and by the host on `Load`. A read-write `*` grant reads "full control of your files" in the prompt. |
+| PH-03 | fixed (Card C) | `src/install_record.rs`: one record per plugin version, `<cache>/<id>/<version>/install.toml`, written once (`create_new` temp file, hard link to the final name). It holds the SHA-256 of `plugin.toml`, the `.wasm` and the `.cwasm`, the wasmtime version and the resolved capabilities. `verify` runs before each start, re-hashes `plugin.toml` and the `.wasm`, parses the bytes it hashed, and takes the capabilities and the `.cwasm` hash from the record; `Load::new(&Verified)` is the only constructor. A change means "install the plugin again". Not signed: it relies on the cache being writable by the app alone. No publisher identity (out of scope). `tsubame-plugc` prints `file`/`record`/`sha256` lines; the record itself is the machine-readable result. |
+| PH-10 | fixed (Card C) | One folder per id and version (`<cache>/<id>/<version>/component.cwasm`); the record names the id and version and `verify` refuses a record for another plugin. |
+| PH-12 | fixed (Card E) | Inputs carry a scope. Column and previewer: the path itself (a folder: `stat` and a non-recursive `read-dir`, nothing in it opened). Vfs: the path and the archive file, flat. Search: the root, recursive. Command: the selection, recursive, plus the current folder, flat (always passed; the owner allowed this). `summary()` says which. |
+| PH-18 | fixed (Card C), compile bound open | The `.cwasm` and the record are written through a `create_new` file with a random name, so a planted link is not followed; `plugin.toml`, the record, the `.wasm` and the `.cwasm` are read through one handle with `take(limit + 1)`. Open: the Cranelift compile still has no time or memory bound; the app must run `tsubame-plugc` in a job. |
 
 The PoC tests for these now assert that the attack fails and run in the normal
 suite; the exploit setup is unchanged.
@@ -362,7 +367,8 @@ cargo test -p tsubame-plughost --test host -- --ignored --nocapture ph0
 ```
 
 The open ones are `#[ignore]` and pass while the weakness exists. The tests
-for fixed findings (PH-01, PH-04, PH-05, PH-06, PH-09) are regression tests:
+for fixed findings (PH-01, PH-02, PH-03, PH-04, PH-05, PH-06, PH-09, PH-10,
+PH-12, PH-13 b, PH-16, PH-17, PH-18) are regression tests:
 not ignored, they assert the attack fails. `ph04` and `ph05` need the right to
 create symlinks (Developer Mode); they print `NOT RUN` otherwise. `ph01` in
 `tests/host.rs` tries `\\127.0.0.1\C$` and nothing else.
@@ -371,14 +377,21 @@ create symlinks (Developer Mode); they print `NOT RUN` otherwise. `ph01` in
 |---|---|---|
 | `ph01_unc_paths_pass_the_policy_without_the_network_capability` | `tests/security_poc.rs` | PH-01 |
 | `ph01_any_grant_makes_the_host_open_a_unc_path` | `tests/host.rs` | PH-01 |
-| `ph03_a_modified_cwasm_with_a_matching_hash_is_deserialized_and_run` | `tests/host.rs` | PH-03 |
+| `ph02_a_read_write_any_grant_can_not_touch_the_cache_or_the_package` | `tests/host.rs` | PH-02 |
+| `ph02_a_grant_that_reaches_the_package_or_the_cache_is_refused_at_install` | `tests/security_poc.rs` | PH-02 |
+| `ph03_a_modified_cwasm_with_a_matching_hash_is_deserialized_and_run` (name kept; now asserts the changed image is refused and the record can not be rewritten) | `tests/host.rs` | PH-03 |
+| `ph03_editing_plugin_toml_after_install_refuses_the_load` | `tests/security_poc.rs` | PH-03 |
+| `ph03_the_record_is_written_once` | `tests/security_poc.rs` | PH-03 |
 | `ph04_a_dangling_symlink_lets_write_file_create_a_file_outside_the_grant` | `tests/host.rs` | PH-04 |
 | `ph05_swapping_a_file_for_a_link_between_check_and_open_reads_outside_the_grant` | `tests/host.rs` | PH-05 |
 | `ph06_a_hard_link_reads_and_overwrites_a_file_outside_the_grant` | `tests/host.rs` | PH-06 |
 | `ph09_superscript_device_names_are_accepted` | `tests/security_poc.rs` | PH-09 |
-| `ph10_two_plugins_map_to_the_same_cwasm_name` | `tests/security_poc.rs` | PH-10 |
+| `ph10_two_plugins_map_to_the_same_cwasm_name` (name kept; now asserts the two get different folders) | `tests/security_poc.rs` | PH-10 |
 | `ph11_manifest_accepts_spoofing_characters_and_device_name_ids` | `tests/security_poc.rs` | PH-11 |
+| `ph12_a_column_sees_a_folder_but_not_what_is_in_it` | `tests/host.rs` | PH-12 |
+| `ph12_a_flat_input_folder_does_not_cover_its_tree` | `tests/security_poc.rs` | PH-12 |
 | `ph13_a_small_reply_makes_the_client_allocate_many_times_its_size` | `tests/security_poc.rs` | PH-13 |
 | `ph14_unsolicited_frames_are_read_and_queued_without_limit` | `tests/security_poc.rs` | PH-14 |
 | `ph15_status_blocks_behind_a_call_in_flight` | `tests/security_poc.rs` | PH-15 |
 | `ph17_a_manifest_error_does_not_repeat_untrusted_input` (now a regression test, with the `ph16_*`, `ph13_b_*` and other `ph17_*` tests beside it) | `tests/security_poc.rs` | PH-17, PH-16, PH-13 b |
+| `ph18_an_oversized_manifest_or_record_is_not_read_in_full` | `tests/security_poc.rs` | PH-18 |
