@@ -40,6 +40,8 @@ mod tagsv;
 mod treev;
 #[path = "view_miller.rs"]
 mod millerv;
+#[path = "view_uia.rs"]
+mod uiav;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
 use crate::ops::Ops;
@@ -1818,6 +1820,7 @@ impl View {
         }
         let t = ui.theme;
         self.tags_frame();
+        crate::uia_rows::begin_frame();
         if self.other.is_some() {
             self.paint_dual(ui, g, shell, (w, h), &t);
         } else if self.tab().settings {
@@ -1921,6 +1924,7 @@ impl View {
         if again {
             out.repaint = true;
         }
+        crate::uia_rows::end_frame();
         g.end();
         if let Some(c) = self.ctx.as_mut() { c.presented(); }
         Some(out)
@@ -2410,6 +2414,11 @@ impl View {
                 .then_some(&self.meta.size_map);
             let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, age, base: band_base, band_mode, tags };
             let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
+            if crate::uia_rows::on() {
+                let area = Rect::new(list_r.x, list_r.y, list_r.w - ui.theme.layout_scrollbar_width, list_r.h);
+                let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
+                crate::uia_rows::details(&geo, lstate, lr.range, rows.store, rows.sel, rows.row, rows.tags.as_mut(), rows.age.as_ref());
+            }
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
             (lr, lr.activated)
@@ -2498,6 +2507,11 @@ impl View {
             let tags = root.and_then(|p| self.tags.rows(p, tag_fids));
             let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, band_mode, labels: &mut self.labels, box_dip, font: label_font, tags };
             let gr = grid(ui, g, pid(self.live, ID_LIST), grid_r, gstate, &mut tiles);
+            if crate::uia_rows::on() {
+                let area = Rect::new(grid_r.x, grid_r.y, grid_r.w - ui.theme.layout_scrollbar_width, grid_r.h);
+                let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
+                crate::uia_rows::grid(&geo, gstate, gr.range, tiles.store, tiles.sel, tiles.row, tiles.tags.as_mut());
+            }
             tiles.prefetch(gstate);
             (gr, gr.activated)
         };
@@ -4873,4 +4887,8 @@ mod tests {
         r.key(Key::Char('5'), Mods::CTRL_SHIFT);
         assert_eq!(r.v.mode, ViewMode::Miller, "and back with it");
     }
+
+    // UIA view snapshot (docs/uia-views.md)
+    #[path = "../../view_uia_tests.rs"]
+    mod uia;
 }

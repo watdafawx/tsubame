@@ -457,6 +457,13 @@ impl View {
             let mut rows = ColRows { m: &mut *m, c: i, active, shell, row: &mut self.rowbuf, mouse };
             list(ui, g, id, area, &mut ls, &mut rows)
         };
+        if crate::uia_rows::on()
+            && let Some(col) = m.col(i)
+        {
+            let rows_r = Rect::new(area.x, area.y, area.w - ui.theme.layout_scrollbar_width, area.h);
+            let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_MILLER + i as u32), title: col.title(), area: rows_r, focused: active && ui.has_focus(id) && ui.window_focused() };
+            crate::uia_rows::miller(&geo, &ls, lr.range, col, active, &mut self.rowbuf);
+        }
         if let Some(c) = m.col_mut(i)
             && c.path == path
         {

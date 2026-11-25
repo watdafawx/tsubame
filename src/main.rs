@@ -89,6 +89,7 @@ mod tabs;
 mod tags;
 mod tree;
 mod timing;
+mod uia_rows;
 mod updates;
 mod view;
 mod wakelog;
@@ -1844,6 +1845,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     if let Some(c) = a.view.ctx.as_mut() {
                         c.run_a11y_requests();
                     }
+                    // the file views' rows (rows, Tree, Miller): docs/uia-views.md
+                    a.view.run_view_requests();
                 });
                 invalidate(hwnd);
                 LRESULT(0)
