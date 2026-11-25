@@ -258,17 +258,21 @@ impl View {
             restart: false,
             rollback: false,
             reload_packs: false,
+            ext_toggle: None,
             message: None,
             private_bytes: self.private_bytes,
         };
         st.paint(ui, g, area, &mut cx);
-        let Cx { changed, open, reset_all, restart, rollback, reload_packs, message, .. } = cx;
+        let Cx { changed, open, reset_all, restart, rollback, reload_packs, ext_toggle, message, .. } = cx;
         self.settings = Some(st);
         if changed != 0 {
             self.apply_prefs(ui, changed);
         }
         if reload_packs {
             self.reload_packs(ui);
+        }
+        if let Some((id, on)) = ext_toggle {
+            let _ = self.set_extension_enabled(ui, &id, on);
         }
         self.open_paths.extend(open);
         if let Some(m) = message {

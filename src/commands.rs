@@ -67,6 +67,8 @@ pub const CMD_FILE_CHECKSUM: u32 = 59;
 pub const CMD_GLOBAL_SEARCH: u32 = 60;
 pub const CMD_PREVIEW_TOGGLE: u32 = 61;
 pub const CMD_PREVIEW_QUICK_LOOK: u32 = 62;
+// F4 batch rename (id kept clear of the other P4 batches in flight)
+pub const CMD_BATCH_RENAME: u32 = 72;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -158,6 +160,12 @@ pub static PREVIEW_COMMANDS: &[CommandSpec] = &[
     cmd!(CMD_PREVIEW_QUICK_LOOK, "preview.quick_look", "Quick Look", ["Space", "F3"], F),
 ];
 
+/// Batch-rename extension (`tsubame.ext.batch_rename`) commands. F2 stays on
+/// `file.rename`, which hands several items to this one while the extension is on.
+pub static BATCH_RENAME_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_BATCH_RENAME, "file.batch_rename", "Batch rename selected items\u{2026}", [], F),
+];
+
 /// Every built-in command across `tsubame.core` and the P4 built-in extensions,
 /// in registration order.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -169,6 +177,7 @@ pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
         .chain(CHECKSUM_COMMANDS)
         .chain(SEARCH_COMMANDS)
         .chain(PREVIEW_COMMANDS)
+        .chain(BATCH_RENAME_COMMANDS)
 }
 
 /// Total number of commands registered by `crate::ext::builtin()`.
@@ -180,6 +189,7 @@ pub const fn builtin_count() -> usize {
         + CHECKSUM_COMMANDS.len()
         + SEARCH_COMMANDS.len()
         + PREVIEW_COMMANDS.len()
+        + BATCH_RENAME_COMMANDS.len()
 }
 
 /// Binds every default key (tests and the bench; the app binds its key map,
@@ -307,6 +317,7 @@ mod tests {
         (CMD_GLOBAL_SEARCH, &[(Key::Char('F'), CS)], true),
         (CMD_PREVIEW_TOGGLE, &[(Key::Char('P'), AL)], false),
         (CMD_PREVIEW_QUICK_LOOK, &[(Key::Space, NM), (Key::F(3), NM)], false),
+        (CMD_BATCH_RENAME, &[], false),
     ];
 
     /// What ran with the Settings tab in front before the registry.

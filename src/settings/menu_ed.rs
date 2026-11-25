@@ -1966,7 +1966,7 @@ mod tests {
     }
 
     fn cx_of<'a>(prefs: &'a mut tsubame_config::Config, km: &'a mut KeyMap, env: &'a super::super::Env) -> Cx<'a> {
-        Cx { prefs, keymap: km, env, changed: 0, open: vec![], reset_all: false, restart: false, rollback: false, reload_packs: false, message: None, private_bytes: 0 }
+        Cx { prefs, keymap: km, env, changed: 0, open: vec![], reset_all: false, restart: false, rollback: false, reload_packs: false, ext_toggle: None, message: None, private_bytes: 0 }
     }
 
     #[test]

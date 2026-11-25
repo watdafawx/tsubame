@@ -195,7 +195,11 @@ impl View {
             return;
         }
         if self.tab().sel.count() > 1 {
-            return self.begin_batch(ui);
+            if crate::batchui::is_enabled() {
+                return self.begin_batch(ui);
+            }
+            // extension off: rename the focused item and say so
+            self.ops.message = Some(crate::batchui::OFF_MSG.into());
         }
         let cursor = if self.mode.is_grid() { self.tab().grid.cursor } else { self.tab().list.cursor };
         let t = self.tab_mut();
