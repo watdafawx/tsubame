@@ -11,6 +11,7 @@
 //! (CI) to make a missing target a failure.
 
 use std::path::{Path, PathBuf};
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -31,6 +32,7 @@ fn plugins_dir() -> PathBuf {
 /// True when the wasm target is installed; otherwise says so (or fails, in CI).
 fn wasm_target_available() -> bool {
     let ok = Command::new("rustc")
+        .creation_flags(0x0800_0000)
         .args(["--print", "target-libdir", "--target", "wasm32-wasip2"])
         .output()
         .ok()
@@ -68,6 +70,7 @@ fn build(name: &'static str, cell: &'static OnceLock<Option<Sample>>) -> Option<
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let target = plugins_dir().join("target");
         let out = Command::new(cargo)
+            .creation_flags(0x0800_0000)
             .current_dir(&dir)
             .args(["build", "--release", "--target", "wasm32-wasip2", "--target-dir"])
             .arg(&target)
