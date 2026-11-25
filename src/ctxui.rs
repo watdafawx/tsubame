@@ -341,6 +341,17 @@ pub fn tsubame_rows(entries: &[MenuEntry], kind: Kind, ext: &str, n: usize, dual
     if matches!(kind, Kind::File | Kind::Background) {
         rows.retain(|r| r.action != "tab.open-selected");
     }
+    // "Open in new window" right after "Open in new tab" for folders / drives
+    if matches!(kind, Kind::Folder | Kind::Drive | Kind::Multiple) {
+        let item = MenuItem { key: "app:window.open-selected".into(), ..MenuItem::command(ItemSource::Tsubame, "Open in new window", "window.open-selected") };
+        let at = rows
+            .iter()
+            .position(|r| r.action == "tab.open-selected")
+            .or_else(|| rows.iter().position(|r| r.action == "file.open"))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        rows.insert(at, item);
+    }
     for r in &mut rows {
         if r.action == "file.open" {
             r.flags |= flag::DEFAULT;
@@ -361,9 +372,9 @@ fn own_parts(target: &Target, entries: &[MenuEntry], dual: bool) -> (Vec<MenuIte
             }
         }
     }
-    // a selection without a folder has nothing to open in a tab
+    // a selection without a folder has nothing to open in a tab or new window
     if kind == Kind::Multiple && !target.paths.iter().any(|p| target.folders.contains(p)) {
-        tsubame.retain(|r| r.action != "tab.open-selected");
+        tsubame.retain(|r| r.action != "tab.open-selected" && r.action != "window.open-selected");
     }
     (tsubame, ctxmodel::own_items(entries, kind, &ext).1)
 }
@@ -1273,6 +1284,7 @@ pub fn glyph(action: &str, verb: Option<&str>) -> Option<char> {
     let g = match action {
         "file.open" => '\u{E8E5}',
         "tab.open-selected" => '\u{E8A7}',
+        "window.open-selected" => '\u{E737}',
         "x.other-pane" => '\u{E90D}',
         "file.cut" => '\u{E8C6}',
         "file.copy" => '\u{E8C8}',
@@ -1582,7 +1594,8 @@ mod tests {
         assert!(l.contains(&"Copy name") && l.contains(&ctxmodel::CLASSIC_LABEL));
         assert!(file[0].flags & flag::DEFAULT != 0);
         let dir = labels(&tsubame_rows(&e, Kind::Folder, "", 1, true)).join("|");
-        assert!(dir.contains("Open in new tab") && dir.contains("Open in other pane"), "{dir}");
+        assert!(dir.contains("Open in new tab") && dir.contains("Open in new window") && dir.contains("Open in other pane"), "{dir}");
+        assert!(!l.contains(&"Open in new window"), "files: no new window: {l:?}");
         assert!(!labels(&tsubame_rows(&e, Kind::Folder, "", 2, true)).contains(&"Open in other pane"), "one folder only");
         let bg_rows = tsubame_rows(&e, Kind::Background, "", 1, false);
         let bg = labels(&bg_rows);

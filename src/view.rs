@@ -42,6 +42,9 @@ mod treev;
 mod millerv;
 #[path = "view_uia.rs"]
 mod uiav;
+#[path = "view_nav.rs"]
+mod navv;
+pub use navv::spawn_new_window;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
 use crate::ops::Ops;
@@ -205,6 +208,7 @@ pub enum WinCmd {
     Minimize,
     MaxRestore,
     Close,
+    ToggleFullscreen,
 }
 
 /// Breadcrumbs of the shown path with their text widths (recomputed only
@@ -375,6 +379,18 @@ pub struct View {
     copy_clipboard: Option<String>,
     /// P4.F6: tags (row cache, picker, filter results; the store is on a worker)
     pub(crate) tags: crate::tags::ui::TagsUi,
+    /// B10-B: per-window bounded reopen stack (Ctrl+Shift+T, cap 20)
+    closed_tabs: crate::tabs::ClosedStack<crate::tab::ClosedTab>,
+    /// B10-B: folders to open in new Tsubame windows (main spawns them)
+    pub open_windows: Vec<String>,
+    /// B10-B: true while the window is in borderless F11 fullscreen
+    pub fullscreen: bool,
+    /// B10-B: open Back/Forward history or breadcrumb subfolder dropdown
+    nav_menu: Option<Box<crate::nav_menu::NavMenu>>,
+    /// B10-B: long-press tracker on Back/Forward toolbar buttons
+    nav_hold: Option<crate::nav_menu::HoldState>,
+    /// B10-B: cached chevron anchors per pane for UIA Invoke/Expand
+    crumb_anchors: [Vec<(usize, Pt)>; 2],
 }
 
 impl View {
@@ -472,6 +488,12 @@ impl View {
             preview: crate::preview_ui::PreviewState::default(),
             copy_clipboard: None,
             tags: crate::tags::ui::TagsUi::new(),
+            closed_tabs: crate::tabs::ClosedStack::default(),
+            open_windows: Vec::new(),
+            fullscreen: false,
+            nav_menu: None,
+            nav_hold: None,
+            crumb_anchors: [Vec::new(), Vec::new()],
         }
     }
 
@@ -702,8 +724,9 @@ impl View {
         if self.palette.is_some() || self.search.is_some() || self.preview.quick_look_open() || ui.capture_keys || self.ops.asking || self.rename.is_some() || self.batch.is_some() {
             return false;
         }
-        if self.ctx.is_some() || ui.popups_open() > 0 {
+        if self.ctx.is_some() || self.nav_menu.is_some() || ui.popups_open() > 0 {
             self.ctx = None;
+            self.nav_menu = None;
             ui.close_all_popups();
             ui.request_repaint();
             return true;
@@ -752,6 +775,7 @@ impl View {
         }
         if self.tabs.items.len() <= 1 {
             if let Some(o) = self.other.take() {
+                self.record_closed_tab(i);
                 let was_settings = self.tabs.items[i].settings;
                 let o = *o;
                 self.tabs = o.tabs;
@@ -783,6 +807,7 @@ impl View {
             }
             return;
         }
+        self.record_closed_tab(i);
         let was_settings = self.tabs.items.get(i).is_some_and(|t| t.settings);
         drop(self.tabs.close(i));
         if was_settings {
@@ -894,6 +919,7 @@ impl View {
         }
         changed |= self.preview.pump();
         changed |= self.tags.pump();
+        changed |= self.pump_nav_menu();
         if self.tab_mut().take_watch_changed() {
             let p = self.tab().path.clone();
             self.meta.invalidate_git(&p);
@@ -1278,6 +1304,10 @@ impl View {
             CMD_PREVIEW_TOGGLE => self.toggle_preview_pane(ui),
             CMD_PREVIEW_QUICK_LOOK => self.toggle_quick_look(ui),
             CMD_TAGS_PICK => self.open_tags_picker(ui, None, false),
+            CMD_REOPEN_TAB => self.reopen_closed_tab(),
+            CMD_NEW_WINDOW => self.open_new_window(None),
+            CMD_FULLSCREEN => self.win_cmd = Some(WinCmd::ToggleFullscreen),
+            CMD_REVEAL_SIDEBAR => self.reveal_in_sidebar(ui),
             _ => {}
         }
         ui.request_repaint();
@@ -1514,6 +1544,7 @@ impl View {
             || self.palette.is_some()
             || self.search.is_some()
             || self.ctx.is_some()
+            || self.nav_menu_open()
             || ui.has_focus(pid(self.live, ID_FILTER))
             || ui.has_focus(pid(self.live, ID_PATH_EDIT))
             || ui.has_focus(pid(self.active, ID_FILTER))
@@ -1912,6 +1943,7 @@ impl View {
         self.paint_search(ui, g, (w, h));
         self.paint_tags_picker(ui, g, (w, h));
         self.paint_quick_look(ui, g, (w, h));
+        self.paint_nav_menu(ui, g, (w, h));
         // the context menu is on top of everything
         if let Some(c) = self.ctx.as_mut() {
             c.paint(ui, g, Rect::new(0.0, 0.0, w, h));
@@ -2133,13 +2165,9 @@ impl View {
             (tab.history.can_back(), tab.history.can_forward(), nav::parent(&tab.path).is_some())
         };
         let mut x = r.x + t.space_4;
-        if icon_button(ui, g, t, pid(self.live, ID_BACK), Rect::new(x, by, bs, bs), "\u{E72B}", can_back) {
-            self.back();
-        }
+        self.paint_nav_btn(ui, g, Rect::new(x, by, bs, bs), can_back, false);
         x += bs + 2.0;
-        if icon_button(ui, g, t, pid(self.live, ID_FWD), Rect::new(x, by, bs, bs), "\u{E72A}", can_fwd) {
-            self.forward();
-        }
+        self.paint_nav_btn(ui, g, Rect::new(x, by, bs, bs), can_fwd, true);
         x += bs + 2.0;
         if icon_button(ui, g, t, pid(self.live, ID_UP), Rect::new(x, by, bs, bs), "\u{E74A}", can_up) {
             self.up();
@@ -2320,36 +2348,7 @@ impl View {
             g.text("\u{E76C}", Rect::new(x, bar.y, SEP_W, bar.h), f(8.0).icon().c(), t.text_dim);
             x += SEP_W;
         }
-        let mut go = None;
-        let mut new_tab = None;
-        for i in first..n {
-            let last = i + 1 == n;
-            let wd = self.crumbs.widths[i] + 2.0 * CRUMB_PAD;
-            let r = Rect::new(x, bar.y + 3.0, wd, bar.h - 6.0);
-            let hit = ui.interact(pid(self.live, ID_PATH).child("crumb").with(i as u64), r, Sense::click().cursor(Cursor::Hand));
-            if hit.hovered {
-                g.round(r, t.radius_sm, t.hover);
-            }
-            let font = if last { t.font_md().b() } else { t.font_md() };
-            g.text(&self.crumbs.crumbs[i].label, Rect::new(x + CRUMB_PAD, bar.y, self.crumbs.widths[i] + 2.0, bar.h), font, if last { t.text } else { t.text_dim });
-            if hit.clicked == Some(Button::Left) {
-                go = Some(self.crumbs.crumbs[i].path.clone());
-            } else if hit.clicked == Some(Button::Middle) {
-                new_tab = Some(self.crumbs.crumbs[i].path.clone());
-            }
-            x += wd;
-            if !last {
-                g.text("\u{E76C}", Rect::new(x, bar.y, SEP_W, bar.h), f(8.0).icon().c(), t.text_dim);
-                x += SEP_W;
-            }
-        }
-        g.unclip();
-        if let Some(p) = go {
-            self.go(&p);
-        } else if let Some(p) = new_tab {
-            self.open_in_new_tab(&p);
-            ui.request_repaint();
-        }
+        self.paint_crumbs_with_chevrons(ui, g, bar, t, first, n, x);
     }
 
     /// The path-bar error box, under the bar (drawn last: on top).
@@ -2685,7 +2684,7 @@ pub fn first_visible_crumb(widths: &[f32], avail: f32) -> usize {
     if n == 0 {
         return 0;
     }
-    let cost = |i: usize| widths[i] + 2.0 * CRUMB_PAD + if i + 1 < n { SEP_W } else { 0.0 };
+    let cost = |i: usize| widths[i] + 2.0 * CRUMB_PAD + SEP_W;
     let total: f32 = (0..n).map(cost).sum();
     if total <= avail {
         return 0;
@@ -4935,4 +4934,8 @@ mod tests {
     // UIA view snapshot (docs/uia-views.md)
     #[path = "../../view_uia_tests.rs"]
     mod uia;
+
+    // B10-B Explorer parity
+    #[path = "../../view_b10b_tests.rs"]
+    mod b10b;
 }

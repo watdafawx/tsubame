@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::tree::TreeModel;
-use crate::uia_rows::{self, PART_LIST, PART_MILLER, PART_PANE};
+use crate::uia_rows::{self, PART_CRUMBS, PART_LIST, PART_MILLER, PART_PANE};
 use tsubame_win::uia::{VAct, VReq};
 
 impl View {
@@ -26,6 +26,11 @@ impl View {
         match uia_rows::part_of(r.surf) {
             PART_LIST => self.a11y_list(r),
             PART_PANE => self.a11y_pane(r),
+            PART_CRUMBS => match r.act {
+                VAct::Invoke | VAct::Expand => self.a11y_crumb(r.key as usize, true),
+                VAct::Collapse => self.a11y_crumb(r.key as usize, false),
+                _ => {}
+            },
             p if p >= PART_MILLER => self.a11y_miller((p - PART_MILLER) as usize, r),
             _ => {}
         }
