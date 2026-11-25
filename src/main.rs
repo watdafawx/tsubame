@@ -1844,6 +1844,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 with(|a| {
                     if let Some(c) = a.view.ctx.as_mut() {
                         c.run_a11y_requests();
+                    } else if a.view.tags.picker_open() {
+                        // the tags picker's rows (a popup, not a context menu)
+                        for r in tsubame_win::uia::take_requests() {
+                            if !r.collapse && r.lv == 0 {
+                                a.view.tags.a11y_invoke(r.key);
+                            }
+                        }
                     }
                     // the file views' rows (rows, Tree, Miller): docs/uia-views.md
                     a.view.run_view_requests();

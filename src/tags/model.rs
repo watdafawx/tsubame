@@ -198,8 +198,7 @@ pub fn visible_tags(defs: &[TagDef], mask: u64, max: usize, out: &mut Vec<usize>
 }
 
 /// The screen-reader name of a row: "contract-draft-v3.docx, tags: Urgent, To review, Work".
-// the file list publishes no UIA rows yet; this is its row name once it does
-#[cfg_attr(not(test), allow(dead_code))]
+/// A file row's UIA name: the file name and its tags (`uia_rows`).
 pub fn a11y_name(name: &str, defs: &[TagDef], mask: u64) -> String {
     let tags: Vec<&str> = defs.iter().filter(|d| mask & d.bit() != 0).map(|d| d.name.as_str()).collect();
     if tags.is_empty() { name.to_string() } else { format!("{name}, tags: {}", tags.join(", ")) }
