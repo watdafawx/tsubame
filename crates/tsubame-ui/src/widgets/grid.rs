@@ -243,6 +243,8 @@ pub struct GridResponse {
     pub context_key: bool,
     pub scrolled: bool,
     pub cursor_moved: bool,
+    /// cell currently under the pointer (not banding, within the grid)
+    pub hovered: Option<usize>,
 }
 
 /// The grid in `rect`, with its scrollbar on the right.
@@ -422,6 +424,7 @@ pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridSt
     let hot = (it.hovered && ui.active().is_none_or(|a| a == id) && area.contains_pt(ui.mouse()) && !st.banding())
         .then(|| st.cell_at(ui.mouse().x - area.x, ui.mouse().y - area.y, len))
         .flatten();
+    resp.hovered = hot;
     let focused = it.focused && ui.window_focused();
     let theme = &ui.theme;
     c.clip(area);

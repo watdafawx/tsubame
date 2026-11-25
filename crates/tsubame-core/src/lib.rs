@@ -11,6 +11,14 @@ pub const HIDDEN: u16 = 2;
 pub const SYSTEM: u16 = 4;
 pub const READONLY: u16 = 8;
 pub const REPARSE: u16 = 16;
+/// Cloud Files On-Demand: online-only placeholder (`FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`).
+pub const CLOUD_ONLINE: u16 = 32;
+/// Cloud Files On-Demand: pinned ("Always keep on this device", `FILE_ATTRIBUTE_PINNED`).
+pub const CLOUD_PINNED: u16 = 64;
+/// Cloud Files On-Demand: unpinned locally available placeholder (`FILE_ATTRIBUTE_UNPINNED`).
+pub const CLOUD_UNPINNED: u16 = 128;
+/// Symlink or directory junction (`IO_REPARSE_TAG_SYMLINK` / `IO_REPARSE_TAG_MOUNT_POINT`).
+pub const SYMLINK: u16 = 256;
 /// Tombstone bit of a removed record (internal; masked off every input).
 const DEAD: u16 = 0x8000;
 #[repr(C)]

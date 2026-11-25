@@ -17,6 +17,7 @@
 pub mod bitmap;
 pub mod defaultfm;
 pub mod dnd;
+pub mod eject;
 pub mod enumerate;
 pub mod fileid;
 pub mod lagtrace;
