@@ -45,6 +45,12 @@ pub struct State {
     /// Tag of the release the cached manifest belongs to.
     #[serde(default)]
     pub latest_tag: Option<String>,
+    /// ETag of the nightly channel's release (`releases/tags/nightly`).
+    #[serde(default)]
+    pub nightly_etag: Option<String>,
+    /// Tag the cached nightly manifest belongs to (always `nightly` when set).
+    #[serde(default)]
+    pub nightly_tag: Option<String>,
     #[serde(default)]
     pub installed_version: Option<String>,
     #[serde(default)]
@@ -77,6 +83,14 @@ impl State {
             if n > 16 {
                 self.skipped.drain(..n - 16);
             }
+        }
+    }
+
+    /// (ETag, cached tag) of one release source.
+    pub fn source_mut(&mut self, source: crate::Channel) -> (&mut Option<String>, &mut Option<String>) {
+        match source {
+            crate::Channel::Stable => (&mut self.etag, &mut self.latest_tag),
+            crate::Channel::Nightly => (&mut self.nightly_etag, &mut self.nightly_tag),
         }
     }
 

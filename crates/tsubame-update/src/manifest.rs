@@ -18,6 +18,7 @@
 //! The updater itself only uses the `portable` asset (a zip of the app's exes). The
 //! `setup` asset is listed for humans and for the `too old to update in place` hint.
 
+use crate::channel::{self, Channel};
 use crate::error::{Error, Result};
 use crate::keys;
 use crate::version::Version;
@@ -25,6 +26,10 @@ use serde::{Deserialize, Serialize};
 
 pub const MANIFEST_FILE: &str = "tsubame-update.json";
 pub const SIGNATURE_FILE: &str = "tsubame-update.json.sig";
+/// The nightly channel's manifest (on the rolling `nightly` pre-release). A different name on
+/// purpose: it can never be fetched, cached or served as the stable one.
+pub const NIGHTLY_MANIFEST_FILE: &str = "tsubame-update-nightly.json";
+pub const NIGHTLY_SIGNATURE_FILE: &str = "tsubame-update-nightly.json.sig";
 pub const SUMS_FILE: &str = "SHA256SUMS";
 
 pub const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -72,6 +77,8 @@ pub struct Verified {
     pub manifest: Manifest,
     pub version: Version,
     pub min_supported: Version,
+    /// The channel named inside the signed bytes.
+    pub channel: Channel,
     /// SHA-256 of the exact signed bytes (identifies this release's manifest).
     pub manifest_sha256: String,
 }
@@ -101,16 +108,32 @@ pub fn verify(manifest_bytes: &[u8], sig_bytes: &[u8], keys_: &[ed25519_compact:
     parse_validated(manifest_bytes)
 }
 
+/// [`verify`], and the signed `channel` must be the one this manifest was fetched for. A nightly
+/// manifest renamed to `tsubame-update.json` (or served from a stable release) is refused.
+pub fn verify_for(expected: Channel, manifest_bytes: &[u8], sig_bytes: &[u8], keys_: &[ed25519_compact::PublicKey]) -> Result<Verified> {
+    let v = verify(manifest_bytes, sig_bytes, keys_)?;
+    if v.channel != expected {
+        return Err(Error::Parse(format!("manifest is for the {} channel, expected {}", v.channel, expected)));
+    }
+    Ok(v)
+}
+
 /// Parse + validate without checking a signature. Call only on bytes already verified.
 pub fn parse_validated(bytes: &[u8]) -> Result<Verified> {
     let manifest: Manifest = serde_json::from_slice(bytes).map_err(|e| Error::Parse(format!("manifest: {e}")))?;
     if manifest.schema != 1 {
         return Err(Error::Parse(format!("unsupported manifest schema {}", manifest.schema)));
     }
-    if manifest.channel != "stable" {
-        return Err(Error::Parse(format!("channel {:?} is not supported (stable only)", manifest.channel)));
-    }
+    let Some(chan) = Channel::parse(&manifest.channel) else {
+        return Err(Error::Parse(format!("channel {:?} is not supported (stable or nightly)", manifest.channel)));
+    };
     let version = Version::parse(&manifest.version)?;
+    // a nightly is always `X.Y.Z-nightly.N`, a stable release never is: the two can't be mixed up
+    match (chan, channel::nightly_run(&version)) {
+        (Channel::Nightly, None) => return Err(Error::Parse(format!("nightly manifest has a non-nightly version {version}"))),
+        (Channel::Stable, Some(_)) => return Err(Error::Parse(format!("stable manifest has a nightly version {version}"))),
+        _ => {}
+    }
     let min_supported = Version::parse(&manifest.min_supported_version)?;
     if min_supported > version {
         return Err(Error::Parse("min_supported_version is newer than version".into()));
@@ -140,7 +163,7 @@ pub fn parse_validated(bytes: &[u8]) -> Result<Verified> {
             }
         }
     }
-    let v = Verified { manifest_sha256: crate::hash::sha256_hex(bytes)?, manifest, version, min_supported };
+    let v = Verified { manifest_sha256: crate::hash::sha256_hex(bytes)?, manifest, version, min_supported, channel: chan };
     if let Some(a) = v.update_asset() {
         if !a.contents.iter().any(|c| c.name == MAIN_EXE) {
             return Err(Error::Parse(format!("portable asset does not list {MAIN_EXE}")));
@@ -231,6 +254,43 @@ pub(crate) mod tests {
         assert!(mutated(|m| m.assets[0].contents.clear()).is_err());
         let dup = Content { name: "tsubame.exe".into(), size: 5, sha256: H.into() };
         assert!(mutated(|m| m.assets[0].contents.push(dup)).is_err());
+    }
+
+    pub fn sample_nightly(version: &str) -> Manifest {
+        let mut m = sample(version);
+        m.channel = "nightly".into();
+        m.notes_url = "https://github.com/watdafawx/tsubame/releases/tag/nightly".into();
+        m
+    }
+
+    #[test]
+    fn nightly_manifest_signs_and_verifies_with_the_dev_key() {
+        let (b, s) = signed(&sample_nightly("0.1.1-nightly.42"));
+        let v = verify_for(Channel::Nightly, &b, &s, &[dev_keypair().pk]).unwrap();
+        assert_eq!(v.channel, Channel::Nightly);
+        assert_eq!(v.version.to_string(), "0.1.1-nightly.42");
+        // same bytes, wrong channel expected: refused even though the signature is fine
+        assert!(matches!(verify_for(Channel::Stable, &b, &s, &[dev_keypair().pk]), Err(Error::Parse(_))));
+        // and a stable manifest is not accepted where a nightly one is expected
+        let (b2, s2) = signed(&sample("0.2.0"));
+        assert!(verify_for(Channel::Nightly, &b2, &s2, &[dev_keypair().pk]).is_err());
+        assert!(verify_for(Channel::Stable, &b2, &s2, &[dev_keypair().pk]).is_ok());
+        // flipping the channel after signing breaks the signature
+        let txt = String::from_utf8(b.clone()).unwrap().replace("\"nightly\"", "\"stable\"");
+        assert!(matches!(verify(txt.as_bytes(), &s, &[dev_keypair().pk]), Err(Error::BadSignature(_))));
+    }
+
+    #[test]
+    fn channel_and_version_shape_must_agree() {
+        let nightly = |ver: &str| {
+            let (b, _) = signed(&sample_nightly(ver));
+            parse_validated(&b)
+        };
+        assert!(nightly("0.1.1-nightly.1").is_ok());
+        assert!(nightly("0.1.1").is_err(), "a nightly manifest with a plain version");
+        assert!(nightly("0.1.1-rc.1").is_err());
+        assert!(mutated(|m| m.version = "0.2.1-nightly.3".into()).is_err(), "a stable manifest with a nightly version");
+        assert!(mutated(|m| m.channel = "Nightly".into()).is_err());
     }
 
     #[test]

@@ -56,6 +56,26 @@ impl Fx {
         std::fs::write(self.rel.join(manifest::SIGNATURE_FILE), sig).unwrap();
     }
 
+    fn updater_on(&self, current: &str, channel: Channel) -> Updater {
+        Updater::new(self.cfg(current).with_channel(channel))
+    }
+
+    /// Publish the rolling nightly (its own manifest name, signed channel `nightly`) next to
+    /// whatever stable release is already in the directory.
+    fn publish_nightly(&self, version: &str, exe: &[u8]) {
+        let zip = zip::build_zip(&[("tsubame.exe", exe)], true);
+        std::fs::write(self.rel.join(format!("tsubame-{version}-win-x64.zip")), &zip).unwrap();
+        let mut m = crate::manifest::tests::sample_nightly(version);
+        m.assets[0].size = zip.len() as u64;
+        m.assets[0].sha256 = hash::sha256_hex(&zip).unwrap();
+        m.assets[0].contents[0].size = exe.len() as u64;
+        m.assets[0].contents[0].sha256 = hash::sha256_hex(exe).unwrap();
+        let bytes = serde_json::to_vec_pretty(&m).unwrap();
+        let sig = hash::to_hex(dev_keypair().sk.sign(keys::signed_message(&bytes), None).as_ref());
+        std::fs::write(self.rel.join(manifest::NIGHTLY_MANIFEST_FILE), &bytes).unwrap();
+        std::fs::write(self.rel.join(manifest::NIGHTLY_SIGNATURE_FILE), sig).unwrap();
+    }
+
     fn exe(&self) -> Vec<u8> {
         std::fs::read(self.app.join("tsubame.exe")).unwrap()
     }
@@ -478,4 +498,158 @@ fn the_folder_handler_shim_is_swapped_with_the_app_and_rolled_back_with_it() {
     fx.updater("0.2.0").rollback().unwrap();
     assert_eq!(std::fs::read(fx.app.join("tsubame-handler.exe")).unwrap(), b"OLD-SHIM");
     assert_eq!(fx.exe(), b"OLD-EXE");
+}
+
+// ---- channels (docs/updater.md "Channels") ---------------------------------------------
+
+#[test]
+fn stable_copy_never_asks_for_or_sees_the_nightly() {
+    let fx = Fx::new();
+    fx.publish("0.1.0", b"STABLE-0.1.0", "0.0.1");
+    fx.publish_nightly("0.1.1-nightly.5", b"NIGHTLY-5");
+    let up = fx.updater("0.1.0");
+    assert_eq!(up.config().channel(), Channel::Stable, "stable is the default");
+    assert!(up.check(true).unwrap().is_none());
+    assert_eq!(fx.server.hit_count("/releases/tags/nightly"), 0, "a stable copy never talks to the nightly release");
+    assert_eq!(fx.server.hit_count("tsubame-update-nightly.json"), 0);
+}
+
+#[test]
+fn nightly_copy_gets_the_nightly_from_its_own_manifest_and_installs_it() {
+    let fx = Fx::new();
+    fx.publish("0.1.0", b"STABLE-0.1.0", "0.0.1");
+    fx.publish_nightly("0.1.1-nightly.5", b"NIGHTLY-5");
+    let up = fx.updater_on("0.1.0", Channel::Nightly);
+    let rel = up.check(false).unwrap().expect("0.1.1-nightly.5 is newer than 0.1.0");
+    assert_eq!(rel.version.to_string(), "0.1.1-nightly.5");
+    assert_eq!(rel.channel, Channel::Nightly);
+    assert_eq!(rel.tag, "nightly");
+    assert_eq!(up.api_url(Channel::Nightly), format!("{}/repos/{REPO}/releases/tags/nightly", fx.server.base));
+    assert_eq!(up.manifest_url(Channel::Nightly, &rel.tag), format!("{}/{REPO}/releases/download/nightly/tsubame-update-nightly.json", fx.server.base));
+    assert_eq!(fx.server.hit_count("GET /repos/test/tsubame/releases/tags/nightly -> 200"), 1);
+    assert_eq!(fx.server.hit_count("/releases/download/nightly/tsubame-update-nightly.json -> 200"), 1);
+    assert_eq!(fx.server.hit_count("/releases/download/nightly/tsubame-update-nightly.json.sig -> 200"), 1);
+    // it also looked at stable (a tester is offered the next stable release too)
+    assert_eq!(fx.server.hit_count("/releases/latest"), 1);
+    let staged = up.download(&rel, &mut no_progress).unwrap();
+    assert_eq!(staged.channel, "nightly");
+    let applied = up.apply(&staged).unwrap();
+    assert_eq!(applied.version, "0.1.1-nightly.5");
+    assert_eq!(fx.exe(), b"NIGHTLY-5");
+    // inside the 24 h window the answer comes from the verified nightly cache, no request
+    let again = fx.updater_on("0.1.0", Channel::Nightly);
+    let cached = again.check(false).unwrap().unwrap();
+    assert_eq!(cached.version.to_string(), "0.1.1-nightly.5");
+    assert_eq!(fx.server.hit_count("/releases/tags/nightly"), 1, "no second request inside 24 h");
+}
+
+#[test]
+fn nightly_etag_is_kept_per_channel() {
+    let fx = Fx::new();
+    fx.publish("0.1.0", b"S", "0.0.1");
+    fx.publish_nightly("0.1.1-nightly.5", b"N5");
+    let up = fx.updater_on("0.1.0", Channel::Nightly);
+    assert!(up.check(true).unwrap().is_some());
+    assert!(up.check(true).unwrap().is_some());
+    assert_eq!(fx.server.hit_count("releases/tags/nightly -> 304"), 1);
+    assert_eq!(fx.server.hit_count("releases/latest -> 304"), 1);
+    assert_eq!(fx.server.hit_count("tsubame-update-nightly.json -> 200"), 1, "no manifest re-download on 304");
+}
+
+#[test]
+fn nightly_copy_moves_to_a_later_nightly_but_never_an_earlier_one() {
+    let fx = Fx::new();
+    fx.publish_nightly("0.1.1-nightly.12", b"N12");
+    let r = fx.updater_on("0.1.1-nightly.5", Channel::Nightly).check(true).unwrap().unwrap();
+    assert_eq!(r.version.to_string(), "0.1.1-nightly.12");
+    let fx = Fx::new();
+    fx.publish_nightly("0.1.1-nightly.4", b"N4");
+    assert!(fx.updater_on("0.1.1-nightly.5", Channel::Nightly).check(true).unwrap().is_none());
+    // run 10 vs 9: numeric, not text
+    let fx = Fx::new();
+    fx.publish_nightly("0.1.1-nightly.10", b"N10");
+    assert!(fx.updater_on("0.1.1-nightly.9", Channel::Nightly).check(true).unwrap().is_some());
+}
+
+#[test]
+fn nightly_copy_is_offered_the_next_stable_release() {
+    let fx = Fx::new();
+    fx.publish("0.1.1", b"STABLE-0.1.1", "0.0.1");
+    fx.publish_nightly("0.1.1-nightly.5", b"N5"); // the nightly has not run since the release
+    let up = fx.updater_on("0.1.1-nightly.5", Channel::Nightly);
+    let rel = up.check(true).unwrap().expect("stable 0.1.1 supersedes 0.1.1-nightly.5");
+    assert_eq!((rel.version.to_string().as_str(), rel.channel, rel.tag.as_str()), ("0.1.1", Channel::Stable, "v0.1.1"));
+    let staged = up.download(&rel, &mut no_progress).unwrap();
+    up.apply(&staged).unwrap();
+    assert_eq!(fx.exe(), b"STABLE-0.1.1");
+    // once the nightly after the release exists (0.1.2-nightly.N), that one wins again
+    fx.publish_nightly("0.1.2-nightly.6", b"N6");
+    let r = fx.updater_on("0.1.1", Channel::Nightly).check(true).unwrap().unwrap();
+    assert_eq!((r.version.to_string().as_str(), r.channel), ("0.1.2-nightly.6", Channel::Nightly));
+}
+
+#[test]
+fn switching_nightly_to_stable_waits_for_a_newer_stable_and_drops_the_staged_nightly() {
+    let fx = Fx::new();
+    fx.publish("0.1.0", b"STABLE-0.1.0", "0.0.1");
+    fx.publish_nightly("0.1.1-nightly.7", b"N7");
+    // a nightly copy downloads nightly 7 but has not applied it yet
+    let nightly = fx.updater_on("0.1.1-nightly.5", Channel::Nightly);
+    let staged = nightly.download(&nightly.check(true).unwrap().unwrap(), &mut no_progress).unwrap();
+    // the tester switches to stable: no downgrade to 0.1.0, and the staged nightly is ignored
+    let stable = fx.updater_on("0.1.1-nightly.5", Channel::Stable);
+    assert!(stable.check(true).unwrap().is_none(), "0.1.0 is older than the installed nightly: never offered");
+    assert!(stable.staged().is_none(), "a staged nightly is not offered to a stable copy");
+    assert!(matches!(stable.apply(&staged), Err(Error::Install(_))), "and cannot be applied");
+    assert_eq!(fx.exe(), b"OLD-EXE");
+    // the next start of the stable copy removes the foreign download
+    stable.on_start();
+    assert!(!staged.dir.exists());
+    // the next stable release is offered as usual
+    fx.publish("0.1.1", b"STABLE-0.1.1", "0.0.1");
+    let r = stable.check(true).unwrap().unwrap();
+    assert_eq!((r.version.to_string().as_str(), r.channel), ("0.1.1", Channel::Stable));
+}
+
+#[test]
+fn a_nightly_manifest_served_as_the_stable_one_is_refused() {
+    let fx = Fx::new();
+    // the nightly manifest uploaded under the stable name (the test server then calls the
+    // release v0.1.1-nightly.5): the signature is genuine, the signed channel is not stable
+    fx.publish_nightly("0.1.1-nightly.5", b"N5");
+    std::fs::copy(fx.rel.join(manifest::NIGHTLY_MANIFEST_FILE), fx.rel.join(manifest::MANIFEST_FILE)).unwrap();
+    std::fs::copy(fx.rel.join(manifest::NIGHTLY_SIGNATURE_FILE), fx.rel.join(manifest::SIGNATURE_FILE)).unwrap();
+    std::fs::remove_file(fx.rel.join(manifest::NIGHTLY_MANIFEST_FILE)).unwrap();
+    let err = fx.updater("0.1.0").check(true).unwrap_err();
+    assert!(err.to_string().contains("nightly"), "{err}");
+    // and the stable manifest served as the nightly one
+    let fx = Fx::new();
+    fx.publish("0.2.0", b"S", "0.0.1");
+    std::fs::copy(fx.rel.join(manifest::MANIFEST_FILE), fx.rel.join(manifest::NIGHTLY_MANIFEST_FILE)).unwrap();
+    std::fs::copy(fx.rel.join(manifest::SIGNATURE_FILE), fx.rel.join(manifest::NIGHTLY_SIGNATURE_FILE)).unwrap();
+    std::fs::remove_file(fx.rel.join(manifest::MANIFEST_FILE)).unwrap();
+    assert!(fx.updater_on("0.1.0", Channel::Nightly).check(true).is_err());
+}
+
+#[test]
+fn nightly_signed_by_another_key_is_refused_even_with_a_good_stable() {
+    let fx = Fx::new();
+    fx.publish("0.1.0", b"S", "0.0.1");
+    fx.publish_nightly("0.1.1-nightly.5", b"N5");
+    let other = ed25519_compact::KeyPair::from_seed(ed25519_compact::Seed::new([12u8; 32]));
+    let bytes = std::fs::read(fx.rel.join(manifest::NIGHTLY_MANIFEST_FILE)).unwrap();
+    std::fs::write(fx.rel.join(manifest::NIGHTLY_SIGNATURE_FILE), hash::to_hex(other.sk.sign(keys::signed_message(&bytes), None).as_ref())).unwrap();
+    // stable has nothing newer, so the failed nightly must surface (not "up to date")
+    let err = fx.updater_on("0.1.0", Channel::Nightly).check(true).unwrap_err();
+    assert!(matches!(err, Error::BadSignature(_)), "{err}");
+    assert_eq!(fx.exe(), b"OLD-EXE");
+}
+
+#[test]
+fn no_nightly_published_yet_falls_back_to_stable() {
+    let fx = Fx::new();
+    fx.publish("0.2.0", b"S", "0.0.1");
+    let r = fx.updater_on("0.1.0", Channel::Nightly).check(true).unwrap().unwrap();
+    assert_eq!((r.version.to_string().as_str(), r.channel), ("0.2.0", Channel::Stable));
+    assert_eq!(fx.server.hit_count("releases/tags/nightly -> 404"), 1);
 }

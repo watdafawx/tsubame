@@ -7,6 +7,9 @@
   2. builds a real release (tools\release.ps1, DEV test key) of two stand-in versions
   3. serves the 0.2.0 release on http://127.0.0.1 and runs `tsubame-update check/download/apply/rollback`
      against it, then repeats with a tampered zip, a tampered manifest and a wrong signature
+  4. builds a nightly (release.ps1 -Channel nightly) next to the stable 0.2.0 and checks the channel
+     rules: stable never sees it, nightly gets it from tsubame-update-nightly.json, a nightly copy is
+     offered the next stable, switching back to stable never downgrades
 
   The "app" is a stand-in file (never executed), so this runs anywhere, also on CI.
   Everything lives under -Work (default dist\e2e, gitignored). Exit code 0 = all checks passed.
@@ -61,6 +64,12 @@ foreach ($v in '0.1.0', '0.2.0') {
     if ($LASTEXITCODE -ne 0) { throw "release.ps1 failed for $v" }
     $rel[$v] = Join-Path $Work "release-$v"
 }
+Write-Host '== release script, nightly 0.2.1-nightly.5 (channel nightly)'
+$nightlyVer = '0.2.1-nightly.5'
+$exes = New-StandIn $nightlyVer
+& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'release.ps1') -Channel nightly -Version $nightlyVer -DevKey -SkipBuild -ExeDir $exes -SkipInstaller -OutDir (Join-Path $Work "release-$nightlyVer") -Cargo $Cargo
+if ($LASTEXITCODE -ne 0) { throw "release.ps1 failed for $nightlyVer" }
+$rel[$nightlyVer] = Join-Path $Work "release-$nightlyVer"
 Check 'release script made zip, manifest, signature, SHA256SUMS' ((@('tsubame-0.2.0-win-x64.zip', 'tsubame-update.json', 'tsubame-update.json.sig', 'SHA256SUMS') | Where-Object { -not (Test-Path (Join-Path $rel['0.2.0'] $_)) }).Count -eq 0)
 # SHA256SUMS agrees with the files
 $sumsOk = $true
@@ -118,7 +127,7 @@ try {
     Write-Host "      $(($out.Trim() -split "`r?`n") -join "`n      ")"
     Check 'status (no --current-version): running 0.2.0, previous 0.1.0 kept' ($out -match 'running:\s+0\.2\.0' -and $out -match 'previous: 0\.1\.0')
     $out = & $cli check --force --install-dir (Join-Path $sb 'app') --data-dir (Join-Path $sb 'data') --api-base $base 2>&1 | Out-String
-    Check 'check again: up to date (exit 0)' ($LASTEXITCODE -eq 0 -and $out -match 'up to date \(0\.2\.0\)')
+    Check 'check again: up to date (exit 0)' ($LASTEXITCODE -eq 0 -and $out -match 'up to date \(0\.2\.0, stable channel\)')
 
     # ---- 3b. rollback -----------------------------------------------------------------------
     Write-Host "`n== B. one-click rollback"
@@ -127,7 +136,7 @@ try {
     Check 'rollback: exit 0' ($LASTEXITCODE -eq 0 -and $out -match 'rolled back 0\.2\.0 -> 0\.1\.0')
     Check 'ROLLBACK RESTORED the 0.1.0 file' ((Sha $exe) -eq $oldHash)
     $out = & $cli check --force --install-dir (Join-Path $sb 'app') --data-dir (Join-Path $sb 'data') --api-base $base 2>&1 | Out-String
-    Check 'rolled-back version is not offered again' ($LASTEXITCODE -eq 0 -and $out -match 'up to date \(0\.1\.0\)')
+    Check 'rolled-back version is not offered again' ($LASTEXITCODE -eq 0 -and $out -match 'up to date \(0\.1\.0, stable channel\)')
     $out = & $cli rollback --install-dir (Join-Path $sb 'app') --data-dir (Join-Path $sb 'data') --api-base $base 2>&1 | Out-String
     Check 'second rollback refused (only one step back)' ($LASTEXITCODE -eq 1)
 
@@ -172,6 +181,39 @@ try {
     Check 'sign with unpinned key: refused (exit 1, no signature written)' ($LASTEXITCODE -eq 1 -and -not (Test-Path (Join-Path $scratch 'x.sig')) -and $out -match 'not in RELEASE_PUBLIC_KEYS_HEX')
     $seed = (Get-Content $otherKey -Raw).Trim()
     Check 'sign/keygen output never contains the private seed' (-not ($out -like "*$seed*"))
+
+    # ---- 3g. nightly channel -----------------------------------------------------------------
+    Write-Host "`n== G. nightly channel (stable 0.2.0 and nightly $nightlyVer served side by side)"
+    $nd = $rel[$nightlyVer]
+    $nm = Get-Content -Raw (Join-Path $nd 'tsubame-update-nightly.json') | ConvertFrom-Json
+    Check 'nightly release: own manifest name, channel nightly, version rule' ((Test-Path (Join-Path $nd 'tsubame-update-nightly.json.sig')) -and -not (Test-Path (Join-Path $nd 'tsubame-update.json')) -and $nm.channel -eq 'nightly' -and $nm.version -eq $nightlyVer)
+    $out = & $tool nightly-version --base 0.2.0 --run 5 2>&1 | Out-String
+    Check 'nightly-version: 0.2.0 + run 5 -> 0.2.1-nightly.5' ($out.Trim() -eq $nightlyVer)
+    $out = & $tool verify --manifest (Join-Path $nd 'tsubame-update-nightly.json') --sig (Join-Path $nd 'tsubame-update-nightly.json.sig') --dev-test-key 2>&1 | Out-String
+    Check 'nightly manifest signature verifies (dev key)' ($LASTEXITCODE -eq 0)
+    $both = Join-Path $Work 'release-both'; Copy-Item $rel['0.2.0'] $both -Recurse
+    Get-ChildItem $nd -File | Where-Object Name -ne 'SHA256SUMS' | Copy-Item -Destination $both
+    $base = Start-Server $both
+    $sb5 = New-Sandbox 'nightly' '0.1.0'
+    $r = Run-Cli $sb5 $base @('check', '--force')
+    Check 'stable 0.1.0: offered stable 0.2.0, not the nightly' ($r.Code -eq 3 -and $r.Out -match '0\.1\.0 -> 0\.2\.0\r?\n' -and $r.Out -match 'channel:\s+stable' -and $r.Out -match 'tsubame-update\.json' -and $r.Out -notmatch 'nightly\.')
+    $r = Run-Cli $sb5 $base @('check', '--force', '--channel', 'nightly')
+    Check "nightly 0.1.0: offered $nightlyVer from tsubame-update-nightly.json" ($r.Code -eq 3 -and $r.Out -match [regex]::Escape("0.1.0 -> $nightlyVer") -and $r.Out -match 'channel:\s+nightly' -and $r.Out -match [regex]::Escape('/releases/download/nightly/tsubame-update-nightly.json'))
+    $r = Run-Cli $sb5 $base @('download', '--channel', 'nightly'); Check 'nightly download: staged' ($r.Code -eq 0 -and $r.Out -match [regex]::Escape("staged $nightlyVer"))
+    $r = Run-Cli $sb5 $base @('apply', '--channel', 'nightly'); Check 'nightly apply: installed' ($r.Code -eq 0 -and $r.Out -match [regex]::Escape("applied $nightlyVer"))
+    Check 'NIGHTLY INSTALLED: tsubame.exe is the nightly file' ((Sha (Join-Path $sb5 'app\tsubame.exe')) -eq (Sha (Join-Path (Join-Path $Work "exes-$nightlyVer") 'tsubame.exe')))
+    $out = & $cli check --force --channel stable --install-dir (Join-Path $sb5 'app') --data-dir (Join-Path $sb5 'data') --api-base $base 2>&1 | Out-String
+    Check "switched back to stable on $nightlyVer`: 0.2.0 is NOT offered (no downgrade)" ($LASTEXITCODE -eq 0 -and $out -match [regex]::Escape("up to date ($nightlyVer, stable channel)"))
+    $out = & $cli check --force --channel nightly --install-dir (Join-Path $sb5 'app') --data-dir (Join-Path $sb5 'data') --api-base $base 2>&1 | Out-String
+    Check 'nightly channel on the newest nightly: up to date' ($LASTEXITCODE -eq 0 -and $out -match [regex]::Escape("up to date ($nightlyVer, nightly channel)"))
+    # a nightly manifest served as the stable one is refused (signed channel field != source)
+    $swap = Join-Path $Work 'release-swapped'; $null = New-Item -ItemType Directory $swap
+    Copy-Item (Join-Path $nd "tsubame-$nightlyVer-win-x64.zip") $swap
+    Copy-Item (Join-Path $nd 'tsubame-update-nightly.json') (Join-Path $swap 'tsubame-update.json')
+    Copy-Item (Join-Path $nd 'tsubame-update-nightly.json.sig') (Join-Path $swap 'tsubame-update.json.sig')
+    $base = Start-Server $swap
+    $sb6 = New-Sandbox 'swapped' '0.1.0'
+    $r = Run-Cli $sb6 $base @('check', '--force'); Check 'nightly manifest posing as stable: REFUSED' ($r.Code -eq 1 -and $r.Out -notmatch 'update available')
 }
 finally {
     Stop-Server

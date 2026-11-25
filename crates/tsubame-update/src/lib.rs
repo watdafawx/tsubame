@@ -16,6 +16,7 @@
 //! ```
 
 pub mod authenticode;
+pub mod channel;
 pub mod error;
 pub mod hash;
 pub mod http;
@@ -36,6 +37,7 @@ pub mod testserver;
 #[cfg(all(feature = "test-server", not(debug_assertions)))]
 compile_error!("the `test-server` feature allows plain http and trusts a public DEV key: it must never be built in release mode");
 
+pub use channel::Channel;
 pub use error::{Error, Result};
 pub use layout::Layout;
 pub use version::Version;
@@ -65,6 +67,7 @@ pub struct Config {
     current: Version,
     keys: Vec<PublicKey>,
     pins: Vec<Pin>,
+    channel: Channel,
 }
 
 impl Config {
@@ -86,7 +89,15 @@ impl Config {
                 k
             },
             pins: keys::PINNED_SIGNERS.to_vec(),
+            channel: Channel::Stable,
         })
+    }
+
+    /// Follow `channel` instead of stable (the `[updates] channel` setting). The trust chain is
+    /// the same for every channel: same pinned keys, same hashes, same downgrade rule.
+    pub fn with_channel(mut self, channel: Channel) -> Config {
+        self.channel = channel;
+        self
     }
 
     /// Test fixture: any base URL (http://127.0.0.1:port), the DEV key. Not in release builds.
@@ -121,12 +132,17 @@ impl Config {
     pub fn repo(&self) -> &str {
         &self.repo
     }
+    pub fn channel(&self) -> Channel {
+        self.channel
+    }
 }
 
 /// A verified, newer release that can be downloaded.
 #[derive(Clone, Debug)]
 pub struct Release {
     pub version: Version,
+    /// Where it came from (a nightly copy can also be offered a stable release).
+    pub channel: Channel,
     pub tag: String,
     pub released: String,
     pub notes_url: String,
@@ -158,6 +174,9 @@ pub struct StagedFile {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Staged {
     pub version: String,
+    /// Channel of the release this came from. Older `staged.json` files have none: stable.
+    #[serde(default = "stable_str")]
+    pub channel: String,
     pub min_supported_version: String,
     pub manifest_sha256: String,
     /// Directory holding the extracted files (inside `update\staging`).
@@ -214,6 +233,18 @@ pub struct Updater {
     cfg: Config,
 }
 
+fn stable_str() -> String {
+    Channel::Stable.as_str().to_string()
+}
+
+/// Pick the newer of two offers (ties keep the first, i.e. the channel's own source).
+fn newer(best: Option<Release>, r: Release) -> Option<Release> {
+    match best {
+        Some(b) if b.version >= r.version => Some(b),
+        _ => Some(r),
+    }
+}
+
 impl Updater {
     pub fn new(cfg: Config) -> Updater {
         Updater { cfg }
@@ -224,6 +255,11 @@ impl Updater {
         Ok(Updater::new(Config::production(current_version, Layout::of_current_exe()?)?))
     }
 
+    /// [`Updater::production`] following `channel`.
+    pub fn production_channel(current_version: &str, channel: Channel) -> Result<Updater> {
+        Ok(Updater::new(Config::production(current_version, Layout::of_current_exe()?)?.with_channel(channel)))
+    }
+
     pub fn config(&self) -> &Config {
         &self.cfg
     }
@@ -232,8 +268,18 @@ impl Updater {
         http::Opts { allow_http_loopback: self.cfg.allow_http_loopback, max_bytes }
     }
 
-    fn api_url(&self) -> String {
-        format!("{}/repos/{}/releases/latest", self.cfg.api_base, self.cfg.repo)
+    /// The release-list endpoint of one source: `releases/latest` (GitHub never returns a
+    /// pre-release there) or the rolling `releases/tags/nightly`.
+    pub fn api_url(&self, source: Channel) -> String {
+        match source {
+            Channel::Stable => format!("{}/repos/{}/releases/latest", self.cfg.api_base, self.cfg.repo),
+            Channel::Nightly => format!("{}/repos/{}/releases/tags/{}", self.cfg.api_base, self.cfg.repo, channel::NIGHTLY_TAG),
+        }
+    }
+
+    /// Manifest URL of one source's release `tag`.
+    pub fn manifest_url(&self, source: Channel, tag: &str) -> String {
+        self.asset_url(tag, source.manifest_file())
     }
 
     fn asset_url(&self, tag: &str, file: &str) -> String {
@@ -250,10 +296,10 @@ impl Updater {
         let mut st = State::load(l);
         let now = now_unix();
         if !check_due(&st, now, force) {
-            return self.cached_release(&mut st);
+            return self.cached_best(&mut st);
         }
         st.last_attempt_unix = now;
-        let r = self.fetch_latest(&mut st);
+        let r = self.fetch_best(&mut st);
         st.next_attempt_unix = match &r {
             Err(Error::RateLimited) => now + BACKOFF_RATE_LIMIT_SECS,
             _ => 0,
@@ -267,23 +313,58 @@ impl Updater {
         r
     }
 
-    fn cache_paths(&self) -> (PathBuf, PathBuf) {
+    fn cache_paths(&self, source: Channel) -> (PathBuf, PathBuf) {
         let d = self.cfg.layout.cache_dir();
-        (d.join(manifest::MANIFEST_FILE), d.join(manifest::SIGNATURE_FILE))
+        (d.join(source.manifest_file()), d.join(source.signature_file()))
     }
 
-    fn cached_release(&self, st: &mut State) -> Result<Option<Release>> {
-        let (mp, sp) = self.cache_paths();
+    /// The newest offer over every source of the channel, from the verified cache only.
+    fn cached_best(&self, st: &mut State) -> Result<Option<Release>> {
+        let mut best = None;
+        for &src in self.cfg.channel.sources() {
+            if let Some(r) = self.cached_release(st, src)? {
+                best = newer(best, r);
+            }
+        }
+        Ok(best)
+    }
+
+    /// Ask every source of the channel (stable: one request; nightly: the nightly release, then
+    /// stable). A rate limit stops at once. Another failure only matters when no source had an
+    /// offer: "up to date" is never claimed on the strength of a source that could not be read.
+    fn fetch_best(&self, st: &mut State) -> Result<Option<Release>> {
+        let mut best = None;
+        let mut first_err = None;
+        for &src in self.cfg.channel.sources() {
+            match self.fetch_source(st, src) {
+                Ok(Some(r)) => best = newer(best, r),
+                Ok(None) => {}
+                Err(Error::RateLimited) => return Err(Error::RateLimited),
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match (best, first_err) {
+            (Some(r), _) => Ok(Some(r)),
+            (None, Some(e)) => Err(e),
+            (None, None) => Ok(None),
+        }
+    }
+
+    fn cached_release(&self, st: &mut State, source: Channel) -> Result<Option<Release>> {
+        let (mp, sp) = self.cache_paths(source);
         let (Ok(m), Ok(s)) = (std::fs::read(&mp), std::fs::read(&sp)) else { return Ok(None) };
-        let Some(tag) = st.latest_tag.clone() else { return Ok(None) };
-        match manifest::verify(&m, &s, &self.cfg.keys) {
+        let Some(tag) = st.source_mut(source).1.clone() else { return Ok(None) };
+        match manifest::verify_for(source, &m, &s, &self.cfg.keys) {
             Ok(v) => self.release_from(v, &tag, st),
             Err(_) => {
                 // tampered / stale cache: drop it and ask the network next time
                 let _ = std::fs::remove_file(&mp);
                 let _ = std::fs::remove_file(&sp);
-                st.etag = None;
-                st.latest_tag = None;
+                let (etag, tag) = st.source_mut(source);
+                *etag = None;
+                *tag = None;
                 st.last_attempt_unix = 0;
                 let _ = st.save(&self.cfg.layout);
                 Ok(None)
@@ -291,13 +372,13 @@ impl Updater {
         }
     }
 
-    fn fetch_latest(&self, st: &mut State) -> Result<Option<Release>> {
-        let (mp, sp) = self.cache_paths();
-        let have_cache = mp.is_file() && sp.is_file() && st.latest_tag.is_some();
-        let etag = if have_cache { st.etag.clone() } else { None };
-        let (resp, body) = http::get_bytes(&self.api_url(), etag.as_deref(), self.opts(API_MAX_BYTES))?;
+    fn fetch_source(&self, st: &mut State, source: Channel) -> Result<Option<Release>> {
+        let (mp, sp) = self.cache_paths(source);
+        let have_cache = mp.is_file() && sp.is_file() && st.source_mut(source).1.is_some();
+        let etag = if have_cache { st.source_mut(source).0.clone() } else { None };
+        let (resp, body) = http::get_bytes(&self.api_url(source), etag.as_deref(), self.opts(API_MAX_BYTES))?;
         match resp.status {
-            304 => self.cached_release(st),
+            304 => self.cached_release(st, source),
             200 => {
                 #[derive(Deserialize)]
                 struct Latest {
@@ -308,12 +389,24 @@ impl Updater {
                     prerelease: bool,
                 }
                 let l: Latest = serde_json::from_slice(&body).map_err(|e| Error::Parse(format!("release JSON: {e}")))?;
-                if l.draft || l.prerelease {
-                    st.etag = resp.etag;
-                    st.latest_tag = None;
-                    return Ok(None); // stable channel only
+                let usable = match source {
+                    // `releases/latest` never lists a pre-release; refuse one anyway
+                    Channel::Stable => !l.draft && !l.prerelease,
+                    // the rolling nightly: exactly the `nightly` tag, published
+                    Channel::Nightly => !l.draft && l.tag_name == channel::NIGHTLY_TAG,
+                };
+                if !usable {
+                    let (e, t) = st.source_mut(source);
+                    *e = resp.etag;
+                    *t = None;
+                    return Ok(None);
                 }
-                let tag_version = version::parse_tag(&l.tag_name)?;
+                // stable: the tag carries the version. nightly: the tag is the fixed `nightly`
+                // and the version comes only from the signed manifest (its shape is checked there).
+                let tag_version = match source {
+                    Channel::Stable => Some(version::parse_tag(&l.tag_name)?),
+                    Channel::Nightly => None,
+                };
                 let get_small = |file: &str| -> Result<Vec<u8>> {
                     let (r, b) = http::get_bytes(&self.asset_url(&l.tag_name, file), None, self.opts(manifest::MAX_MANIFEST_BYTES))?;
                     if r.status != 200 {
@@ -321,22 +414,26 @@ impl Updater {
                     }
                     Ok(b)
                 };
-                let mbytes = get_small(manifest::MANIFEST_FILE)?;
-                let sbytes = get_small(manifest::SIGNATURE_FILE)?;
-                let v = manifest::verify(&mbytes, &sbytes, &self.cfg.keys)?;
-                if v.version != tag_version {
+                let mbytes = get_small(source.manifest_file())?;
+                let sbytes = get_small(source.signature_file())?;
+                let v = manifest::verify_for(source, &mbytes, &sbytes, &self.cfg.keys)?;
+                if let Some(tv) = tag_version
+                    && v.version != tv
+                {
                     return Err(Error::Parse(format!("manifest says {} but the release tag is {}", v.version, l.tag_name)));
                 }
                 let _ = layout::write_atomic(&mp, &mbytes);
                 let _ = layout::write_atomic(&sp, &sbytes);
-                st.etag = resp.etag;
-                st.latest_tag = Some(l.tag_name.clone());
+                let (e, t) = st.source_mut(source);
+                *e = resp.etag;
+                *t = Some(l.tag_name.clone());
                 self.release_from(v, &l.tag_name, st)
             }
             403 | 429 => Err(Error::RateLimited),
             404 => {
-                st.etag = None;
-                st.latest_tag = None;
+                let (e, t) = st.source_mut(source);
+                *e = None;
+                *t = None;
                 Ok(None)
             }
             c => Err(Error::Http(c)),
@@ -345,7 +442,9 @@ impl Updater {
 
     fn release_from(&self, v: manifest::Verified, tag: &str, st: &State) -> Result<Option<Release>> {
         let installed = installed_version(&self.cfg, st);
-        if v.version <= installed || st.is_skipped(&v.version.to_string()) {
+        // never a downgrade (also not from a nightly to an older stable), never a channel this
+        // copy does not follow, never a version that was rolled back from
+        if v.version <= installed || !self.cfg.channel.accepts(v.channel) || st.is_skipped(&v.version.to_string()) {
             return Ok(None);
         }
         let Some(asset) = v.update_asset() else {
@@ -353,6 +452,7 @@ impl Updater {
         };
         Ok(Some(Release {
             version: v.version.clone(),
+            channel: v.channel,
             tag: tag.to_string(),
             released: v.manifest.released.clone(),
             notes_url: v.manifest.notes_url.clone(),
@@ -374,6 +474,9 @@ impl Updater {
     pub fn download(&self, rel: &Release, progress: &mut dyn FnMut(Progress) -> bool) -> Result<Staged> {
         if !rel.in_place_ok {
             return Err(Error::TooOld { min: rel.min_supported_version.to_string() });
+        }
+        if !self.cfg.channel.accepts(rel.channel) {
+            return Err(Error::Install(format!("this copy follows the {} channel; the {} release {} is not installed", self.cfg.channel, rel.channel, rel.version)));
         }
         let st = State::load(&self.cfg.layout);
         if rel.version <= installed_version(&self.cfg, &st) {
@@ -448,6 +551,7 @@ impl Updater {
         }
         let staged = Staged {
             version: rel.version.to_string(),
+            channel: rel.channel.as_str().to_string(),
             min_supported_version: rel.min_supported_version.to_string(),
             manifest_sha256: rel.manifest_sha256.clone(),
             dir: files_dir,
@@ -467,11 +571,20 @@ impl Updater {
             let Ok(bytes) = std::fs::read(e.path().join("staged.json")) else { continue };
             let Ok(s) = serde_json::from_slice::<Staged>(&bytes) else { continue };
             let Ok(v) = Version::parse(&s.version) else { continue };
+            if !self.staged_channel_ok(&s) {
+                continue;
+            }
             if v > installed && best.as_ref().is_none_or(|(b, _)| v > *b) {
                 best = Some((v, s));
             }
         }
         best.map(|(_, s)| s)
+    }
+
+    /// A staged download from a channel this copy no longer follows (switched nightly ->
+    /// stable after downloading) is never applied.
+    fn staged_channel_ok(&self, s: &Staged) -> bool {
+        Channel::parse(&s.channel).is_some_and(|c| self.cfg.channel.accepts(c))
     }
 
     // ---- apply ---------------------------------------------------------------------
@@ -486,6 +599,9 @@ impl Updater {
         let installed = installed_version(&self.cfg, &st);
         if new_version <= installed {
             return Err(Error::NotNewer);
+        }
+        if !self.staged_channel_ok(staged) {
+            return Err(Error::Install(format!("the staged update {} is from the {} channel; this copy follows {}", staged.version, staged.channel, self.cfg.channel)));
         }
         if installed < Version::parse(&staged.min_supported_version)? {
             return Err(Error::TooOld { min: staged.min_supported_version.clone() });
@@ -714,7 +830,12 @@ impl Updater {
         let installed = installed_version(&self.cfg, st);
         if let Ok(rd) = std::fs::read_dir(l.staging_root()) {
             for e in rd.flatten() {
-                let stale = e.file_name().to_str().and_then(|n| Version::parse(n).ok()).is_none_or(|v| v <= installed);
+                // also a download from a channel this copy no longer follows
+                let foreign = std::fs::read(e.path().join("staged.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Staged>(&b).ok())
+                    .is_some_and(|s| !self.staged_channel_ok(&s));
+                let stale = foreign || e.file_name().to_str().and_then(|n| Version::parse(n).ok()).is_none_or(|v| v <= installed);
                 if stale {
                     let _ = std::fs::remove_dir_all(e.path());
                 }
