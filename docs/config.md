@@ -185,6 +185,7 @@ maximized = false
 | `file_age.style` | `"text"` | `text` (tints the Modified date), `chip` (tinted rect behind the date), `accent` (3 px bar on the row's left edge). Unknown value = `text` |
 | `file_age.palette` | `"heat"` | `heat`, `colour_blind` (blue/yellow safe) or `mono` (grey steps, bold for the newest). Unknown value = `heat` |
 | `file_age.pips` | `false` | four small bars before the date (4 = today, 0 = older). Always on for `colour_blind` and `mono` |
+| `miller.col_width` | `220` | Miller columns: default column width in px (140 to 480). Columns also drag-resize per session (double-click on the edge resets). Config file only, no settings control yet |
 | `tree.expand_cap` | `500` | Tree rows: recursive expand (`Shift+Right`, `*`) stops after this many folders (1 to 5,000); the status bar says so. Never follows junctions or symlinks |
 | `tree.child_cap` | `5000` | Tree rows: children listed per expanded folder, then a "Showing first 5,000 of N" row (100 to 50,000) |
 | `tree.pane` | `false` | folders-only Tree pane left of the list (`Shift+Alt+T`, command `pane.tree`; a 248 px drawer below 560 px) |
