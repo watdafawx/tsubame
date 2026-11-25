@@ -238,6 +238,11 @@ fn check_plugin_id(id: &str) -> Result<(), ManifestError> {
     if ["tsubame.", "core.", "pack."].iter().any(|p| id.starts_with(p)) {
         return err(format!("plugin.id `{id}` uses a prefix that is reserved for Tsubame"));
     }
+    // The id becomes a file name (`<id>-<version>.cwasm`) and a data folder name: on Windows
+    // `nul.x-1.0.0.cwasm` is the NUL device (PH-11).
+    if id.split('.').any(crate::caps::is_device_name) {
+        return err(format!("plugin.id `{id}` has a part that is a reserved Windows device name (`con`, `nul`, `com1` ...)"));
+    }
     Ok(())
 }
 
@@ -257,8 +262,8 @@ fn check_label(what: &str, s: &str, max: usize) -> Result<(), ManifestError> {
     if s.chars().count() > max {
         return err(format!("{what} is longer than {max} characters"));
     }
-    if s.chars().any(char::is_control) {
-        return err(format!("{what} has a control character"));
+    if s.chars().any(crate::sanitize::is_spoofing) {
+        return err(format!("{what} has a control, invisible, direction-changing or private-use character"));
     }
     Ok(())
 }
@@ -375,8 +380,8 @@ impl Manifest {
             return err(format!("plugin.api `{}` is not supported (this build speaks `{API_VERSION}`)", raw.plugin.api));
         }
         check_component(&raw.plugin.component)?;
-        if raw.plugin.description.chars().count() > 400 || raw.plugin.description.chars().any(|c| c.is_control() && c != '\n') {
-            return err("plugin.description is longer than 400 characters or has a control character");
+        if raw.plugin.description.chars().count() > 400 || raw.plugin.description.chars().any(|c| crate::sanitize::is_spoofing(c) && c != '\n') {
+            return err("plugin.description is longer than 400 characters or has a control, invisible, direction-changing or private-use character");
         }
 
         let c = &raw.capabilities;
@@ -722,7 +727,16 @@ keys = ["Ctrl+Alt+E"]
         rejects("api = \"0.1\"", "api = \"1\"", "not supported");
         rejects("name = \"N\"", "name = \"  \"", "plugin.name is empty");
         rejects("name = \"N\"", &format!("name = \"{}\"", "x".repeat(81)), "longer than 80");
-        rejects("name = \"N\"", "name = \"a\\u0007b\"", "control character");
+        rejects("name = \"N\"", "name = \"a\\u0007b\"", "control, invisible");
+        // bidi override, zero width space, line separator, private use (PH-11)
+        for c in ["202e", "200b", "2028", "e000"] {
+            rejects("name = \"N\"", &format!("name = \"a\\u{c}b\""), "plugin.name has a control, invisible");
+        }
+        // an id part that is a Windows device name (PH-11)
+        for id in ["nul.x", "x.con", "com1.tools", "a.lpt9.b", "aux.x"] {
+            rejects("id = \"a.b\"", &format!("id = \"{id}\""), "reserved Windows device name");
+        }
+        assert!(with("id = \"a.b\"", "id = \"console.com10\"").is_ok());
         rejects("api = \"0.1\"\n", "", "missing field `api`");
         rejects("id = \"a.b\"\n", "", "missing field `id`");
     }

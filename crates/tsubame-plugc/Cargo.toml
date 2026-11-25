@@ -1,0 +1,19 @@
+[package]
+name = "tsubame-plugc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tsubame wasm plugin install step: checks a plugin package, compiles its component with Cranelift and writes the .cwasm and the install record"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tsubame-plugc"
+path = "src/main.rs"
+
+[dependencies]
+# The runtime host crate: manifest, install record, engine settings. Its own build has no compiler.
+tsubame-plughost = { path = "../tsubame-plughost" }
+# The only place in the workspace that links Cranelift (about 8 MB of code that must not be in the host exe).
+wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime", "component-model", "std", "cranelift"] }

@@ -39,6 +39,13 @@ fn is_unsafe(c: char) -> bool {
     c.is_control() || is_format(c) || c == '\u{2028}' || c == '\u{2029}'
 }
 
+/// True if `c` can make text lie about what it says: control (Cc), format (Cf:
+/// bidi overrides, zero-width), line and paragraph separators (Zl, Zp) and
+/// private-use characters. A manifest label with one of these is refused (PH-11).
+pub fn is_spoofing(c: char) -> bool {
+    is_unsafe(c) || matches!(c as u32, 0xE000..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD)
+}
+
 fn cut(s: &mut String, max: usize) {
     if s.len() > max {
         let mut n = max;

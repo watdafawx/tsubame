@@ -14,7 +14,7 @@ Measured 2026-11-17 on the benchmark machine (Ryzen 9 5900X, Windows 11), releas
 | Measurement client `plughost-bench` (separate bin, not part of the host exe) | `crates/tsubame-plughost/src/bin/plughost-bench.rs` |
 | Guest: `<EXT upper> <path length>` per path; `wasm32-wasip2`, 62,732 B; own `[workspace]`, also listed in root `exclude` | `plugins/sample-column/` |
 
-Host features: `wasmtime` with `default-features = false`, `["runtime", "component-model", "std"]`, plus the crate feature `compiler` (= `wasmtime/cranelift`, on by default). No cache, profiling, wat, gc, async, threads, parallel-compilation, no `wasmtime-wasi`. Unknown imports (the std/wasip2 guest may import wasi) are linked as traps. A guest that needs real I/O would need `wasmtime-wasi` (size not measured).
+Host features: `wasmtime` with `default-features = false`, `["runtime", "component-model", "std"]`, plus, at the time of the spike, the crate feature `compiler` (= `wasmtime/cranelift`, on by default). That feature is gone: the compiler is the separate `tsubame-plugc` crate (security review PH-20). No cache, profiling, wat, gc, async, threads, parallel-compilation, no `wasmtime-wasi`. Unknown imports (the std/wasip2 guest may import wasi) are linked as traps. A guest that needs real I/O would need `wasmtime-wasi` (size not measured).
 
 The host never touches the main exe: it is a separate package target, and `tsubame` (the app crate) has no dependency on it or on wasmtime.
 
@@ -32,7 +32,7 @@ plughost-bench.exe spawn|rtt|mem .\tsubame-plughost.exe sample.cwasm --pre
 
 | Exe | Size |
 |---|---|
-| Host, full (Cranelift: compiles `.wasm` itself, `precompile`) | **9,764,864 B = 9.31 MB** |
+| Host, full (Cranelift: compiles `.wasm` itself, `precompile`; the spike's `compiler` build, no longer a build of the host package) | **9,764,864 B = 9.31 MB** |
 | Host, **runtime-only** (`--no-default-features`, loads a precompiled `.cwasm` only) | **896,512 B = 0.86 MB** |
 | `plughost-bench` (client, not shipped) | 294,912 B |
 | Guest `sample_column.wasm` / precompiled `sample.cwasm` | 62,732 B / 202,712 B |

@@ -167,6 +167,19 @@ $exes = @('tsubame.exe'); if ($WithPlughost -or (Test-Path (Join-Path $exeSrc 't
 if (Test-Path (Join-Path $exeSrc 'tsubame-handler.exe')) { $exes += 'tsubame-handler.exe' }
 elseif (-not $DevKey) { throw "missing tsubame-handler.exe in $exeSrc (a real release must ship the fail-safe shim; -DevKey rehearsals may skip it)" }
 foreach ($e in $exes) { if (-not (Test-Path (Join-Path $exeSrc $e))) { throw "missing $e in $exeSrc" } }
+# The plugin host must stay runtime-only (security review PH-20): a host over this size almost
+# certainly has Cranelift linked in, usually because a build of test targets (or a workspace-wide
+# build) overwrote target\release\tsubame-plughost.exe. Checked on the file that is packaged, so
+# -SkipBuild and -ExeDir are covered too.
+$plughostBudget = 1572864   # 1.5 MiB; a runtime-only host is about 1.0 MiB
+if ($exes -contains 'tsubame-plughost.exe') {
+    $plughostSize = (Get-Item (Join-Path $exeSrc 'tsubame-plughost.exe')).Length
+    if ($plughostSize -gt $plughostBudget) {
+        throw ("tsubame-plughost.exe in $exeSrc is $plughostSize bytes, over the $plughostBudget byte budget. " +
+            "It probably contains the Cranelift compiler (built together with test targets). Rebuild it alone: cargo build --release -p tsubame-plughost")
+    }
+    Write-Host ("tsubame-plughost.exe {0:N0} bytes (budget {1:N0})" -f $plughostSize, $plughostBudget)
+}
 
 # ---- staging area ----------------------------------------------------------------
 $null = New-Item -ItemType Directory -Force $OutDir

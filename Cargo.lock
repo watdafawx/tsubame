@@ -1141,12 +1141,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsubame-plugc"
+version = "0.1.0"
+dependencies = [
+ "tsubame-plughost",
+ "wasmtime",
+]
+
+[[package]]
 name = "tsubame-plughost"
 version = "0.1.0"
 dependencies = [
  "serde",
  "toml",
  "tsubame-ext-api",
+ "tsubame-plugc",
  "wasmtime",
  "wat",
  "windows",

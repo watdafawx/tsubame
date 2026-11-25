@@ -3,8 +3,8 @@
 //! A test that is `#[ignore]` **passes while its weakness is present**. The
 //! test name starts with the finding's id. When a finding is fixed, its test
 //! becomes a regression test (assertion flipped, `#[ignore]` dropped, the
-//! exploit setup kept): PH-01, PH-02, PH-03, PH-09, PH-10, PH-12, PH-13 b, PH-16,
-//! PH-17 and PH-18 are fixed and run in the normal suite.
+//! exploit setup kept): PH-01, PH-02, PH-03, PH-09, PH-10, PH-11, PH-12, PH-13 a and b,
+//! PH-14, PH-15, PH-16, PH-17 and PH-18 are fixed and run in the normal suite.
 //!
 //! Run the open PoCs: `cargo test -p tsubame-plughost --test security_poc -- --ignored --nocapture`
 //!
@@ -257,27 +257,43 @@ fn ph12_a_flat_input_folder_does_not_cover_its_tree() {
 }
 
 // ---- PH-11: what the install prompt would show ---------------------------------------------------
+// Fixed: labels and the description refuse control, format (bidi, zero-width), separator and private-use
+// characters; a plugin id with a Windows device name part is refused.
 
 #[test]
-#[ignore = "PoC PH-11: passes while bidi/invisible characters and device-name ids are accepted"]
-fn ph11_manifest_accepts_spoofing_characters_and_device_name_ids() {
-    // U+202E (right-to-left override) and U+200B (zero width space) are not `char::is_control`.
-    let m = Manifest::parse(&manifest("id = \"com.example.x\"\nname = \"Tsubame \u{202e}detsurT\u{200b}\"\nversion = \"1.0.0\"", "")).unwrap();
-    assert!(m.name.contains('\u{202e}') && m.name.contains('\u{200b}'));
-    // The id becomes a file name (`<id>-<version>.cwasm`) and, likely, a data folder name.
+fn ph11_manifest_refuses_spoofing_characters_and_device_name_ids() {
+    // U+202E (right-to-left override), U+200B (zero width space), U+2028 (line separator), U+E000 (private use).
+    for bad in ["Tsubame \u{202e}detsurT", "Tsub\u{200b}ame", "two\u{2028}lines", "Tsubame\u{e000}", "bell\\u0007"] {
+        let e = Manifest::parse(&manifest(&format!("id = \"com.example.x\"\nname = \"{bad}\"\nversion = \"1.0.0\""), "")).unwrap_err();
+        assert!(e.0.contains("plugin.name"), "{bad:?}: {}", e.0);
+    }
+    // The same for the description (a newline is still fine there) and the entry labels.
+    let e = Manifest::parse(&manifest("id = \"com.example.x\"\nname = \"N\"\nversion = \"1.0.0\"\ndescription = \"a\u{202e}b\"", "")).unwrap_err();
+    assert!(e.0.contains("plugin.description"), "{}", e.0);
+    let ok = manifest("id = \"com.example.x\"\nname = \"N\"\nversion = \"1.0.0\"\ndescription = \"two\\nlines\"", "");
+    assert!(Manifest::parse(&ok).is_ok());
+    let spoof_label = manifest("id = \"com.example.x\"\nname = \"N\"\nversion = \"1.0.0\"", "").replace("label = \"C\"", "label = \"C\u{202e}\"");
+    assert!(Manifest::parse(&spoof_label).unwrap_err().0.contains("label"));
+
+    // The id becomes a file name (`<id>-<version>.cwasm`) and a data folder name:
     // `nul.x-1.0.0.cwasm` is the NUL device on Windows 10 and older.
-    for id in ["nul.x", "aux.plugin", "con.fig", "com1.tools", "prn.t"] {
-        let m = Manifest::parse(&manifest(&format!("id = \"{id}\"\nname = \"N\"\nversion = \"1.0.0\""), "")).unwrap();
-        assert_eq!(m.id, id);
+    for id in ["nul.x", "aux.plugin", "con.fig", "com1.tools", "prn.t", "com.example.lpt3", "a.nul.b"] {
+        let e = Manifest::parse(&manifest(&format!("id = \"{id}\"\nname = \"N\"\nversion = \"1.0.0\""), "")).unwrap_err();
+        assert!(e.0.contains("plugin.id"), "{id}: {}", e.0);
+    }
+    // Names that only look like devices are fine (`com` is not `com1`; `console` is not `con`).
+    for id in ["com.example.x", "console.tools", "com10.x", "nulled.x"] {
+        assert_eq!(Manifest::parse(&manifest(&format!("id = \"{id}\"\nname = \"N\"\nversion = \"1.0.0\""), "")).unwrap().id, id);
     }
 }
 
 // ---- PH-13: the client allocates far more than a reply's size -------------------------------------
+// Fixed: a document reply is capped at `MAX_NODES` nodes and a list at `MAX_BATCH` entries before anything
+// is reserved, and a column reply must carry exactly as many values as the request had paths.
 
 #[test]
-#[ignore = "PoC PH-13: passes while a reply's list count is only checked against the frame size"]
-fn ph13_a_small_reply_makes_the_client_allocate_many_times_its_size() {
-    // A reply of N one-byte nodes (`Indent`). `dec_doc` reserves N * size_of::<Node>().
+fn ph13_a_small_reply_is_refused_before_the_client_allocates() {
+    // A reply of N one-byte nodes (`Indent`). It used to reserve N * size_of::<Node>().
     const N: usize = 1 << 20;
     let mut frame = Vec::with_capacity(N + 16);
     frame.extend_from_slice(&7u32.to_le_bytes()); // request id
@@ -286,53 +302,98 @@ fn ph13_a_small_reply_makes_the_client_allocate_many_times_its_size() {
     frame.resize(frame.len() + N, 7); // tag 7 = Indent
     let reply = proto::decode_reply(&frame).unwrap();
     let mut nodes: Vec<Node> = Vec::new();
-    proto::dec_doc(reply.body.unwrap(), &mut nodes).unwrap();
-    let heap = nodes.capacity() * size_of::<Node>();
-    let ratio = heap / frame.len();
-    println!("PH-13: {} byte reply -> {} bytes of Vec<Node> ({}x); a {} MiB frame -> {} MiB", frame.len(), heap, ratio, proto::MAX_FRAME >> 20, (proto::MAX_FRAME * ratio) >> 20);
-    assert!(ratio >= 24, "ratio {ratio}");
+    assert!(proto::dec_doc(reply.body.unwrap(), &mut nodes).is_err());
+    assert!(nodes.capacity() * size_of::<Node>() < 1 << 16, "nothing was reserved: {} bytes", nodes.capacity() * size_of::<Node>());
 
-    // The same for a column reply: the count is compared with the request only after decoding.
+    // The same for a column reply: the count is compared with the request before the cells are decoded.
     let mut frame = Vec::with_capacity(N + 16);
     frame.extend_from_slice(&7u32.to_le_bytes());
     frame.push(proto::reply::OK);
     frame.extend_from_slice(&(N as u32).to_le_bytes());
     frame.resize(frame.len() + N, 0); // tag 0 = Cell::Empty
     let mut cells: Vec<Cell> = Vec::new();
-    let n = proto::dec_cells(proto::decode_reply(&frame).unwrap().body.unwrap(), &mut cells).unwrap();
-    assert_eq!(n, N, "a caller that asked for 1 path gets {N} cells decoded before it can compare");
-    println!("PH-13: cells: {} byte reply -> {} bytes", frame.len(), cells.capacity() * size_of::<Cell>());
+    let e = proto::dec_cells(proto::decode_reply(&frame).unwrap().body.unwrap(), &mut cells, 1).unwrap_err();
+    assert!(e.0.contains("does not match"), "{}", e.0);
+    assert!(cells.capacity() * size_of::<Cell>() < 1 << 16, "nothing was reserved: {} bytes", cells.capacity() * size_of::<Cell>());
+
+    // Through the client: a host that answers a 1-path request with 3 values is a protocol error.
+    let p = plugin_answering(proto::enc_ok_cells(2, &[Cell::Int(1), Cell::Int(2), Cell::Int(3)]).unwrap());
+    let mut out = vec![Cell::Int(9)];
+    assert!(matches!(p.column_values("c", &["C:\\a"], &mut out), Err(CallError::Protocol(_))));
+    assert_eq!(out, [Cell::Int(9)], "what the caller had stays, nothing of the bad reply is added");
+    // ... and so is one that answers with fewer.
+    let p = plugin_answering(proto::enc_ok_cells(2, &[Cell::Int(1)]).unwrap());
+    assert!(matches!(p.column_values("c", &["C:\\a", "C:\\b"], &mut Vec::new()), Err(CallError::Protocol(_))));
 }
 
 // ---- a scripted host for the client PoCs ---------------------------------------------------------
 
+/// What the scripted host plays, one frame at a time. A real host answers a request after it got it,
+/// and the client refuses a frame that comes before (PH-14), so frame `i` is released only after the
+/// client wrote `min(i, 2)` frames: the hello at once, the answer to `Load` after the first request, the
+/// answer to the call and anything after it after the second.
 struct Script {
     data: Vec<u8>,
+    /// Where each frame starts in `data`.
+    starts: Vec<usize>,
     pos: usize,
     consumed: Arc<AtomicUsize>,
+    written: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
+}
+
+impl Script {
+    fn new(data: Vec<u8>, consumed: Arc<AtomicUsize>, written: Arc<AtomicUsize>, stop: Arc<AtomicBool>) -> Script {
+        let mut starts = Vec::new();
+        let mut at = 0;
+        while at < data.len() {
+            starts.push(at);
+            at += 4 + u32::from_le_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+        }
+        Script { data, starts, pos: 0, consumed, written, stop }
+    }
 }
 
 impl Read for Script {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // After the script the "host" says nothing more until it is killed.
-        while self.pos == self.data.len() {
+        loop {
             if self.stop.load(Ordering::SeqCst) {
                 return Ok(0);
             }
+            // After the script the "host" says nothing more until it is killed.
+            if self.pos < self.data.len() {
+                let i = self.starts.partition_point(|&s| s <= self.pos) - 1;
+                if self.written.load(Ordering::SeqCst) >= i.min(2) {
+                    let end = self.starts.get(i + 1).copied().unwrap_or(self.data.len());
+                    let n = buf.len().min(end - self.pos);
+                    buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                    self.pos += n;
+                    self.consumed.fetch_add(n, Ordering::SeqCst);
+                    return Ok(n);
+                }
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
-        let n = buf.len().min(self.data.len() - self.pos);
-        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-        self.pos += n;
-        self.consumed.fetch_add(n, Ordering::SeqCst);
-        Ok(n)
     }
 }
 
-struct Sink;
+/// Counts the frames the client writes.
+struct Sink {
+    pending: Vec<u8>,
+    written: Arc<AtomicUsize>,
+}
+
 impl Write for Sink {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(b);
+        while self.pending.len() >= 4 {
+            let n = 4 + u32::from_le_bytes(self.pending[..4].try_into().unwrap()) as usize;
+            if self.pending.len() < n {
+                break;
+            }
+            self.pending.drain(..n);
+            self.written.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(b.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -350,7 +411,7 @@ impl HostProcess for Proc {
     }
 }
 
-/// A host that ignores its input and plays `script` once.
+/// A host that plays `script` once, a frame at a time (see [`Script`]).
 struct Scripted {
     script: Vec<u8>,
     consumed: Arc<AtomicUsize>,
@@ -359,9 +420,10 @@ struct Scripted {
 impl Launcher for Scripted {
     fn launch(&self) -> io::Result<HostIo> {
         let stop = Arc::new(AtomicBool::new(false));
+        let written = Arc::new(AtomicUsize::new(0));
         Ok(HostIo {
-            input: Box::new(Sink),
-            output: Box::new(Script { data: self.script.clone(), pos: 0, consumed: self.consumed.clone(), stop: stop.clone() }),
+            input: Box::new(Sink { pending: Vec::new(), written: written.clone() }),
+            output: Box::new(Script::new(self.script.clone(), self.consumed.clone(), written, stop.clone())),
             process: Box::new(Proc(stop)),
         })
     }
@@ -376,10 +438,12 @@ fn load(timeout_ms: u32) -> Load {
         caps: Capabilities { timeout_ms, ..Capabilities::default() },
         entrypoints: entrypoints(),
         protected: Vec::new(),
+        plugin_dir: String::new(),
+        data_dir: String::new(),
     }
 }
 
-fn entrypoints() -> Vec<(Kind, String)> {
+fn entrypoints()-> Vec<(Kind, String)> {
     vec![(Kind::Column, "c".into()), (Kind::Previewer, "pv".into()), (Kind::Vfs, "v".into()), (Kind::Search, "s".into()), (Kind::Command, "open".into())]
 }
 
@@ -402,10 +466,11 @@ fn greeting() -> Vec<u8> {
 }
 
 // ---- PH-14: frames nobody asked for pile up in the app --------------------------------------------
+// Fixed: the reader takes a frame only while a request is waiting and hands it over through a channel of
+// one; a frame nobody asked for ends the host.
 
 #[test]
-#[ignore = "PoC PH-14: passes while the client reads and queues replies without a pending request"]
-fn ph14_unsolicited_frames_are_read_and_queued_without_limit() {
+fn ph14_an_unsolicited_frame_ends_the_host_and_is_not_queued() {
     const FLOOD_FRAMES: usize = 48;
     const FRAME: usize = 1 << 20;
     let mut script = greeting();
@@ -422,36 +487,54 @@ fn ph14_unsolicited_frames_are_read_and_queued_without_limit() {
     let mut out = Vec::new();
     plugin.column_values("c", &["C:\\a"], &mut out).unwrap();
     assert_eq!(out, [Cell::Int(1)]);
-    // No call is running now. The reader thread still drains the pipe into an unbounded channel.
+    // No call is running now. The first stray frame is read, the reader stops, the host is killed.
+    assert_eq!(plugin.stats().kills, 0);
     let end = Instant::now() + Duration::from_secs(10);
-    while consumed.load(Ordering::SeqCst) < total && Instant::now() < end {
+    while plugin.stats().kills == 0 && Instant::now() < end {
+        let _ = plugin.status(); // the app notices on its next look
         std::thread::sleep(Duration::from_millis(10));
     }
     let got = consumed.load(Ordering::SeqCst);
-    println!("PH-14: the idle client took {} MiB of frames it never asked for", got >> 20);
-    assert_eq!(got, total, "all {FLOOD_FRAMES} unsolicited frames were read and are held in memory");
-    assert_eq!(plugin.status(), Status::Running, "and the host is still considered healthy");
-    // Only the next call notices (a stale frame answers it) and kills the host.
-    assert!(matches!(plugin.column_values("c", &["C:\\a"], &mut out), Err(CallError::Protocol(_))));
+    println!("PH-14: the idle client took {} of {} MiB of frames it never asked for", got >> 20, total >> 20);
+    assert_eq!(plugin.stats().kills, 1, "the host that sent data nobody asked for is killed");
+    assert_eq!(plugin.status(), Status::Idle);
+    assert!(got < 3 * FRAME, "at most one stray frame is read, got {got} of {total} bytes");
 }
 
-// ---- PH-15: every other method waits behind a running call ----------------------------------------
+// ---- PH-15: every other method waited behind a running call ---------------------------------------
+// Fixed: a call holds its own lock; the state lock is short and never held across the host round trip.
 
 #[test]
-#[ignore = "PoC PH-15: passes while `status()` blocks for as long as a plugin call runs"]
-fn ph15_status_blocks_behind_a_call_in_flight() {
+fn ph15_status_does_not_block_behind_a_call_in_flight() {
     // The host loads fine, then never answers the call.
     let plugin = Arc::new(Plugin::new(load(1_500), Scripted { script: greeting(), consumed: Arc::new(AtomicUsize::new(0)) }, Options::default()));
     let p = plugin.clone();
     let worker = std::thread::spawn(move || p.column_values("c", &["C:\\a"], &mut Vec::new()));
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(300));
     // What a UI thread would do to draw a "plugin is running" badge, or `stop_if_idle` on a timer tick.
     let t0 = Instant::now();
-    let _ = plugin.status();
-    let blocked = t0.elapsed();
-    println!("PH-15: status() returned after {blocked:?} (the plugin's timeout_ms is 1500)");
-    assert!(blocked >= Duration::from_millis(1_000), "{blocked:?}");
+    assert_eq!(plugin.status(), Status::Running);
+    let _ = plugin.stats();
+    assert!(!plugin.stop_if_idle(Duration::ZERO), "a busy plugin is not stopped");
+    let took = t0.elapsed();
+    println!("PH-15: status(), stats() and stop_if_idle() returned after {took:?} (the plugin's timeout_ms is 1500)");
+    assert!(took < Duration::from_millis(500), "{took:?}");
     assert_eq!(worker.join().unwrap(), Err(CallError::Timeout));
+}
+
+#[test]
+fn ph15_shutdown_ends_a_running_call_without_waiting_for_it() {
+    let plugin = Arc::new(Plugin::new(load(5_000), Scripted { script: greeting(), consumed: Arc::new(AtomicUsize::new(0)) }, Options::default()));
+    let p = plugin.clone();
+    let worker = std::thread::spawn(move || p.column_values("c", &["C:\\a"], &mut Vec::new()));
+    std::thread::sleep(Duration::from_millis(300));
+    let t0 = Instant::now();
+    plugin.shutdown();
+    assert!(t0.elapsed() < Duration::from_millis(1_000), "{:?}", t0.elapsed());
+    // The call in flight ends well before its 5 s deadline.
+    let r = worker.join().unwrap();
+    assert!(r.is_err(), "{r:?}");
+    assert!(t0.elapsed() < Duration::from_millis(3_000), "{:?}", t0.elapsed());
 }
 
 // ---- PH-17: untrusted text in messages (fixed: regression tests) ---------------------------------
@@ -544,13 +627,21 @@ fn ph16_a_button_may_only_run_the_plugins_own_commands() {
 
 #[test]
 fn ph13_b_overlong_strings_and_documents_are_capped() {
+    use tsubame_ext_api::Previewer;
     use tsubame_plughost::sanitize::{MAX_NODES, MAX_NODE_TEXT};
     let big = Node::Text { text: "x".repeat(100_000), dim: false };
     let got = preview(&[big], 1 << 20);
     assert!(matches!(&got[..], [Node::Text { text, .. }] if text.len() == MAX_NODE_TEXT), "{}", got.len());
 
-    let many: Vec<Node> = (0..MAX_NODES + 500).map(|_| Node::Indent).collect();
+    // The host cuts a document at MAX_NODES; the client takes exactly that many and refuses more.
+    let many: Vec<Node> = (0..MAX_NODES).map(|_| Node::Indent).collect();
     assert_eq!(preview(&many, 1 << 20).len(), MAX_NODES);
+    let too_many: Vec<Node> = (0..MAX_NODES + 500).map(|_| Node::Indent).collect();
+    let p = plugin_answering(proto::enc_ok_doc(2, &too_many).unwrap());
+    let mut doc = Doc { nodes: vec![Node::Heading("kept".into())] };
+    let e = WasmPreviewer::new(p, &decl("pv")).preview(r"C:\a.zip", Limits { max_bytes: 1 << 20, max_px: 100 }, &mut doc).unwrap_err();
+    assert!(e.contains("more nodes"), "{e}");
+    assert_eq!(doc.nodes, [Node::Heading("kept".into())], "nothing of the refused reply is added");
 
     // `limits.max_bytes` bounds the document.
     let lines: Vec<Node> = (0..10).map(|_| Node::Mono("y".repeat(1_000))).collect();

@@ -9,6 +9,7 @@ members = [
     "crates/tsubame-d2d",
     "crates/tsubame-ext-api",
     "crates/tsubame-plughost",
+    "crates/tsubame-plugc",
     "crates/tsubame-bench",
     "crates/tsubame-update",
     "crates/tsubame-config",
