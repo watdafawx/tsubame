@@ -197,6 +197,9 @@ pub struct ListResponse {
     pub context_key: bool,
     pub scrolled: bool,
     pub cursor_moved: bool,
+    /// Ctrl + wheel notches over the list this frame (+1 = away from the user);
+    /// the list does not scroll for them, the app zooms
+    pub zoom: f32,
 }
 
 /// The list in `rect`, with its scrollbar on the right.
@@ -219,8 +222,12 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
 
     // wheel: whole line steps, no smoothing
     if it.wheel.1 != 0.0 {
-        let step = it.wheel.1 as f64 * ui.theme.wheel_lines() as f64 * rh as f64;
-        st.set_scroll(st.scroll - step, len);
+        if it.wheel_mods.ctrl {
+            resp.zoom = it.wheel.1;
+        } else {
+            let step = it.wheel.1 as f64 * ui.theme.wheel_lines() as f64 * rh as f64;
+            st.set_scroll(st.scroll - step, len);
+        }
     }
 
     // mouse on the rows

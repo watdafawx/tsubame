@@ -820,6 +820,90 @@ fn column_header_click_sorts_and_grip_resizes() {
     assert_eq!(r.sort, None, "releasing a resize drag is not a sort click");
 }
 
+#[test]
+fn column_header_right_click_and_edge_double_click() {
+    let mut h = Harness::new();
+    let id = Id::new("hdr2");
+    let rect = Rect::new(0.0, 0.0, 600.0, 24.0);
+    let cols = [HeaderCol { label: "Name", right: false }, HeaderCol { label: "Date", right: false }, HeaderCol { label: "Size", right: true }];
+    let spans = [(0.0, 300.0), (300.0, 150.0), (450.0, 150.0)];
+    let mut resp = HeaderResponse::default();
+    let mut run = |h: &mut Harness| {
+        h.frame(|ui, c| {
+            resp = column_header(ui, c, id, rect, &cols, &spans, None);
+        });
+        resp
+    };
+    run(&mut h);
+    // right click on the Date cell: a context request at that point, no sort
+    h.move_to(380.0, 12.0);
+    run(&mut h);
+    h.push(Event::MouseDown { pos: Pt::new(380.0, 12.0), button: Button::Right, mods: Mods::NONE, double: false });
+    run(&mut h);
+    h.push(Event::MouseUp { pos: Pt::new(380.0, 12.0), button: Button::Right, mods: Mods::NONE });
+    let r = run(&mut h);
+    assert_eq!(r.context, Some((1, Pt::new(380.0, 12.0))));
+    assert_eq!(r.sort, None);
+    // double click on the edge between Name and Date fits Name (column 0)
+    h.move_to(300.0, 12.0);
+    run(&mut h);
+    h.down_m(300.0, 12.0, Mods::NONE, true);
+    let r = run(&mut h);
+    assert_eq!(r.auto_fit, Some(0));
+    assert_eq!(r.resize, None, "the double press itself does not resize");
+    h.up(300.0, 12.0);
+    run(&mut h);
+    // the right edge of the last column fits it too
+    h.move_to(597.0, 12.0);
+    run(&mut h);
+    h.down_m(597.0, 12.0, Mods::NONE, true);
+    let r = run(&mut h);
+    assert_eq!(r.auto_fit, Some(2));
+    h.up(597.0, 12.0);
+    run(&mut h);
+}
+
+#[test]
+fn ctrl_wheel_zooms_instead_of_scrolling() {
+    let ctrl = Mods { ctrl: true, shift: false, alt: false };
+    // list
+    let mut h = Harness::new();
+    let mut st = ListState::new(22.0);
+    let mut rows = Rows::new(1000);
+    list_frame(&mut h, &mut st, &mut rows);
+    h.push(Event::Wheel { pos: Pt::new(100.0, 100.0), dy: -2.0, dx: 0.0, mods: ctrl });
+    let r = list_frame(&mut h, &mut st, &mut rows);
+    assert_eq!(st.scroll, 0.0, "Ctrl+wheel never scrolls the list");
+    assert_eq!(r.zoom, -2.0);
+    h.push(Event::Wheel { pos: Pt::new(100.0, 100.0), dy: -2.0, dx: 0.0, mods: Mods::NONE });
+    let r = list_frame(&mut h, &mut st, &mut rows);
+    assert_eq!(st.scroll, 6.0 * 22.0, "a plain wheel still scrolls");
+    assert_eq!(r.zoom, 0.0);
+    // grid
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = Tiles::new(100);
+    grid_frame(&mut h, &mut st, &mut src);
+    h.push(Event::Wheel { pos: Pt::new(100.0, 200.0), dy: 1.0, dx: 0.0, mods: ctrl });
+    let r = grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.scroll, 0.0);
+    assert_eq!(r.zoom, 1.0);
+    h.push(Event::Wheel { pos: Pt::new(100.0, 200.0), dy: -1.0, dx: 0.0, mods: Mods::NONE });
+    let r = grid_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.scroll, 66.0);
+    assert_eq!(r.zoom, 0.0);
+}
+
+#[test]
+fn grid_cell_size_change_keeps_the_top_row() {
+    let mut st = GridState::new(100.0, 100.0);
+    st.scroll = 350.0; // row 3 at the top
+    st.set_cell_size(80.0, 70.0);
+    assert_eq!(st.scroll, 3.0 * 70.0);
+    st.set_cell_size(80.0, 70.0);
+    assert_eq!(st.scroll, 3.0 * 70.0, "same size: untouched");
+}
+
 // -------------------------------------------------------------------- grid
 
 struct Tiles {
