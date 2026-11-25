@@ -4,6 +4,8 @@
 //!
 //! * `GET /repos/<repo>/releases/latest`  -> `{"tag_name":"v<version from tsubame-update.json>",...}`
 //!   with an ETag, and `304` on a matching `If-None-Match`
+//! * `GET /repos/<repo>/releases/tags/nightly` -> `{"tag_name":"nightly","prerelease":true,...}` when
+//!   `<dir>/tsubame-update-nightly.json` exists (the rolling nightly pre-release), ETag as above
 //! * `GET /<repo>/releases/download/<tag>/<file>` -> `<dir>/<file>`
 //!
 //! Tampering with a release = editing a file in that directory.
@@ -107,6 +109,15 @@ fn route(dir: &std::path::Path, repo: &str, path: &str, inm: Option<&str>) -> (u
         let Some(ver) = v.get("version").and_then(|x| x.as_str()) else { return nf };
         let body = format!("{{\"tag_name\":\"v{ver}\",\"draft\":false,\"prerelease\":false}}").into_bytes();
         let etag = format!("\"{}\"", crate::hash::sha256_hex(&m).unwrap_or_default().get(..16).unwrap_or(""));
+        if inm == Some(etag.as_str()) {
+            return (304, Some(etag), Vec::new());
+        }
+        return (200, Some(etag), body);
+    }
+    if path == format!("/repos/{repo}/releases/tags/{}", crate::channel::NIGHTLY_TAG) {
+        let Ok(m) = std::fs::read(dir.join(crate::manifest::NIGHTLY_MANIFEST_FILE)) else { return nf };
+        let body = format!("{{\"tag_name\":\"{}\",\"draft\":false,\"prerelease\":true}}", crate::channel::NIGHTLY_TAG).into_bytes();
+        let etag = format!("\"n{}\"", crate::hash::sha256_hex(&m).unwrap_or_default().get(..16).unwrap_or(""));
         if inm == Some(etag.as_str()) {
             return (304, Some(etag), Vec::new());
         }

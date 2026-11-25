@@ -9,14 +9,15 @@ Release side (building, signing, publishing): `docs\release.md`. Research behind
 
 ## Goals and non-goals
 
-- Check GitHub Releases (stable channel only), at most once per 24 h, with ETag / `If-None-Match`.
+- Check GitHub Releases, at most once per 24 h, with ETag / `If-None-Match`. Stable is the default; testers can
+  opt in to the rolling nightly test channel (see "Channels").
 - Verify before trusting anything: signed manifest, then SHA-256 of the zip, then SHA-256 of each exe.
 - Replace the running exe by rename, keep the previous version for one-click rollback, and roll back
   on its own when the new version does not start.
 - **Never**: a background service, a scheduled task, a helper process that lingers, a PowerShell/cmd
   one-liner, an elevation prompt, writes to `%TEMP%`, persistence beyond what the user opted into.
   Everything runs inside the app when the user (or the opt-out auto-check) asks.
-- Non-goals: delta updates, pre-release channels, per-machine (Program Files) in-place updates
+- Non-goals: delta updates, more pre-release channels than the one rolling nightly, per-machine (Program Files) in-place updates
   (those installs are told to run the installer), silent downloads of the update.
 
 ## Trust chain
@@ -30,6 +31,9 @@ Release side (building, signing, publishing): `docs\release.md`. Research behind
                                                                                           ▼
                                                                          Authenticode signer pinned in keys.rs
 ```
+
+The nightly channel uses the same chain with its own file names (`tsubame-update-nightly.json` + `.sig`), the
+same pinned key and the same checks; see "Channels".
 
 1. **Manifest signature.** ed25519 over `"tsubame-update-manifest-v1\n" + exact manifest bytes` (domain
    separation: a signature made for anything else is no use here). The signature is checked
@@ -85,11 +89,11 @@ A production build also rejects `http://`, including loopback, in `http::get`.
     portable.txt       marker: data dir moves to <install dir>\data
 
 <data dir>\update\                   %LOCALAPPDATA%\Tsubame\update   (portable: <install dir>\data\update)
-    state.json         last check, next allowed check, ETag, latest tag, installed version,
-                       previous version, trial boot counter, skipped versions
+    state.json         last check, next allowed check, ETag + latest tag per source (stable, nightly),
+                       installed version, previous version, trial boot counter, skipped versions
     cache\             last verified manifest + signature (answers "is there an update" without network)
     staging\<ver>\files\    verified exes waiting to be applied
-    staging\<ver>\staged.json
+    staging\<ver>\staged.json     includes the channel it came from
 ```
 
 The staging area is always under the data dir, never `%TEMP%` (same volume as the install for per-user
@@ -161,13 +165,16 @@ Settings > Updates, and `src\main.rs` calls it at three points. The UI thread on
 **Code map**
 
 - `src\updates.rs`: `init`, `on_ready`, `auto_check`, `check_now`, `install`, `cancel`, `restart`,
-  `rollback_and_relaunch`, `snapshot`, `ago`, `wait_for_exit`, `set_auto_install`. The pure policy
+  `rollback_and_relaunch`, `snapshot`, `ago`, `wait_for_exit`, `set_auto_install`, `channel`, `set_channel`. The pure policy
   (`off_reason`, `should_auto_check`, `manual_check_allowed`, `phase_from_error`,
   `apply_staged_at_start`) is unit-tested in the same file.
 - `src\settings\updates_page.rs`: the page, and `status_line` (one sentence per `Phase`).
 - `src\main.rs`: the three call sites below. `src\cli.rs`: `--after-update <pid>`.
 - `[updates]` in `config.toml`: `auto_check` (default on), `auto_install` (default off), `channel`
-  (read, ignored: the updater is stable-only).
+  (`"stable"` default, or `"nightly"`; any other value means stable).
+- `src\buildinfo.rs`: the version, channel and commit the exe was built with (`TSUBAME_VERSION`,
+  `TSUBAME_CHANNEL`, `TSUBAME_COMMIT`, set by `tools\release.ps1`; a plain `cargo build` says "local build").
+  `--version` and the Settings > Updates card print them.
 
 **Start**, in `main` before the single-instance claim (a relaunched copy has to wait for its parent):
 
@@ -217,7 +224,10 @@ Around the state:
 - `[Roll back to {previous}]`: disabled when `snapshot().previous` is `None`, needs two clicks ("Click
   again to roll back"), and says the previous version is kept "for a while" (nothing calls
   `discard_previous()` yet).
-- "Update channel: Stable" is a read-only row. "Integrity": the pinned-key sentence,
+- "Update channel": a Stable | Nightly switch (writes `[updates] channel`, applied at once through
+  `updates::set_channel`; read-only while a download runs). With Nightly picked, a warning note says
+  what nightly builds are and that going back to Stable never installs an older version. An offer names
+  its channel ("Nightly X is available"), and the card shows the build's channel and short commit. "Integrity": the pinned-key sentence,
   `github.com/{repo} (https only)`, and "nothing is sent about you".
 
 **Apply flow**, from the click to the new version running:
@@ -262,12 +272,61 @@ the process.
   next start it triggers. Machine-wide installs are sent to the installer, never updated in place.
 
 CLI (same logic, for scripts, installer tests and support): `tsubame-update check [--force] | download | apply [--restart] | rollback [--restart] | status`,
-flags `--install-dir`, `--current-version`. Exit code 3 from `check` means "update available".
+flags `--install-dir`, `--current-version`, `--channel stable|nightly` (`check` prints the channel and the
+manifest URL of an offer). Exit code 3 from `check` means "update available".
+
+## Channels
+
+`tsubame_update::Channel` (`channel.rs`): `Stable` (default) or `Nightly`, from `[updates] channel`.
+
+| | Stable | Nightly |
+|---|---|---|
+| GitHub release | `releases/latest` (`vX.Y.Z`) | the rolling pre-release tagged `nightly` (`releases/tags/nightly`), plus `releases/latest` |
+| Manifest | `tsubame-update.json` + `.sig` | `tsubame-update-nightly.json` + `.sig` |
+| Version | `X.Y.Z` | `X.Y.Z-nightly.N` |
+| Who publishes | owner pushes a `vX.Y.Z` tag (`release.yml`) | `nightly.yml` after every green `ci` on main |
+
+**Version rule.** A nightly built from Cargo.toml version `X.Y.Z` is `X.Y.(Z+1)-nightly.N`, N = the
+workflow's run number (grows by one per run, never reused). A prerelease sorts *below* its release, so
+`0.2.1-nightly.5` is newer than the `0.2.0` it was built after and older than the `0.2.1` that will ship it,
+and numeric identifiers compare as numbers (`nightly.10` > `nightly.9`). A base that already has a
+prerelease (`0.3.0-rc.1`) keeps its core: `0.3.0-nightly.N`. One implementation: `channel::nightly_version`,
+which CI calls through `tsubame-release nightly-version --base X.Y.Z --run N`.
+
+**What each copy fetches.**
+- Stable never asks for the nightly release, so a stable user cannot be offered a nightly.
+- Nightly asks for the nightly release and the stable `releases/latest`, and offers the newest of the two.
+  A nightly tester is therefore offered the next stable once it is newer than their nightly. If one source
+  fails (no nightly release yet, a 404, a bad manifest) the other one still answers; the error only shows when
+  neither has an offer. A rate limit stops at once.
+- ETag and cached tag are kept per source; the verified-manifest cache is per file name.
+
+**Same trust chain.** Both manifests are signed with the same key and checked against the same pinned list.
+The manifest's signed `channel` field must equal the source it was fetched from (`manifest::verify_for`),
+and the version shape must match the channel (a nightly must be `-nightly.N`, a stable must not). So a
+nightly manifest put up as a stable release, or the other way round, is refused even though its signature
+is genuine. SHA-256 per asset, the size cap and the downgrade check are unchanged.
+
+**Switching back to stable never downgrades.** The updater only offers a version newer than the running
+one, so a copy on `0.2.1-nightly.5` that switches to Stable waits for `0.2.1` (or later); it is never offered
+`0.2.0`. A nightly that was downloaded but not yet installed is not applied by a stable copy: `staged()` and
+`apply()` skip a staged build from a channel the copy does not follow, and the next start removes it. To go
+back to an older stable right away, install it with its installer (or unpack its zip); the updater never does
+that by itself.
+
+**Asset names and in-flight downloads.** The nightly release keeps one manifest name but versioned zips
+(`tsubame-X.Y.Z-nightly.N-win-x64.zip`). The workflow uploads the new zip first, then the manifest that
+points at it, and deletes old zips only after that, keeping the two previous builds, so a tester whose copy
+read the previous manifest can still finish that download.
+
+There is no env-var override of the API base or the channel in the app (the repo has no such pattern);
+tests use the CLI with `--api-base` and the `test-server` feature.
 
 ## Rate limiting and politeness
 
 Anonymous GitHub API: 60 requests/hour per IP. A check is 1 request (the `releases/latest` JSON) plus, only when there is
-a new tag, 2 small asset downloads (manifest, signature). With the 24 h limit, the ETag (a 304 does not count against the
+a new tag, 2 small asset downloads (manifest, signature). On the nightly channel a check is 2 API requests
+(nightly + latest), each with its own ETag. With the 24 h limit, the ETag (a 304 does not count against the
 limit) and the verified cache, a normal day costs 0–1 requests. A 403/429 stops all checks for 24 h. Requests send a
 `User-Agent: Tsubame-Updater/<version>` and the repo's public coordinates only: no machine id, no usage data, no cookies.
 
@@ -279,6 +338,8 @@ limit) and the verified cache, a normal day costs 0–1 requests. A 403/429 stop
 - `Pin::Subject` is allowed as well as the public-key hash (the key hash is preferred; subject is easier to bootstrap).
 - The previous exe is **kept** as `.old` for one-click rollback instead of deleted on next start.
 - Added a watchdog relaunch (`relaunch_watched`) and a trial-boot counter so a new version that dies at start is undone automatically.
+- One opt-in pre-release channel (nightly) instead of "stable only". Same key, same checks; the signed
+  `channel` field is bound to the source, and a nightly copy also follows stable (see "Channels").
 - No FileVersion cross-check of the extracted exe and no revocation check (documented above).
 - A small custom semver and zip reader instead of the `semver`/`zip` crates, to keep the dependency list to
   `ed25519-compact`, `miniz_oxide`, `serde`, `serde_json`, `windows`.

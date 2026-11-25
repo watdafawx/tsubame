@@ -9,6 +9,7 @@
 //! Common flags:
 //!   --install-dir <dir>       folder holding tsubame.exe (default: folder of this exe)
 //!   --current-version <x.y.z> version installed there (default: what the last run recorded)
+//!   --channel stable|nightly  release channel to follow (default stable)
 //!
 //! Test builds (`--features test-server`, debug only) add `--data-dir`, `--api-base` and
 //! `--repo` so the CLI can talk to `tsubame-update-testserver` instead of GitHub.
@@ -50,7 +51,11 @@ fn build(a: &Args) -> Updater {
         .val("--current-version")
         .or_else(|| tsubame_update::state::State::load(&layout).installed_version)
         .unwrap_or_else(|| die("unknown installed version: pass --current-version <x.y.z> once"));
-    let cfg = make_config(a, &current, layout).unwrap_or_else(|e| die(e));
+    let channel = match a.val("--channel") {
+        Some(c) => tsubame_update::Channel::parse(&c).unwrap_or_else(|| die(format!("unknown channel {c:?} (stable or nightly)"))),
+        None => tsubame_update::Channel::Stable,
+    };
+    let cfg = make_config(a, &current, layout).unwrap_or_else(|e| die(e)).with_channel(channel);
     Updater::new(cfg)
 }
 
@@ -81,7 +86,7 @@ fn make_config(_: &Args, current: &str, layout: Layout) -> tsubame_update::Resul
 fn main() {
     let mut it = std::env::args().skip(1);
     let Some(cmd) = it.next() else {
-        eprintln!("usage: tsubame-update <check [--force]|download|apply [--restart]|rollback [--restart]|status> [--install-dir D] [--current-version V]");
+        eprintln!("usage: tsubame-update <check [--force]|download|apply [--restart]|rollback [--restart]|status> [--install-dir D] [--current-version V] [--channel stable|nightly]");
         std::process::exit(2);
     };
     let a = Args { cmd, flags: it.collect() };
@@ -90,6 +95,8 @@ fn main() {
         "check" => match up.check(a.has("--force")) {
             Ok(Some(r)) => {
                 println!("update available: {} -> {}", up.config().current_version(), r.version);
+                println!("  channel:  {} (following {})", r.channel, up.config().channel());
+                println!("  manifest: {}", up.manifest_url(r.channel, &r.tag));
                 println!("  released: {}", r.released);
                 println!("  notes:    {}", r.notes_url);
                 println!("  download: {} ({} bytes)", r.download_file, r.download_size);
@@ -98,7 +105,7 @@ fn main() {
                 }
                 std::process::exit(3);
             }
-            Ok(None) => println!("up to date ({})", up.config().current_version()),
+            Ok(None) => println!("up to date ({}, {} channel)", up.config().current_version(), up.config().channel()),
             Err(e) => die(e),
         },
         "download" => {

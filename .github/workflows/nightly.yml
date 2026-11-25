@@ -1,0 +1,246 @@
+name: nightly
+
+# Test channel. After every successful `ci` run of a push to main (or by hand on main), build
+# exactly like a stable release (tools/release.ps1, same steps, same pinned actions, plughost left
+# out as in stable), sign the NIGHTLY manifest (tsubame-update-nightly.json) with the same
+# UPDATE_SIGNING_KEY secret, and replace the assets of ONE rolling GitHub pre-release tagged
+# `nightly`. It is marked pre-release and never "latest", so stable users and the stable updater
+# never see it. Version: X.Y.(Z+1)-nightly.<run number> (docs/updater.md "Channels").
+#
+# Never runs for forks or pull requests: the trigger is workflow_run of `ci` and every job checks
+# that the run was a push to main of this repository. No pull_request_target anywhere.
+# Two jobs: `build` (read-only token, has the signing secret in one step) and `publish` (the only
+# job with contents: write; it runs no repository code, only gh on the downloaded files).
+# See docs/release.md "Nightly channel".
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# Nothing by default; each job asks for exactly what it needs.
+permissions: {}
+
+concurrency:
+  # One nightly at a time. A newer trigger waits for the running one (never cancels it halfway
+  # through publishing) and replaces any older queued one.
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    if: >-
+      github.repository == 'watdafawx/tsubame' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      sha: ${{ steps.check.outputs.sha }}
+    env:
+      # The commit CI just tested (workflow_run), or main's head (manual run). Only ever used
+      # through this variable, never pasted into a script.
+      BUILD_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.BUILD_SHA }}
+          persist-credentials: false
+
+      - name: Commit to build
+        shell: pwsh
+        run: |
+          if ($env:BUILD_SHA -notmatch '^[0-9a-f]{40}$') { throw 'unexpected commit id' }
+          $head = (git rev-parse HEAD | Out-String).Trim()
+          if ($head -ne $env:BUILD_SHA) { throw "checked out $head, expected $env:BUILD_SHA" }
+          Write-Host "nightly run $env:GITHUB_RUN_NUMBER of $env:BUILD_SHA"
+
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Tests
+        shell: pwsh
+        run: cargo test -p tsubame-update --locked
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup not available' }
+          "ISCC=$iscc" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build, package, sign the nightly manifest
+        shell: pwsh
+        env:
+          # The ed25519 private key (64 hex chars), the same repository secret as a stable
+          # release. Only this step sees it, and it is never echoed: the release script hands the
+          # variable NAME to tsubame-release, not the value.
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          # Optional Authenticode, exactly as in release.yml (unset today: builds ship unsigned).
+          SIGN_CERT_THUMBPRINT: ${{ secrets.SIGN_CERT_THUMBPRINT }}
+          ARTIFACT_SIGNING_DLIB: ${{ secrets.ARTIFACT_SIGNING_DLIB }}
+          ARTIFACT_SIGNING_METADATA: ${{ secrets.ARTIFACT_SIGNING_METADATA }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_SIGNING_KEY)) { throw 'secret UPDATE_SIGNING_KEY is not set (see docs/release.md)' }
+          pwsh -NoProfile -File tools/release.ps1 -Channel nightly -NightlyRun $env:GITHUB_RUN_NUMBER -Commit $env:BUILD_SHA -OutDir "$env:GITHUB_WORKSPACE/dist/nightly"
+
+      - name: Check the files
+        id: check
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE 'dist/nightly'
+          $m = Get-Content -Raw (Join-Path $out 'tsubame-update-nightly.json') | ConvertFrom-Json
+          $v = [string]$m.version
+          if ($v -notmatch '^\d+\.\d+\.\d+-nightly\.[1-9]\d*$') { throw "unexpected nightly version '$v'" }
+          if ($m.channel -ne 'nightly') { throw "manifest channel is '$($m.channel)', expected nightly" }
+          # exactly these files, nothing else gets published
+          $want = @("tsubame-$v-win-x64.zip", "tsubame-$v-x64-setup.exe", 'tsubame-update-nightly.json', 'tsubame-update-nightly.json.sig', 'SHA256SUMS') | Sort-Object
+          $have = @(Get-ChildItem $out -File | ForEach-Object Name | Sort-Object)
+          if (Compare-Object $want $have) { throw "unexpected files: $($have -join ', ')" }
+          # SHA256SUMS must agree with the files on disk
+          foreach ($l in (Get-Content (Join-Path $out 'SHA256SUMS'))) {
+            if ($l -notmatch '^(?<h>[0-9a-f]{64})  (?<f>.+)$') { throw "unparsable SHA256SUMS line: $l" }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out $Matches['f'])).Hash.ToLowerInvariant()
+            if ($actual -ne $Matches['h']) { throw "SHA256SUMS mismatch: $($Matches['f'])" }
+          }
+          # the manifest signature against the key pinned in keys.rs (what installed apps check)
+          $tool = Join-Path $env:GITHUB_WORKSPACE 'target/release/tsubame-release.exe'
+          & $tool verify --manifest (Join-Path $out 'tsubame-update-nightly.json') --sig (Join-Path $out 'tsubame-update-nightly.json.sig')
+          if ($LASTEXITCODE -ne 0) { throw 'nightly manifest signature does not verify against the pinned key' }
+          "version=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "sha=$env:BUILD_SHA" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          $lines = @("## Nightly build $v", '', "Commit ``$env:BUILD_SHA``", '', '| File | Bytes |', '|---|---:|')
+          Get-ChildItem $out -File | Sort-Object Name | ForEach-Object { $lines += "| $($_.Name) | $($_.Length) |" }
+          $lines -join "`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: Keep the files for the publish job
+        # actions/upload-artifact v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: nightly-files
+          path: dist/nightly/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # the rolling release and its tag
+      contents: write
+      # `gh run download` of this run's own artifact (no third-party download action needed)
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+      BUILD_SHA: ${{ needs.build.outputs.sha }}
+    steps:
+      # No checkout: this job runs no repository code while it holds a write token.
+      - name: Download the build
+        shell: pwsh
+        run: |
+          gh run download $env:GITHUB_RUN_ID --repo $env:GH_REPO --name nightly-files --dir dist
+          if ($LASTEXITCODE -ne 0) { throw 'cannot download the nightly-files artifact' }
+
+      - name: Publish the rolling nightly pre-release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Invoke-Gh { & gh @args; if ($LASTEXITCODE -ne 0) { throw "gh $($args[0]) $($args[1]) failed ($LASTEXITCODE)" } }
+          $tag = 'nightly'
+          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+-nightly\.(?<run>[1-9]\d*)$') { throw "unexpected version '$env:VERSION'" }
+          $run = [long]$Matches['run']
+          if ($env:BUILD_SHA -notmatch '^[0-9a-f]{40}$') { throw 'unexpected commit id' }
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          $zip = "tsubame-$env:VERSION-win-x64.zip"; $setup = "tsubame-$env:VERSION-x64-setup.exe"
+          $manifest = 'tsubame-update-nightly.json'; $sig = "$manifest.sig"; $sums = 'SHA256SUMS'
+          $want = @($zip, $setup, $manifest, $sig, $sums) | Sort-Object
+          $have = @(Get-ChildItem $dir -File | ForEach-Object Name | Sort-Object)
+          if (Compare-Object $want $have) { throw "unexpected files: $($have -join ', ')" }
+          $p = { param($n) Join-Path $dir $n }
+
+          # where the previous nightly pointed (for the change list); lightweight tag -> commit sha
+          $prev = (& gh api "repos/$env:GH_REPO/git/ref/tags/$tag" --jq '.object.sha' 2>$null | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $prev -notmatch '^[0-9a-f]{40}$') { $prev = '' }
+
+          # release notes: version, commit, and the commits since the previous nightly. Commit
+          # messages only ever go into this file, never into a command line.
+          $notes = Join-Path $env:RUNNER_TEMP 'nightly-notes.md'
+          $short = $env:BUILD_SHA.Substring(0, 7)
+          $lines = @(
+            "Nightly test build **$env:VERSION** from commit [$short](https://github.com/$env:GH_REPO/commit/$env:BUILD_SHA) (``$env:BUILD_SHA``).",
+            '',
+            "Not a release: built automatically from main, unsigned (Windows SmartScreen warns), may be broken. How to install it, switch channels and report bugs: [TESTERS.md](https://github.com/$env:GH_REPO/blob/main/TESTERS.md).",
+            '',
+            '### Changes since the previous nightly',
+            '')
+          if ($prev -and $prev -ne $env:BUILD_SHA) {
+            $log = @(& gh api "repos/$env:GH_REPO/compare/$prev...$env:BUILD_SHA" --jq '.commits | reverse | .[] | "- " + .sha[0:7] + " " + (.commit.message | split("\n") | .[0])' 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $log.Count -gt 0) { $lines += $log } else { $lines += "- (could not list the commits since $($prev.Substring(0, 7)))" }
+          }
+          elseif ($prev) { $lines += '- (same commit as the previous nightly, rebuilt)' }
+          else { $lines += '- (first nightly)' }
+          [IO.File]::WriteAllLines($notes, [string[]]$lines)
+
+          & gh release view $tag --repo $env:GH_REPO --json tagName 2>$null | Out-Null
+          $exists = $LASTEXITCODE -eq 0
+          if (-not $exists) {
+            # first nightly: point the tag at the commit, then create the pre-release with every file
+            if ($prev) { Invoke-Gh api -X PATCH "repos/$env:GH_REPO/git/refs/tags/$tag" -f "sha=$env:BUILD_SHA" -F force=true | Out-Null }
+            else { Invoke-Gh api -X POST "repos/$env:GH_REPO/git/refs" -f "ref=refs/tags/$tag" -f "sha=$env:BUILD_SHA" | Out-Null }
+            Invoke-Gh release create $tag (& $p $zip) (& $p $setup) (& $p $sums) (& $p $sig) (& $p $manifest) --repo $env:GH_REPO --title "Nightly $env:VERSION" --notes-file $notes --prerelease --latest=false --verify-tag
+          }
+          else {
+            # Order matters, so a failure at any point leaves a consistent release behind:
+            # 1. the new zip + installer under their new names (the current manifest still points
+            #    at the old zip, which stays),
+            Invoke-Gh release upload $tag (& $p $zip) (& $p $setup) --repo $env:GH_REPO --clobber
+            # 2. then the sums, the signature and the manifest that point at them,
+            Invoke-Gh release upload $tag (& $p $sums) (& $p $sig) (& $p $manifest) --repo $env:GH_REPO --clobber
+            # 3. then move the tag and refresh the title and notes,
+            Invoke-Gh api -X PATCH "repos/$env:GH_REPO/git/refs/tags/$tag" -f "sha=$env:BUILD_SHA" -F force=true | Out-Null
+            Invoke-Gh release edit $tag --repo $env:GH_REPO --title "Nightly $env:VERSION" --notes-file $notes --prerelease --latest=false
+          }
+          # 4. only now drop old builds. The two previous ones stay, so a tester whose updater
+          #    still holds an older (cached) manifest can finish that download.
+          $assets = @(& gh release view $tag --repo $env:GH_REPO --json assets --jq '.assets[].name')
+          if ($LASTEXITCODE -ne 0) { throw 'cannot list the nightly assets' }
+          $old = foreach ($a in $assets) {
+            if ($a -match '^tsubame-\d+\.\d+\.\d+-nightly\.(?<n>[1-9]\d*)-(win-x64\.zip|x64-setup\.exe)$' -and [long]$Matches['n'] -ne $run) { [pscustomobject]@{ Name = $a; Run = [long]$Matches['n'] } }
+          }
+          $keepRuns = @($old | ForEach-Object Run | Sort-Object -Unique -Descending | Select-Object -First 2)
+          foreach ($o in $old) {
+            if ($keepRuns -notcontains $o.Run) {
+              Invoke-Gh release delete-asset $tag $o.Name --repo $env:GH_REPO --yes
+              Write-Host "removed old asset $($o.Name)"
+            }
+          }
+
+          # it must be a pre-release and must not be "latest"
+          $pre = (& gh release view $tag --repo $env:GH_REPO --json isPrerelease --jq '.isPrerelease' | Out-String).Trim()
+          if ($pre -ne 'true') { throw 'the nightly release is not marked pre-release' }
+          $latest = (& gh api "repos/$env:GH_REPO/releases/latest" --jq '.tag_name' 2>$null | Out-String).Trim()
+          if ($latest -eq $tag) { throw 'the nightly release became "latest"' }
+          "Published **$env:VERSION** to the ``$tag`` pre-release (previous nightly commit: $(if ($prev) { $prev.Substring(0, 7) } else { 'none' }))." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY

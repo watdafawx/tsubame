@@ -96,6 +96,8 @@ More info > Run anyway. That warning only covers the first run of an unsigned fi
 checked against a signing key built into the app, so they are verified either way. A `SHA256SUMS`
 file is published with each release if you want to check a download yourself.
 
+Want to test unreleased changes? There is an opt-in nightly channel: see [TESTERS.md](TESTERS.md).
+
 ## Building from source
 
 You need Windows 10 or 11, a recent stable Rust toolchain with the MSVC target (edition 2024), and the Visual Studio Build Tools (MSVC and a Windows SDK). From the repository root:

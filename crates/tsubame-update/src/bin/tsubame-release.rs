@@ -4,6 +4,7 @@
 //!   tsubame-release pubkey (--key-file F | --key-env VAR | --dev-test-key)
 //!   tsubame-release sign   --manifest M --out SIG (--key-file F | --key-env VAR | --dev-test-key) [--allow-unpinned]
 //!   tsubame-release verify --manifest M --sig SIG [--dev-test-key]
+//!   tsubame-release nightly-version --base X.Y.Z --run N   prints the nightly version (docs/updater.md)
 //!
 //! The private key (a 32-byte seed, 64 hex chars) is read from a file or an environment
 //! variable and is never printed, logged or written anywhere else. `sign` refuses a key
@@ -94,6 +95,16 @@ fn main() {
                 Ok(()) => println!("signature OK"),
                 Err(e) => die(e),
             }
+        }
+        "nightly-version" => {
+            let base = val(rest, "--base").unwrap_or_else(|| die("nightly-version needs --base <x.y.z>"));
+            let run = val(rest, "--run").unwrap_or_else(|| die("nightly-version needs --run <n>"));
+            let base = tsubame_update::Version::parse(&base).unwrap_or_else(|e| die(e));
+            if tsubame_update::channel::nightly_run(&base).is_some() {
+                die("--base is already a nightly version");
+            }
+            let run: u64 = run.parse().ok().filter(|n| *n > 0).unwrap_or_else(|| die("--run must be a positive integer"));
+            println!("{}", tsubame_update::channel::nightly_version(&base, run));
         }
         other => die(format!("unknown command {other:?}")),
     }

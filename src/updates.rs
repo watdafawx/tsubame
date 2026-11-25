@@ -19,7 +19,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tsubame_update::{Error, Progress, Release, Startup, Updater, Version};
+use crate::buildinfo::VERSION;
+use tsubame_update::{Channel, Error, Progress, Release, Startup, Updater, Version};
 
 /// Where this run stands, for the Settings > Updates page.
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +53,8 @@ pub enum OffReason {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Info {
     pub version: String,
+    /// The channel the release came from (a nightly copy may be offered a stable release).
+    pub channel: Channel,
     pub notes_url: String,
     /// false: this copy is too old / read-only and needs the installer.
     pub in_place_ok: bool,
@@ -136,6 +139,11 @@ struct Shared {
     updated_to: Option<String>,
     crashed_after_update: Option<String>,
     auto_install: bool,
+    /// `[updates] channel`, as the updater follows it.
+    channel: Channel,
+    /// Bumped on every channel switch: a check that was started for the old channel drops
+    /// its answer instead of showing an offer from a channel the user just left.
+    generation: u64,
 }
 
 static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
@@ -144,7 +152,17 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 
 fn shared() -> &'static Mutex<Shared> {
     SHARED.get_or_init(|| {
-        Mutex::new(Shared { env: Env { dev_run: true, portable: false, bench: false }, up: None, phase: Phase::Off(OffReason::NoUpdater), release: None, updated_to: None, crashed_after_update: None, auto_install: false })
+        Mutex::new(Shared {
+            env: Env { dev_run: true, portable: false, bench: false },
+            up: None,
+            phase: Phase::Off(OffReason::NoUpdater),
+            release: None,
+            updated_to: None,
+            crashed_after_update: None,
+            auto_install: false,
+            channel: Channel::Stable,
+            generation: 0,
+        })
     })
 }
 
@@ -168,6 +186,44 @@ pub fn set_auto_install(v: bool) {
     lock().auto_install = v;
 }
 
+/// The channel the updater follows now.
+pub fn channel() -> Channel {
+    lock().channel
+}
+
+/// The channel setting changed in Settings. Builds a new updater for it (same pinned key, same
+/// checks), forgets an offer from the old channel and goes back to "not checked yet". Refused
+/// (false) while a download runs. Switching nightly -> stable never downgrades: the updater only
+/// offers a stable release newer than the running nightly, and a nightly that was downloaded but
+/// not installed is discarded at the next start.
+pub fn set_channel(c: Channel) -> bool {
+    let mut sh = lock();
+    if sh.channel == c {
+        return true;
+    }
+    if matches!(sh.phase, Phase::Downloading { .. }) {
+        return false;
+    }
+    sh.channel = c;
+    sh.generation += 1;
+    sh.release = None;
+    if sh.up.is_some() {
+        match Updater::production_channel(VERSION, c) {
+            Ok(u) => sh.up = Some(Arc::new(u)),
+            Err(_) => {
+                sh.up = None;
+                sh.phase = Phase::Off(OffReason::NoUpdater);
+            }
+        }
+    }
+    if !matches!(sh.phase, Phase::Off(_) | Phase::ReadyToRestart(_)) {
+        sh.phase = Phase::Idle;
+    }
+    drop(sh);
+    wake();
+    true
+}
+
 /// The environment this run was started with (for the Settings page).
 pub fn current_env() -> Env {
     lock().env
@@ -184,16 +240,17 @@ pub enum StartAction {
 
 /// First thing in `main` (before the single-instance claim). Pure bookkeeping in a dev
 /// run: no updater is even built, nothing is read or written.
-pub fn init(env: Env, auto_install: bool, wake_fn: impl Fn() + Send + Sync + 'static) -> StartAction {
+pub fn init(env: Env, auto_install: bool, channel: Channel, wake_fn: impl Fn() + Send + Sync + 'static) -> StartAction {
     let _ = WAKE.set(Box::new(wake_fn));
     let mut sh = lock();
     sh.env = env;
     sh.auto_install = auto_install;
+    sh.channel = channel;
     if let Some(r) = off_reason(env) {
         sh.phase = Phase::Off(r);
         return StartAction::Continue;
     }
-    let up = match Updater::production(env!("CARGO_PKG_VERSION")) {
+    let up = match Updater::production_channel(VERSION, channel) {
         Ok(u) => Arc::new(u),
         Err(_) => {
             sh.phase = Phase::Off(OffReason::NoUpdater);
@@ -219,7 +276,7 @@ pub fn init(env: Env, auto_install: bool, wake_fn: impl Fn() + Send + Sync + 'st
     }
     // apply a staged download at this restart (auto install only)
     let staged = up.staged();
-    if apply_staged_at_start(auto_install, staged.as_ref().map(|s| s.version.as_str()), env!("CARGO_PKG_VERSION"))
+    if apply_staged_at_start(auto_install, staged.as_ref().map(|s| s.version.as_str()), VERSION)
         && let Some(st) = staged
     {
         drop(sh);
@@ -273,12 +330,16 @@ pub fn check_now() {
 }
 
 fn spawn_check(up: Arc<Updater>, force: bool) {
+    let generation = lock().generation;
     set_phase(Phase::Checking);
     tsubame_update::spawn_check(up.clone(), force, move |r| {
+        if lock().generation != generation {
+            return; // the channel changed while this ran: its answer is for the old channel
+        }
         match r {
             Ok(None) => set_phase(Phase::UpToDate),
             Ok(Some(rel)) => {
-                let info = Info { version: rel.version.to_string(), notes_url: rel.notes_url.clone(), in_place_ok: rel.in_place_ok, size: rel.download_size };
+                let info = info_of(&rel);
                 let auto = lock().auto_install && rel.in_place_ok;
                 {
                     let mut sh = lock();
@@ -337,7 +398,7 @@ fn e_is_cancel(e: &Error) -> bool {
 }
 
 fn info_of(rel: &Release) -> Info {
-    Info { version: rel.version.to_string(), notes_url: rel.notes_url.clone(), in_place_ok: rel.in_place_ok, size: rel.download_size }
+    Info { version: rel.version.to_string(), channel: rel.channel, notes_url: rel.notes_url.clone(), in_place_ok: rel.in_place_ok, size: rel.download_size }
 }
 
 pub fn cancel() {
@@ -376,7 +437,7 @@ pub fn snapshot() -> Snapshot {
             let s = up.status();
             (s.running, s.previous, s.last_check_unix)
         }
-        None => (env!("CARGO_PKG_VERSION").to_string(), None, 0),
+        None => (VERSION.to_string(), None, 0),
     };
     Snapshot { phase: sh.phase.clone(), running, previous, last_check_unix: last, updated_to: sh.updated_to.clone(), crashed_after_update: sh.crashed_after_update.clone() }
 }
@@ -486,15 +547,28 @@ mod tests {
     #[test]
     fn dev_run_init_builds_no_updater_and_stays_off() {
         // the shared state is process-global: this test only asserts the dev-run path
-        let a = init(env(true, false, false), false, || {});
+        let a = init(env(true, false, false), false, Channel::Stable, || {});
         assert_eq!(a, StartAction::Continue);
         let s = snapshot();
         assert_eq!(s.phase, Phase::Off(OffReason::DevRun));
-        assert_eq!(s.running, env!("CARGO_PKG_VERSION"));
+        assert_eq!(s.running, VERSION);
         // and the buttons do nothing (no worker, no state change)
         check_now();
         install();
         assert_eq!(snapshot().phase, Phase::Off(OffReason::DevRun));
+        // switching the channel in a dev run builds no updater either and keeps it off
+        assert!(set_channel(Channel::Nightly));
+        assert_eq!(channel(), Channel::Nightly);
+        assert_eq!(snapshot().phase, Phase::Off(OffReason::DevRun));
+        assert!(set_channel(Channel::Stable));
+    }
+
+    #[test]
+    fn config_channel_values_map_to_the_updater_channel() {
+        let c = tsubame_config::Config::default();
+        assert_eq!(Channel::from_config(&c.updates.channel), Channel::Stable, "stable is the default");
+        assert_eq!(Channel::from_config("nightly"), Channel::Nightly);
+        assert_eq!(Channel::from_config("beta"), Channel::Stable, "an unknown value never means test builds");
     }
 
     #[test]
