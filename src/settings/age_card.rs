@@ -48,14 +48,11 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
     let ext_on = crate::age::is_enabled();
     pg.section("File age colours");
-    let mut c = pg.card(9, 52.0);
+    let mut c = pg.card(8, 52.0);
     let fa = &mut cx.prefs.file_age;
     if let Some(v) = pg.toggle_row(&mut c, "Colour files by age", "Tints the Modified date (or the row) by how recently the file changed. Off by default.", fa.enabled, ext_on) {
         fa.enabled = v;
         cx.changed |= C_OTHER;
-    }
-    if let Some(v) = pg.toggle_row(&mut c, "Status-bar key and palette command", "Off removes the key at the right of the status bar and the Age colours command.", ext_on, true) {
-        cx.ext_switch = Some((crate::age::EXT_FILE_AGE, v));
     }
     let style = match fa.style {
         AgeStyle::Text => 0,

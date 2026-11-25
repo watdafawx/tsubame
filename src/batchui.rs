@@ -7,6 +7,36 @@ use crate::overlay;
 use crate::rename::{self, BatchItem, BatchPlan, RowProblem};
 use tsubame_ui::{Button, Canvas, Id, Rect, Sense, TextInput, Theme, Ui, f, text_input};
 
+use tsubame_ext_api::{Contributions, Extension, ExtensionInfo};
+
+/// Built-in extension id for batch rename (F4). The pattern engine
+/// (`rename::plan_batch`) stays in core; this extension owns the command,
+/// the context-menu entry and the bar.
+pub const EXT_BATCH_RENAME: &str = "tsubame.ext.batch_rename";
+
+/// Shown in the status bar when F2 hits several items while the extension is off.
+pub const OFF_MSG: &str = "Batch rename is switched off (Settings > Extensions). Renaming one item.";
+
+/// Built-in extension registering `file.batch_rename`.
+pub struct BatchRenameExtension;
+
+impl Extension<crate::ext::App> for BatchRenameExtension {
+    fn info(&self) -> ExtensionInfo {
+        ExtensionInfo::builtin(EXT_BATCH_RENAME, "Batch rename", false)
+    }
+
+    fn contribute(&self, c: &mut Contributions<crate::ext::App>) {
+        for spec in crate::commands::BATCH_RENAME_COMMANDS {
+            c.command(spec.clone(), crate::view::View::run_builtin);
+        }
+    }
+}
+
+/// True when `tsubame.ext.batch_rename` is enabled in the registry.
+pub fn is_enabled() -> bool {
+    crate::ext::read(|r| r.is_enabled(EXT_BATCH_RENAME).unwrap_or(false))
+}
+
 pub const BAR_H: f32 = 40.0;
 const PREVIEW_ROWS: usize = 8;
 const PREVIEW_W: f32 = 640.0;

@@ -125,5 +125,6 @@ does not draw provider columns yet; that arrives with wasm plugins.
 | `tsubame.vfs.archive` | No | Archive VFS browsing (`.zip`, `.tar`, `.tar.gz`, `.tgz`, `.7z`) + `archive.extract_here`, `archive.extract_selected` |
 | `tsubame.ext.folder_sizes` | No | `folder.calc_sizes` background recursive folder size scan |
 | `tsubame.ext.checksum` | No | `file.checksum` background CRC32 / MD5 / SHA-1 / SHA-256 copy |
+| `tsubame.ext.batch_rename` | No | `file.batch_rename`, "Rename N items" context-menu entry, bar. F2 on several items opens it; off: F2 renames the focused item inline and the status bar says so. Pattern engine stays in core (`src/rename.rs`) |
 | `tsubame.ext.global_search` | No | `search.global` (`Ctrl+Shift+F`) Everything IPC + parallel walk search overlay |
 | `tsubame.ext.file_age` | No | `view.age_colours` and the status-bar key: tints the Modified date by age (`[file_age]`, `src/age.rs`, Settings > Extensions). Off switch removes the key and the command; colours themselves are off by default |

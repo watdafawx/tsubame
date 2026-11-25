@@ -1,5 +1,5 @@
 //! Settings, drawn inside a tab (U4): a navigation list on the left, one page on the right.
-//! Pages: General, Appearance, Context menu, Keys, Updates, Default file manager, Advanced.
+//! Pages: General, Appearance, Context menu, Keys, Updates, Default file manager, Extensions, Advanced.
 //!
 //! The state here is built the first time the tab opens and dropped when it closes. Every
 //! change is applied the moment it is made: a page edits `Cx::prefs` (the config) or
@@ -12,7 +12,7 @@ mod advanced;
 mod age_card;
 mod appearance;
 mod defaultfm_page;
-mod extensions;
+mod extensions_page;
 mod general;
 mod keys_page;
 mod menu_ed;
@@ -78,7 +78,7 @@ impl Page {
             Page::Keys => "\u{E765}",
             Page::Updates => "\u{E896}",
             Page::DefaultFm => "\u{E8B7}",
-            Page::Extensions => "\u{E71D}",
+            Page::Extensions => "\u{EA86}",
             Page::Advanced => "\u{E90F}",
         }
     }
@@ -92,7 +92,7 @@ impl Page {
             Page::Keys => "keyboard shortcuts keybindings hotkeys rebind chord",
             Page::Updates => "update version check download install rollback signature",
             Page::DefaultFm => "explorer default folder registry win+e shim",
-            Page::Extensions => "extension feature file age colours heat modified date tint palette thresholds pips",
+            Page::Extensions => "extension plugin built-in switch on off batch rename preview archive search checksum folder sizes file age colours heat modified date tint palette thresholds pips",
             Page::Advanced => "config folder reset diagnostics log memory portable",
         }
     }
@@ -140,8 +140,8 @@ pub struct Cx<'a> {
     pub rollback: bool,
     /// "Reload packs" on the Advanced page was pressed
     pub reload_packs: bool,
-    /// an extension switched on or off on the Extensions page
-    pub ext_switch: Option<(&'static str, bool)>,
+    /// an extension switch on the Extensions page was flipped: (id, on)
+    pub ext_toggle: Option<(String, bool)>,
     /// a message for the status bar
     pub message: Option<String>,
     /// private bytes of the process, for the Advanced page (the view reads it once a second)
@@ -159,7 +159,7 @@ pub struct Settings {
     pub menu: menu_ed::State,
     pub dfm: defaultfm_page::State,
     pub adv: advanced::State,
-    pub ext: extensions::State,
+    pub ext: extensions_page::State,
     pub upd: updates_page::State,
     /// the page was just switched: scroll to the top, rebuild lazily
     fresh: bool,
@@ -217,7 +217,7 @@ impl Settings {
                 Page::Keys => keys_page::paint(&mut pg, &mut self.keys, cx),
                 Page::Updates => updates_page::paint(&mut pg, &mut self.upd, cx),
                 Page::DefaultFm => defaultfm_page::paint(&mut pg, &mut self.dfm, cx),
-                Page::Extensions => extensions::paint(&mut pg, &mut self.ext, cx),
+                Page::Extensions => extensions_page::paint(&mut pg, &mut self.ext, cx),
                 Page::Advanced => advanced::paint(&mut pg, &mut self.adv, cx),
             }
             end = pg.y;
