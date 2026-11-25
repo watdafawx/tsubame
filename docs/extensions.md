@@ -126,3 +126,5 @@ does not draw provider columns yet; that arrives with wasm plugins.
 | `tsubame.ext.folder_sizes` | No | `folder.calc_sizes` background recursive folder size scan |
 | `tsubame.ext.checksum` | No | `file.checksum` background CRC32 / MD5 / SHA-1 / SHA-256 copy |
 | `tsubame.ext.global_search` | No | `search.global` (`Ctrl+Shift+F`) Everything IPC + parallel walk search overlay |
+| `tsubame.ext.tags` | No | Tags and colours (P4.F6): `tags.pick` (`Alt+T`) picker, marks after the name and in Grid, the sidebar Tags section (filter across folders, drop to tag), Settings > Tags. Off: no `tags.db` is opened and nothing runs |
+| `tsubame.column.tags` | No | Tags column (`order: 5`, right after Name, opt-in with `[tags] column = true`); needs `tsubame.ext.tags` |

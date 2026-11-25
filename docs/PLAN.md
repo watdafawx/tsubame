@@ -115,7 +115,7 @@ Work is split into phases. Each phase has a gate that is checked before the next
 | P1 | A skeleton you can browse with | Browse, sort, filter, tabs; leak gate runs | Done |
 | P2 | Daily driver: file operations, watcher, shell integration, icons, panes, palette, config | Daily use without data-loss hazards | Done |
 | P3 | Extension registry | Built-in features registered through `tsubame-ext-api` | Done (`docs/extensions.md`, `docs/extension-packs.md`) |
-| P4 | Features as built-in extensions | Each feature switchable | Partial: F1, F2, F3, F5 done as switchable built-ins; F4 still core-only; F6 not started |
+| P4 | Features as built-in extensions | Each feature switchable | Partial: F1, F2, F3, F5 done as switchable built-ins; F4 still core-only; F6 tags done, Miller, tree and age not started |
 | P5 | Wasm plugins | Host lifecycle, capability manifest, SDK | Partial: P1 and P2 done (`docs/wasm-plugins.md`, `docs/plugin-authoring.md`); P3 security review open |
 | P6 | Ship: installer, updater, default file manager | Signed release a user can install and update | Mostly done; two items open |
 
@@ -175,7 +175,7 @@ Each one gets a mock first where it has UI.
 | F3 | Archive VFS (zip, 7z, tar) browse and extract | Done (built-in extension `tsubame.vfs.archive`, `src/archive_ui.rs`). Follow-up accepted 2026-11-24: status-bar message for blocked actions, overwrite prompt (skip, replace, rename) |
 | F4 | Batch rename with live preview | Done in U3 as a built-in; not yet on the extension registry |
 | F5 | Folder sizes column (background, cached), git status column, checksum command | Done (built-in extensions `tsubame.ext.folder_sizes`, `tsubame.ext.checksum`, `tsubame.column.git`; `crates/tsubame-win/src/meta/`) |
-| F6 | Miller columns view, tree view, tags and colours, file-age colouring | Not done |
+| F6 | Miller columns view, tree view, tags and colours, file-age colouring | Partial: tags and colours done (built-in extensions `tsubame.ext.tags`, `tsubame.column.tags`; `src/tags/`, `src/view_tags.rs`, `docs/f6-mock.md`). Miller, tree and age not started |
 
 ### P5. Wasm plugins
 
@@ -211,6 +211,7 @@ Kept current as work lands: every measurement surprise, QA finding or improvemen
 
 | Date | Finding | Status |
 |---|---|---|
+| 2026-11-25 | P4.F6 tags and colours built as `tsubame.ext.tags` + `tsubame.column.tags`: central `tags.db` keyed by (volume serial, file id) with a path hint, owned by one worker thread (lazy open, coalesced saves, one reconcile per volume that pauses while the view scrolls), view reads through a 4,096-row LRU, soft cap 100k items / 16 MB with a warning at 90%. Choices made while building: a click outside the picker applies it (Esc cancels); the context menu gets one "Tags…" row that opens the picker instead of a submenu; the Tags column is opt-in (`[tags] column`); export/import use a fixed `tags-export.json` next to `config.toml` (no file dialog yet); a rename moves path-keyed tags at submit time, not when the shell confirms. *Proposed:* `Alt+T` is also the approved chord for the future tree pane, so one of them needs another chord in the keybinding pass; the picker's UIA rows can be read but not invoked. | Done (tree-pane chord open) |
 | 2026-11-25 | Plughost cards C and E: install record (`src/install_record.rs`, written once, verified before each start; capabilities come from the record), protected folders in `Load` (protocol version 2; package and settings read-only, cache sealed, checked on the handle's final path), one cache folder per id and version, capped reads; `$input` scoped by entry-point kind (column and previewer flat, search and command selection recursive, command folder flat). Host exe 1,070,592 B. The app still loads no plugins, so the record and protected folders are tested in the crate only. | Fixed: PH-02, 03, 10, 12, 18 (compile bound still open: run `tsubame-plugc` in a job) |
 | 2026-11-25 | P5.P2 guest SDK and samples: sample `.cwasm` files are 327 KB (file kind column) and 426 KB (CSV previewer); `.wasm` 88 KB and 122 KB. The SDK exports every WIT interface and answers the unused ones with errors, so a plugin of one kind still works against the host. vfs, search and command have no SDK trait yet. The e2e test skips when `wasm32-wasip2` is missing unless `TSUBAME_REQUIRE_WASM_SAMPLES` is set; decide whether CI sets it. | Done |
 | 2026-11-25 | P4.F4/F6 mocks approved with all recommendations (`docs/f6-mock.md`, `mocks/mock-f6-*.html`, `mock-f4-batch-rename-ext.html`): Miller (header per column, pane-wide sort, drill-down below 560 px), Tree (separate `Alt+T` pane, files and folders, junction follow on explicit action, caps 500/5,000), Tags (central `tags.db`, 8 named tags, shapes on, `Alt+T` picker), Age (off by default, date text + Heat palette, since midnight 7/30/365 days, no folder tint), F4 (switchable built-in, default on, engine stays in core). Mocks only have dark and light: the other basic themes still need adding to the mock tokens. | Approved; build order: Age and Tags and F4, then Tree, then Miller |
