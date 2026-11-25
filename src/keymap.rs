@@ -401,7 +401,7 @@ pub fn category(name: &str) -> &'static str {
         "select" => "Edit",
         "view" | "sidebar" | "preview" => "View",
         "pane" => "Panes",
-        "settings" | "app" | "palette" => "App",
+        "settings" | "app" | "palette" | "window" => "App",
         _ => "Tools",
     }
 }
@@ -475,10 +475,10 @@ mod tests {
 
     #[test]
     fn overrides_apply_and_to_overrides_round_trips() {
-        let o = ov(&[("tab.new", &["Ctrl+N", "Ctrl+Alt+T"]), ("tab.close", &[])]);
+        let o = ov(&[("tab.new", &["Ctrl+J", "Ctrl+Alt+T"]), ("tab.close", &[])]);
         let (m, warn) = KeyMap::from_overrides(&o);
         assert!(warn.is_empty(), "{warn:?}");
-        assert_eq!(m.chords(CMD_NEW_TAB), &[Chord::new(Key::Char('N'), Mods::CTRL), Chord::new(Key::Char('T'), Mods { ctrl: true, shift: false, alt: true })]);
+        assert_eq!(m.chords(CMD_NEW_TAB), &[Chord::new(Key::Char('J'), Mods::CTRL), Chord::new(Key::Char('T'), Mods { ctrl: true, shift: false, alt: true })]);
         assert!(m.chords(CMD_CLOSE_TAB).is_empty(), "empty list = unbound");
         assert_eq!(m.label(CMD_NEXT_TAB), "Ctrl+Tab", "others keep their defaults");
         assert_eq!(m.changed(), 2);
@@ -490,11 +490,11 @@ mod tests {
     #[test]
     fn a_default_chord_can_move_to_another_command() {
         // Ctrl+T leaves "new tab" for "close tab": no conflict, the old owner is emptied by its own override
-        let o = ov(&[("tab.new", &["Ctrl+N"]), ("tab.close", &["Ctrl+T"])]);
+        let o = ov(&[("tab.new", &["Ctrl+J"]), ("tab.close", &["Ctrl+T"])]);
         let (m, warn) = KeyMap::from_overrides(&o);
         assert!(warn.is_empty(), "{warn:?}");
         assert_eq!(m.label(CMD_CLOSE_TAB), "Ctrl+T");
-        assert_eq!(m.label(CMD_NEW_TAB), "Ctrl+N");
+        assert_eq!(m.label(CMD_NEW_TAB), "Ctrl+J");
     }
 
     #[test]
@@ -546,10 +546,10 @@ mod tests {
     fn slots_replace_append_and_clear() {
         let mut m = KeyMap::defaults();
         let ctrl = |ch| Chord::new(Key::Char(ch), Mods::CTRL);
-        m.assign(CMD_NEW_TAB, 1, ctrl('N')).unwrap();
-        assert_eq!(m.chords(CMD_NEW_TAB), &[ctrl('T'), ctrl('N')]);
+        m.assign(CMD_NEW_TAB, 1, ctrl('J')).unwrap();
+        assert_eq!(m.chords(CMD_NEW_TAB), &[ctrl('T'), ctrl('J')]);
         m.assign(CMD_NEW_TAB, 0, ctrl('M')).unwrap();
-        assert_eq!(m.chords(CMD_NEW_TAB), &[ctrl('M'), ctrl('N')]);
+        assert_eq!(m.chords(CMD_NEW_TAB), &[ctrl('M'), ctrl('J')]);
         m.assign(CMD_NEW_TAB, 5, ctrl('Q')).unwrap();
         assert_eq!(m.chords(CMD_NEW_TAB).len(), 2, "never more than two");
         m.clear_slot(CMD_NEW_TAB, 0);
@@ -566,10 +566,10 @@ mod tests {
         m.bind_all(&mut ui);
         assert_eq!(ui.shortcuts.lookup(Key::Char('T'), Mods::CTRL, true), Some(CMD_NEW_TAB));
         assert_eq!(ui.shortcuts.lookup(Key::F(2), Mods::NONE, false), Some(CMD_RENAME));
-        m.assign(CMD_NEW_TAB, 0, Chord::new(Key::Char('N'), Mods::CTRL)).unwrap();
+        m.assign(CMD_NEW_TAB, 0, Chord::new(Key::Char('J'), Mods::CTRL)).unwrap();
         m.bind_all(&mut ui);
         assert_eq!(ui.shortcuts.lookup(Key::Char('T'), Mods::CTRL, true), None, "the old chord is gone");
-        assert_eq!(ui.shortcuts.lookup(Key::Char('N'), Mods::CTRL, true), Some(CMD_NEW_TAB));
+        assert_eq!(ui.shortcuts.lookup(Key::Char('J'), Mods::CTRL, true), Some(CMD_NEW_TAB));
     }
 
     #[test]

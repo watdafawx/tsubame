@@ -77,6 +77,11 @@ pub const CMD_VIEW_MILLER: u32 = 83;
 pub const CMD_AGE_COLOURS: u32 = 70;
 // F4 batch rename (id kept clear of the other P4 batches in flight)
 pub const CMD_BATCH_RENAME: u32 = 72;
+// B10-B: Explorer parity (navigation, tabs, window; id range 120-139)
+pub const CMD_REOPEN_TAB: u32 = 120;
+pub const CMD_NEW_WINDOW: u32 = 121;
+pub const CMD_FULLSCREEN: u32 = 122;
+pub const CMD_REVEAL_SIDEBAR: u32 = 123;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -133,12 +138,16 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_SYSTEM, "view.system", "Show protected system files", [], G),
     cmd!(CMD_CHECK_UPDATES, "app.check-updates", "Check for updates", [], G),
     cmd!(CMD_OPEN_CONFIG, "app.open-config-folder", "Open the settings folder", [], G),
-    cmd!(CMD_SETTINGS_KEYS, "settings.keys", "Settings: keyboard shortcuts", [], G),
+    cmd!(CMD_SETTINGS_KEYS, "settings.keys", "Settings: keyboard shortcuts", ["F1"], G),
     cmd!(CMD_SETTINGS_APPEARANCE, "settings.appearance", "Settings: themes and appearance", [], G),
     cmd!(CMD_SETTINGS_MENU, "settings.context-menu", "Settings: context menu editor", [], G),
     cmd!(CMD_SETTINGS_UPDATES, "settings.updates", "Settings: updates", [], G),
     cmd!(CMD_SETTINGS_DEFAULT_FM, "settings.default-file-manager", "Settings: default file manager", [], G),
     cmd!(CMD_RESET_KEYS, "settings.reset-keys", "Reset all keyboard shortcuts", [], G),
+    cmd!(CMD_REOPEN_TAB, "tab.reopen", "Reopen closed tab", ["Ctrl+Shift+T"], G),
+    cmd!(CMD_NEW_WINDOW, "window.new", "New window", ["Ctrl+N"], G),
+    cmd!(CMD_FULLSCREEN, "window.fullscreen", "Toggle fullscreen", ["F11"], G),
+    cmd!(CMD_REVEAL_SIDEBAR, "sidebar.reveal-current", "Reveal current folder in sidebar", ["Ctrl+Shift+E"], GF),
 ];
 
 /// Archive extension (`tsubame.vfs.archive`) commands. The extension commands take the
@@ -341,12 +350,16 @@ mod tests {
         (CMD_SYSTEM, &[], true),
         (CMD_CHECK_UPDATES, &[], true),
         (CMD_OPEN_CONFIG, &[], true),
-        (CMD_SETTINGS_KEYS, &[], true),
+        (CMD_SETTINGS_KEYS, &[(Key::F(1), NM)], true),
         (CMD_SETTINGS_APPEARANCE, &[], true),
         (CMD_SETTINGS_MENU, &[], true),
         (CMD_SETTINGS_UPDATES, &[], true),
         (CMD_SETTINGS_DEFAULT_FM, &[], true),
         (CMD_RESET_KEYS, &[], true),
+        (CMD_REOPEN_TAB, &[(Key::Char('T'), CS)], true),
+        (CMD_NEW_WINDOW, &[(Key::Char('N'), CT)], true),
+        (CMD_FULLSCREEN, &[(Key::F(11), NM)], true),
+        (CMD_REVEAL_SIDEBAR, &[(Key::Char('E'), CS)], true),
     ];
 
     const FEATURE_BEFORE: &[Before] = &[
@@ -369,7 +382,7 @@ mod tests {
     fn settings_tab_allowed_before(cmd: u32) -> bool {
         matches!(
             cmd,
-            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS
+            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS | CMD_REOPEN_TAB | CMD_NEW_WINDOW | CMD_FULLSCREEN
         ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
     }
 

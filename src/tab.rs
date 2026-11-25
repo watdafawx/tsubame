@@ -76,6 +76,16 @@ pub struct Restore {
     pub selected: Vec<String>,
 }
 
+/// Snapshot of a closed tab kept on the window's reopen stack (`Ctrl+Shift+T`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosedTab {
+    pub path: String,
+    pub view_mode: tsubame_config::ViewMode,
+    pub sort: Sort,
+    pub scroll_first_row: usize,
+    pub index: usize,
+}
+
 /// Times of the last navigation, all measured from the navigation event.
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
@@ -960,6 +970,17 @@ impl Tab {
     /// Heap bytes this tab holds in its store (diagnostics).
     pub fn memory_bytes(&self) -> usize {
         self.store.memory_bytes()
+    }
+
+    /// Captures enough state to reopen this tab after close (`Ctrl+Shift+T`).
+    /// Returns `None` for Settings or synthetic tabs.
+    pub fn snapshot_closed(&self, view_mode: tsubame_config::ViewMode, index: usize) -> Option<ClosedTab> {
+        if self.settings || self.synthetic || self.path.is_empty() {
+            return None;
+        }
+        let row_h = self.list.row_h.max(1.0) as f64;
+        let scroll_first_row = (self.list.scroll.max(0.0) / row_h).round() as usize;
+        Some(ClosedTab { path: self.path.clone(), view_mode, sort: self.sort, scroll_first_row, index })
     }
 }
 

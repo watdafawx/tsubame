@@ -172,6 +172,10 @@ pub struct Sidebar {
     tip: Option<(Rect, String)>,
     /// the Tags header's "+" was clicked this frame
     new_tag: bool,
+    /// height of the scrollable body on the last paint (for `reveal`)
+    last_body_h: f32,
+    /// item to scroll into view on the next paint (`Ctrl+Shift+E`)
+    pending_reveal: Option<Kind>,
 }
 
 impl Default for Sidebar {
@@ -198,6 +202,8 @@ impl Default for Sidebar {
             want_width: None,
             tip: None,
             new_tag: false,
+            last_body_h: 0.0,
+            pending_reveal: None,
         }
     }
 }
@@ -360,6 +366,57 @@ impl Sidebar {
         }
     }
 
+    /// `Ctrl+Shift+E`: expands the sidebar if collapsed, unfolds the section
+    /// containing `path` (Pinned, Quick access, Recent, This PC or Network),
+    /// selects it if pinned, and scrolls it into view. Returns true if the
+    /// sidebar's rail state changed (caller should rebuild theme/layout).
+    pub fn reveal(&mut self, path: &str) -> bool {
+        let was_rail = self.rail;
+        if self.rail {
+            self.set_rail(false);
+        }
+        let p = norm(path);
+        let kind = self.current(path).or_else(|| self.recents.iter().position(|r| norm(r) == p).map(Kind::Recent));
+        if let Some(k) = kind {
+            let sec = match k {
+                Kind::Pinned(i) => {
+                    self.kb = Some(i);
+                    Some(PINNED)
+                }
+                Kind::Quick(_) => Some(QUICK),
+                Kind::Recent(_) => Some(RECENT),
+                Kind::Drive(_) => Some(PC),
+                Kind::Net(_) => Some(NETWORK),
+                _ => None,
+            };
+            if let Some(s) = sec
+                && self.closed[s]
+            {
+                self.closed[s] = false;
+                self.dirty = true;
+            }
+            let items = self.items(false);
+            if let Some(it) = items.iter().find(|i| i.kind == k) {
+                let body_h = self.last_body_h;
+                if body_h > 0.0 {
+                    let max_scroll = (Self::content_h(&items) - body_h).max(0.0);
+                    if it.y < self.scroll || it.y + it.h > self.scroll + body_h {
+                        self.scroll = (it.y - (body_h - it.h) * 0.5).clamp(0.0, max_scroll);
+                    }
+                } else {
+                    self.scroll = it.y;
+                }
+            }
+            self.pending_reveal = Some(k);
+        }
+        was_rail != self.rail
+    }
+
+    #[cfg(test)]
+    pub fn scroll_offset(&self) -> f32 {
+        self.scroll
+    }
+
     fn quick_places(&self) -> Vec<(&'static str, &'static str, &str)> {
         QUICK_NAMES.iter().filter_map(|(n, g)| self.place_path(n).map(|p| (*n, *g, p))).collect()
     }
@@ -466,9 +523,16 @@ impl Sidebar {
         c.fill(Rect::new(r.r() - 1.0, r.y, 1.0, r.h), t.border);
         let inner = Rect::new(r.x, r.y, r.w - 1.0, r.h);
         let body = Rect::new(inner.x, inner.y, inner.w, (inner.h - FOOTER_H).max(0.0));
+        self.last_body_h = body.h;
         let items = self.items(self.rail);
         let content = Self::content_h(&items);
         let max_scroll = (content - body.h).max(0.0);
+        if let Some(k) = self.pending_reveal.take()
+            && let Some(it) = items.iter().find(|i| i.kind == k)
+            && (it.y < self.scroll || it.y + it.h > self.scroll + body.h)
+        {
+            self.scroll = (it.y - (body.h - it.h) * 0.5).clamp(0.0, max_scroll);
+        }
         self.scroll = self.scroll.clamp(0.0, max_scroll);
 
         let bg = ui.interact(ID.child("bg"), inner, Sense::click().focusable().wheel());
@@ -1176,5 +1240,26 @@ mod tests {
         for w in items.windows(2) {
             assert!(w[1].y >= w[0].y + w[0].h - 0.01);
         }
+    }
+
+    #[test]
+    fn reveal_expands_rail_unfolds_section_and_scrolls_to_item() {
+        let mut s = Sidebar {
+            drives: vec![drive('C', DriveKind::Fixed), drive('D', DriveKind::Fixed)],
+            places: vec![Place { name: "Downloads", path: "C:\\Users\\me\\Downloads".into() }],
+            ..Default::default()
+        };
+        for i in 0..10 {
+            s.pin_at(&format!("C:\\pin{i}"), i);
+        }
+        s.closed[PC] = true;
+        s.rail = true;
+        s.last_body_h = 100.0;
+
+        let changed = s.reveal("D:\\work\\sub");
+        assert!(changed, "rail was collapsed and is now expanded");
+        assert!(!s.rail);
+        assert!(!s.closed[PC], "This PC unfolded for drive D:");
+        assert!(s.scroll_offset() > 0.0, "scrolled down toward drive D:");
     }
 }

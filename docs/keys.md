@@ -54,6 +54,7 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Next tab | `tab.next` | `Ctrl+Tab` |
 | Previous tab | `tab.prev` | `Ctrl+Shift+Tab` |
 | Open the selected folder in a new tab | `tab.open-selected` | `Ctrl+Enter` |
+| Reopen closed tab | `tab.reopen` | `Ctrl+Shift+T` |
 
 ### Panes
 
@@ -80,6 +81,7 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Collapse or expand the sidebar | `sidebar.toggle` | `Ctrl+B` |
 | Pin this folder to the sidebar | `sidebar.pin-folder` | `Ctrl+D` |
 | Show hidden files | `view.hidden` | `Ctrl+H` |
+| Reveal current folder in sidebar | `sidebar.reveal-current` | `Ctrl+Shift+E` |
 | Toggle preview pane | `preview.toggle_pane` | `Alt+P` |
 | Quick Look | `preview.quick_look` | `Space`, `F3` |
 | Tree view | `view.tree` | `Ctrl+Shift+4` |
@@ -91,6 +93,9 @@ This table is generated from the command table in `src/commands.rs`; the test
 |---|---|---|
 | Command palette | `palette.open` | `Ctrl+Shift+P`, `Ctrl+K` |
 | Open settings | `settings.open` | `Ctrl+,` |
+| Settings: keyboard shortcuts | `settings.keys` | `F1` |
+| New window | `window.new` | `Ctrl+N` |
+| Toggle fullscreen | `window.fullscreen` | `F11` |
 
 ### Tools
 
@@ -110,7 +115,6 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Show protected system files | `view.system` |
 | Check for updates | `app.check-updates` |
 | Open the settings folder | `app.open-config-folder` |
-| Settings: keyboard shortcuts | `settings.keys` |
 | Settings: themes and appearance | `settings.appearance` |
 | Settings: context menu editor | `settings.context-menu` |
 | Settings: updates | `settings.updates` |
