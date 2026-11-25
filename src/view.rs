@@ -42,6 +42,8 @@ mod treev;
 mod millerv;
 #[path = "view_uia.rs"]
 mod uiav;
+#[path = "view_basics.rs"]
+mod basics;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
 use crate::ops::Ops;
@@ -65,14 +67,6 @@ pub enum ViewMode {
 impl ViewMode {
     pub fn is_grid(self) -> bool {
         matches!(self, ViewMode::GridSmall | ViewMode::GridLarge)
-    }
-    /// (cell width, cell height, picture box, type icon) in DIPs. The cell is
-    /// the picture box, a 6 DIP gap, two label lines and 8 DIP of padding.
-    pub fn dims(self) -> (f32, f32, f32, f32) {
-        match self {
-            ViewMode::GridLarge => (152.0, 182.0, 128.0, 64.0),
-            _ => (96.0, 118.0, 64.0, 48.0),
-        }
     }
     pub fn next(self) -> ViewMode {
         match self {
@@ -240,6 +234,8 @@ pub struct View {
     pub mode: ViewMode,
     /// P4.F6 Tree pane / drawer state (`view_tree.rs`)
     tree_ui: treev::TreeUi,
+    /// B10-A: zoom wheel, type-ahead, column menu (`view_basics.rs`)
+    basics: basics::Basics,
     /// width of the sidebar in DIPs, from the config
     pub sidebar_width: f32,
     /// a setting the user changed: main writes the config (debounced)
@@ -398,6 +394,7 @@ impl View {
             zebra: false,
             mode: ViewMode::Details,
             tree_ui: treev::TreeUi::default(),
+            basics: basics::Basics::default(),
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             config_dirty: false,
             dpi: 96.0,
@@ -1149,7 +1146,7 @@ impl View {
             ui.request_repaint();
             return;
         }
-        if self.run_u4(ui, cmd) {
+        if self.run_u4(ui, cmd) || self.run_basics(ui, cmd) {
             ui.request_repaint();
             return;
         }
@@ -1186,8 +1183,8 @@ impl View {
             }
             CMD_REFRESH => self.refresh(),
             CMD_VIEW_DETAILS => self.set_mode(ViewMode::Details),
-            CMD_VIEW_GRID_SMALL => self.set_mode(ViewMode::GridSmall),
-            CMD_VIEW_GRID_LARGE => self.set_mode(ViewMode::GridLarge),
+            CMD_VIEW_GRID_SMALL => self.set_mode_preset(ViewMode::GridSmall),
+            CMD_VIEW_GRID_LARGE => self.set_mode_preset(ViewMode::GridLarge),
             CMD_SELECT_ALL => {
                 let t = self.tab_mut();
                 if t.miller_on && let Some(m) = t.miller.as_mut() {
@@ -1756,9 +1753,8 @@ impl View {
                 if !was_grid {
                     t.grid.cursor = t.list.cursor;
                 }
-                let (cw, ch, _, _) = mode.dims();
-                t.grid.cell_w = cw;
-                t.grid.cell_h = ch;
+                let (cw, ch, _, _) = basics::grid_dims(self.prefs.view.grid_size_dip());
+                t.grid.set_cell_size(cw, ch);
                 t.grid.reveal = true;
             } else if was_grid {
                 t.list.cursor = t.grid.cursor.min(len.saturating_sub(1));
@@ -1912,6 +1908,7 @@ impl View {
         self.paint_search(ui, g, (w, h));
         self.paint_tags_picker(ui, g, (w, h));
         self.paint_quick_look(ui, g, (w, h));
+        self.paint_col_menu(ui, g);
         // the context menu is on top of everything
         if let Some(c) = self.ctx.as_mut() {
             c.paint(ui, g, Rect::new(0.0, 0.0, w, h));
@@ -1940,6 +1937,16 @@ impl View {
         }
         // Tree rows: letters are type-ahead, not the filter
         let typed: Vec<char> = if (self.tree_rows_on() || self.miller_showing()) && !ui.has_focus(pid(self.live, ID_FILTER)) { Vec::new() } else { typed };
+        // Explorer's type-ahead: typing jumps to a name; `[view] type_ahead_filters` keeps the old filter
+        let filter_focus = ui.has_focus(pid(self.live, ID_FILTER));
+        let typed = if !self.prefs.view.type_ahead_filters && !filter_focus {
+            if self.type_ahead_input(&typed) {
+                again = true;
+            }
+            Vec::new()
+        } else {
+            typed
+        };
         for c in typed {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
@@ -2163,7 +2170,7 @@ impl View {
         };
         if icon_button(ui, g, t, pid(self.live, ID_VIEW), vb, glyph, true) {
             let m = self.mode.next();
-            self.set_mode(m);
+            self.set_mode_preset(m);
         }
         let bar = Rect::new(x, fr.y, (vb.x - t.space_4 - x).max(40.0), t.height_path_bar);
         self.paint_path_bar(ui, g, bar, t);
@@ -2425,7 +2432,19 @@ impl View {
         {
             tab.sort_by(sc);
         }
+        if let Some((_, pt)) = hr.context {
+            self.open_col_menu(ui, pt);
+        }
+        if let Some(i) = hr.auto_fit
+            && let Some(&col) = shown.get(i)
+        {
+            self.fit_edge(g, t, col);
+        }
+        if self.take_fit_all() {
+            self.fit_columns(g, t, shown);
+        }
         if !hide_type
+            && !self.fit_held(ui)
             && let Some((i, x)) = hr.resize
             && let Some(&col) = shown.get(i)
         {
@@ -2463,6 +2482,7 @@ impl View {
             (lr, lr.activated)
         }
         };
+        self.zoom_wheel(ui, lr.zoom);
         let scroll = self.tabs.items[self.tabs.active].list.scroll;
         self.tags.note_scroll(scroll);
         self.tags.flush();
@@ -2529,12 +2549,11 @@ impl View {
         self.sort_strip(ui, g, strip_r, t);
 
         let was_renaming = self.rename.is_some();
-        let (cw, ch, box_dip, icon_dip) = self.mode.dims();
+        let (cw, ch, box_dip, icon_dip) = basics::grid_dims(self.prefs.view.grid_size_dip());
         let dpi = self.dpi;
         g.fill(grid_r, t.row);
         let tab = &mut self.tabs.items[self.tabs.active];
-        tab.grid.cell_w = cw;
-        tab.grid.cell_h = ch;
+        tab.grid.set_cell_size(cw, ch);
         // cells one screen shows (thumbnail size is chosen so they all fit the cache)
         let cols = tab.grid.cols_for(grid_r.w - t.layout_scrollbar_width);
         let rows_vis = (grid_r.h / ch).ceil() as usize + 1;
@@ -2554,6 +2573,7 @@ impl View {
             tiles.prefetch(gstate);
             (gr, gr.activated)
         };
+        self.zoom_wheel(ui, gr.zoom);
         let scroll = self.tabs.items[self.tabs.active].grid.scroll;
         self.tags.note_scroll(scroll);
         self.tags.flush();
@@ -2925,8 +2945,8 @@ impl ListSource for Rows<'_> {
                 let font = t.font();
                 let defs = tg.defs().to_vec();
                 let cw = crate::tags::marks::cluster_w(g, t, &defs, m, 3, &mut tg.buf);
-                let nw = g.measure(row.name_str(), font).min((name_w - cw - crate::tags::marks::LEAD).max(24.0));
-                g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, nw + 1.0, r.h), font, name_c);
+                let nw = g.measure(row.label(), font).min((name_w - cw - crate::tags::marks::LEAD).max(24.0));
+                g.text(row.label(), Rect::new(x + sp[0].0 + 32.0, r.y, nw + 1.0, r.h), font, name_c);
                 let shapes = tg.shapes();
                 crate::tags::marks::draw_cluster(g, t, &defs, m, shapes, x + sp[0].0 + 32.0 + nw + crate::tags::marks::LEAD, r.y + r.h / 2.0, 3, crate::tags::marks::MARK, crate::tags::marks::GAP, &mut tg.buf);
                 if sp[5].1 > 0.0 {
@@ -2936,14 +2956,14 @@ impl ListSource for Rows<'_> {
             (Some(tg), None) if tg.reading() => {
                 // not read yet while the reconcile runs: a dashed mark, "reading…"
                 let font = t.font();
-                let nw = g.measure(row.name_str(), font).min((name_w - 14.0).max(24.0));
-                g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, nw + 1.0, r.h), font, name_c);
+                let nw = g.measure(row.label(), font).min((name_w - 14.0).max(24.0));
+                g.text(row.label(), Rect::new(x + sp[0].0 + 32.0, r.y, nw + 1.0, r.h), font, name_c);
                 crate::tags::marks::draw(g, crate::tags::marks::Mark::Pending, t.text_dim, x + sp[0].0 + 32.0 + nw + crate::tags::marks::LEAD + 5.0, r.y + r.h / 2.0, crate::tags::marks::MARK);
                 if sp[5].1 > 0.0 {
                     g.text("reading\u{2026}", Rect::new(x + sp[5].0 + 8.0, r.y, (sp[5].1 - 12.0).max(0.0), r.h), t.font_small(), t.text_disabled);
                 }
             }
-            _ => g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, name_w, r.h), t.font(), name_c),
+            _ => g.text(row.label(), Rect::new(x + sp[0].0 + 32.0, r.y, name_w, r.h), t.font(), name_c),
         }
         // a column not shown has no width: nothing to format or draw
         if sp[1].1 > 0.0 {
@@ -3071,13 +3091,14 @@ impl GridSource for Tiles<'_> {
         let boxr = Rect::new(r.x + (r.w - self.box_dip) / 2.0, r.y + 8.0, self.box_dip, self.box_dip);
         self.shell.paint_pic(c, t, row, self.root, boxr);
         // name: at most two lines, centred, the second one ends in an ellipsis
-        let name = row.name_str();
+        let full = row.name_str();
+        let name = row.label();
         let lw = r.w - 8.0;
         let n = label_split(self.labels, c, name, self.font, lw);
-        let color = if row.hidden { t.text_dim } else { crate::packs::name_color(name, row.is_dir()).unwrap_or(t.text) };
+        let color = if row.hidden { t.text_dim } else { crate::packs::name_color(full, row.is_dir()).unwrap_or(t.text) };
         let y = boxr.b() + 6.0;
         let (l1, l2) = name.split_at(n);
-        let tmask = self.tags.as_mut().and_then(|tg| tg.mask(id, name)).filter(|m| *m != 0);
+        let tmask = self.tags.as_mut().and_then(|tg| tg.mask(id, full)).filter(|m| *m != 0);
         // a shape row under the name (up to 4, +N): a long name keeps one line when the cell has no room for both
         let lines = if l2.is_empty() { 1.0 } else { 2.0 };
         let room = tmask.is_some() && y + lines * LABEL_LINE + 12.0 > r.b();
@@ -3220,6 +3241,7 @@ mod tests {
     #[test]
     fn typing_in_the_list_filters_and_escape_clears() {
         let mut r = Rig::new("typing");
+        r.v.prefs.view.type_ahead_filters = true;
         r.ui.push(Event::Char('b'));
         r.frame();
         assert_eq!(r.v.tab().filter, "b");
@@ -4220,6 +4242,7 @@ mod tests {
         // Backspace in filter box edits filter instead of going up
         r.v.go(&docs);
         r.settle();
+        r.v.prefs.view.type_ahead_filters = true;
         r.ui.push(Event::Char('a'));
         r.frame();
         assert_eq!(r.v.filter.text, "a");
@@ -4931,6 +4954,9 @@ mod tests {
 
     #[path = "../../view_f6_tests.rs"]
     mod f6;
+
+    #[path = "../../view_basics_tests.rs"]
+    mod basics_tests;
 
     // UIA view snapshot (docs/uia-views.md)
     #[path = "../../view_uia_tests.rs"]

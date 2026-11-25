@@ -1359,6 +1359,9 @@ fn map_key(vk: u16) -> Key {
         VK_DELETE => Key::Delete,
         VK_INSERT => Key::Insert,
         VK_SPACE => Key::Space,
+        // the numpad + and - are the zoom keys with Ctrl (Ctrl+= / Ctrl+-)
+        VK_ADD => Key::Char('='),
+        VK_SUBTRACT => Key::Char('-'),
         v if (VK_F1.0..=VK_F24.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
         v if (0x30..=0x39).contains(&v.0) || (0x41..=0x5a).contains(&v.0) => Key::Char(v.0 as u8 as char),
         v if v.0 == 0xDC => Key::Char('\\'), // VK_OEM_5: the backslash key (Ctrl+\ splits the window)
@@ -1612,7 +1615,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let mut p = POINT { x: lo(lp), y: hi(lp) };
                 let _ = ScreenToClient(hwnd, &mut p);
                 let s = dpi_scale();
-                push(hwnd, Event::Wheel { pos: Pt::new(p.x as f32 / s, p.y as f32 / s), dy, dx: 0.0, mods: mods() });
+                // MK_CONTROL / MK_SHIFT ride in wParam: the key state at the time of the wheel message
+                let mut m = mods();
+                m.ctrl |= wp.0 & 0x0008 != 0;
+                m.shift |= wp.0 & 0x0004 != 0;
+                push(hwnd, Event::Wheel { pos: Pt::new(p.x as f32 / s, p.y as f32 / s), dy, dx: 0.0, mods: m });
                 LRESULT(0)
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {

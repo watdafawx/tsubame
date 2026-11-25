@@ -61,7 +61,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
 
     pg.section("Files and folders");
-    let mut c = pg.card(2, 52.0);
+    let mut c = pg.card(4, 52.0);
     if let Some(v) = pg.toggle_row(&mut c, "Show hidden files", "Same as Ctrl+H. Items with the hidden attribute are drawn in a dimmer colour.", g.show_hidden, true) {
         g.show_hidden = v;
         cx.changed |= C_HIDE;
@@ -69,6 +69,15 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     if let Some(v) = pg.toggle_row(&mut c, "Show protected system files", "Hidden and system at once: pagefile.sys, desktop.ini. Leave off unless you need them.", g.show_system, true) {
         g.show_system = v;
         cx.changed |= C_HIDE;
+    }
+    let vw = &mut cx.prefs.view;
+    if let Some(v) = pg.toggle_row(&mut c, "Show file extensions", "Same as the View command. Off draws file names without .txt and the like. Rename still edits the full name; sorting uses it too.", vw.show_extensions, true) {
+        vw.show_extensions = v;
+        cx.changed |= C_OTHER;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Typing in a folder filters it", "Off (like Explorer): typing letters jumps to the first name that starts with them; Ctrl+F opens the filter. On: typing starts the filter.", vw.type_ahead_filters, true) {
+        vw.type_ahead_filters = v;
+        cx.changed |= C_OTHER;
     }
 
     pg.section("Deleting");

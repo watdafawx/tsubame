@@ -30,6 +30,7 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Command | Name | Default keys |
 |---|---|---|
 | Select all | `select.all` | `Ctrl+A` |
+| Invert selection | `select.invert` | `Ctrl+Shift+A` |
 | Clear filter, then selection | `select.escape` | `Esc` |
 
 ### Navigate
@@ -77,6 +78,8 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Details view | `view.details` | `Ctrl+Shift+1` |
 | Small thumbnails | `view.grid-small` | `Ctrl+Shift+2` |
 | Large thumbnails | `view.grid-large` | `Ctrl+Shift+3` |
+| Bigger icons (Ctrl+wheel up) | `view.zoom-in` | `Ctrl+=`, `Ctrl+Shift+=` |
+| Smaller icons (Ctrl+wheel down) | `view.zoom-out` | `Ctrl+-` |
 | Collapse or expand the sidebar | `sidebar.toggle` | `Ctrl+B` |
 | Pin this folder to the sidebar | `sidebar.pin-folder` | `Ctrl+D` |
 | Show hidden files | `view.hidden` | `Ctrl+H` |
@@ -105,6 +108,7 @@ This table is generated from the command table in `src/commands.rs`; the test
 
 | Command | Name |
 |---|---|
+| Show file extensions | `view.extensions` |
 | Move this tab to the other pane | `pane.move-tab` |
 | Show this folder in the other pane | `pane.sync-folders` |
 | Show protected system files | `view.system` |

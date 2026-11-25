@@ -92,6 +92,11 @@ font_scale = 1.0             # list and menu text size, 10-18 px at 12 px = 1.0 
 accent = "#e0492c"           # optional; absent = the theme's accent
 view_mode = "details"        # "details" | "grid-small" | "grid-large"
 
+[view]
+grid_size = 96               # grid cell width in DIPs, 48-256 in steps of 8 (Ctrl+wheel, Ctrl+Plus / Ctrl+Minus)
+type_ahead_filters = false   # true: typing in the list starts the filter (old behaviour); false: typing jumps to the first name that starts with it
+show_extensions = true       # false: file names are drawn without their extension (rename still edits the full name; sorting uses the real name)
+
 [panes]
 dual = false
 split = "vertical"           # "vertical" = side by side | "horizontal" = stacked

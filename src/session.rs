@@ -166,6 +166,7 @@ pub fn sync_config(view: &View, cfg: &mut tsubame_config::Config) {
     cfg.appearance.accent = view.prefs.appearance.accent.clone();
     cfg.appearance.font_scale = view.prefs.appearance.font_scale;
     cfg.general = view.prefs.general.clone();
+    cfg.view = view.prefs.view.clone();
     cfg.updates = view.prefs.updates.clone();
     cfg.keys = view.prefs.keys.clone();
     cfg.context_menu = view.prefs.context_menu.clone();

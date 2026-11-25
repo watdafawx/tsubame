@@ -42,6 +42,7 @@ impl View {
         crate::ext::apply_disabled(&cfg.extensions.disabled);
         crate::packs::sync();
         self.prefs = cfg.clone();
+        self.sync_basics();
         if theme_from_cfg && let Some(p) = themes::find(&cfg.appearance.theme) {
             self.theme_id = p.id.to_string();
             self.dark = p.dark;
@@ -88,6 +89,7 @@ impl View {
         if bits & C_HIDE != 0 {
             self.apply_hide();
         }
+        self.sync_basics();
         if bits & C_KEYS != 0 {
             self.prefs.keys.overrides = self.keymap.to_overrides(&self.prefs.keys.overrides);
             keymap::set_current(&self.keymap);
@@ -140,6 +142,7 @@ impl View {
     /// After "Reset all settings": every setting back to the default, live.
     pub fn reset_prefs(&mut self, ui: &mut Ui, cfg: &tsubame_config::Config) {
         self.prefs = cfg.clone();
+        self.sync_basics();
         crate::ext::apply_disabled(&cfg.extensions.disabled);
         self.sync_feature_extensions();
         self.keymap = KeyMap::defaults();

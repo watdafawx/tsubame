@@ -32,6 +32,20 @@ pub const ATTR_HIDDEN: u32 = 0x2;
 pub const ATTR_SYSTEM: u32 = 0x4;
 pub const ATTR_READONLY: u32 = 0x1;
 
+thread_local! {
+    /// `[view] show_extensions` for the UI thread (the views draw names through `RowBuf::label`).
+    static SHOW_EXT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// `[view] show_extensions`: off draws file names without their extension.
+pub fn set_show_extensions(on: bool) {
+    SHOW_EXT.with(|c| c.set(on));
+}
+
+pub fn show_extensions() -> bool {
+    SHOW_EXT.with(|c| c.get())
+}
+
 /// One row, decoded and ready to draw. Reused for every row of a frame.
 pub struct RowBuf {
     /// UTF-8; names reach 255 UTF-16 units (up to 765 bytes)
@@ -64,6 +78,16 @@ impl RowBuf {
             Some(i) if i > 0 && !self.is_dir() => &n[i..],
             _ => "",
         }
+    }
+    /// The name as drawn: without the extension of a file when extensions are
+    /// hidden (folders and dot-files keep theirs). Everything that is not
+    /// drawing (rename, sort, open, tags, colours) keeps using `name_str`.
+    pub fn label(&self) -> &str {
+        let n = self.name_str();
+        if show_extensions() {
+            return n;
+        }
+        &n[..n.len() - self.ext().len()]
     }
     /// Type column text into `out`.
     pub fn type_text(&self, out: &mut String) {
