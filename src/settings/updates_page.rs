@@ -4,6 +4,7 @@
 use super::lay::{Look, Pg, button, button_in, fit};
 use super::{C_UPDATES, Cx};
 use crate::updates::{self, OffReason, Phase};
+use tsubame_update::Channel;
 use tsubame_ui::{Id, Rect, f};
 
 const ID_CHECK: Id = Id::new("upd-check");
@@ -19,6 +20,26 @@ pub struct State {
     confirm_roll: bool,
 }
 
+const CHANNEL_DESC: &str = "Stable: tested releases. Nightly: test builds of the newest code.";
+/// Shown under the channel row while Nightly is picked.
+pub const NIGHTLY_WARNING: &str = "Nightly builds are test versions made automatically from the newest code. They can have bugs, lose settings or crash. They are signed and checked like every update, but not tested by hand. Back up anything important. To go back, pick Stable: Tsubame then waits for the next stable release that is newer than this build (it never installs an older version).";
+
+fn available_title(info: &crate::updates::Info) -> String {
+    match info.channel {
+        Channel::Nightly => format!("Nightly {} is available", info.version),
+        Channel::Stable => format!("Version {} is available", info.version),
+    }
+}
+
+/// The small line under the version: how this copy is installed, its build channel and commit.
+pub fn build_line(portable: bool, channel: &str, commit: Option<&str>) -> String {
+    let how = if portable { "64-bit \u{b7} portable copy" } else { "64-bit \u{b7} installed for this user" };
+    match commit {
+        Some(c) => format!("{how} \u{b7} {channel} \u{b7} {c}"),
+        None => format!("{how} \u{b7} {channel}"),
+    }
+}
+
 fn mb(b: u64) -> String {
     format!("{:.1} MB", b as f64 / 1_048_576.0)
 }
@@ -32,7 +53,7 @@ pub fn status_line(phase: &Phase, last: &str) -> (String, bool) {
         Phase::Idle => (format!("Not checked yet this session \u{b7} last checked {last}"), false),
         Phase::Checking => ("Checking for updates\u{2026}".into(), false),
         Phase::UpToDate => (format!("You\u{2019}re up to date \u{b7} last checked {last}"), true),
-        Phase::Available(i) => (format!("Version {} is available", i.version), false),
+        Phase::Available(i) => (format!("Version {} ({}) is available", i.version, i.channel), false),
         Phase::Downloading { .. } => ("Downloading the update\u{2026}".into(), false),
         Phase::Staged(v) => (format!("Version {v} is downloaded. It installs when you restart Tsubame."), true),
         Phase::ReadyToRestart(v) => (format!("Version {v} is installed. Restart to start it."), true),
@@ -55,7 +76,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
             pg.g.round(r, t.radius_lg, t.panel);
             pg.g.round_stroke(r, t.radius_lg, t.accent, 1.0);
             pg.g.text("\u{E896}", Rect::new(r.x + 14.0, r.y, 20.0, r.h), f(16.0).icon().c(), t.accent);
-            pg.g.text(&format!("Version {} is available", info.version), Rect::new(r.x + 44.0, r.y + 9.0, 400.0, 18.0), t.font_md().b(), t.text);
+            pg.g.text(&available_title(info), Rect::new(r.x + 44.0, r.y + 9.0, 400.0, 18.0), t.font_md().b(), t.text);
             let sub = if info.in_place_ok { format!("{} \u{b7} the signature is checked before it is installed", mb(info.size)) } else { "This copy cannot update itself. Download the installer from the release page.".to_string() };
             let shown = fit(pg.g, &sub, t.font_small(), pg.w - 360.0);
             pg.g.text(&shown, Rect::new(r.x + 44.0, r.y + 29.0, pg.w - 360.0, 16.0), t.font_small(), t.text_dim);
@@ -109,8 +130,8 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         pg.g.round(logo, t.radius_lg, tsubame_ui::theme::BRAND_NAVY);
         pg.g.text("\u{2197}", logo, f(22.0).b().c(), tsubame_ui::theme::BRAND_CREAM);
         pg.g.text(&format!("Tsubame {}", snap.running), Rect::new(r.x + 74.0, r.y + 14.0, 400.0, 22.0), f(t.font_size_lg + 2.0).b(), t.text);
-        let how = if cx.env.portable { "64-bit \u{b7} portable copy" } else { "64-bit \u{b7} installed for this user" };
-        pg.g.text(how, Rect::new(r.x + 74.0, r.y + 37.0, 400.0, 16.0), t.font_small(), t.text_dim);
+        let how = build_line(cx.env.portable, crate::buildinfo::build_channel(), crate::buildinfo::short_commit());
+        pg.g.text(&how, Rect::new(r.x + 74.0, r.y + 37.0, 400.0, 16.0), t.font_small(), t.text_dim);
         let (line, ok) = status_line(&snap.phase, &last);
         let line = fit(pg.g, &line, t.font(), r.w - 74.0 - 170.0);
         if ok {
@@ -125,9 +146,24 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
         }
     }
     c.restart_at(c.r.y + 84.0);
-    let row = pg.next_row(&mut c);
-    pg.row_text(row, "Update channel", "Stable is the only channel today: a release when it is ready, signed and checked.", 120.0, true);
-    pg.g.text("Stable", Rect::new(row.r() - 16.0 - 100.0, row.y, 100.0, row.h), t.font_md().r(), t.text_dim);
+    let nightly = Channel::from_config(&cx.prefs.updates.channel) == Channel::Nightly;
+    let downloading = matches!(snap.phase, Phase::Downloading { .. });
+    if downloading {
+        // no switching under a running download: show the channel, read-only
+        let row = pg.next_row(&mut c);
+        pg.row_text(row, "Update channel", "Can\u{2019}t change the channel while an update downloads.", 160.0, false);
+        let label = if nightly { "Nightly" } else { "Stable" };
+        pg.g.text(label, Rect::new(row.r() - 16.0 - 100.0, row.y, 100.0, row.h), t.font_md().r(), t.text_dim);
+    } else if let Some(i) = pg.seg_row(&mut c, "Update channel", CHANNEL_DESC, &["Stable", "Nightly"], nightly as usize) {
+        let pick = if i == 1 { Channel::Nightly } else { Channel::Stable };
+        if pick.as_str() != cx.prefs.updates.channel {
+            cx.prefs.updates.channel = pick.as_str().to_string();
+            cx.changed |= C_UPDATES;
+        }
+    }
+    if nightly {
+        pg.note("\u{E7BA}", NIGHTLY_WARNING, true);
+    }
 
     pg.section("How updates happen");
     let mut c = pg.card(3, 52.0);
@@ -185,8 +221,20 @@ mod tests {
         let (u, ok) = status_line(&Phase::Unreachable, "2 h ago");
         assert!(u.contains("Can\u{2019}t reach") && u.contains("2 h ago") && !ok);
         assert!(status_line(&Phase::UpToDate, "today").1);
-        let a = Phase::Available(Info { version: "0.2.0".into(), notes_url: String::new(), in_place_ok: true, size: 1 });
+        let a = Phase::Available(Info { version: "0.2.0".into(), channel: Channel::Stable, notes_url: String::new(), in_place_ok: true, size: 1 });
         assert!(status_line(&a, "x").0.contains("0.2.0"));
         assert_eq!(mb(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn the_offer_names_its_channel_and_the_copy_names_its_build() {
+        let n = Info { version: "0.1.1-nightly.42".into(), channel: Channel::Nightly, notes_url: String::new(), in_place_ok: true, size: 1 };
+        assert_eq!(available_title(&n), "Nightly 0.1.1-nightly.42 is available");
+        assert!(status_line(&Phase::Available(n), "x").0.contains("(nightly)"));
+        let s = Info { version: "0.2.0".into(), channel: Channel::Stable, notes_url: String::new(), in_place_ok: true, size: 1 };
+        assert_eq!(available_title(&s), "Version 0.2.0 is available");
+        assert_eq!(build_line(false, "nightly", Some("abc1234")), "64-bit \u{b7} installed for this user \u{b7} nightly \u{b7} abc1234");
+        assert_eq!(build_line(true, "local build", None), "64-bit \u{b7} portable copy \u{b7} local build");
+        assert!(NIGHTLY_WARNING.contains("older version"), "the warning says switching back never downgrades");
     }
 }

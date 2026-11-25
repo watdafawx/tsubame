@@ -47,6 +47,7 @@ mod age;
 mod archive_ui;
 mod batchui;
 mod bench;
+mod buildinfo;
 mod cli;
 mod clip;
 mod cols;
@@ -309,7 +310,7 @@ fn main() {
         print_and_exit(cli::HELP);
     }
     if cli.version {
-        print_and_exit(&format!("Tsubame {}\n", cli::VERSION));
+        print_and_exit(&format!("{}\n", buildinfo::version_line()));
     }
     let flag = |n: &str| args.iter().any(|a| a == n);
     let bench_mode = flag("--bench") || std::env::var_os("TSUBAME_BENCH").is_some_and(|v| v != "0");
@@ -398,7 +399,8 @@ fn main() {
                 let _ = PostMessageW(Some(HWND(h as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(0));
             }
         };
-        if updates::init(upd_env, cfg.updates.auto_install, wake) == updates::StartAction::Exit {
+        let channel = tsubame_update::Channel::from_config(&cfg.updates.channel);
+        if updates::init(upd_env, cfg.updates.auto_install, channel, wake) == updates::StartAction::Exit {
             return;
         }
 
@@ -486,7 +488,7 @@ fn main() {
             exe: std::env::current_exe().unwrap_or_default(),
             portable: cli.portable || loc.portable,
             system_dark: system_dark(),
-            version: env!("CARGO_PKG_VERSION"),
+            version: buildinfo::VERSION,
         };
         let theme_from_cfg = !dev && cfg_status != LoadStatus::Missing && arg_value(&args, "--theme").is_none();
         // a measurement run uses the defaults and shows every file

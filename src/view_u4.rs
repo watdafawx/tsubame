@@ -95,6 +95,7 @@ impl View {
         }
         if bits & C_UPDATES != 0 {
             crate::updates::set_auto_install(self.prefs.updates.auto_install);
+            crate::updates::set_channel(tsubame_update::Channel::from_config(&self.prefs.updates.channel));
         }
         if bits & C_PREVIEW != 0 {
             self.preview.apply_prefs(ui, &self.prefs.preview);

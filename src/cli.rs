@@ -15,8 +15,6 @@
 
 use std::path::{Path, PathBuf};
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 pub const HELP: &str = concat!(
     "Tsubame ",
     env!("CARGO_PKG_VERSION"),
