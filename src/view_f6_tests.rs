@@ -455,3 +455,14 @@ fn the_default_column_width_setting_applies_to_columns_without_a_width_of_their_
     assert_eq!(mil(&r).width(0), 200.0);
     assert_eq!(mil(&r).width(1), 420.0);
 }
+
+#[test]
+fn the_settings_slider_reaches_the_columns_without_a_worker_wake() {
+    // the app only runs `pump` on a worker wake: the Settings page path is `apply_prefs`
+    let mut r = miller_rig("f6-colw-live");
+    r.v.prefs.miller.col_width = 380;
+    r.v.apply_prefs(&mut r.ui, crate::settings::C_OTHER);
+    assert_eq!(mil(&r).width(0), 380.0, "no pump in between");
+    r.frame();
+    assert_eq!(mil(&r).width(0), 380.0);
+}
