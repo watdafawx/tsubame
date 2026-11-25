@@ -292,6 +292,12 @@ pub struct View {
     pub drag_keys: Option<Mods>,
     /// the shell menu's Rename: inline rename on the next frame
     pub rename_request: bool,
+    /// B10-C: commands that need the pool or the clipboard (`shellops::after_frame` runs them)
+    pub shell_reqs: Vec<crate::newmenu::ShellReq>,
+    /// B10-C: a changed file name extension waits for the user's yes (`shellops::after_frame` asks)
+    pub ext_ask: Option<(RenameEdit, crate::editing::RenameOut)>,
+    /// B10-C: a new item to rename once the list shows it
+    rename_wait: Option<edit::RenameWait>,
     /// files to open with their default handler (main runs them on a worker)
     pub open_paths: Vec<String>,
     /// programs a pack command or a file-type rule wants started (`shellops::after_frame` runs them)
@@ -441,6 +447,9 @@ impl View {
             drop_read_only: false,
             drag_keys: None,
             rename_request: false,
+            shell_reqs: Vec::new(),
+            ext_ask: None,
+            rename_wait: None,
             open_paths: Vec::new(),
             pack_runs: Vec::new(),
             win_cmd: None,
@@ -1243,6 +1252,15 @@ impl View {
                 }
             }
             CMD_RENAME => self.begin_rename(ui),
+            CMD_RENAME_PREV => {
+                if let Some(e) = self.rename.as_ref()
+                    && (e.valid() || e.unchanged())
+                {
+                    self.finish_rename(ui, crate::editing::RenameOut::CommitPrev);
+                }
+            }
+            CMD_CREATE_SHORTCUT => self.shell_reqs.push(crate::newmenu::ShellReq::CreateShortcut),
+            CMD_PASTE_SHORTCUT => self.shell_reqs.push(crate::newmenu::ShellReq::PasteShortcut),
             CMD_BATCH_RENAME => self.begin_batch(ui),
             CMD_SIDEBAR => {
                 self.side.set_rail(!self.side.rail);
@@ -1883,6 +1901,7 @@ impl View {
         if std::mem::take(&mut self.rename_request) && !self.tab().synthetic {
             self.begin_rename(ui);
         }
+        self.poll_rename_wait(ui);
         if std::mem::take(&mut self.focus_path) {
             ui.set_focus(Some(pid(self.live, ID_PATH_EDIT)));
         } else if std::mem::take(&mut self.focus_list) {
@@ -2135,6 +2154,12 @@ impl View {
         let bound = ui.shortcuts.lookup(Key::Tab, Mods::NONE, true).is_some();
         if want != bound {
             ui.shortcuts.bind(Key::Tab, Mods::NONE, CMD_SWITCH_PANE, want);
+        }
+        // Shift+Tab renames the previous row while a rename is open
+        let want = self.rename.is_some();
+        let bound = ui.shortcuts.lookup(Key::Tab, Mods::SHIFT, true).is_some();
+        if want != bound {
+            ui.shortcuts.bind(Key::Tab, Mods::SHIFT, CMD_RENAME_PREV, want);
         }
     }
 
@@ -2554,7 +2579,7 @@ impl View {
             let body = Rect::new(list_r.x, list_r.y, list_r.w - t.layout_scrollbar_width, list_r.h);
             match &tab.load {
                 Load::Done if tab.store.is_empty() => empty_state(g, t, body, "\u{E8B7}", "This folder is empty", None),
-                Load::Done => empty_state(g, t, body, "\u{E721}", "No items match the filter", Some("Press Esc to clear it.")),
+                Load::Done => empty_state(g, t, body, "\u{E721}", "No items match your search", Some("Press Esc to clear it.")),
                 Load::Failed(m) => empty_state(g, t, body, "\u{E783}", "Can't open this folder", Some(m)),
                 Load::Loading => {}
             }
@@ -4986,6 +5011,9 @@ mod tests {
 
     #[path = "../../view_basics_tests.rs"]
     mod basics_tests;
+    // B10-C: rename Tab / extension question, New item, shortcut commands
+    #[path = "../../view_b10c_tests.rs"]
+    mod b10c;
 
     // UIA view snapshot (docs/uia-views.md)
     #[path = "../../view_uia_tests.rs"]

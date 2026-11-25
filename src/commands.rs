@@ -87,6 +87,10 @@ pub const CMD_REOPEN_TAB: u32 = 120;
 pub const CMD_NEW_WINDOW: u32 = 121;
 pub const CMD_FULLSCREEN: u32 = 122;
 pub const CMD_REVEAL_SIDEBAR: u32 = 123;
+// B10-C: file operation basics
+pub const CMD_CREATE_SHORTCUT: u32 = 140;
+pub const CMD_PASTE_SHORTCUT: u32 = 141;
+pub const CMD_RENAME_PREV: u32 = 142;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -157,6 +161,10 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_NEW_WINDOW, "window.new", "New window", ["Ctrl+N"], G),
     cmd!(CMD_FULLSCREEN, "window.fullscreen", "Toggle fullscreen", ["F11"], G),
     cmd!(CMD_REVEAL_SIDEBAR, "sidebar.reveal-current", "Reveal current folder in sidebar", ["Ctrl+Shift+E"], GF),
+    cmd!(CMD_CREATE_SHORTCUT, "file.create-shortcut", "Create shortcut", [], F),
+    cmd!(CMD_PASTE_SHORTCUT, "edit.paste-shortcut", "Paste shortcut", [], F),
+    // Tab is `pane.switch` (it commits and renames the next row); the view binds Shift+Tab to this while a rename is open
+    cmd!(CMD_RENAME_PREV, "rename.previous", "Rename: commit and rename the previous item", [], F),
 ];
 
 /// Archive extension (`tsubame.vfs.archive`) commands. The extension commands take the
@@ -373,6 +381,9 @@ mod tests {
         (CMD_NEW_WINDOW, &[(Key::Char('N'), CT)], true),
         (CMD_FULLSCREEN, &[(Key::F(11), NM)], true),
         (CMD_REVEAL_SIDEBAR, &[(Key::Char('E'), CS)], true),
+        (CMD_CREATE_SHORTCUT, &[], false),
+        (CMD_PASTE_SHORTCUT, &[], false),
+        (CMD_RENAME_PREV, &[], false),
     ];
 
     const FEATURE_BEFORE: &[Before] = &[

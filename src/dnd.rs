@@ -35,7 +35,8 @@ impl DragPayload {
 pub enum DropAction {
     Move,
     Copy,
-    /// Create a shortcut (Alt). Needs the shell; the app shows it but cannot do it yet.
+    /// Create a shortcut (Alt). Planned as `Step::Link`; `Ops::submit_steps` hands those to
+    /// `shellops::after_frame`, which makes the .lnk files on a shell worker.
     Link,
 }
 

@@ -124,6 +124,9 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Settings: updates | `settings.updates` |
 | Settings: default file manager | `settings.default-file-manager` |
 | Reset all keyboard shortcuts | `settings.reset-keys` |
+| Create shortcut | `file.create-shortcut` |
+| Paste shortcut | `edit.paste-shortcut` |
+| Rename: commit and rename the previous item | `rename.previous` |
 | Age colours: toggle | `view.age_colours` |
 | Batch rename selected items… | `file.batch_rename` |
 

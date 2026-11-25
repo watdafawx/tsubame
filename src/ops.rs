@@ -80,6 +80,9 @@ pub struct Ops {
     pub message: Option<String>,
     /// a conflict or delete dialog is up (the timer must not open another)
     pub asking: bool,
+    /// Alt-drops planned by `submit_steps`: (folder, sources). Shortcuts are made on
+    /// a shell worker, so `shellops::after_frame` takes them.
+    pub links: Vec<(String, Vec<String>)>,
 }
 
 pub fn plural(n: usize) -> &'static str {
@@ -171,9 +174,19 @@ impl Ops {
     }
 
     /// A drop, F5 / F6: the steps of `dnd::plan`. Shortcuts are made by a shell
-    /// worker, not the queue, so `Link` steps are skipped here.
+    /// worker, not the queue: `Link` steps wait in `links` for `shellops`.
     pub fn submit_steps(&mut self, steps: &[Step], folder: &str) -> bool {
         let mut select = Vec::new();
+        for s in steps {
+            if let Step::Link { source, target } = s
+                && let Some(dest) = nav::parent(target)
+            {
+                match self.links.iter_mut().find(|(f, _)| f.eq_ignore_ascii_case(&dest)) {
+                    Some((_, v)) => v.push(source.clone()),
+                    None => self.links.push((dest, vec![source.clone()])),
+                }
+            }
+        }
         let ops: Vec<Operation> = steps
             .iter()
             .filter_map(|s| {
@@ -187,6 +200,9 @@ impl Ops {
             })
             .collect();
         if ops.is_empty() {
+            if !self.links.is_empty() {
+                return true;
+            }
             self.message = Some("Nothing to do".into());
             return false;
         }
@@ -355,7 +371,10 @@ mod tests {
     #[test]
     fn link_only_or_empty_submissions_start_nothing() {
         let mut o = Ops::default();
-        assert!(!o.submit_steps(&[Step::Link { source: "C:\\a".into(), target: "C:\\b.lnk".into() }], "C:\\"));
+        // an Alt-drop: no queue operation; the shortcuts wait for the shell worker, grouped by folder
+        let link = |s: &str, t: &str| Step::Link { source: s.into(), target: t.into() };
+        assert!(o.submit_steps(&[link("C:\\a", "C:\\b\\a.lnk"), link("C:\\c.txt", "C:\\b\\c.txt.lnk"), link("C:\\d", "C:\\e\\d.lnk")], "C:\\b"));
+        assert_eq!(o.links, vec![("C:\\b".to_string(), vec!["C:\\a".to_string(), "C:\\c.txt".to_string()]), ("C:\\e".to_string(), vec!["C:\\d".to_string()])]);
         assert!(o.queue.is_none(), "no queue thread for nothing");
         assert!(!o.busy());
         assert!(!o.submit(vec![], Job::new("Copying", "Copied")));

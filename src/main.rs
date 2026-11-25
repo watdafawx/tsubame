@@ -69,6 +69,7 @@ mod meta_ui;
 mod miller;
 mod nav;
 mod nav_menu;
+mod newmenu;
 mod ole_glue;
 mod ops;
 mod overlay;

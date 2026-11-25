@@ -22,6 +22,7 @@
 //! Nothing here holds `crate::with` across a call that can re-enter the
 //! window procedure (`DoDragDrop`, `MessageBoxW`, `UpdateWindow`).
 
+use crate::newmenu::NewKind;
 use crate::ole_glue;
 use crate::ops::{Job, plural};
 use crate::view::DropDest;
@@ -192,6 +193,10 @@ enum ClipCtx {
     Set(String),
     Paste { folder: String },
     Links { folder: String },
+    /// "Paste shortcut": the files on the clipboard become shortcuts in `folder`
+    PasteLinks { folder: String },
+    /// a picture on the clipboard is being saved as a PNG in `folder`
+    Image { folder: String },
 }
 
 struct MenuCtx {
@@ -546,6 +551,46 @@ fn paste(a: &mut App, folder: String) {
     clip(a, ClipJob::Read { staging, cap: STAGE_CAP, consume_cut: true }, ClipCtx::Paste { folder });
 }
 
+/// "Paste shortcut": shortcuts in `folder` to the files on the clipboard
+/// (the clipboard keeps them, a cut stays a cut).
+fn paste_shortcut(a: &mut App, folder: String) {
+    if crate::archive_ui::is_archive_path(&folder) {
+        return status(a, crate::archive_ui::READ_ONLY_MSG);
+    }
+    a.ops.staged += 1;
+    let staging = std::env::temp_dir().join("Tsubame").join(format!("paste-{}-{}", std::process::id(), a.ops.staged));
+    status(a, "Reading the clipboard...");
+    // cap 0: virtual files (a zip folder, a mail) are not staged; there is nothing to point at
+    clip(a, ClipJob::Read { staging, cap: 0, consume_cut: false }, ClipCtx::PasteLinks { folder });
+}
+
+/// The folders of `paths` with the items in each, in order of first appearance.
+/// A drive root has no folder: it is left out.
+pub fn group_by_parent(paths: &[String]) -> Vec<(String, Vec<PathBuf>)> {
+    let mut out: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    for p in paths {
+        let Some(parent) = Path::new(p).parent().map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty()) else { continue };
+        match out.iter_mut().find(|(f, _)| f.eq_ignore_ascii_case(&parent)) {
+            Some((_, v)) => v.push(PathBuf::from(p)),
+            None => out.push((parent, vec![PathBuf::from(p)])),
+        }
+    }
+    out
+}
+
+/// "Create shortcut": `<name> - Shortcut.lnk` next to each item.
+fn create_shortcuts(a: &mut App, paths: Vec<String>) {
+    if paths.is_empty() {
+        return status(a, "Select something first");
+    }
+    if paths.iter().any(|p| crate::archive_ui::is_archive_path(p)) {
+        return status(a, crate::archive_ui::READ_ONLY_MSG);
+    }
+    for (folder, targets) in group_by_parent(&paths) {
+        clip(a, ClipJob::Links { targets, folder: PathBuf::from(&folder) }, ClipCtx::Links { folder });
+    }
+}
+
 fn on_clip(a: &mut App, id: u64, reply: ClipReply) {
     let ctx = match &a.ops.clip_busy {
         Some((cid, _)) if *cid == id => a.ops.clip_busy.take().map(|c| c.1),
@@ -564,6 +609,24 @@ fn on_clip(a: &mut App, id: u64, reply: ClipReply) {
                 a.view.after_ops();
             }
             (ClipCtx::Links { folder, .. }, ClipReply::Links(Err(e))) => status(a, format!("Can't make shortcuts in {folder}: {e}")),
+            (ClipCtx::PasteLinks { folder }, ClipReply::Read(Ok(r))) => {
+                // staged virtual files are not real files to point at
+                if let Some(s) = &r.staging {
+                    let _ = std::fs::remove_dir_all(s);
+                }
+                if r.info.paths.is_empty() {
+                    status(a, "No files on the clipboard to make shortcuts to");
+                } else {
+                    drop_into(a, &r.info.paths, folder, EFFECT_LINK, r.info.rejected);
+                }
+            }
+            (ClipCtx::PasteLinks { .. }, ClipReply::Read(Err(e))) => status(a, format!("Can't read the clipboard: {e}")),
+            (ClipCtx::Image { folder }, ClipReply::Image(Ok(name))) => {
+                status(a, format!("Pasted the picture as {name}"));
+                a.view.ops.changed(&folder, vec![name]);
+                a.view.after_ops();
+            }
+            (ClipCtx::Image { .. }, ClipReply::Image(Err(e))) => status(a, format!("Can't save the picture: {e}")),
             _ => {}
         }
     }
@@ -578,6 +641,12 @@ fn paste_read(a: &mut App, folder: String, r: ClipRead) {
     if sources.is_empty() {
         if let Some(s) = &r.staging {
             let _ = std::fs::remove_dir_all(s);
+        }
+        // a picture and no files: Ctrl+V saves it as Image.png (text does nothing)
+        if r.image && r.info.rejected == 0 {
+            status(a, "Saving the picture...");
+            clip(a, ClipJob::SaveImage { folder: PathBuf::from(&folder), base: "Image".into() }, ClipCtx::Image { folder });
+            return;
         }
         let skipped = r.skipped + r.info.rejected;
         status(a, if skipped > 0 { format!("Nothing pasted: {skipped} item(s) refused (unsafe name, device path or over {} MB)", STAGE_CAP >> 20) } else { "Nothing to paste".into() });
@@ -770,6 +839,12 @@ fn open_properties(paths: Vec<String>) {
 }
 
 fn new_item(a: &mut App, file: bool) {
+    new_kind(a, if file { NewKind::Text } else { NewKind::Folder });
+}
+
+/// A new folder, text document or registered file type in the shown folder; the
+/// new item is renamed as soon as the list has it.
+fn new_kind(a: &mut App, kind: NewKind) {
     if a.view.tab().is_archive() {
         return status(a, crate::archive_ui::READ_ONLY_MSG);
     }
@@ -781,11 +856,13 @@ fn new_item(a: &mut App, file: bool) {
             taken.insert(String::from_utf16_lossy(n).to_lowercase());
         }
     }
-    let name = if file { ole_glue::free_name("New Text Document", ".txt", &|n| taken.contains(n)) } else { ole_glue::free_name("New folder", "", &|n| taken.contains(n)) };
-    let path = Path::new(&folder).join(&name);
-    let op = if file { Operation::NewFile(path) } else { Operation::NewFolder(path) };
-    let job = Job::new("Creating", "Created").into_folder(folder, vec![name]);
-    a.view.ops.submit(vec![op], job);
+    let Some((name, op)) = crate::newmenu::plan(&kind, Path::new(&folder), &|n| taken.contains(n), &crate::newmenu::types()) else {
+        return status(a, "That file type is not available");
+    };
+    let job = Job::new("Creating", "Created").into_folder(folder.clone(), vec![name.clone()]);
+    if a.view.ops.submit(vec![op], job) {
+        a.view.rename_when_listed(&folder, &name);
+    }
 }
 
 fn open_terminal(folder: String) {
@@ -843,6 +920,8 @@ fn native_bg_menu(a: &mut App, folder: String, sx: i32, sy: i32, extended: bool)
 /// Opens the own-drawn menu (a newer one replaces an older one: dropping
 /// its handle closes it on its worker, its late batches are dropped).
 fn open_own(a: &mut App, mut t: crate::ctxui::Target) {
+    // the "New" submenu's registered types (a no-op after the first call)
+    tsubame_win::shellnew::ensure_started();
     a.view.ctx = None;
     if !t.background && t.paths.len() == 1 {
         t.removable_drive = a.view.side.is_removable_drive(&t.paths[0]);
@@ -893,7 +972,50 @@ pub fn open_background_menu(a: &mut App, folder: String, sx: i32, sy: i32, exten
     }
 }
 
+/// "If you change a file name extension..." (Yes / No).
+fn confirm_ext(hwnd: HWND) -> bool {
+    with(|a| a.view.ops.asking = true);
+    let r = unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(crate::rename::EXT_CHANGE_TEXT), &HSTRING::from("Rename"), MB_YESNO | MB_ICONWARNING) };
+    with(|a| a.view.ops.asking = false);
+    r == IDYES
+}
+
 pub fn after_frame(hwnd: HWND) {
+    // commands the view could not run itself (no pool, no clipboard there)
+    let reqs = with(|a| std::mem::take(&mut a.view.shell_reqs)).unwrap_or_default();
+    let links = with(|a| std::mem::take(&mut a.view.ops.links)).unwrap_or_default();
+    if !reqs.is_empty() || !links.is_empty() {
+        with(|a| {
+            for r in reqs {
+                match r {
+                    crate::newmenu::ShellReq::CreateShortcut => {
+                        let sel = a.view.tab().selected_paths(MAX_ITEMS);
+                        create_shortcuts(a, sel);
+                    }
+                    crate::newmenu::ShellReq::PasteShortcut => {
+                        if let Some(f) = active_folder(a) {
+                            paste_shortcut(a, f);
+                        }
+                    }
+                }
+            }
+            // Alt-drops the view planned (`Ops::submit_steps`)
+            for (folder, sources) in links {
+                let paths: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
+                drop_into(a, &paths, folder, EFFECT_LINK, 0);
+            }
+        });
+        invalidate(hwnd);
+    }
+    // a changed file name extension: ask (outside the app borrow), then go on or edit again
+    if let Some(ask) = with(|a| a.view.ext_ask.take()).flatten() {
+        let yes = confirm_ext(hwnd);
+        with(|a| {
+            a.view.ext_ask = Some(ask);
+            a.view.ext_answer(&mut a.ui, yes);
+        });
+        invalidate(hwnd);
+    }
     // programs a pack command or file-type rule queued this frame
     for argvs in with(|a| std::mem::take(&mut a.view.pack_runs)).unwrap_or_default() {
         start_custom(hwnd.0 as isize, argvs);
@@ -985,7 +1107,7 @@ pub fn ctx_after_frame(hwnd: HWND) {
 fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_config::MenuEntry], shift: bool) {
     let paths = if t.background { Vec::new() } else { t.paths.clone() };
     if crate::archive_ui::is_archive_path(&t.folder)
-        && matches!(act, "file.cut" | "file.delete" | "file.rename" | "file.paste" | "x.new-folder" | "x.new-file")
+        && (matches!(act, "file.cut" | "file.delete" | "file.rename" | "file.paste" | "file.create-shortcut" | "edit.paste-shortcut") || crate::newmenu::kind_of_action(act).is_some())
     {
         status(a, crate::archive_ui::READ_ONLY_MSG);
         return;
@@ -1026,8 +1148,13 @@ fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_
         "file.rename" => a.view.rename_request = true,
         "file.batch_rename" => a.view.run_command(&mut a.ui, crate::commands::CMD_BATCH_RENAME),
         "file.delete" => start_delete(a, paths, shift),
-        "x.new-folder" => new_item(a, false),
-        "x.new-file" => new_item(a, true),
+        "file.create-shortcut" => create_shortcuts(a, paths),
+        "edit.paste-shortcut" => paste_shortcut(a, one_dir.unwrap_or_else(|| t.folder.clone())),
+        act if crate::newmenu::kind_of_action(act).is_some() => {
+            if let Some(k) = crate::newmenu::kind_of_action(act) {
+                new_kind(a, k);
+            }
+        }
         "x.terminal" => open_terminal(one_dir.unwrap_or_else(|| t.folder.clone())),
         "x.refresh" => a.view.run_command(&mut a.ui, crate::commands::CMD_REFRESH),
         "tags.pick" => a.view.open_tags_picker(&mut a.ui, None, false),
@@ -1290,6 +1417,17 @@ fn drop_into(a: &mut App, paths: &[PathBuf], folder: String, e: u32, rejected: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_targets_are_grouped_by_their_folder() {
+        let p = |s: &str| s.to_string();
+        let g = group_by_parent(&[p(r"C:\a\x.txt"), p(r"C:\b\y.txt"), p(r"c:\A\z.txt"), p(r"D:\")]);
+        assert_eq!(g.len(), 2, "a drive root has no folder: {g:?}");
+        assert_eq!(g[0].0, r"C:\a");
+        assert_eq!(g[0].1, [PathBuf::from(r"C:\a\x.txt"), PathBuf::from(r"c:\A\z.txt")], "folders compare case-insensitively");
+        assert_eq!(g[1], (p(r"C:\b"), vec![PathBuf::from(r"C:\b\y.txt")]));
+        assert!(group_by_parent(&[]).is_empty());
+    }
 
     #[test]
     fn file_shortcuts() {

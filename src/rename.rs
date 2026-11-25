@@ -132,6 +132,33 @@ pub fn is_slow_click(prev_ms: Option<u64>, was_sole: bool, now_ms: u64) -> bool 
     }
 }
 
+/// Explorer asks before a file's extension changes ("the file might become
+/// unusable"). Not for folders, not for a file that had no extension, not when
+/// only the case of the extension changes.
+pub fn ext_change_needs_confirm(old: &str, new: &str, is_dir: bool) -> bool {
+    if is_dir {
+        return false;
+    }
+    let old_ext = split_ext(old, false).1;
+    if old_ext.is_empty() {
+        return false;
+    }
+    let new_ext = split_ext(new, false).1;
+    !old_ext.eq_ignore_ascii_case(new_ext)
+}
+
+/// The text of the extension question.
+pub const EXT_CHANGE_TEXT: &str = "If you change a file name extension, the file might become unusable. Are you sure?";
+
+/// Tab / Shift+Tab while renaming: the row to rename next. `pos` is the
+/// renamed row's place in the shown list of `count` rows. `None` at either end.
+pub fn neighbour(pos: usize, count: usize, forward: bool) -> Option<usize> {
+    if pos >= count {
+        return None;
+    }
+    if forward { (pos + 1 < count).then_some(pos + 1) } else { pos.checked_sub(1) }
+}
+
 // ---------------------------------------------------------------- batch
 
 /// One item of a batch rename.
@@ -354,6 +381,33 @@ mod tests {
         assert!(validate("mine.txt", "mine.txt", "C:\\d", exists).is_ok());
         assert!(!NameError::Empty.can_replace());
         assert_eq!(NameError::Exists.message(), "A file with this name already exists");
+    }
+
+    #[test]
+    fn extension_change_asks_only_for_real_changes_of_files() {
+        assert!(ext_change_needs_confirm("a.txt", "a.md", false));
+        assert!(ext_change_needs_confirm("a.txt", "a", false), "removing it counts");
+        assert!(ext_change_needs_confirm("a.txt", "a.txt.bak", false));
+        assert!(!ext_change_needs_confirm("a.txt", "b.txt", false), "same extension");
+        assert!(!ext_change_needs_confirm("a.txt", "a.TXT", false), "case only");
+        assert!(!ext_change_needs_confirm("a", "a.txt", false), "it had none");
+        assert!(!ext_change_needs_confirm(".gitignore", ".ignore", false), "a dot file has no extension");
+        assert!(!ext_change_needs_confirm("v1.2", "v1.3", true), "folders never ask");
+        assert!(!ext_change_needs_confirm("v1.2", "v2", true));
+        assert!(ext_change_needs_confirm("archive.tar.gz", "archive.tar.xz", false));
+    }
+
+    #[test]
+    fn tab_moves_to_the_neighbour_row() {
+        assert_eq!(neighbour(0, 3, true), Some(1));
+        assert_eq!(neighbour(1, 3, true), Some(2));
+        assert_eq!(neighbour(2, 3, true), None, "last row: Tab stops");
+        assert_eq!(neighbour(2, 3, false), Some(1));
+        assert_eq!(neighbour(0, 3, false), None, "first row: Shift+Tab stops");
+        assert_eq!(neighbour(0, 1, true), None);
+        assert_eq!(neighbour(0, 1, false), None);
+        assert_eq!(neighbour(5, 3, true), None, "a row that is not there");
+        assert_eq!(neighbour(0, 0, false), None);
     }
 
     #[test]

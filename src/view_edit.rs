@@ -18,6 +18,15 @@ const ID_RENAME: Id = Id::new("rename-edit");
 const ID_BATCH: Id = Id::new("batch-pattern");
 /// Pointer travel (DIPs) before a press on a row becomes a drag.
 const DRAG_START: f32 = 5.0;
+/// A new item that has not shown in its folder's list by now is not renamed.
+const RENAME_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A new file or folder waiting to show in the list, to be renamed.
+pub struct RenameWait {
+    pub folder: String,
+    pub name: String,
+    pub since: Instant,
+}
 
 /// Milliseconds since the first call (a monotonic clock for click timing).
 pub fn now_ms() -> u64 {
@@ -373,9 +382,30 @@ impl View {
     }
 
     pub(super) fn finish_rename(&mut self, ui: &mut Ui, out: RenameOut) {
+        self.finish_rename_checked(ui, out, false);
+    }
+
+    /// `confirmed`: the user already said yes to a changed file name extension.
+    fn finish_rename_checked(&mut self, ui: &mut Ui, out: RenameOut, confirmed: bool) {
         let Some(e) = self.rename.take() else { return };
         self.focus_list = true;
-        if out == RenameOut::Cancel || e.unchanged() || !(e.valid() || matches!(out, RenameOut::Commit { replace: true })) {
+        let step = matches!(out, RenameOut::CommitNext | RenameOut::CommitPrev) && !self.tree_rows_on() && !self.miller_showing();
+        if out == RenameOut::Cancel || !(e.unchanged() || e.valid() || matches!(out, RenameOut::Commit { replace: true })) {
+            ui.request_repaint();
+            return;
+        }
+        // Tab / Shift+Tab move on even when the name stayed the same
+        if e.unchanged() {
+            if step {
+                self.rename_neighbour(ui, &e.path, out == RenameOut::CommitNext);
+            }
+            ui.request_repaint();
+            return;
+        }
+        // Explorer asks before a file's extension changes; `shellops::after_frame` shows the
+        // question (a dialog can not open inside the frame) and calls `ext_answer`
+        if !confirmed && rename::ext_change_needs_confirm(&e.original, e.name(), e.is_dir) {
+            self.ext_ask = Some((e, out));
             ui.request_repaint();
             return;
         }
@@ -392,25 +422,76 @@ impl View {
                 m.want_pick(&to);
             }
         }
-        if out == RenameOut::CommitNext && !self.tree_rows_on() && !self.miller_showing() {
-            self.rename_next(ui, &e.path);
+        if step {
+            self.rename_neighbour(ui, &e.path, out == RenameOut::CommitNext);
         }
         ui.request_repaint();
     }
 
-    /// Tab: the row below the one that was just renamed.
-    fn rename_next(&mut self, ui: &mut Ui, prev: &str) {
+    /// The answer to the extension question (`shellops::after_frame` asked it).
+    /// Yes: the rename goes on. No: the field comes back with the typed name.
+    pub fn ext_answer(&mut self, ui: &mut Ui, yes: bool) {
+        let Some((mut e, out)) = self.ext_ask.take() else { return };
+        if yes {
+            self.rename = Some(e);
+            self.finish_rename_checked(ui, out, true);
+        } else {
+            // the field takes the focus again before its "lost the focus" rule can end it
+            e.frames = 0;
+            self.rename = Some(e);
+            self.focus_list = false;
+            ui.set_focus(Some(pid(self.live, ID_RENAME)));
+        }
+        ui.request_repaint();
+    }
+
+    /// Tab / Shift+Tab: the row after / before the one that was just renamed.
+    fn rename_neighbour(&mut self, ui: &mut Ui, prev: &str, forward: bool) {
+        let grid = self.mode.is_grid();
         let t = self.tab_mut();
         let name = crate::dnd::name_of(prev);
         let w: Vec<u16> = name.encode_utf16().collect();
         let Some(pos) = t.store.find(&w).and_then(|id| t.store.view().iter().position(|v| *v == id)) else { return };
-        if pos + 1 >= t.shown() {
+        let Some(next) = rename::neighbour(pos, t.shown(), forward) else { return };
+        t.sel.single(&t.store, next);
+        if grid {
+            t.grid.cursor = next;
+        } else {
+            t.list.cursor = next;
+            let len = t.shown();
+            t.list.ensure_visible(next, len);
+        }
+        self.begin_rename(ui);
+    }
+
+    /// A new item was queued in `folder`: rename it as soon as the listing shows it.
+    pub fn rename_when_listed(&mut self, folder: &str, name: &str) {
+        self.rename_wait = Some(RenameWait { folder: folder.to_string(), name: name.to_string(), since: std::time::Instant::now() });
+    }
+
+    /// Every frame (cheap when nothing waits): starts the rename of a new item
+    /// once it is in the list; gives up after a few seconds, when the user
+    /// went elsewhere or started another rename.
+    pub(super) fn poll_rename_wait(&mut self, ui: &mut Ui) {
+        let Some(w) = self.rename_wait.as_ref() else { return };
+        let gone = w.since.elapsed() > RENAME_WAIT || self.rename.is_some() || self.batch.is_some() || self.tree_rows_on() || self.miller_showing();
+        if gone || !self.tab().path.trim_end_matches('\\').eq_ignore_ascii_case(w.folder.trim_end_matches('\\')) {
+            self.rename_wait = None;
             return;
         }
-        t.sel.single(&t.store, pos + 1);
-        t.list.cursor = pos + 1;
-        let len = t.shown();
-        t.list.ensure_visible(pos + 1, len);
+        let wide: Vec<u16> = w.name.encode_utf16().collect();
+        let grid = self.mode.is_grid();
+        let t = self.tab_mut();
+        let Some(pos) = t.store.find(&wide).and_then(|id| t.store.view().iter().position(|v| *v == id)) else { return };
+        t.sel.single(&t.store, pos);
+        if grid {
+            t.grid.cursor = pos;
+        } else {
+            t.list.cursor = pos;
+            let len = t.shown();
+            t.list.ensure_visible(pos, len);
+        }
+        self.rename_wait = None;
         self.begin_rename(ui);
     }
 
