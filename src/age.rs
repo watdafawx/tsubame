@@ -256,6 +256,11 @@ pub struct AgeUi {
 
 const BUCKET_NAMES: [&str; 5] = ["Today", "This week", "This month", "This year", "Older"];
 
+/// The name of bucket `b` (0 today .. 4 older), for the legend and screen readers.
+pub fn bucket_name(b: usize) -> &'static str {
+    BUCKET_NAMES[b.min(4)]
+}
+
 fn threshold_text(cfg: &FileAge, b: usize, out: &mut String) {
     use std::fmt::Write;
     out.clear();

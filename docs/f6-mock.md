@@ -84,7 +84,7 @@ F4 on ext-api
 - All text and glyph colours were computed against the token surfaces: tag colours >= 3:1 on row, zebra, hover, selected, panel and popup in both themes (dark min 4.3, light min 3.3); age date text >= 4.5:1 for all three palettes on all five row states.
 - The Heat age palette and the tag palette are not colour-blind safe on their own. Mitigations built into the designs: tag shapes and names, age pips and bold-today, and the Colour-blind safe palette (neighbouring buckets are separated by CIE delta E of 30 or more under deuteranopia and protanopia).
 - Everything is keyboard-complete; the focus ring is the existing 1 px `--c-focus` (8.5:1 dark, 7.0:1 light on the row fill).
-- UI Automation follows the CM10 rules in `docs/ctxmenu.md`: built only while a client listens. Tree and TreeItem with ExpandCollapse for the tree, List and ListItem for Miller columns, tags and age bucket appended to the row's Name or Modified value.
+- UI Automation follows the CM10 rules in `docs/ctxmenu.md`: built only while a client listens. Tree and TreeItem with ExpandCollapse for the tree, List and ListItem for Miller columns, tags and age bucket appended to the row's Name or Modified value. Built: see `docs/uia-views.md`.
 
 ## Verification
 

@@ -41,6 +41,9 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use windows::core::{BOOL, BSTR, Error, IUnknown, IUnknownImpl, Interface, PCWSTR, Result, implement};
 
+mod view;
+pub use view::{Expand, VAct, VItem, VReq, VSurface, ViewSnap, publish_view, take_view_requests};
+
 /// Posted to the main window when a request is waiting ([`take_requests`]).
 pub const WM_APP_UIA: u32 = WM_APP + 10;
 
@@ -108,6 +111,8 @@ pub struct Req {
 struct Shared {
     hwnd: isize,
     snap: Mutex<Arc<Snap>>,
+    /// the file views (rows, Tree, Miller columns): `uia/view.rs`
+    view: Mutex<Arc<ViewSnap>>,
     cache: Mutex<HashMap<Node, Provider>>,
     root: Mutex<Option<Provider>>,
 }
@@ -152,6 +157,10 @@ enum Node {
     Level(usize),
     Row(usize, u64),
     Filter,
+    /// a file view: List or Tree (its key)
+    Surf(u32),
+    /// a row of a file view: (surface key, row key)
+    Cell(u32, u64),
 }
 
 impl Node {
@@ -161,6 +170,8 @@ impl Node {
             Node::Level(l) => (1, l as i32, 0),
             Node::Row(l, k) => (2, l as i32, k),
             Node::Filter => (3, 0, 0),
+            Node::Surf(s) => (4, s as i32, 0),
+            Node::Cell(s, k) => (5, s as i32, k),
         };
         [UiaAppendRuntimeId as i32, kind, lv, (key >> 32) as i32, key as i32]
     }
@@ -229,6 +240,8 @@ impl Shared {
             Node::Level(l) => l < snap.levels.len(),
             Node::Row(l, k) => Self::row(snap, l, k).is_some(),
             Node::Filter => snap.levels.first().is_some_and(|l| l.filter.is_some()),
+            // the view's nodes are checked against the view's snapshot
+            Node::Surf(_) | Node::Cell(..) => false,
         }
     }
 
@@ -271,9 +284,14 @@ impl Shared {
         let _ = unsafe { PostMessageW(Some(HWND(self.hwnd as *mut c_void)), WM_APP_UIA, WPARAM(0), LPARAM(0)) };
     }
 
-    /// Releases UIA's hold on every provider made for the menu that closed.
+    /// Releases UIA's hold on every provider made for the menu that closed (the
+    /// view's rows stay: they follow the view snapshot).
     fn disconnect_items(&self) {
-        let items: Vec<Provider> = lock(&self.cache).drain().map(|(_, p)| p).collect();
+        let items: Vec<Provider> = {
+            let mut c = lock(&self.cache);
+            let menu: Vec<Node> = c.keys().copied().filter(|n| !n.is_view()).collect();
+            menu.into_iter().filter_map(|k| c.remove(&k)).collect()
+        };
         for p in items {
             let _ = unsafe { UiaDisconnectProvider(&p.0) };
         }
@@ -294,7 +312,7 @@ pub fn on_get_object(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match g.as_ref() {
             Some(s) if s.hwnd == hwnd.0 as isize => s.clone(),
             _ => {
-                let s = Arc::new(Shared { hwnd: hwnd.0 as isize, snap: Mutex::new(Arc::new(Snap::default())), cache: Mutex::new(HashMap::new()), root: Mutex::new(None) });
+                let s = Arc::new(Shared { hwnd: hwnd.0 as isize, snap: Mutex::new(Arc::new(Snap::default())), view: Mutex::new(Arc::new(ViewSnap::default())), cache: Mutex::new(HashMap::new()), root: Mutex::new(None) });
                 *g = Some(s.clone());
                 s
             }
@@ -315,7 +333,9 @@ pub fn on_get_object(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
 pub fn shutdown(hwnd: HWND) {
     if let Some(sh) = lock(&SHARED).take() {
         *lock(&sh.snap) = Arc::new(Snap::default());
+        *lock(&sh.view) = Arc::new(ViewSnap::default());
         sh.disconnect_items();
+        sh.prune_view(&ViewSnap::default());
         if let Some(r) = lock(&sh.root).take() {
             let _ = unsafe { UiaDisconnectProvider(&r.0) };
         }
@@ -401,8 +421,8 @@ impl IRawElementProviderSimple_Impl for RootProv_Impl {
 
 impl IRawElementProviderFragment_Impl for RootProv_Impl {
     fn Navigate(&self, dir: NavigateDirection) -> Result<IRawElementProviderFragment> {
-        let snap = self.sh.snap();
-        match self.sh.navigate(&snap, Node::Root, dir) {
+        let (snap, view) = (self.sh.snap(), self.sh.view());
+        match self.sh.navigate_all(&snap, &view, Node::Root, dir) {
             Some(n) => self.sh.fragment(n),
             None => Err(none()),
         }
@@ -427,7 +447,7 @@ impl IRawElementProviderFragment_Impl for RootProv_Impl {
 
 impl IRawElementProviderFragmentRoot_Impl for RootProv_Impl {
     fn ElementProviderFromPoint(&self, x: f64, y: f64) -> Result<IRawElementProviderFragment> {
-        let snap = self.sh.snap();
+        let (snap, view) = (self.sh.snap(), self.sh.view());
         let hwnd = HWND(self.sh.hwnd as *mut c_void);
         let mut p = POINT { x: x.round() as i32, y: y.round() as i32 };
         let _ = unsafe { ScreenToClient(hwnd, &mut p) };
@@ -448,19 +468,24 @@ impl IRawElementProviderFragmentRoot_Impl for RootProv_Impl {
             }
             return self.sh.fragment(Node::Level(lv));
         }
-        Err(none())
+        match Shared::view_from_point(&view, px, py) {
+            Some(n) => self.sh.fragment(n),
+            None => Err(none()),
+        }
     }
     fn GetFocus(&self) -> Result<IRawElementProviderFragment> {
-        match self.sh.snap().focus() {
-            Some((l, k)) => self.sh.fragment(Node::Row(l, k)),
-            None => Err(none()),
+        // an open menu owns the keyboard, else the view's cursor row
+        match (self.sh.snap().focus(), self.sh.view().focus()) {
+            (Some((l, k)), _) => self.sh.fragment(Node::Row(l, k)),
+            (None, Some(n)) => self.sh.fragment(n),
+            (None, None) => Err(none()),
         }
     }
 }
 
 // ---- levels, rows and the filter field -----------------------------------------
 
-#[implement(IRawElementProviderSimple, IRawElementProviderFragment, IInvokeProvider, IToggleProvider, IExpandCollapseProvider, IValueProvider)]
+#[implement(IRawElementProviderSimple, IRawElementProviderFragment, IInvokeProvider, IToggleProvider, IExpandCollapseProvider, IValueProvider, ISelectionProvider, ISelectionItemProvider)]
 struct Item {
     sh: Arc<Shared>,
     node: Node,
@@ -474,10 +499,14 @@ impl Item_Impl {
         }
     }
     fn alive(&self, snap: &Snap) -> Result<()> {
+        if self.node.is_view() {
+            return if self.sh.view().exists(self.node) { Ok(()) } else { Err(gone()) };
+        }
         if Shared::exists(snap, self.node) { Ok(()) } else { Err(gone()) }
     }
     fn rect(&self, snap: &Snap) -> Result<Px> {
         match self.node {
+            Node::Surf(_) | Node::Cell(..) => self.view_rect(&self.sh.view()),
             Node::Level(l) => snap.levels.get(l).map(|l| l.rect).ok_or_else(gone),
             Node::Row(..) => self.row(snap).map(|r| r.rect),
             Node::Filter => snap.levels.first().and_then(|l| l.filter.as_ref()).map(|f| f.0).ok_or_else(gone),
@@ -486,6 +515,9 @@ impl Item_Impl {
     }
     /// Runs the row like Enter would; refuses a disabled row.
     fn invoke(&self) -> Result<()> {
+        if self.node.is_view() {
+            return self.view_invoke();
+        }
         let snap = self.sh.snap();
         let row = self.row(&snap)?;
         if !row.enabled {
@@ -503,6 +535,9 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
         Ok(ProviderOptions_ServerSideProvider)
     }
     fn GetPatternProvider(&self, id: UIA_PATTERN_ID) -> Result<IUnknown> {
+        if self.node.is_view() {
+            return self.view_pattern(id);
+        }
         let snap = self.sh.snap();
         self.alive(&snap)?;
         let me = self.to_object();
@@ -524,6 +559,7 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
             return Ok(variant_bool(true));
         }
         match self.node {
+            Node::Surf(_) | Node::Cell(..) => self.view_property(id),
             Node::Level(l) => {
                 let lv = &snap.levels[l];
                 Ok(match id {
@@ -574,10 +610,10 @@ impl IRawElementProviderSimple_Impl for Item_Impl {
 
 impl IRawElementProviderFragment_Impl for Item_Impl {
     fn Navigate(&self, dir: NavigateDirection) -> Result<IRawElementProviderFragment> {
-        let snap = self.sh.snap();
+        let (snap, view) = (self.sh.snap(), self.sh.view());
         self.alive(&snap)?;
-        match self.sh.navigate(&snap, self.node, dir) {
-            Some(n) if Shared::exists(&snap, n) => self.sh.fragment(n),
+        match self.sh.navigate_all(&snap, &view, self.node, dir) {
+            Some(n) if Shared::exists(&snap, n) || view.exists(n) => self.sh.fragment(n),
             _ => Err(none()),
         }
     }
@@ -619,6 +655,9 @@ impl IToggleProvider_Impl for Item_Impl {
 
 impl IExpandCollapseProvider_Impl for Item_Impl {
     fn Expand(&self) -> Result<()> {
+        if self.node.is_view() {
+            return self.view_expand(true);
+        }
         let snap = self.sh.snap();
         let r = self.row(&snap)?;
         if r.expanded {
@@ -627,6 +666,9 @@ impl IExpandCollapseProvider_Impl for Item_Impl {
         self.invoke()
     }
     fn Collapse(&self) -> Result<()> {
+        if self.node.is_view() {
+            return self.view_expand(false);
+        }
         let snap = self.sh.snap();
         let r = self.row(&snap)?;
         if let Node::Row(lv, key) = self.node
@@ -637,6 +679,9 @@ impl IExpandCollapseProvider_Impl for Item_Impl {
         Ok(())
     }
     fn ExpandCollapseState(&self) -> Result<ExpandCollapseState> {
+        if self.node.is_view() {
+            return self.view_expand_state();
+        }
         let snap = self.sh.snap();
         let r = self.row(&snap)?;
         Ok(if !r.submenu {
@@ -655,6 +700,9 @@ impl IValueProvider_Impl for Item_Impl {
         Err(Error::from_hresult(windows::core::HRESULT(UIA_E_NOTSUPPORTED as i32)))
     }
     fn Value(&self) -> Result<BSTR> {
+        if matches!(self.node, Node::Cell(..)) {
+            return self.view_value();
+        }
         let snap = self.sh.snap();
         snap.levels.first().and_then(|l| l.filter.as_ref()).map(|f| BSTR::from(f.1.as_str())).ok_or_else(gone)
     }
@@ -686,7 +734,7 @@ mod tests {
     }
 
     fn sh() -> Shared {
-        Shared { hwnd: 0, snap: Mutex::new(Arc::new(Snap::default())), cache: Mutex::new(HashMap::new()), root: Mutex::new(None) }
+        Shared { hwnd: 0, snap: Mutex::new(Arc::new(Snap::default())), view: Mutex::new(Arc::new(ViewSnap::default())), cache: Mutex::new(HashMap::new()), root: Mutex::new(None) }
     }
 
     #[test]

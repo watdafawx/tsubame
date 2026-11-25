@@ -319,7 +319,7 @@ impl TagsUi {
         let title = if files.is_empty() {
             "New tag".to_string()
         } else if files.len() == 1 { format!("Tags for {}", split(&files[0].0).1) } else { format!("{} items selected", sep(files.len())) };
-        let mut p = Picker { title, at, focus: 0, edit: Edit::default(), field: TextInput::default(), new: None, fresh: true, masks: vec![None; files.len()], by_ck: HashMap::new(), files: Vec::new(), a11y: false };
+        let mut p = Picker { title, at, focus: 0, edit: Edit::default(), field: TextInput::default(), new: None, fresh: true, masks: vec![None; files.len()], by_ck: HashMap::new(), files: Vec::new(), a11y: false, a11y_inv: None };
         // what is cached answers at once; the rest is one lookup per folder
         let mut ask: HashMap<String, Vec<Row>> = HashMap::new();
         let none = !self.has_items() && self.snap.is_some();
@@ -348,6 +348,18 @@ impl TagsUi {
 
     pub fn picker_open(&self) -> bool {
         self.picker.is_some()
+    }
+
+    /// A screen reader invoked a picker row (`uia::Req` key): the next paint acts
+    /// on it as a click would. False: no picker is open.
+    pub fn a11y_invoke(&mut self, key: u64) -> bool {
+        match self.picker.as_mut() {
+            Some(p) => {
+                p.a11y_inv = Some(key);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Paints the picker (when open) and runs what it asks.
@@ -587,6 +599,8 @@ pub struct Picker {
     pub new: Option<NewTag>,
     fresh: bool,
     a11y: bool,
+    /// a row a screen reader invoked, acted on by the next paint (`TagsUi::a11y_invoke`)
+    a11y_inv: Option<u64>,
 }
 
 enum PickOut {
@@ -757,7 +771,7 @@ impl Picker {
                 if focused {
                     g.round_stroke(rr, t.radius_sm, t.focus, 1.0);
                 }
-                if it.clicked == Some(Button::Left) && !disabled {
+                if (it.clicked == Some(Button::Left) || self.a11y_inv == Some(i as u64 + 1)) && !disabled {
                     self.focus = i;
                     act = Some(*row);
                 }
@@ -824,6 +838,7 @@ impl Picker {
                 });
                 cy += ih;
             }
+            self.a11y_inv = None;
             // footer
             let fr = Rect::new(pr.x, pr.b() - 22.0, pr.w, 22.0);
             g.fill(Rect::new(fr.x, fr.y, fr.w, 1.0), t.border);
@@ -926,7 +941,7 @@ impl Picker {
                 }
                 let m = if shapes { Mark::Shape(Shape::ALL[i]) } else { Mark::Dot };
                 marks::draw(g, m, model::colour_rgb(i as u8, t.is_dark()), sr.x + sr.w / 2.0, sr.y + 15.0, 14.0);
-                if it.clicked == Some(Button::Left) {
+                if it.clicked == Some(Button::Left) || self.a11y_inv == Some(100 + i as u64) {
                     nt.swatch = i;
                     ui.set_focus(Some(ID_PK_NAME));
                 }
@@ -959,12 +974,13 @@ impl Picker {
                 g.text(&label, Rect::new(rr.x + 30.0, rr.y, rr.w - 100.0, ih), t.font(), if i == 0 && !ok { t.text_disabled } else { t.text });
                 let kw = g.measure(key, t.font_mono()) + 10.0;
                 tsubame_ui::keycap(g, t, rr.r() - 8.0 - kw.max(t.height_keycap), rr.y + ih / 2.0, key);
-                if it.clicked == Some(Button::Left) {
+                if it.clicked == Some(Button::Left) || self.a11y_inv == Some(200 + i as u64) {
                     if i == 0 { create = true } else { cancel = true }
                 }
                 a11y_rows.push(uia::Row { key: 200 + i as u64, name: label, shortcut: key.into(), rect: [rr.x, rr.y, rr.w, rr.h], enabled: i == 1 || ok, focused, visible: true, ..Default::default() });
                 cy += ih;
             }
+            self.a11y_inv = None;
             ui.popup_end(g);
         }
         if uia::active() {
@@ -1136,7 +1152,7 @@ mod tests {
     #[test]
     fn picker_toggles_like_the_mock_for_a_mixed_selection() {
         let defs = model::defaults();
-        let mut p = Picker { title: String::new(), at: Pt::default(), files: vec![], masks: vec![Some(1), Some(0), Some(1 | 16)], by_ck: HashMap::new(), edit: Edit::default(), field: TextInput::default(), focus: 0, new: None, fresh: false, a11y: false };
+        let mut p = Picker { title: String::new(), at: Pt::default(), files: vec![], masks: vec![Some(1), Some(0), Some(1 | 16)], by_ck: HashMap::new(), edit: Edit::default(), field: TextInput::default(), focus: 0, new: None, fresh: false, a11y: false, a11y_inv: None };
         assert_eq!(p.check(1), Check::Mixed);
         assert_eq!(p.check(16), Check::Mixed);
         assert_eq!(p.check(2), Check::Off);

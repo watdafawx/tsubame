@@ -328,7 +328,7 @@ impl View {
         let mouse = ui.mouse();
         let tab = &mut self.tabs.items[self.tabs.active];
         tab.list.row_h = t.height_list_row;
-        let Tab { store, tree, list: lstate, tag_fids, .. } = &mut *tab;
+        let Tab { store, tree, list: lstate, tag_fids, path, .. } = &mut *tab;
         let Some(m) = tree.as_mut() else { return (ListResponse::default(), None) };
         // the cursor follows its entry when rows moved
         if let Some(c) = m.cursor_row(Some(store)) {
@@ -352,6 +352,11 @@ impl View {
             clicked: None,
         };
         let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
+        if crate::uia_rows::on() {
+            let area = Rect::new(list_r.x, list_r.y, list_r.w - ui.theme.layout_scrollbar_width, list_r.h);
+            let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
+            crate::uia_rows::tree(&geo, lstate, lr.range, rows.m, rows.root, rows.root_fids, rows.tags, rows.row, rows.age.as_ref(), true);
+        }
         let chev = rows.chev;
         let activated = lr.activated;
         let status = rows.m.take_status();
@@ -470,6 +475,11 @@ impl View {
                 clicked: None,
             };
             let lr = list(ui, g, pid(self.live, ID_TPANE), area, pane_list, &mut rows);
+            if crate::uia_rows::on() {
+                let rows_r = Rect::new(area.x, area.y, area.w - ui.theme.layout_scrollbar_width, area.h);
+                let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_PANE), title: "Folders", area: rows_r, focused: ui.has_focus(pid(self.live, ID_TPANE)) && ui.window_focused() };
+                crate::uia_rows::tree(&geo, pane_list, lr.range, rows.m, None, &[], rows.tags, rows.row, None, false);
+            }
             (lr, rows.chev, rows.clicked)
         };
         self.tree_ui.pane_focus = ui.has_focus(pid(self.live, ID_TPANE));

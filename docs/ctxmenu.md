@@ -265,6 +265,9 @@ root has none.
   `UiaDisconnectProvider` and the cache is dropped; the window's root is
   released at `WM_DESTROY`.
 
+The file views (rows, Tree, Miller columns) use the same machinery with their
+own snapshot: see `docs/uia-views.md`.
+
 Not exposed (nothing invented): the CM8 edit menu, the Undo strip's buttons
 as separate elements (the strip is one MenuItem), the hover tooltip of the
 icon row, an unchecked check item (the data does not tell it from a plain
