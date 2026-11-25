@@ -77,6 +77,10 @@ pub const CMD_VIEW_MILLER: u32 = 83;
 pub const CMD_AGE_COLOURS: u32 = 70;
 // F4 batch rename (id kept clear of the other P4 batches in flight)
 pub const CMD_BATCH_RENAME: u32 = 72;
+// B10-C: file operation basics
+pub const CMD_CREATE_SHORTCUT: u32 = 140;
+pub const CMD_PASTE_SHORTCUT: u32 = 141;
+pub const CMD_RENAME_PREV: u32 = 142;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -139,6 +143,10 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_SETTINGS_UPDATES, "settings.updates", "Settings: updates", [], G),
     cmd!(CMD_SETTINGS_DEFAULT_FM, "settings.default-file-manager", "Settings: default file manager", [], G),
     cmd!(CMD_RESET_KEYS, "settings.reset-keys", "Reset all keyboard shortcuts", [], G),
+    cmd!(CMD_CREATE_SHORTCUT, "file.create-shortcut", "Create shortcut", [], F),
+    cmd!(CMD_PASTE_SHORTCUT, "edit.paste-shortcut", "Paste shortcut", [], F),
+    // Tab is `pane.switch` (it commits and renames the next row); the view binds Shift+Tab to this while a rename is open
+    cmd!(CMD_RENAME_PREV, "rename.previous", "Rename: commit and rename the previous item", [], F),
 ];
 
 /// Archive extension (`tsubame.vfs.archive`) commands. The extension commands take the
@@ -347,6 +355,9 @@ mod tests {
         (CMD_SETTINGS_UPDATES, &[], true),
         (CMD_SETTINGS_DEFAULT_FM, &[], true),
         (CMD_RESET_KEYS, &[], true),
+        (CMD_CREATE_SHORTCUT, &[], false),
+        (CMD_PASTE_SHORTCUT, &[], false),
+        (CMD_RENAME_PREV, &[], false),
     ];
 
     const FEATURE_BEFORE: &[Before] = &[

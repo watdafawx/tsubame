@@ -15,6 +15,8 @@ pub struct RenameEdit {
     pub error: Option<NameError>,
     /// frames drawn (a click away only ends the edit once the field had the focus)
     pub frames: u32,
+    /// a folder (its name has no extension to protect)
+    pub is_dir: bool,
 }
 
 /// What the user decided this frame.
@@ -28,6 +30,8 @@ pub enum RenameOut {
     Cancel,
     /// Tab: commit and start renaming the next row
     CommitNext,
+    /// Shift+Tab (the view's `rename.previous` command): commit and start renaming the previous row
+    CommitPrev,
 }
 
 impl RenameEdit {
@@ -41,7 +45,7 @@ impl RenameEdit {
         let end = original.char_indices().nth(stem).map(|(i, _)| i).unwrap_or(original.len());
         input.anchor = 0;
         input.caret = end;
-        RenameEdit { path: path.to_string(), original, parent, input, error: None, frames: 0 }
+        RenameEdit { path: path.to_string(), original, parent, input, error: None, frames: 0, is_dir }
     }
 
     pub fn name(&self) -> &str {
