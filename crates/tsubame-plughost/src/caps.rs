@@ -155,10 +155,10 @@ impl Capabilities {
             });
         }
         if self.network {
-            out.push("Use the network".to_string());
+            out.push("Use the network (reserved: no network calls exist yet; only lets folder grants on network shares work)".to_string());
         }
         if self.run_processes {
-            out.push("Start other programs".to_string());
+            out.push("Start other programs (reserved: not possible yet)".to_string());
         }
         out.push(format!("Use up to {} MB of memory and {} ms per call", self.max_memory_mb, self.timeout_ms));
         out
@@ -203,7 +203,7 @@ fn strip_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
 }
 
-fn is_device_name(component: &str) -> bool {
+pub(crate) fn is_device_name(component: &str) -> bool {
     // Windows looks at the part before the first dot, ignoring trailing spaces: `NUL.txt` is NUL.
     let stem = component.split('.').next().unwrap_or("").trim_end_matches(' ');
     const NAMES: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
@@ -819,7 +819,7 @@ mod tests {
         assert!(s[0].contains("for a command what you selected"));
         assert!(s[0].contains("for a search the folder searched"));
         assert_eq!(s[1], "Read and change files in C:\\Out");
-        assert_eq!(s[2], "Use the network");
+        assert!(s[2].starts_with("Use the network (reserved"), "{}", s[2]);
         assert_eq!(s.len(), 4);
         assert_eq!(Capabilities::default().summary().len(), 1);
     }

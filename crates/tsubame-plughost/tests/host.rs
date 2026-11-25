@@ -157,7 +157,7 @@ impl Image {
     }
 }
 
-const COLUMNS: [&str; 12] = ["echo", "len", "hang", "grow", "read", "write", "short", "trap", "caps", "info", "dir", "kid"];
+const COLUMNS: [&str; 13] = ["echo", "len", "hang", "grow", "read", "write", "short", "trap", "caps", "info", "dir", "kid", "xscope"];
 
 fn entrypoints(full: bool) -> Vec<(Kind, &'static str)> {
     let mut eps: Vec<(Kind, &str)> = COLUMNS.iter().map(|c| (Kind::Column, *c)).collect();
@@ -241,6 +241,17 @@ fn guest_wat(id: &str, full: bool) -> String {
             (then
               (call $caps (i32.const 200))
               (call $int (local.get $c) (i64.extend_i32_u (i32.load (i32.const 208))))
+              (br $cell)))
+          ;; x: the scope tags of the first two grants (first + 16 * second), as `get-capabilities` reports them
+          ;; (a path-grant is 16 bytes: the scope variant's tag at 0, its string at 4, the access at 12)
+          (if (i32.eq (local.get $mode) (i32.const 120))
+            (then
+              (call $caps (i32.const 200))
+              (call $int (local.get $c)
+                (i64.extend_i32_u
+                  (i32.add
+                    (i32.load8_u (i32.load (i32.const 212)))
+                    (i32.mul (i32.const 16) (i32.load8_u (i32.add (i32.load (i32.const 212)) (i32.const 16)))))))
               (br $cell)))
           ;; r: the first 16 bytes of the file as text, or -(1 + error code)
           (if (i32.eq (local.get $mode) (i32.const 114))
@@ -364,8 +375,7 @@ fn componentize(wat: &str, world: &str) -> Vec<u8> {
 
 /// What the install step does: compile with the host's engine settings.
 fn precompile(component: &[u8]) -> Vec<u8> {
-    let engine = wasmtime::Engine::new(&tsubame_plughost::host::engine_config()).expect("engine");
-    engine.precompile_component(component).expect("the component compiles")
+    tsubame_plugc::compile(component).expect("the component compiles")
 }
 
 /// The full guest as a package ships it (a component, `.wasm`).
@@ -433,6 +443,8 @@ fn load_for(temp: &Temp, cwasm: &[u8], caps: Capabilities, full: bool) -> Load {
         caps,
         entrypoints: entrypoints(full).into_iter().map(|(k, id)| (k, id.to_string())).collect(),
         protected: Vec::new(),
+        plugin_dir: String::new(),
+        data_dir: String::new(),
     }
 }
 
@@ -571,6 +583,56 @@ fn memory_is_capped() {
     let paths = vec![long.as_str(); 2_000];
     assert!(matches!(column(&p, "echo", &paths), Err(CallError::Memory | CallError::Trap(_))));
     assert_eq!(column(&p, "echo", &paths[..10]).unwrap().len(), 10);
+}
+
+// ---- PH-08: tables count in the memory budget --------------------------------------------------
+
+/// The column guest with `extra` (module fields, e.g. tables) added after its memory.
+fn column_cwasm_with(extra: &str) -> Vec<u8> {
+    let wat = guest_wat("test.fixture", false);
+    let anchor = "(memory (export \"memory\") 2)";
+    assert!(wat.contains(anchor));
+    precompile(&componentize(&wat.replacen(anchor, &format!("{anchor}\n  {extra}"), 1), "column-plugin"))
+}
+
+fn column_plugin_with(t: &Temp, extra: &str, max_memory_mb: u32) -> Plugin {
+    let cwasm = column_cwasm_with(extra);
+    Plugin::new(load_for(t, &cwasm, Capabilities { max_memory_mb, ..Capabilities::default() }, false), ProcessLauncher::new(HOST_EXE), options())
+}
+
+#[test]
+fn tables_are_counted_in_the_memory_budget() {
+    // 14 tables of 65,536 funcrefs are 7 MiB of host memory the old cap (2^20 elements, 256 tables) did not
+    // count. (The component's own glue has a table or two as well; the cap is 16.)
+    let tables: String = (0..14).map(|_| "(table 65536 funcref)").collect::<Vec<_>>().join(" ");
+    let t = Temp::new("tables-budget");
+    let p = column_plugin_with(&t, &tables, 4);
+    match column(&p, "echo", &["C:\\a"]) {
+        Err(CallError::Load(m)) => assert!(m.contains("memory"), "{m}"),
+        other => panic!("tables of 7 MiB in a 4 MB budget were accepted: {other:?}"),
+    }
+    // The same component fits in a budget that holds its tables and its memory.
+    let t = Temp::new("tables-budget-ok");
+    let p = column_plugin_with(&t, &tables, 16);
+    assert_eq!(column(&p, "echo", &["C:\\a"]).unwrap().len(), 1);
+}
+
+#[test]
+fn table_and_table_count_caps_hold() {
+    // one table over 65,536 elements
+    let t = Temp::new("table-big");
+    let p = column_plugin_with(&t, "(table 65537 funcref)", 64);
+    assert!(matches!(column(&p, "echo", &["C:\\a"]), Err(CallError::Load(_))), "one table of 65,537 elements");
+    // 16 tables of its own and the glue's: over the cap of 16
+    let t = Temp::new("table-count");
+    let many: String = (0..16).map(|_| "(table 1 funcref)").collect::<Vec<_>>().join(" ");
+    let p = column_plugin_with(&t, &many, 64);
+    assert!(matches!(column(&p, "echo", &["C:\\a"]), Err(CallError::Load(_))), "more than 16 tables");
+    // a handful of small tables is fine
+    let t = Temp::new("table-count-ok");
+    let ok: String = (0..12).map(|_| "(table 1 funcref)").collect::<Vec<_>>().join(" ");
+    let p = column_plugin_with(&t, &ok, 64);
+    assert_eq!(column(&p, "echo", &["C:\\a"]).unwrap().len(), 1);
 }
 
 #[test]
@@ -767,7 +829,70 @@ fn a_junction_does_not_lead_out_of_a_grant() {
     assert_eq!(column(&p, "write", &[&through, &format!("{link}\\new.txt")]).unwrap(), [DENIED, DENIED]);
     assert_eq!(std::fs::read_to_string(&secret).unwrap(), "secret");
     assert!(!Path::new(&t.path("outside\\new.txt")).exists());
+    // PH-22: a file that does not exist behind the junction is refused the same way as one that does,
+    // so the answer says nothing about the folder the junction points to.
+    let missing = format!("{link}\\no-such-file.txt");
+    assert_eq!(column(&p, "read", &[&through, &missing]).unwrap(), [DENIED, DENIED]);
     let _ = std::fs::remove_dir(&link);
+}
+
+// ---- PH-21: `$plugin` and `$data` stay symbolic ---------------------------------------------------
+
+#[test]
+fn plugin_and_data_folders_are_symbolic_and_expanded_by_the_host() {
+    let t = Temp::new("symbolic");
+    let pkg = tsubame_plughost::caps::normalize(&t.path("pkg")).unwrap();
+    let data = tsubame_plughost::caps::normalize(&t.path("data")).unwrap();
+    t.write("data\\note.txt", "from data");
+    t.write("pkg\\readme.txt", "from pkg");
+    let mut load = load_for(&t, full_cwasm(), caps(vec![grant(Scope::Prefix(pkg.clone()), Access::Read), grant(Scope::Prefix(data.clone()), Access::ReadWrite)]), true);
+    load.plugin_dir = pkg;
+    load.data_dir = data;
+    let p = Plugin::new(load, ProcessLauncher::new(HOST_EXE), options());
+    // What `get-capabilities` tells the plugin: the scope tags `plugin` (3) and `data` (4), not the folders.
+    assert_eq!(column(&p, "xscope", &["C:\\a"]).unwrap(), [Cell::Int(3 + 16 * 4)]);
+    // The host expands a leading `$plugin` / `$data` (any case, either separator).
+    assert_eq!(
+        column(&p, "read", &["$data\\note.txt", "$PLUGIN\\readme.txt", "$data/note.txt"]).unwrap(),
+        [Cell::Text("from data".into()), Cell::Text("from pkg".into()), Cell::Text("from data".into())]
+    );
+    assert_eq!(column(&p, "write", &["$data\\new.txt"]).unwrap(), [Cell::Int(0)]);
+    assert_eq!(std::fs::read_to_string(t.path("data\\new.txt")).unwrap(), "hi");
+    // The grants still decide: `$plugin` is read only, and `..` does not leave the folder.
+    assert_eq!(column(&p, "write", &["$plugin\\x.txt"]).unwrap(), [DENIED]);
+    assert!(!Path::new(&t.path("pkg\\x.txt")).exists());
+    assert_eq!(column(&p, "read", &["$data\\..\\pkg\\readme.txt"]).unwrap(), [INVALID_PATH]);
+    // Only the whole word is a symbol.
+    assert_eq!(column(&p, "read", &["$database\\note.txt"]).unwrap(), [INVALID_PATH]);
+}
+
+#[test]
+fn without_the_grants_the_symbols_mean_nothing() {
+    let t = Temp::new("symbolic-none");
+    t.write("data\\note.txt", "from data");
+    let abs = tsubame_plughost::caps::normalize(&t.path("data")).unwrap();
+    let p = plugin(&t, caps(vec![grant(Scope::Prefix(abs), Access::Read)]));
+    // An absolute grant is reported as it is (tag 0, `prefix`), and `$data` is not a path for this plugin.
+    let Cell::Int(tags) = column(&p, "xscope", &["C:\\a"]).unwrap()[0].clone() else { panic!("not a number") };
+    assert_eq!(tags & 15, 0);
+    assert_eq!(column(&p, "read", &["$data\\note.txt", "$plugin\\x"]).unwrap(), [INVALID_PATH, INVALID_PATH]);
+}
+
+// ---- PH-22: the host enforces what the protocol promises --------------------------------------------
+
+#[test]
+fn a_batch_of_paths_over_a_mebibyte_is_refused_by_the_host_not_only_split_by_the_client() {
+    use tsubame_plughost::proto::{self, MAX_BATCH_BYTES};
+    let t = Temp::new("batch-bytes");
+    let p = plugin(&t, Capabilities::default());
+    // The client splits this into calls the host accepts.
+    let long = format!("C:\\{}", "x".repeat(300 * 1024));
+    let paths = vec![long.as_str(); 7];
+    assert_eq!(column(&p, "len", &paths).unwrap().len(), 7);
+    // A request that was not split is refused by the decoder.
+    let frame = proto::enc_column(5, "len", &paths).unwrap();
+    assert!(paths.iter().map(|s| s.len()).sum::<usize>() > MAX_BATCH_BYTES);
+    assert!(proto::decode_request(&frame[4..]).is_err());
 }
 
 #[test]
@@ -909,13 +1034,36 @@ fn release_exe_is_small() {
             println!("release host exe: {} bytes ({:.2} MB), budget {BUDGET}", m.len(), m.len() as f64 / (1024.0 * 1024.0));
             assert!(
                 m.len() <= BUDGET,
-                "{} is {} bytes, over the {BUDGET} byte budget. Was it built with `--features compiler`? Rebuild with `cargo build --release -p tsubame-plughost`.",
+                "{} is {} bytes, over the {BUDGET} byte budget. A build of this package's test targets links Cranelift (through the `tsubame-plugc` dev-dependency) and writes the same output path; rebuild the host alone with `cargo build --release -p tsubame-plughost`.",
                 exe.display(),
                 m.len()
             );
         }
         Err(_) => println!("release host exe not built ({}): size not checked", exe.display()),
     }
+}
+
+/// PH-20: `tools/release.ps1` refuses a plugin host over 1.5 MiB, which is what a build that linked
+/// Cranelift into it looks like. The script is not run here (it builds a whole release); this keeps
+/// the guard from being edited away unnoticed.
+#[test]
+fn the_release_script_guards_the_host_size() {
+    let script = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/release.ps1")).unwrap();
+    assert!(script.contains("$plughostBudget = 1572864"), "the 1.5 MiB budget is gone from tools/release.ps1");
+    let guard = script.split("$plughostBudget = 1572864").nth(1).unwrap();
+    assert!(guard.contains("-gt $plughostBudget") && guard.contains("throw"), "the guard no longer throws");
+}
+
+/// PH-20: the compiler is not a feature of the host package any more, so no feature of it can link Cranelift.
+#[test]
+fn the_host_package_has_no_compiler_feature() {
+    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    // Comments may say "no compiler feature"; only the TOML lines count.
+    let code = |s: &str| s.lines().map(|l| l.split('#').next().unwrap_or("")).collect::<Vec<_>>().join("\n");
+    let features = code(manifest.split("[features]").nth(1).unwrap_or("").split("\n[").next().unwrap_or(""));
+    assert!(!features.contains("compiler") && !features.contains("cranelift"), "{features}");
+    let normal_deps = code(manifest.split("[dependencies]").nth(1).unwrap_or("").split("\n[").next().unwrap_or(""));
+    assert!(!normal_deps.contains("tsubame-plugc"), "the compiler crate is a dev-dependency only");
 }
 
 // ---- security review P5.P3: proofs of concept ---------------------------------------------------

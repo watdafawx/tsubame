@@ -14,14 +14,6 @@ name = "tsubame-plughost"
 path = "src/main.rs"
 required-features = ["host"]
 
-# The install step: checks a plugin package and compiles its component to `.cwasm`.
-# Build it on its own (`--features compiler --bin tsubame-plugc`): the feature links
-# Cranelift into every bin of this package that is built in the same run.
-[[bin]]
-name = "tsubame-plugc"
-path = "src/bin/tsubame-plugc.rs"
-required-features = ["compiler"]
-
 # Measurement client and mock hosts for the tests. Not shipped.
 [[bin]]
 name = "plughost-bench"
@@ -41,9 +33,9 @@ required-features = ["host"]
 default = ["host"]
 # Wasmtime runtime. Off (`default-features = false`) the crate is the manifest,
 # the protocol and the supervisor client only, which is what the app links.
+# There is no compiler feature: Cranelift lives in the `tsubame-plugc` crate, so no
+# feature of this package can put it into `tsubame-plughost.exe` (security review PH-20).
 host = ["dep:wasmtime", "dep:windows-sys"]
-# Cranelift, for the install step only. Never part of the shipped host exe.
-compiler = ["host", "wasmtime/cranelift"]
 
 [dependencies]
 tsubame-ext-api.workspace = true
@@ -65,9 +57,11 @@ windows-sys = { version = "0.61", optional = true, features = [
 ] }
 
 [dev-dependencies]
-# The tests compile their guests themselves, so they need Cranelift. Dev-only:
-# a plain `cargo build -p tsubame-plughost` does not get it.
-wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime", "component-model", "std", "cranelift"] }
+# The tests compile their guests with the install step's `compile` (which links Cranelift).
+# Dev-only: `cargo build -p tsubame-plughost` does not get it. A command that builds test
+# targets does, and then also writes a Cranelift-sized exe to `target/<profile>/tsubame-plughost.exe`;
+# `tools/release.ps1` refuses such an exe (PH-20).
+tsubame-plugc = { path = "../tsubame-plugc" }
 # The test guest is WebAssembly text; wit-component turns it into a component against
 # the real WIT file. All three are the wasm-tools release wasmtime 50 already uses.
 wat = "=1.261.0"

@@ -20,8 +20,9 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 use tsubame_ext_api::{Cell, Hit, Limits, Node, VfsEntry};
 
@@ -221,6 +222,19 @@ impl Load {
     /// capabilities and the `.cwasm` hash come from its install record, never
     /// from the live `plugin.toml`.
     pub fn new(v: &crate::install_record::Verified) -> Load {
+        use crate::manifest::Location;
+        // `caps.paths` is the manifest's `paths` in the same order (see `InstallRecord::to_caps`).
+        let dir_of = |want: Location| {
+            v.manifest
+                .paths
+                .iter()
+                .zip(&v.caps.paths)
+                .find_map(|(d, g)| match &g.scope {
+                    crate::caps::Scope::Prefix(p) if d.location == want => Some(p.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
         Load {
             plugin_id: v.manifest.id.clone(),
             version: v.manifest.version.clone(),
@@ -229,11 +243,18 @@ impl Load {
             caps: v.caps.clone(),
             entrypoints: v.manifest.entrypoints(),
             protected: v.protected.clone(),
+            plugin_dir: dir_of(Location::Plugin),
+            data_dir: dir_of(Location::Data),
         }
     }
 }
 
 // ---- the supervisor ----------------------------------------------------------------------
+//
+// Two locks. `calls` is held for the whole of a request (start, round trip, stop): one
+// request at a time on the host's pipes. `state` is a short lock for the bookkeeping and
+// is never held across I/O or a wait, so `status`, `stats`, `reset` (and a `shutdown` that
+// finds a call running) never wait for a plugin (PH-15).
 
 enum Event {
     Frame(Vec<u8>),
@@ -242,12 +263,17 @@ enum Event {
 
 struct Conn {
     tx: Sender<Vec<u8>>,
-    rx: Receiver<Event>,
-    process: Box<dyn HostProcess>,
+    /// Read only by the thread that holds `Plugin::calls`.
+    rx: Mutex<Receiver<Event>>,
+    process: Mutex<Box<dyn HostProcess>>,
+    /// True from the moment a reply is expected until the reader hands it over.
+    expecting: Arc<AtomicBool>,
+    /// The reader got a frame while none was expected (PH-14).
+    unsolicited: Arc<AtomicBool>,
 }
 
 struct State {
-    conn: Option<Conn>,
+    conn: Option<Arc<Conn>>,
     next_id: u32,
     faults: u32,
     faulted: Option<String>,
@@ -265,14 +291,24 @@ pub struct Plugin {
     load: Load,
     launcher: Box<dyn Launcher>,
     opts: Options,
+    /// Held for a whole request. Only `call`, `start` and the stop paths take it.
+    calls: Mutex<()>,
     state: Mutex<State>,
 }
 
-fn read_loop(mut output: Box<dyn Read + Send>, tx: Sender<Event>) {
+/// Reads frames, at most one per request: a reply is handed over (the channel holds one
+/// frame) and clears `expecting`; a frame that arrives while nothing is expected ends the
+/// reading, is dropped, and is flagged (a hostile host can not make the app buffer data
+/// it never asked for).
+fn read_loop(mut output: Box<dyn Read + Send>, tx: SyncSender<Event>, expecting: Arc<AtomicBool>, unsolicited: Arc<AtomicBool>) {
     loop {
         let mut buf = Vec::new();
         match proto::read_frame(&mut output, &mut buf) {
             Ok(true) => {
+                if !expecting.swap(false, Ordering::SeqCst) {
+                    unsolicited.store(true, Ordering::SeqCst);
+                    return;
+                }
                 if tx.send(Event::Frame(buf)).is_err() {
                     return;
                 }
@@ -294,25 +330,35 @@ fn write_loop(mut input: Box<dyn Write + Send>, rx: Receiver<Vec<u8>>) {
     }
 }
 
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    // A panic while holding a lock can only come from a bug here; the state is
+    // still usable, so carry on rather than poison every caller.
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Conn {
     fn open(io: HostIo) -> io::Result<Conn> {
         let (tx, write_rx) = mpsc::channel::<Vec<u8>>();
-        let (read_tx, rx) = mpsc::channel::<Event>();
+        let (read_tx, rx) = mpsc::sync_channel::<Event>(1);
+        // The host's first frame is its hello.
+        let expecting = Arc::new(AtomicBool::new(true));
+        let unsolicited = Arc::new(AtomicBool::new(false));
         let (input, output) = (io.input, io.output);
         let mut process = io.process;
+        let (e, u) = (expecting.clone(), unsolicited.clone());
         let spawned = std::thread::Builder::new()
             .name("plughost-write".into())
             .spawn(move || write_loop(input, write_rx))
-            .and_then(|_| std::thread::Builder::new().name("plughost-read".into()).spawn(move || read_loop(output, read_tx)));
+            .and_then(|_| std::thread::Builder::new().name("plughost-read".into()).spawn(move || read_loop(output, read_tx, e, u)));
         if let Err(e) = spawned {
             process.kill();
             return Err(e);
         }
-        Ok(Conn { tx, rx, process })
+        Ok(Conn { tx, rx: Mutex::new(rx), process: Mutex::new(process), expecting, unsolicited })
     }
 
     fn recv(&self, deadline: Instant) -> Result<Vec<u8>, Fail> {
-        match self.rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        match lock(&self.rx).recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Event::Frame(f)) => Ok(f),
             Ok(Event::Closed) | Err(RecvTimeoutError::Disconnected) => Err(Fail::Closed),
             Err(RecvTimeoutError::Timeout) => Err(Fail::Timeout),
@@ -320,21 +366,28 @@ impl Conn {
     }
 
     fn round_trip(&self, frame: Vec<u8>, deadline: Instant) -> Result<Vec<u8>, Fail> {
+        self.expecting.store(true, Ordering::SeqCst);
         self.tx.send(frame).map_err(|_| Fail::Closed)?;
         self.recv(deadline)
     }
 
+    fn sent_unsolicited(&self) -> bool {
+        self.unsolicited.load(Ordering::SeqCst)
+    }
+
     /// Ends the host now.
-    fn kill(mut self) {
-        self.process.kill();
+    fn kill(&self) {
+        lock(&self.process).kill();
     }
 }
+
+const UNSOLICITED: &str = "the host sent data nobody asked for";
 
 impl Plugin {
     /// Nothing is started here.
     pub fn new(load: Load, launcher: impl Launcher + 'static, opts: Options) -> Plugin {
         let state = State { conn: None, next_id: 1, faults: 0, faulted: None, last_used: Instant::now(), stats: Stats::default(), last_start: None };
-        Plugin { load, launcher: Box::new(launcher), opts, state: Mutex::new(state) }
+        Plugin { load, launcher: Box::new(launcher), opts, calls: Mutex::new(()), state: Mutex::new(state) }
     }
 
     pub fn id(&self) -> &str {
@@ -346,12 +399,38 @@ impl Plugin {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        // A panic while holding the lock can only come from a bug here; the
-        // state is still usable, so carry on rather than poison every caller.
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.state)
     }
 
+    /// The call lock, or `None` when a call (or a start, or a stop) is running.
+    fn try_calls(&self) -> Option<MutexGuard<'_, ()>> {
+        match self.calls.try_lock() {
+            Ok(g) => Some(g),
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    fn next_id(&self) -> u32 {
+        let mut st = self.lock();
+        let id = st.next_id;
+        st.next_id = st.next_id.wrapping_add(1);
+        id
+    }
+
+    /// Ends a host that sent something nobody asked for. Never waits for a call.
+    fn reap_unsolicited(&self) {
+        let mut st = self.lock();
+        if let Some(conn) = st.conn.clone()
+            && conn.sent_unsolicited()
+        {
+            self.fault(&mut st, Some(&conn), true, CallError::Protocol(UNSOLICITED.into()));
+        }
+    }
+
+    /// Does not wait for a running call.
     pub fn status(&self) -> Status {
+        self.reap_unsolicited();
         let st = self.lock();
         match (&st.faulted, &st.conn) {
             (Some(why), _) => Status::Faulted(why.clone()),
@@ -378,40 +457,66 @@ impl Plugin {
 
     /// Stops the host if there is one: asks it to exit, then kills it if it
     /// has not within [`Options::shutdown_wait`]. The next call starts it again.
+    /// When a call is running it does not wait for it: the host is killed and
+    /// that call fails with [`CallError::Crashed`] (not counted as a fault).
     pub fn shutdown(&self) {
-        let mut st = self.lock();
-        self.stop(&mut st);
+        match self.try_calls() {
+            Some(_calls) => self.stop(),
+            None => {
+                let conn = self.lock().conn.take();
+                if let Some(conn) = conn {
+                    conn.kill();
+                    self.lock().stats.kills += 1;
+                }
+            }
+        }
     }
 
     /// Stops the host when no call was made for `idle`. True if it was stopped.
-    /// The app calls this from events it already has; there is no timer here.
+    /// False also when a call is running (busy), without waiting for it. The app
+    /// calls this from events it already has; there is no timer here.
     pub fn stop_if_idle(&self, idle: Duration) -> bool {
-        let mut st = self.lock();
-        if st.conn.is_some() && st.last_used.elapsed() >= idle {
-            self.stop(&mut st);
-            return true;
+        let Some(_calls) = self.try_calls() else { return false };
+        let due = {
+            let st = self.lock();
+            st.conn.is_some() && st.last_used.elapsed() >= idle
+        };
+        if due {
+            self.stop();
         }
-        false
+        due
     }
 
-    fn stop(&self, st: &mut State) {
-        let Some(conn) = st.conn.take() else { return };
-        let id = st.next_id;
-        st.next_id = st.next_id.wrapping_add(1);
+    /// With the call lock held.
+    fn stop(&self) {
+        let (conn, id) = {
+            let mut st = self.lock();
+            let Some(conn) = st.conn.take() else { return };
+            let id = st.next_id;
+            st.next_id = st.next_id.wrapping_add(1);
+            (conn, id)
+        };
         let end = Instant::now() + self.opts.shutdown_wait;
-        let Conn { tx, rx, mut process } = conn;
-        let _ = tx.send(proto::enc_shutdown(id));
-        // Dropping the sender ends the writer thread, which closes the host's stdin.
-        drop(tx);
+        conn.expecting.store(true, Ordering::SeqCst);
+        let _ = conn.tx.send(proto::enc_shutdown(id));
         // The host answers the shutdown, then closes its stdout.
-        while let Ok(Event::Frame(_)) = rx.recv_timeout(end.saturating_duration_since(Instant::now())) {}
-        if !process.wait(end.saturating_duration_since(Instant::now())) {
-            st.stats.kills += 1;
+        while let Ok(Event::Frame(_)) = lock(&conn.rx).recv_timeout(end.saturating_duration_since(Instant::now())) {}
+        let exited = lock(&conn.process).wait(end.saturating_duration_since(Instant::now()));
+        conn.kill();
+        if !exited {
+            self.lock().stats.kills += 1;
         }
-        process.kill();
     }
 
-    fn fault(&self, st: &mut State, kill: bool, err: CallError) -> CallError {
+    /// Counts a failure. With `conn` given (the host that failed), a host somebody
+    /// else already stopped is not counted against the plugin.
+    fn fault(&self, st: &mut State, conn: Option<&Arc<Conn>>, kill: bool, err: CallError) -> CallError {
+        if let Some(c) = conn
+            && !st.conn.as_ref().is_some_and(|s| Arc::ptr_eq(s, c))
+        {
+            c.kill();
+            return err;
+        }
         if kill && let Some(conn) = st.conn.take() {
             conn.kill();
             st.stats.kills += 1;
@@ -428,16 +533,15 @@ impl Plugin {
         err
     }
 
-    /// Starts the host and loads the component.
-    fn start(&self, st: &mut State) -> Result<(), CallError> {
+    /// Starts the host and loads the component. With the call lock held.
+    fn start(&self) -> Result<Arc<Conn>, CallError> {
         let t0 = Instant::now();
         let io = self.launcher.launch().map_err(|e| CallError::Spawn(e.to_string()))?;
         let mut times = StartTimes { spawn: t0.elapsed(), ..StartTimes::default() };
-        st.stats.spawns += 1;
-        let conn = Conn::open(io).map_err(|e| CallError::Spawn(e.to_string()))?;
+        self.lock().stats.spawns += 1;
+        let conn = Arc::new(Conn::open(io).map_err(|e| CallError::Spawn(e.to_string()))?);
         let deadline = Instant::now() + self.opts.start_timeout;
-        let id = st.next_id;
-        st.next_id = st.next_id.wrapping_add(1);
+        let id = self.next_id();
         let result = (|| {
             let hello = match conn.recv(deadline) {
                 Ok(f) => proto::decode_hello(&f).map_err(|e| CallError::Spawn(e.to_string()))?,
@@ -474,56 +578,75 @@ impl Plugin {
         })();
         match result {
             Ok(()) => {
-                st.conn = Some(conn);
+                let mut st = self.lock();
+                st.conn = Some(conn.clone());
                 st.last_start = Some(times);
-                Ok(())
+                Ok(conn)
             }
             Err(e) => {
                 conn.kill();
-                st.stats.kills += 1;
+                self.lock().stats.kills += 1;
                 Err(e)
             }
         }
     }
 
     /// One request and its reply. `build` gets the request id; `read` decodes
-    /// the body of an OK reply.
+    /// the body of an OK reply. Only the call lock is held while waiting.
     fn call<T>(&self, build: impl FnOnce(u32) -> Result<Vec<u8>, ProtoError>, read: impl FnOnce(Dec) -> Result<T, ProtoError>) -> Result<T, CallError> {
-        let mut st = self.lock();
-        if let Some(why) = &st.faulted {
-            return Err(CallError::Faulted(why.clone()));
+        let _calls = lock(&self.calls);
+        let existing = {
+            let st = self.lock();
+            if let Some(why) = &st.faulted {
+                return Err(CallError::Faulted(why.clone()));
+            }
+            st.conn.clone()
+        };
+        let conn = match existing {
+            Some(c) => c,
+            None => match self.start() {
+                Ok(c) => c,
+                Err(e) => {
+                    let mut st = self.lock();
+                    return Err(self.fault(&mut st, None, false, e));
+                }
+            },
+        };
+        if conn.sent_unsolicited() {
+            let mut st = self.lock();
+            return Err(self.fault(&mut st, Some(&conn), true, CallError::Protocol(UNSOLICITED.into())));
         }
-        if st.conn.is_none()
-            && let Err(e) = self.start(&mut st)
-        {
-            return Err(self.fault(&mut st, false, e));
-        }
-        let id = st.next_id;
-        st.next_id = st.next_id.wrapping_add(1);
+        let id = self.next_id();
         // Too large to send: the caller's mistake, the host never sees it.
         let frame = build(id).map_err(|e| CallError::Protocol(e.to_string()))?;
-        st.stats.calls += 1;
-        st.last_used = Instant::now();
+        {
+            let mut st = self.lock();
+            st.stats.calls += 1;
+            st.last_used = Instant::now();
+        }
         let deadline = Instant::now() + Duration::from_millis(u64::from(self.load.caps.timeout_ms)) + self.opts.grace;
-        let conn = st.conn.as_ref().expect("started above");
-        let reply = match conn.round_trip(frame, deadline) {
+        // The wait is outside the state lock.
+        let reply = conn.round_trip(frame, deadline);
+        let mut st = self.lock();
+        let reply = match reply {
             Ok(f) => f,
-            Err(Fail::Timeout) => return Err(self.fault(&mut st, true, CallError::Timeout)),
-            Err(Fail::Closed) => return Err(self.fault(&mut st, true, CallError::Crashed)),
+            Err(Fail::Timeout) => return Err(self.fault(&mut st, Some(&conn), true, CallError::Timeout)),
+            Err(Fail::Closed) => return Err(self.fault(&mut st, Some(&conn), true, CallError::Crashed)),
         };
         st.last_used = Instant::now();
         let r = match proto::decode_reply(&reply) {
             Ok(r) if r.id == id => r,
-            Ok(_) => return Err(self.fault(&mut st, true, CallError::Protocol("reply id does not match".into()))),
-            Err(e) => return Err(self.fault(&mut st, true, CallError::Protocol(e.to_string()))),
+            Ok(_) => return Err(self.fault(&mut st, Some(&conn), true, CallError::Protocol("reply id does not match".into()))),
+            Err(e) => return Err(self.fault(&mut st, Some(&conn), true, CallError::Protocol(e.to_string()))),
         };
+        // Decoding is CPU work on a frame already in memory: short.
         match r.body {
             Ok(d) => match read(d) {
                 Ok(v) => {
                     st.faults = 0;
                     Ok(v)
                 }
-                Err(e) => Err(self.fault(&mut st, true, CallError::Protocol(e.to_string()))),
+                Err(e) => Err(self.fault(&mut st, Some(&conn), true, CallError::Protocol(e.to_string()))),
             },
             Err((kind, msg)) => match kind {
                 ErrKind::Plugin => {
@@ -532,12 +655,12 @@ impl Plugin {
                 }
                 ErrKind::Unsupported => Err(CallError::Unsupported(msg)),
                 // The host dropped the instance and is ready for the next call.
-                ErrKind::Timeout => Err(self.fault(&mut st, false, CallError::Timeout)),
-                ErrKind::Trap => Err(self.fault(&mut st, false, CallError::Trap(msg))),
-                ErrKind::Memory => Err(self.fault(&mut st, false, CallError::Memory)),
-                ErrKind::BadResult => Err(self.fault(&mut st, false, CallError::BadResult(msg))),
+                ErrKind::Timeout => Err(self.fault(&mut st, Some(&conn), false, CallError::Timeout)),
+                ErrKind::Trap => Err(self.fault(&mut st, Some(&conn), false, CallError::Trap(msg))),
+                ErrKind::Memory => Err(self.fault(&mut st, Some(&conn), false, CallError::Memory)),
+                ErrKind::BadResult => Err(self.fault(&mut st, Some(&conn), false, CallError::BadResult(msg))),
                 // The two sides are out of step: start over with a new host.
-                ErrKind::BadRequest | ErrKind::NotLoaded | ErrKind::Load => Err(self.fault(&mut st, true, CallError::Protocol(msg))),
+                ErrKind::BadRequest | ErrKind::NotLoaded | ErrKind::Load => Err(self.fault(&mut st, Some(&conn), true, CallError::Protocol(msg))),
             },
         }
     }
@@ -550,18 +673,11 @@ impl Plugin {
         let start = out.len();
         for chunk in proto::chunks(paths) {
             let before = out.len();
-            let r = self.call(|id| proto::enc_column(id, column, chunk), |d| proto::dec_cells(d, out));
-            match r {
-                Ok(n) if n == chunk.len() => {}
-                Ok(n) => {
-                    out.truncate(start);
-                    let mut st = self.lock();
-                    return Err(self.fault(&mut st, true, CallError::Protocol(format!("{n} values for {} paths", chunk.len()))));
-                }
-                Err(e) => {
-                    out.truncate(start);
-                    return Err(e);
-                }
+            // The reply must carry exactly one value per path; any other count is refused before it is decoded.
+            let r = self.call(|id| proto::enc_column(id, column, chunk), |d| proto::dec_cells(d, out, chunk.len()));
+            if let Err(e) = r {
+                out.truncate(start);
+                return Err(e);
             }
             debug_assert_eq!(out.len(), before + chunk.len());
         }
@@ -647,8 +763,7 @@ mod tests {
     use crate::caps::Capabilities;
     use crate::manifest::Kind;
     use crate::proto::Request;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
 
     /// What the in-memory host does with requests after a good hello and load.
     #[derive(Clone, Copy, PartialEq)]
@@ -836,6 +951,8 @@ mod tests {
             caps: Capabilities { timeout_ms, ..Capabilities::default() },
             entrypoints: vec![(Kind::Column, "c".into())],
             protected: Vec::new(),
+            plugin_dir: String::new(),
+            data_dir: String::new(),
         }
     }
 

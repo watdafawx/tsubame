@@ -2,8 +2,9 @@
 //! calls over a pair of streams. This is what `tsubame-plughost.exe` runs.
 //!
 //! Enforcement lives here, not in the guest and not in the client:
-//! - **Memory.** A resource limiter caps the total of all linear memories at
-//!   the plugin's `max_memory_mb`, and caps tables and instances.
+//! - **Memory.** A resource limiter caps the total of all linear memories and
+//!   all table elements together at the plugin's `max_memory_mb`, and caps the
+//!   number of tables, memories and instances and the size of one table.
 //! - **Time.** Every entry into the guest runs under an epoch deadline. A
 //!   watchdog thread that sleeps until a call starts bumps the epoch when the
 //!   plugin's `timeout_ms` is over, which traps the guest at its next loop or
@@ -57,11 +58,25 @@ pub fn engine_config() -> Config {
 
 // ---- limits --------------------------------------------------------------------------------
 
-/// `StoreLimits` for tables and counts, plus a cap on the total of all linear
-/// memories (`StoreLimits` alone caps each memory, not their sum).
+/// Bytes one table element takes in the host (a function or reference slot).
+pub const TABLE_ELEMENT_BYTES: usize = 8;
+/// Most elements in one table.
+pub const MAX_TABLE_ELEMENTS: usize = 1 << 16;
+/// Store caps. A real component has a handful of each (a few core instances, one
+/// memory, a table or two); the old caps (256 instances and tables, 2^20 elements)
+/// allowed 2 GiB of tables outside the memory budget (security review PH-08).
+pub const MAX_INSTANCES: usize = 32;
+pub const MAX_TABLES: usize = 16;
+pub const MAX_MEMORIES: usize = 8;
+
+/// `StoreLimits` for counts and sizes, plus **one budget** (`max_memory_mb`) for
+/// everything the guest can make the host commit: the total of all linear
+/// memories and of all table elements (at [`TABLE_ELEMENT_BYTES`] each).
+/// `StoreLimits` alone caps each memory and each table, not their sum.
 struct Limiter {
     inner: StoreLimits,
     max_total: usize,
+    /// Bytes of linear memory and table elements in the store now.
     total: usize,
     /// Set when a growth was refused, so a failed call can say why.
     denied: bool,
@@ -70,24 +85,36 @@ struct Limiter {
 impl Limiter {
     fn new(max_memory_mb: u32) -> Limiter {
         let max_total = (max_memory_mb as usize) << 20;
-        let inner = StoreLimitsBuilder::new().memory_size(max_total).table_elements(1 << 20).instances(256).tables(256).memories(64).build();
+        let inner = StoreLimitsBuilder::new()
+            .memory_size(max_total)
+            .table_elements(MAX_TABLE_ELEMENTS)
+            .instances(MAX_INSTANCES)
+            .tables(MAX_TABLES)
+            .memories(MAX_MEMORIES)
+            .build();
         Limiter { inner, max_total, total: 0, denied: false }
+    }
+
+    /// Replaces `current` bytes by `desired` in the budget, or refuses.
+    fn charge(&mut self, current: usize, desired: usize) -> bool {
+        let total = self.total.saturating_sub(current).saturating_add(desired);
+        if total > self.max_total {
+            return false;
+        }
+        self.total = total;
+        true
     }
 }
 
 impl ResourceLimiter for Limiter {
     fn memory_growing(&mut self, current: usize, desired: usize, maximum: Option<usize>) -> wasmtime::Result<bool> {
-        let total = self.total.saturating_sub(current).saturating_add(desired);
-        if total > self.max_total || !self.inner.memory_growing(current, desired, maximum)? {
-            self.denied = true;
-            return Ok(false);
-        }
-        self.total = total;
-        Ok(true)
+        let ok = self.inner.memory_growing(current, desired, maximum)? && self.charge(current, desired);
+        self.denied |= !ok;
+        Ok(ok)
     }
 
     fn table_growing(&mut self, current: usize, desired: usize, maximum: Option<usize>) -> wasmtime::Result<bool> {
-        let ok = self.inner.table_growing(current, desired, maximum)?;
+        let ok = self.inner.table_growing(current, desired, maximum)? && self.charge(current.saturating_mul(TABLE_ELEMENT_BYTES), desired.saturating_mul(TABLE_ELEMENT_BYTES));
         self.denied |= !ok;
         Ok(ok)
     }
@@ -180,6 +207,9 @@ struct Ctx {
     plugin_id: String,
     log_left: u32,
     protected: Protected,
+    /// What `$plugin` and `$data` stand for (empty: no such grant), see `Load::plugin_dir`.
+    plugin_dir: String,
+    data_dir: String,
 }
 
 /// 100 ns steps since 1601-01-01 UTC.
@@ -215,6 +245,43 @@ impl Ctx {
             plugin_id: load.plugin_id.clone(),
             log_left: MAX_LOG_LINES,
             protected: protected.clone(),
+            plugin_dir: load.plugin_dir.clone(),
+            data_dir: load.data_dir.clone(),
+        }
+    }
+
+    /// `$plugin\x` and `$data\x` become the folders they stand for, so the plugin never
+    /// has to learn them (PH-21). Anything else is returned as given; the policy then
+    /// checks the result like any other path.
+    fn expand(&self, path: &str) -> String {
+        for (symbol, dir) in [("$plugin", &self.plugin_dir), ("$data", &self.data_dir)] {
+            if dir.is_empty() {
+                continue;
+            }
+            let n = symbol.len();
+            let head_ok = path.as_bytes().get(..n).is_some_and(|h| h.eq_ignore_ascii_case(symbol.as_bytes()));
+            if head_ok && let Some(rest) = path.get(n..) && (rest.is_empty() || rest.starts_with(['\\', '/'])) {
+                return format!("{dir}{rest}");
+            }
+        }
+        path.to_string()
+    }
+
+    /// The scope as the plugin may see it: `$plugin` and `$data` stay symbolic.
+    fn visible_scope(&self, scope: &Scope) -> wit_host::Scope {
+        match scope {
+            Scope::Prefix(p) => {
+                let k = caps::key(p);
+                if !self.plugin_dir.is_empty() && caps::key(&self.plugin_dir) == k {
+                    wit_host::Scope::Plugin
+                } else if !self.data_dir.is_empty() && caps::key(&self.data_dir) == k {
+                    wit_host::Scope::Data
+                } else {
+                    wit_host::Scope::Prefix(p.clone())
+                }
+            }
+            Scope::Input => wit_host::Scope::Input,
+            Scope::Any => wit_host::Scope::Any,
         }
     }
 
@@ -227,7 +294,8 @@ impl Ctx {
     fn open(&mut self, path: &str, want: Want) -> Result<std::fs::File, wit_host::FsError> {
         let write = matches!(want, Want::Write { .. });
         let access = if write { Access::ReadWrite } else { Access::Read };
-        let (norm, roots) = self.policy.check(path, access).map_err(|d| match d {
+        let path = self.expand(path);
+        let (norm, roots) = self.policy.check(&path, access).map_err(|d| match d {
             Denied::Invalid(_) => wit_host::FsError::InvalidPath,
             Denied::NotGranted => wit_host::FsError::Denied,
         })?;
@@ -252,11 +320,7 @@ impl wit_host::Host for Ctx {
                 .paths
                 .iter()
                 .map(|g| wit_host::PathGrant {
-                    scope: match &g.scope {
-                        Scope::Prefix(p) => wit_host::Scope::Prefix(p.clone()),
-                        Scope::Input => wit_host::Scope::Input,
-                        Scope::Any => wit_host::Scope::Any,
-                    },
+                    scope: self.visible_scope(&g.scope),
                     access: if g.access == Access::ReadWrite { wit_host::Access::ReadWrite } else { wit_host::Access::Read },
                 })
                 .collect(),
@@ -404,23 +468,31 @@ impl Loaded {
         Ok((loaded, info))
     }
 
-    fn instantiate(&self) -> wasmtime::Result<Live> {
+    /// A fresh instance. On failure also says whether the limiter refused a
+    /// memory or table (the instance is gone, so the caller can not ask it).
+    fn instantiate(&self) -> Result<Live, (wasmtime::Error, bool)> {
         let mut store = Store::new(self.pre.engine(), Ctx::new(&self.load, &self.protected));
         store.limiter(|c| &mut c.limits);
         store.set_hostcall_fuel(HOSTCALL_FUEL);
         store.epoch_deadline_trap();
         // Instantiation can run guest code, so it gets a deadline like a call.
         store.set_epoch_deadline(1);
-        let instance = self.pre.instantiate(&mut store)?;
-        Ok(Live {
-            meta: self.meta.load(&mut store, &instance)?,
-            column: self.column.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
-            previewer: self.previewer.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
-            vfs: self.vfs.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
-            search: self.search.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
-            command: self.command.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
-            store,
-        })
+        let instance = match self.pre.instantiate(&mut store) {
+            Ok(i) => i,
+            Err(e) => return Err((e, store.data().limits.denied)),
+        };
+        let mut parts = || -> wasmtime::Result<_> {
+            Ok((
+                self.meta.load(&mut store, &instance)?,
+                self.column.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
+                self.previewer.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
+                self.vfs.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
+                self.search.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
+                self.command.as_ref().map(|i| i.load(&mut store, &instance)).transpose()?,
+            ))
+        };
+        let (meta, column, previewer, vfs, search, command) = parts().map_err(|e| (e, false))?;
+        Ok(Live { meta, column, previewer, vfs, search, command, store })
     }
 
     /// Runs `f` on the live instance under the deadline. `inputs` are the paths
@@ -428,9 +500,16 @@ impl Loaded {
     /// grant covers). Any failure drops the instance; the next call gets a fresh one.
     fn guarded<T>(&mut self, watchdog: &Watchdog, inputs: Vec<(String, bool)>, f: impl FnOnce(&mut Live) -> wasmtime::Result<T>) -> Result<T, Failure> {
         let armed = watchdog.arm(self.timeout);
+        let mut refused = false;
         let result = (|| {
             if self.live.is_none() {
-                self.live = Some(self.instantiate()?);
+                match self.instantiate() {
+                    Ok(l) => self.live = Some(l),
+                    Err((e, denied)) => {
+                        refused = denied;
+                        return Err(e);
+                    }
+                }
             }
             let live = self.live.as_mut().expect("just set");
             let ctx = live.store.data_mut();
@@ -444,7 +523,7 @@ impl Loaded {
         match result {
             Ok(v) => Ok(v),
             Err(e) => {
-                let denied = self.live.as_ref().is_some_and(|l| l.store.data().limits.denied);
+                let denied = refused || self.live.as_ref().is_some_and(|l| l.store.data().limits.denied);
                 self.live = None;
                 if e.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
                     fail(ErrKind::Timeout, format!("no answer within {} ms", self.timeout.as_millis()))
@@ -672,39 +751,35 @@ pub fn serve(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
     Ok(())
 }
 
-/// The install step: compiles a component for this host. Only with the
-/// `compiler` feature, which the shipped host exe is never built with.
-#[cfg(feature = "compiler")]
-pub mod install {
-    use super::engine_config;
-    use crate::install_record::{self, MAX_WASM_BYTES, RECORD_FILE, Stored};
-    use crate::manifest::{MANIFEST_FILE, MAX_MANIFEST_BYTES, Manifest};
-    use std::path::Path;
-    use wasmtime::Engine;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Compiles `.wasm` bytes to the `.cwasm` bytes the host loads.
-    pub fn compile(wasm: &[u8]) -> Result<Vec<u8>, String> {
-        let engine = Engine::new(&engine_config()).map_err(|e| e.to_string())?;
-        engine.precompile_component(wasm).map_err(|e| format!("not a valid component: {e:#}"))
+    #[test]
+    fn tables_and_memories_share_one_budget() {
+        let mut l = Limiter::new(1); // 1 MiB
+        // two tables of 65,536 funcrefs are 512 KiB each: together the whole budget
+        assert!(l.table_growing(0, MAX_TABLE_ELEMENTS, None).unwrap());
+        assert!(l.table_growing(0, MAX_TABLE_ELEMENTS, None).unwrap());
+        assert!(!l.denied);
+        // nothing is left for a memory or for one more element
+        assert!(!l.memory_growing(0, 64 << 10, None).unwrap());
+        assert!(!l.table_growing(0, 1, None).unwrap());
+        assert!(l.denied);
+        // a table that shrinks back (or is replaced) gives its bytes back
+        let mut l = Limiter::new(1);
+        assert!(l.table_growing(0, 1000, None).unwrap());
+        assert!(l.table_growing(1000, 2000, None).unwrap());
+        assert_eq!(l.total, 2000 * TABLE_ELEMENT_BYTES);
     }
 
-    /// Checks the manifest in `plugin_dir`, compiles the component it names and
-    /// writes `<cache>\<id>\<version>\component.cwasm` and the install record
-    /// next to it ([`install_record::store`]). `cache` must be a folder only
-    /// the app writes to; `data_dir` is the plugin's `$data` folder;
-    /// `protected` are the app's own folders (settings, exe folder), which no
-    /// grant may reach into. Each file is read once, at most its size limit,
-    /// and the bytes that were checked are the ones that are hashed.
-    pub fn install(plugin_dir: &Path, cache: &Path, data_dir: Option<&Path>, protected: &[String]) -> Result<Stored, String> {
-        let read = |p: &Path, limit: u64| install_record::read_capped(p, limit).map_err(|e| format!("{}: {e}", p.display()));
-        let manifest_bytes = read(&plugin_dir.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)?;
-        let manifest = Manifest::parse(std::str::from_utf8(&manifest_bytes).map_err(|_| format!("{MANIFEST_FILE}: not UTF-8"))?).map_err(|e| e.to_string())?;
-        // Before the (slow) compile: a version is installed once.
-        if install_record::install_dir(cache, &manifest.id, &manifest.version).join(RECORD_FILE).symlink_metadata().is_ok() {
-            return Err(format!("{} {} is already installed; remove its folder in the cache to install it again", manifest.id, manifest.version));
-        }
-        let wasm = read(&plugin_dir.join(&manifest.component), MAX_WASM_BYTES)?;
-        let cwasm = compile(&wasm)?;
-        install_record::store(plugin_dir, cache, data_dir, protected, &manifest_bytes, &wasm, &cwasm).map_err(|e| e.to_string())
+    #[test]
+    fn one_table_has_a_cap_and_the_counts_are_low() {
+        let mut l = Limiter::new(64);
+        assert!(l.table_growing(0, MAX_TABLE_ELEMENTS, None).unwrap());
+        assert!(!l.table_growing(0, MAX_TABLE_ELEMENTS + 1, None).unwrap());
+        assert_eq!((l.tables(), l.instances(), l.memories()), (MAX_TABLES, MAX_INSTANCES, MAX_MEMORIES));
+        // the cap that used to leave 2 GiB of tables outside the budget is gone
+        const { assert!(MAX_TABLES * MAX_TABLE_ELEMENTS * TABLE_ELEMENT_BYTES <= 8 << 20) };
     }
 }

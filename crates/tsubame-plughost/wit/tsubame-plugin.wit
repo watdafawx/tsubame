@@ -89,6 +89,13 @@ interface host {
         input,
         /// Every path.
         any,
+        /// The folder the plugin is installed in (read only). Start a path with
+        /// `$plugin\` to name something in it; the host expands it. The real
+        /// folder is never shown to the plugin.
+        plugin,
+        /// The plugin's own data folder. Start a path with `$data\` to name
+        /// something in it; the host expands it.
+        data,
     }
 
     record path-grant {

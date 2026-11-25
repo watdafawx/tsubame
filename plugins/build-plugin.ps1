@@ -18,7 +18,7 @@ A version is installed once: to rebuild it, delete <Out>\<id>\<version> first
 
 tsubame-plugc is looked for in -Plugc, then target\release\tsubame-plugc.exe
 and target\debug\tsubame-plugc.exe of the repo; if neither exists it is built
-(`cargo build --release -p tsubame-plughost --features compiler --bin tsubame-plugc`).
+(`cargo build --release -p tsubame-plugc`).
 
 -Cargo is the cargo command to use (default `cargo`).
 #>
@@ -72,7 +72,7 @@ if (-not $Plugc) {
 }
 if (-not $Plugc) {
     Push-Location $repo
-    try { Invoke-Native @($Cargo, 'build', '--release', '-p', 'tsubame-plughost', '--features', 'compiler', '--bin', 'tsubame-plugc') } finally { Pop-Location }
+    try { Invoke-Native @($Cargo, 'build', '--release', '-p', 'tsubame-plugc') } finally { Pop-Location }
     $Plugc = Join-Path $repo 'target\release\tsubame-plugc.exe'
 }
 $id = $null; $version = $null

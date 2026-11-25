@@ -17,7 +17,7 @@ use tsubame_ext_api::{Cell, Hit, Limits, Node, VfsEntry};
 
 pub const MAGIC: [u8; 4] = *b"TSPH";
 /// Bumped on any change to the frames below.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 /// Largest frame either side accepts (the bytes after the length prefix).
 pub const MAX_FRAME: usize = 16 << 20;
 /// Most paths in one call (`docs/spike-wasm.md`: caps the guest's memory high-water mark).
@@ -273,6 +273,13 @@ pub struct Load {
     /// component's own folder and under any of these that holds the component
     /// (the cache). Since protocol version 2.
     pub protected: Vec<String>,
+    /// The folder the `$plugin` grant stands for, and the one `$data` stands for
+    /// (empty when the plugin has no such grant). The host maps these back to the
+    /// symbolic scopes `get-capabilities` reports and expands a leading `$plugin\`
+    /// or `$data\` in a path it is given, so a plugin never sees the real folders
+    /// (PH-21). Since protocol version 3.
+    pub plugin_dir: String,
+    pub data_dir: String,
 }
 
 /// Most protected folders one `Load` may name.
@@ -353,8 +360,15 @@ fn dec_paths(d: &mut Dec) -> Result<Vec<String>, ProtoError> {
         return Err(ProtoError("batch larger than 2,000 paths"));
     }
     let mut out = Vec::with_capacity(n);
+    let mut bytes = 0usize;
     for _ in 0..n {
-        out.push(d.string()?);
+        let s = d.string()?;
+        bytes = bytes.saturating_add(s.len());
+        // `chunks` lets one path alone pass the byte cap, never two or more together.
+        if !out.is_empty() && bytes > MAX_BATCH_BYTES {
+            return Err(ProtoError("batch has more than 1 MiB of path text"));
+        }
+        out.push(s);
     }
     Ok(out)
 }
@@ -369,6 +383,7 @@ pub fn enc_load(id: u32, l: &Load) -> Result<Vec<u8>, ProtoError> {
     for p in &l.protected {
         e.str(p);
     }
+    e.str(&l.plugin_dir).str(&l.data_dir);
     e.finish()
 }
 
@@ -432,7 +447,8 @@ pub fn decode_request(frame: &[u8]) -> Result<(u32, Request), ProtoError> {
             for _ in 0..n {
                 protected.push(d.string()?);
             }
-            Request::Load(Load { plugin_id, version, component, sha256, caps, entrypoints, protected })
+            let (plugin_dir, data_dir) = (d.string()?, d.string()?);
+            Request::Load(Load { plugin_id, version, component, sha256, caps, entrypoints, protected, plugin_dir, data_dir })
         }
         op::COLUMN => Request::Column { column: d.string()?, paths: dec_paths(&mut d)? },
         op::PREVIEW => Request::Preview { id: d.string()?, path: d.string()?, limits: Limits { max_bytes: d.u64()?, max_px: d.u32()? } },
@@ -526,9 +542,14 @@ pub fn enc_ok_cells(id: u32, cells: &[Cell]) -> Result<Vec<u8>, ProtoError> {
     e.finish()
 }
 
-/// Appends the cells to `out`.
-pub fn dec_cells(mut d: Dec, out: &mut Vec<Cell>) -> Result<usize, ProtoError> {
+/// Appends the cells to `out`. `expected` is the number of paths the request
+/// carried: any other count is refused before anything is reserved (PH-13 a), so a
+/// small reply can not make the app allocate many times its size.
+pub fn dec_cells(mut d: Dec, out: &mut Vec<Cell>, expected: usize) -> Result<usize, ProtoError> {
     let n = d.count(1)?;
+    if n != expected {
+        return Err(ProtoError("number of values does not match the request"));
+    }
     out.reserve(n);
     for _ in 0..n {
         out.push(match d.u8()? {
@@ -571,6 +592,10 @@ pub fn image_ok(w: u32, h: u32, len: usize) -> bool {
 /// Appends the nodes to `out`.
 pub fn dec_doc(mut d: Dec, out: &mut Vec<Node>) -> Result<(), ProtoError> {
     let n = d.count(1)?;
+    // The host never sends more (it cuts the document before encoding); refuse before reserving.
+    if n > crate::sanitize::MAX_NODES {
+        return Err(ProtoError("more nodes than a document may have"));
+    }
     out.reserve(n);
     for _ in 0..n {
         out.push(match d.u8()? {
@@ -607,6 +632,9 @@ pub fn enc_ok_entries(id: u32, entries: &[VfsEntry], next: Option<&str>) -> Resu
 
 pub fn dec_entries(mut d: Dec) -> Result<(Vec<VfsEntry>, Option<String>), ProtoError> {
     let n = d.count(21)?;
+    if n > MAX_BATCH {
+        return Err(ProtoError("more entries than a page may have"));
+    }
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(VfsEntry { name: d.string()?, dir: d.bool()?, size: d.u64()?, mtime: d.u64()? });
@@ -628,6 +656,9 @@ pub fn enc_ok_hits(id: u32, hits: &[Hit], next: Option<&str>) -> Result<Vec<u8>,
 
 pub fn dec_hits(mut d: Dec) -> Result<(Vec<Hit>, Option<String>), ProtoError> {
     let n = d.count(21)?;
+    if n > MAX_BATCH {
+        return Err(ProtoError("more hits than a page may have"));
+    }
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(Hit { path: d.string()?, dir: d.bool()?, size: d.u64()?, mtime: d.u64()? });
@@ -745,6 +776,8 @@ mod tests {
             },
             entrypoints: vec![(Kind::Column, "a".into()), (Kind::Command, "b".into())],
             protected: vec!["C:\\Apps\\Tsubame".into(), "C:\\cache".into()],
+            plugin_dir: "C:\\Plugins\\x".into(),
+            data_dir: "C:\\Data\\x".into(),
         };
         assert_eq!(round(enc_load(1, &load).unwrap()), (1, Request::Load(load)));
         assert_eq!(
@@ -788,7 +821,7 @@ mod tests {
         let cells = vec![Cell::Empty, Cell::Text("häh".into()), Cell::Int(-5), Cell::Bytes(u64::MAX), Cell::Time(1)];
         let f = enc_ok_cells(1, &cells).unwrap();
         let mut out = Vec::new();
-        assert_eq!(dec_cells(decode_reply(frame_body(&f)).unwrap().body.unwrap(), &mut out).unwrap(), 5);
+        assert_eq!(dec_cells(decode_reply(frame_body(&f)).unwrap().body.unwrap(), &mut out, 5).unwrap(), 5);
         assert_eq!(out, cells);
 
         let doc = vec![
@@ -870,7 +903,7 @@ mod tests {
         e.u32(u32::MAX);
         let f = e.finish().unwrap();
         let mut out = Vec::new();
-        assert_eq!(dec_cells(decode_reply(frame_body(&f)).unwrap().body.unwrap(), &mut out), Err(ProtoError("count larger than the frame")));
+        assert_eq!(dec_cells(decode_reply(frame_body(&f)).unwrap().body.unwrap(), &mut out, 1), Err(ProtoError("count larger than the frame")));
         assert_eq!(out.capacity(), 0);
         // a string length past the end
         let mut e = Enc::new(1, op::COLUMN);
@@ -904,7 +937,7 @@ mod tests {
         let f = body(&|e| {
                 e.u32(1).u8(9);
             }, reply::OK);
-        assert_eq!(dec_cells(decode_reply(frame_body(&f)).unwrap().body.unwrap(), &mut out), Err(ProtoError("bad cell")));
+        assert_eq!(dec_cells(decode_reply(frame_body(&f)).unwrap().body.unwrap(), &mut out, 1), Err(ProtoError("bad cell")));
         // an image whose pixels do not match its size
         let f = body(&|e| {
                 e.u32(1).u8(5).u32(100).u32(100).bytes(&[0; 8]);
@@ -924,6 +957,28 @@ mod tests {
         let big = vec![0u8; MAX_FRAME];
         assert_eq!(enc_ok_bytes(1, &big).err(), Some(ProtoError("frame too large")));
         assert!(enc_ok_bytes(1, &big[..MAX_FRAME - HEADER - 4]).is_ok());
+    }
+
+    #[test]
+    fn a_decoded_batch_obeys_the_byte_cap_chunks_promises() {
+        // what `chunks` makes is always accepted
+        let long = "x".repeat(300 * 1024);
+        let paths = vec![long.as_str(); 7];
+        for chunk in chunks(&paths) {
+            let (_, req) = round(enc_column(1, "c", chunk).unwrap());
+            assert!(matches!(req, Request::Column { paths, .. } if paths.len() == chunk.len()));
+        }
+        // two paths over the cap together are not
+        let frame = enc_column(1, "c", &paths[..4]).unwrap();
+        assert_eq!(decode_request(frame_body(&frame)), Err(ProtoError("batch has more than 1 MiB of path text")));
+        // one path over the cap alone is (chunks sends it alone)
+        let huge = "y".repeat(MAX_BATCH_BYTES + 1);
+        let (_, req) = round(enc_column(1, "c", &[huge.as_str()]).unwrap());
+        assert!(matches!(req, Request::Column { paths, .. } if paths.len() == 1));
+        // exactly at the cap is fine
+        let half = "z".repeat(MAX_BATCH_BYTES / 2);
+        let (_, req) = round(enc_column(1, "c", &[half.as_str(), half.as_str()]).unwrap());
+        assert!(matches!(req, Request::Column { paths, .. } if paths.len() == 2));
     }
 
     #[test]

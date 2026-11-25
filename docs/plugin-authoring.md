@@ -94,12 +94,12 @@ before the plugin is enabled.
 | Key | Meaning |
 |---|---|
 | `paths = [{ path = "$input", access = "read" }]` | read the paths of the current call. A column or previewer gets the item itself: a file can be read, a folder looked at and listed, but nothing inside it opened. A command gets the selection and what is under it, plus the current folder itself; a search its root and what is under it. Almost every plugin that touches files needs only this |
-| `{ path = "$data", access = "read-write" }` | the plugin's own data folder |
-| `{ path = "$plugin", access = "read" }` | the folder the plugin is installed in (bundled data) |
+| `{ path = "$data", access = "read-write" }` | the plugin's own data folder. In the guest, name a file as `$data\name`; the host expands it and `get-capabilities` reports the scope `data`, never the real folder |
+| `{ path = "$plugin", access = "read" }` | the folder the plugin is installed in (bundled data). In the guest, `$plugin\name`; the scope reads `plugin` |
 | `{ path = "D:/Photos", access = "read" }` | one folder and everything under it |
 | `{ path = "*", access = "read" }` | every file on the computer. Shown to the user as such; avoid. With `read-write` it reads "full control of your files" |
 | `max_memory_mb` (1-512), `timeout_ms` (10-30000) | lower than the defaults when you can; the host enforces them |
-| `network`, `run_processes` | parsed and shown, but there is no network or process import: they do nothing |
+| `network`, `run_processes` | parsed and shown to the user as "reserved", but there is no network or process import: they do nothing (`network` only allows a folder grant on a network share) |
 
 ## Build and install
 
@@ -108,7 +108,7 @@ pwsh plugins\build-plugin.ps1 plugins\sample-csv-summary
 ```
 
 The script builds the component (`cargo build --release --target wasm32-wasip2`),
-copies it next to `plugin.toml`, builds `tsubame-plugc` on first use, and runs
+copies it next to `plugin.toml`, builds `tsubame-plugc` (`cargo build --release -p tsubame-plugc`) on first use, and runs
 it. `tsubame-plugc <plugin folder> <cache folder> [<data folder>]` checks the
 manifest, compiles the component for this machine and writes
 `<cache>/<id>/<version>/component.cwasm` and the install record

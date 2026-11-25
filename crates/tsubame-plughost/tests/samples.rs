@@ -77,8 +77,7 @@ fn build(name: &'static str, cell: &'static OnceLock<Option<Sample>>) -> Option<
         assert!(out.status.success(), "building {name} failed:\n{}", String::from_utf8_lossy(&out.stderr));
         let manifest = Manifest::load(&dir).expect("plugin.toml is valid");
         let wasm = std::fs::read(target.join("wasm32-wasip2/release").join(&manifest.component)).expect("the build wrote the component the manifest names");
-        let engine = wasmtime::Engine::new(&tsubame_plughost::host::engine_config()).expect("engine");
-        let cwasm = engine.precompile_component(&wasm).expect("the component compiles");
+        let cwasm = tsubame_plugc::compile(&wasm).expect("the component compiles");
         Some(Sample { manifest, dir, wasm, cwasm })
     });
     cell.get().and_then(|s| s.as_ref())

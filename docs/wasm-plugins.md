@@ -29,23 +29,35 @@ author guide (`docs/plugin-authoring.md`) are P5.P2 and are done;
 | Entry points as `tsubame-ext-api` providers | `src/adapters.rs`, `src/cache.rs` | app |
 | Host: wasmtime, limits, imports, serve loop | `src/host.rs`, `src/main.rs` | `tsubame-plughost.exe` |
 | Install record (write once, verify before each start) | `src/install_record.rs` | app, install step |
-| Install step | `src/host.rs` (`install`), `src/bin/tsubame-plugc.rs` | `tsubame-plugc.exe` |
+| Install step and the compiler (`compile`, `install`) | `crates/tsubame-plugc` (`src/lib.rs`, `src/main.rs`) | `tsubame-plugc.exe` |
 | Bench client and mock hosts | `src/bin/plughost-bench.rs` | not shipped |
 
-Cargo features keep the three binaries apart:
+Two packages and one Cargo feature keep the three binaries apart:
 
-| Build | Features | Contains |
+| Build | Package and features | Contains |
 |---|---|---|
-| The app's dependency | `default-features = false` | manifest, protocol, client, adapters. No wasmtime: `serde`, `toml` and `tsubame-ext-api` only |
-| `tsubame-plughost.exe` | default (`host`) | wasmtime runtime, no compiler |
-| `tsubame-plugc.exe` | `compiler` | the same plus Cranelift |
+| The app's dependency | `tsubame-plughost`, `default-features = false` | manifest, protocol, client, adapters. No wasmtime: `serde`, `toml` and `tsubame-ext-api` only |
+| `tsubame-plughost.exe` | `tsubame-plughost`, default (`host`) | wasmtime runtime, no compiler |
+| `tsubame-plugc.exe` | `tsubame-plugc` | the host crate's manifest and record code plus wasmtime with Cranelift |
 
 `tsubame-ext-api` is unchanged: no dependencies, no Win32.
 
-Build the install step on its own, `cargo build --release -p tsubame-plughost
---features compiler --bin tsubame-plugc`. A build with `--features compiler`
-that also builds the host exe links Cranelift into it (9 MB instead of 1 MB);
-the size test below catches that.
+There is no `compiler` feature on the host package: Cranelift is linked by
+`tsubame-plugc` only, so nothing you can switch on in `tsubame-plughost` puts a
+compiler into the host exe (security review PH-20). Build the install step with
+`cargo build --release -p tsubame-plugc`, the host with `cargo build --release
+-p tsubame-plughost`.
+
+**Exe size.** The runtime-only host is **about 1.0 MiB** (1.03 MiB,
+1,075,200 B, measured on `cargo build --release -p tsubame-plughost`). The 9 MB
+that earlier notes (and the spike) reported was a different file at the same
+path: the host's own tests compile their guests with `tsubame_plugc::compile`
+(a dev-dependency), so a build of the test targets (`cargo test`,
+`--all-targets`, `--workspace`) links Cranelift into the host exe it leaves in
+`target/<profile>/`. A release must never ship that one: `tools/release.ps1`
+stops when `tsubame-plughost.exe` is over 1.5 MiB (1,572,864 B), and the test
+`release_exe_is_small` (1,250,000 B) warns earlier. Build the host with `-p
+tsubame-plughost` alone before packaging.
 
 ## Lifecycle
 
@@ -117,13 +129,13 @@ The adapters turn an error into an empty result: a column shows empty cells
 
 | What | Cap | Where |
 |---|---|---|
-| Paths per call | 2,000, and about 1 MiB of path text | client splits (`proto::chunks`), host refuses more |
+| Paths per call | 2,000, and 1 MiB of path text (one longer path travels alone) | client splits (`proto::chunks`), host refuses more |
 | Frame | 16 MiB | both sides, checked before allocating |
 | Entries or hits per page | 2,000 | host |
 | Pages per listing or search | 5,000 | client |
 | Bytes per `read-file` / `vfs.read` call | 4 MiB | host |
 | Bytes the host copies out of the guest per call | 32 MiB (wasmtime hostcall fuel) | host |
-| Guest memory | `max_memory_mb`, 1 to 512, default 64 | host |
+| Guest memory | `max_memory_mb`, 1 to 512, default 64: one budget for all linear memories plus all table elements (8 bytes each). At most 32 instances, 16 tables, 8 memories and 65,536 elements per table | host (`host::Limiter`) |
 | Call time | `timeout_ms`, 10 to 30,000, default 2,000 | host, then client |
 | Column value cache | 8,192 values and 2 MiB per column | `cache::CellCache`, two generations, eviction tests |
 | Log lines per call | 64 lines of 1 KiB | host |
@@ -209,8 +221,8 @@ names the field:
 | `path` | Covers | Notes |
 |---|---|---|
 | `$input` | the paths handed to the current call; what is under them only where the call works on a tree | changes with every call. Column and previewer: the path itself (a folder can be looked at and listed, nothing in it opened). Vfs: the path and the file it goes through (`C:\a.zip` for `C:\a.zip\inner\x`). Search: the root and everything under it. Command: the selection and everything under it, plus the current folder itself |
-| `$data` | the plugin's own data folder | the app creates it; resolved in `Manifest::capabilities` |
-| `$plugin` | the folder the plugin is installed in | read only |
+| `$data` | the plugin's own data folder | the app creates it; resolved in `Manifest::capabilities`. The plugin sees the symbolic scope `data` and writes `$data\name` |
+| `$plugin` | the folder the plugin is installed in | read only. The plugin sees the scope `plugin` and reads `$plugin\name` |
 | an absolute folder | that folder and everything under it | a folder on another computer (`\\server\share`) needs `network = true`; the prompt names the server |
 | `*` | every path on this computer | shown to the user as "any file on this computer". It never covers a `\\server\share` path or a mapped network drive |
 
@@ -435,13 +447,17 @@ Error kinds: 1 `BadRequest`, 2 `NotLoaded`, 3 `Load`, 4 `Plugin`, 5 `Trap`,
 Capabilities on the wire: `network:u8 run_processes:u8 max_memory_mb:u32
 timeout_ms:u32 list<grant>`, a grant being a scope tag (0 prefix + string,
 1 input, 2 any) and an access byte (0 read, 1 read-write). `$plugin` and
-`$data` are already resolved to folders.
+`$data` are already resolved to folders on this wire (a prefix grant); `Load`
+also carries the two folders (`plugin_dir`, `data_dir`, empty when there is no
+such grant) so the host can report those grants to the guest as the scopes
+`plugin` and `data` and expand a leading `$plugin\` or `$data\` in the paths
+a guest passes in. The guest never sees the real folders (PH-21).
 
 Rules:
 
 - The host says `Hello` before it reads anything. A client that sees another
-  protocol version refuses the host. The version is 2 (2 added `protected` to
-  `Load`).
+  protocol version refuses the host. The version is 3 (2 added `protected` to
+  `Load`, 3 added `plugin_dir` and `data_dir`).
 - `Load` comes first and once. A call before it gets `NotLoaded`, a second
   `Load` gets `BadRequest`.
 - Decoding never trusts a length. Every read is bounds checked, a list count is

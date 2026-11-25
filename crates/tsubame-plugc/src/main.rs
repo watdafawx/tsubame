@@ -1,4 +1,5 @@
-//! tsubame-plugc: the install step for a wasm plugin. Not part of the host exe.
+//! tsubame-plugc: the install step for a wasm plugin. Not part of the host exe:
+//! it lives in its own crate because it is the one place that links Cranelift.
 //!
 //!   tsubame-plugc <plugin folder> <cache folder> [<data folder>]
 //!
@@ -16,7 +17,6 @@
 
 use std::path::Path;
 use std::process::ExitCode;
-use tsubame_plughost::host::install;
 use tsubame_plughost::install_record::{COMPONENT_FILE, RECORD_FILE};
 
 fn main() -> ExitCode {
@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let data = args.get(3).map(Path::new);
-    match install::install(Path::new(plugin), Path::new(cache), data, &[]) {
+    match tsubame_plugc::install(Path::new(plugin), Path::new(cache), data, &[]) {
         Ok(s) => {
             println!("plugin   {} {}", s.manifest.id, s.manifest.version);
             println!("file     {}", s.dir.join(COMPONENT_FILE).display());

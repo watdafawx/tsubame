@@ -126,6 +126,14 @@ The table above is the review as written. Fixes since:
 | PH-10 | fixed (Card C) | One folder per id and version (`<cache>/<id>/<version>/component.cwasm`); the record names the id and version and `verify` refuses a record for another plugin. |
 | PH-12 | fixed (Card E) | Inputs carry a scope. Column and previewer: the path itself (a folder: `stat` and a non-recursive `read-dir`, nothing in it opened). Vfs: the path and the archive file, flat. Search: the root, recursive. Command: the selection, recursive, plus the current folder, flat (always passed; the owner allowed this). `summary()` says which. |
 | PH-18 | fixed (Card C), compile bound open | The `.cwasm` and the record are written through a `create_new` file with a random name, so a planted link is not followed; `plugin.toml`, the record, the `.wasm` and the `.cwasm` are read through one handle with `take(limit + 1)`. Open: the Cranelift compile still has no time or memory bound; the app must run `tsubame-plugc` in a job. |
+| PH-08 | fixed (Card G) | One budget, `max_memory_mb`, for everything the guest can make the host commit: all linear memories plus all table elements at 8 bytes each (`host::Limiter`, a `ResourceLimiter` that wraps `StoreLimits` and keeps a running total). Store caps are down to 32 instances, 16 tables, 8 memories and 65,536 elements per table (the old 256 / 256 / 2^20 allowed 2 GiB of tables outside the budget); 16 full tables are 8 MiB. A refusal while the instance is made (a component that declares too much) is reported as `Memory` too. Tests: `tables_are_counted_in_the_memory_budget`, `table_and_table_count_caps_hold` (a real component with 14 tables of 65,536 funcrefs, refused in a 4 MB budget, running in 16 MB; over 16 tables and one table over 65,536 refused), and the `Limiter` unit tests. |
+| PH-11 | fixed (Card J) | `Manifest::parse` refuses Cc, Cf (bidi overrides, zero-width), Zl, Zp and private-use characters in `plugin.name`, `plugin.description` (a newline stays allowed) and every label, title and key chord (`sanitize::is_spoofing`), and a plugin id with a part that is a Windows device name (`nul.x`, `a.com1`; `caps::is_device_name`). |
+| PH-13 a | fixed (Card H) | `dec_cells` takes the number of values the request asked for and refuses any other count before it reserves anything; `dec_doc` refuses more than `MAX_NODES` nodes (the host cuts a document at that number before it encodes) and `dec_entries` / `dec_hits` more than `MAX_BATCH`; a refused column reply leaves the caller's vector as it was. |
+| PH-14 | fixed (Card H) | The reader thread reads a frame only while a request is waiting (`expecting`), hands it over through `sync_channel(1)`, and a frame that arrives with nothing waiting stops the reader and marks the host as faulty; the next `status()`, call or `stop_if_idle` kills it (`CallError::Protocol("the host sent data nobody asked for")`). At most one stray frame is held. |
+| PH-15 | fixed (Card H) | Two locks: `calls` is held for the whole request, `state` only for bookkeeping and never across I/O or a wait. `status`, `stats`, `reset` and `stop_if_idle` do not wait for a running call (`stop_if_idle` says no when busy); `shutdown` while a call runs kills the host without waiting for it. |
+| PH-20 | fixed (Card K) | `tools/release.ps1` throws when `tsubame-plughost.exe` is over 1,572,864 B (checked on the file that is packaged, so `-SkipBuild` and `-ExeDir` are covered). The compiler moved to its own crate, `crates/tsubame-plugc` (`compile`, `install`, and the `tsubame-plugc` binary); the host package has no `compiler` feature and a normal dependency graph without Cranelift. Cranelift is still linked into the host exe by a build of the test targets, because the tests use `tsubame_plugc::compile` as a dev-dependency; that is what the release guard is for. Real release host: 1.00 MiB. |
+| PH-21 | fixed (Card J) | `Load` (protocol version 3) carries the folders `$plugin` and `$data` stand for; `get-capabilities` reports the scopes `plugin` and `data` (new cases of the WIT `scope` variant) instead of the resolved folders, and the host expands a leading `$plugin` or `$data` in a path a plugin passes to `stat`, `read-file`, `read-dir` and `write-file`. Only plugins holding such a grant ever saw the folders (the review said "every plugin"); a plugin without grants sees none. |
+| PH-22 | fixed (Card J) | `dec_paths` refuses more than 1 MiB of path text in one request (a single longer path still travels alone, as `chunks` sends it). A path that resolves outside a grant through a link is `denied` whether or not the target exists (`a_junction_does_not_lead_out_of_a_grant` checks both; the handle-based open of Card B already refuses the link before it looks at the target). The prompt says "reserved" for `network` and `run_processes`; `network = true` still lets a UNC folder grant work, and the text says so. |
 
 The PoC tests for these now assert that the attack fails and run in the normal
 suite; the exploit setup is unchanged.
@@ -139,7 +147,7 @@ suite; the exploit setup is unchanged.
 | Junctions and existing symlinks | The resolved-path check refuses them when stable (existing test, and 241 correct refusals in the PH-05 run). |
 | 8.3 short names | A short alias of a name inside a grant resolves to the long name and stays inside. A short alias of the grant root does not match lexically and is denied. No escape found. By reading; not tested. |
 | `.cwasm` integrity mechanics | Load from bytes, hash and deserialize the same buffer, 256 MiB cap, `.cwasm` refused in packages, engine settings and wasmtime version checked by wasmtime's own header. The weakness is where the hash comes from (PH-03), not how it is checked. |
-| Memory limit | Sum of linear memories capped; a refused growth is reported as `Memory` (existing test). Gap: tables (PH-08). |
+| Memory limit | Sum of linear memories capped; a refused growth is reported as `Memory` (existing test). Tables count in the same budget (PH-08, fixed). |
 | Time limit | Epoch interruption on every entry including instantiation; watchdog race handled under one lock; instance dropped after a trap (existing test). |
 | Host calls that allocate | wasmtime's hostcall fuel is charged in host bytes (`len * size_of::<T>()` for lists, bytes for strings) and reset per lift, so one call or one result copies at most 32 MiB. `read-file` is capped at 4 MiB, `read-dir` at 2,000 entries. |
 | Large `list<string>` batches | 2,000 paths per call enforced by the host decoder; lowering into the guest goes through the guest's allocator and so through the memory limit. |
@@ -185,6 +193,15 @@ enables `wasmtime/cranelift`**:
 - The existing test `release_exe_is_small` measures that same path, so it fails
   after a `--features compiler` build and passes (or reports "not built") after
   a clean one. This was reproduced during the review.
+
+**Since Card K:** the `compiler` feature is gone. Cranelift lives only in the
+`tsubame-plugc` crate, and the host package depends on it only as a
+dev-dependency (the tests compile their guests with it). So `cargo build -p
+tsubame-plughost` and `cargo build -p tsubame -p tsubame-handler -p
+tsubame-plughost` are runtime-only (1.00 MiB), and nothing in the host package
+can switch the compiler on. A build of the test targets (`cargo test`, `--all-targets`,
+`--workspace`) still links it into the host exe it leaves in `target/<profile>/`.
+That is why `release.ps1` now refuses a host over 1,572,864 B.
 
 **Unverified:** the exact command behind the reported 9.31 MiB. The contaminated
 builds here are 8.56 MiB. `docs/spike-wasm.md` gives 9,764,864 B for the spike's
@@ -318,20 +335,20 @@ Mid-tier model.
 
 ### Before calling plugins sandboxed
 
-**Card G. Limits** (PH-08). S. Cheap model. Table bytes in the memory budget,
+**Card G. Limits** (PH-08). S. Cheap model. **Done.** Table bytes in the memory budget,
 lower store caps; test with a component that declares many large tables.
 
-**Card H. Client robustness** (PH-13 a, PH-14, PH-15). S-M. Mid-tier model.
+**Card H. Client robustness** (PH-13 a, PH-14, PH-15). S-M. Mid-tier model. **Done.**
 Expected count in `dec_cells`; `sync_channel(1)` and "unsolicited frame is a
 protocol error"; state lock not held across the round trip. Done when
 `ph13_*`, `ph14_*`, `ph15_*` flip.
 
 **Card I. Operation deadlines and quotas** (PH-19). M. Mid-tier model.
 
-**Card J. Manifest hygiene** (PH-11, PH-21, PH-22). S. Cheap model. Done when
-`ph11_*` flips.
+**Card J. Manifest hygiene** (PH-11, PH-21, PH-22). S. Cheap model. **Done**
+(`ph11_*` flipped).
 
-**Card K. Release guard and crate split** (PH-20). S. Cheap model.
+**Card K. Release guard and crate split** (PH-20). S. Cheap model. **Done.**
 `release.ps1` fails over 1,572,864 B; `tsubame-plugc` moves to
 `crates/tsubame-plugc` depending on `tsubame-plughost` with a `compile` API, so
 no feature of the host package links Cranelift; `docs/wasm-plugins.md` and
@@ -343,7 +360,11 @@ restricted token and low integrity, or AppContainer with a broker for `$input`.
 ## Unverified
 
 - The exact command that produced the reported 9.31 MiB host.
-- PH-08's 2 GiB: computed from the configured limits, not measured.
+- PH-08's 2 GiB: computed from the configured limits, not measured. The fix is
+  tested with real components (tables counted, caps enforced), not by committing
+  gigabytes.
+- PH-13 a: "many times the reply's size" was computed from `size_of::<Node>()`;
+  the fix is tested by capacity after a refused reply.
 - PH-03 and PH-16 in the app: the app does not load plugins or consume preview
   buttons yet; the findings are about the documented wiring and the adapter
   contract.
@@ -362,13 +383,13 @@ restricted token and low integrity, or AppContainer with a broker for `$input`.
 ## Running the PoCs
 
 ```
-cargo test -p tsubame-plughost --test security_poc -- --ignored --nocapture
-cargo test -p tsubame-plughost --test host -- --ignored --nocapture ph0
+cargo test -p tsubame-plughost --test security_poc -- --nocapture
+cargo test -p tsubame-plughost --test host -- --nocapture ph0
 ```
 
-The open ones are `#[ignore]` and pass while the weakness exists. The tests
-for fixed findings (PH-01, PH-02, PH-03, PH-04, PH-05, PH-06, PH-09, PH-10,
-PH-12, PH-13 b, PH-16, PH-17, PH-18) are regression tests:
+An open PoC would be `#[ignore]` and pass while the weakness exists; none is
+left in `security_poc.rs`. The tests for fixed findings (PH-01 to PH-06, PH-08
+to PH-18, PH-20 to PH-22) are regression tests:
 not ignored, they assert the attack fails. `ph04` and `ph05` need the right to
 create symlinks (Developer Mode); they print `NOT RUN` otherwise. `ph01` in
 `tests/host.rs` tries `\\127.0.0.1\C$` and nothing else.
@@ -387,11 +408,15 @@ create symlinks (Developer Mode); they print `NOT RUN` otherwise. `ph01` in
 | `ph06_a_hard_link_reads_and_overwrites_a_file_outside_the_grant` | `tests/host.rs` | PH-06 |
 | `ph09_superscript_device_names_are_accepted` | `tests/security_poc.rs` | PH-09 |
 | `ph10_two_plugins_map_to_the_same_cwasm_name` (name kept; now asserts the two get different folders) | `tests/security_poc.rs` | PH-10 |
-| `ph11_manifest_accepts_spoofing_characters_and_device_name_ids` | `tests/security_poc.rs` | PH-11 |
+| `ph11_manifest_refuses_spoofing_characters_and_device_name_ids` | `tests/security_poc.rs` | PH-11 |
 | `ph12_a_column_sees_a_folder_but_not_what_is_in_it` | `tests/host.rs` | PH-12 |
 | `ph12_a_flat_input_folder_does_not_cover_its_tree` | `tests/security_poc.rs` | PH-12 |
-| `ph13_a_small_reply_makes_the_client_allocate_many_times_its_size` | `tests/security_poc.rs` | PH-13 |
-| `ph14_unsolicited_frames_are_read_and_queued_without_limit` | `tests/security_poc.rs` | PH-14 |
-| `ph15_status_blocks_behind_a_call_in_flight` | `tests/security_poc.rs` | PH-15 |
+| `ph13_a_small_reply_is_refused_before_the_client_allocates` | `tests/security_poc.rs` | PH-13 a |
+| `ph14_an_unsolicited_frame_ends_the_host_and_is_not_queued` | `tests/security_poc.rs` | PH-14 |
+| `ph15_status_does_not_block_behind_a_call_in_flight`, `ph15_shutdown_ends_a_running_call_without_waiting_for_it` | `tests/security_poc.rs` | PH-15 |
+| `tables_are_counted_in_the_memory_budget`, `table_and_table_count_caps_hold` | `tests/host.rs` | PH-08 |
+| `plugin_and_data_folders_are_symbolic_and_expanded_by_the_host`, `without_the_grants_the_symbols_mean_nothing` | `tests/host.rs` | PH-21 |
+| `a_batch_of_paths_over_a_mebibyte_is_refused_by_the_host_not_only_split_by_the_client`, `a_junction_does_not_lead_out_of_a_grant` | `tests/host.rs` | PH-22 |
+| `the_release_script_guards_the_host_size`, `the_host_package_has_no_compiler_feature`, `release_exe_is_small` | `tests/host.rs` | PH-20 |
 | `ph17_a_manifest_error_does_not_repeat_untrusted_input` (now a regression test, with the `ph16_*`, `ph13_b_*` and other `ph17_*` tests beside it) | `tests/security_poc.rs` | PH-17, PH-16, PH-13 b |
 | `ph18_an_oversized_manifest_or_record_is_not_read_in_full` | `tests/security_poc.rs` | PH-18 |
