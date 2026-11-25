@@ -54,6 +54,9 @@ impl View {
         keymap::set_current(&self.keymap);
         self.preview.width = cfg.preview.width.clamp(tsubame_config::PreviewConfig::MIN_WIDTH, tsubame_config::PreviewConfig::MAX_WIDTH) as f32;
         self.preview.pane_open = cfg.preview.enabled && crate::preview_ui::is_enabled();
+        self.side.show_onedrive = cfg.general.show_sidebar_onedrive;
+        self.side.show_wsl = cfg.general.show_sidebar_wsl;
+        self.side.show_recycle = cfg.general.show_sidebar_recycle;
         self.sync_feature_extensions();
         if apply_hide {
             self.apply_hide();
@@ -100,6 +103,12 @@ impl View {
         if bits & C_PREVIEW != 0 {
             self.preview.apply_prefs(ui, &self.prefs.preview);
             self.sync_space_binding(ui);
+        }
+        self.side.show_onedrive = self.prefs.general.show_sidebar_onedrive;
+        self.side.show_wsl = self.prefs.general.show_sidebar_wsl;
+        self.side.show_recycle = self.prefs.general.show_sidebar_recycle;
+        if !self.prefs.general.row_tooltips {
+            self.row_tip.cancel();
         }
         // a pack switched on or off, or reloaded: its themes and menu entries follow
         self.sync_tags();

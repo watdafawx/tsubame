@@ -472,6 +472,7 @@ impl ShellUi {
             self.thumbs.remove(&*key);
             self.animating = true;
         }
+        crate::icon_overlay::draw(g, boxr, crate::icon_overlay::classify(row));
     }
 
     /// The grid's type icon centred in `boxr`, or the placeholder shape.

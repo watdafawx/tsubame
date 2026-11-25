@@ -620,7 +620,7 @@ impl MillerModel {
                 load.capped = true;
                 continue;
             }
-            inputs.push(EntryInput { name, size: e.size, modified: e.mtime as i64, flags: crate::tab::flags_of(e.attrs, e.is_dir(), e.is_reparse_point()) });
+            inputs.push(EntryInput { name, size: e.size, modified: e.mtime as i64, flags: crate::tab::flags_of(e.attrs, e.is_dir(), e.is_reparse_point(), e.reparse_tag) });
         }
         let _ = load.store.push_batch(load.store.generation(), &inputs);
     }

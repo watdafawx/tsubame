@@ -19,7 +19,7 @@
 use crate::nav::{self, History};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
-use tsubame_core::{EntryInput, EntryStore, FOLDER, FilterMode, HIDDEN, READONLY, REPARSE, SYSTEM, Selection, Sort};
+use tsubame_core::{EntryInput, EntryStore, FOLDER, FilterMode, REPARSE, Selection, Sort};
 use tsubame_ui::{BandMode, GridState, ListState};
 use std::collections::VecDeque;
 use std::sync::mpsc::{Sender, channel};
@@ -197,19 +197,10 @@ pub struct Pumped {
 /// UI thread from painting while a big folder streams in.
 pub const PUMP_BUDGET: Duration = Duration::from_millis(6);
 
-pub(crate) fn flags_of(attrs: u32, is_dir: bool, reparse: bool) -> u16 {
-    let mut f = 0;
+pub(crate) fn flags_of(attrs: u32, is_dir: bool, reparse: bool, reparse_tag: u32) -> u16 {
+    let mut f = tsubame_win::watch::flags_of_with_tag(attrs, reparse_tag);
     if is_dir {
         f |= FOLDER;
-    }
-    if attrs & 0x2 != 0 {
-        f |= HIDDEN;
-    }
-    if attrs & 0x4 != 0 {
-        f |= SYSTEM;
-    }
-    if attrs & 0x1 != 0 {
-        f |= READONLY;
     }
     if reparse {
         f |= REPARSE;
@@ -685,7 +676,7 @@ impl Tab {
     fn push(&mut self, b: &Batch) {
         let started = Instant::now();
         let inputs: Vec<EntryInput> =
-            b.iter().map(|(name, e)| EntryInput { name, size: e.size, modified: e.mtime as i64, flags: flags_of(e.attrs, e.is_dir(), e.is_reparse_point()) }).collect();
+            b.iter().map(|(name, e)| EntryInput { name, size: e.size, modified: e.mtime as i64, flags: flags_of(e.attrs, e.is_dir(), e.is_reparse_point(), e.reparse_tag) }).collect();
         let first_id = self.store.id_bound();
         // generation is the store's own (bumped by `start`): only this tab's
         // current listing ever gets here, so it always matches

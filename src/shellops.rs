@@ -161,6 +161,8 @@ fn run_custom(a: &mut App, e: &tsubame_config::MenuEntry, ctx: &MenuCtx) {
 /// Custom entries that run once per item on more than `CONFIRM_ABOVE` items,
 /// waiting for the user's yes (name, programs).
 static RUNS: Mutex<Vec<(String, Vec<crate::custom_cmd::Argv>)>> = Mutex::new(Vec::new());
+/// Completed background drive-eject operations: `(drive_letter, result)`.
+static EJECTS: Mutex<Vec<(char, Result<(), tsubame_win::eject::EjectError>)>> = Mutex::new(Vec::new());
 
 fn start_custom(h: isize, argvs: Vec<crate::custom_cmd::Argv>) {
     crate::custom_cmd::spawn_all(argvs, move |err| {
@@ -357,6 +359,20 @@ pub fn on_app(hwnd: HWND) {
     let errs: Vec<String> = CUSTOM_ERRS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
     if let Some(m) = errs.into_iter().last() {
         with(|a| status(a, m));
+    }
+    let ejects: Vec<_> = EJECTS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
+    for (letter, res) in ejects {
+        match res {
+            Ok(()) => {
+                with(|a| {
+                    status(a, format!("Ejected {letter}:"));
+                    a.view.want_drives = true;
+                });
+            }
+            Err(e) => {
+                with(|a| status(a, e.message(letter)));
+            }
+        }
     }
     let runs: Vec<_> = RUNS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
     for (name, argvs) in runs {
@@ -802,7 +818,7 @@ fn opts_for(background: bool, paths: &[String]) -> (MenuOpts, Vec<Option<Extra>>
 pub fn open_item_menu(a: &mut App, paths: Vec<String>, folders: Vec<String>, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
     let folder = a.view.tab().path.clone();
     if crate::ctxui::own_enabled() {
-        open_own(a, crate::ctxui::Target { paths, folders, folder, background: false, extended, anchor, keyboard, screen: (sx, sy) });
+        open_own(a, crate::ctxui::Target { paths, folders, folder, background: false, extended, anchor, keyboard, screen: (sx, sy), removable_drive: false });
         return;
     }
     native_item_menu(a, paths, folder, sx, sy, extended);
@@ -826,8 +842,11 @@ fn native_bg_menu(a: &mut App, folder: String, sx: i32, sy: i32, extended: bool)
 
 /// Opens the own-drawn menu (a newer one replaces an older one: dropping
 /// its handle closes it on its worker, its late batches are dropped).
-fn open_own(a: &mut App, t: crate::ctxui::Target) {
+fn open_own(a: &mut App, mut t: crate::ctxui::Target) {
     a.view.ctx = None;
+    if !t.background && t.paths.len() == 1 {
+        t.removable_drive = a.view.side.is_removable_drive(&t.paths[0]);
+    }
     let mut menu = a.view.prefs.context_menu.clone();
     menu.entries = tsubame_config::menu::effective(&menu.entries);
     menu.entries.extend(crate::packs::menu_entries());
@@ -867,7 +886,7 @@ fn ctx_save_edits(a: &mut App) {
 /// After a frame: a right click on empty space opens the folder's menu.
 pub fn open_background_menu(a: &mut App, folder: String, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
     if crate::ctxui::own_enabled() {
-        let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor, keyboard, screen: (sx, sy) };
+        let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor, keyboard, screen: (sx, sy), removable_drive: false };
         open_own(a, t);
     } else {
         native_bg_menu(a, folder, sx, sy, extended);
@@ -906,7 +925,7 @@ pub fn after_frame(hwnd: HWND) {
     let (sx, sy) = crate::screen_pt(hwnd, x, y);
     let paint_now = with(|a| {
         if crate::ctxui::own_enabled() {
-            let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor: pt, keyboard: false, screen: (sx, sy) };
+            let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor: pt, keyboard: false, screen: (sx, sy), removable_drive: false };
             open_own(a, t);
         } else {
             native_bg_menu(a, folder, sx, sy, extended);
@@ -1007,6 +1026,7 @@ fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_
         "x.terminal" => open_terminal(one_dir.unwrap_or_else(|| t.folder.clone())),
         "x.refresh" => a.view.run_command(&mut a.ui, crate::commands::CMD_REFRESH),
         "tags.pick" => a.view.open_tags_picker(&mut a.ui, None, false),
+        "drive.eject" => start_eject(a, &paths),
         id => {
             if let Some(e) = entries.iter().find(|e| e.id == id) {
                 let ctx = MenuCtx { id: 0, paths: t.paths.clone(), folder: t.folder.clone(), background: t.background, extras: Vec::new() };
@@ -1014,6 +1034,29 @@ fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_
             }
         }
     }
+}
+
+/// Ejects a removable / USB drive on a background thread and reports the
+/// outcome in the status bar via `WM_APP_SHELLOPS`.
+fn start_eject(a: &mut App, paths: &[String]) {
+    let Some(letter) = paths
+        .first()
+        .and_then(|p| {
+            let b = p.as_bytes();
+            (b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic()).then_some((b[0] as char).to_ascii_uppercase())
+        })
+    else {
+        status(a, "Can't eject: invalid drive");
+        return;
+    };
+    let h = a.ops.hwnd;
+    status(a, format!("Ejecting {letter}:\u{2026}"));
+    tsubame_win::eject::eject_async(letter, move |l, res| {
+        if let Ok(mut g) = EJECTS.lock() {
+            g.push((l, res));
+        }
+        let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_SHELLOPS, WPARAM(0), LPARAM(0)) };
+    });
 }
 
 fn on_menu(a: &mut App, m: &MenuResult, ctx: MenuCtx) {

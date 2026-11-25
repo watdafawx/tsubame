@@ -60,6 +60,7 @@ mod dnd;
 mod editing;
 mod fuzzy;
 mod ext;
+mod icon_overlay;
 mod keymap;
 mod leak;
 mod lru;
@@ -92,6 +93,7 @@ mod timing;
 mod uia_rows;
 mod updates;
 mod view;
+mod view_tooltip;
 mod wakelog;
 
 use std::cell::RefCell;
@@ -160,9 +162,11 @@ const RESIZE_BORDER: f32 = 6.0;
 #[global_allocator]
 static ALLOC: memdiag::counting::Counting = memdiag::counting::Counting;
 
+type PlacesResult = (Vec<places::Drive>, Vec<places::Place>, Vec<places::WslDistro>);
+
 static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
 static PLACES_BUSY: AtomicBool = AtomicBool::new(false);
-static PLACES: Mutex<Option<(Vec<places::Drive>, Vec<places::Place>)>> = Mutex::new(None);
+static PLACES: Mutex<Option<PlacesResult>> = Mutex::new(None);
 
 struct App {
     view: view::View,
@@ -189,6 +193,8 @@ struct App {
     watch_armed: bool,
     /// the own-drawn menu's reveal-grace / loading-line / hover timer interval
     ctx_timer: Option<u32>,
+    /// the one-shot 600 ms row-tooltip dwell timer is armed for this hover sequence
+    row_tip_timer: Option<u64>,
     /// the GPU park timer is armed
     park_timer: bool,
     /// the blink timer exists
@@ -596,6 +602,7 @@ fn main() {
                 hang_bench: flag("--hang"),
                 watch_armed: false,
                 ctx_timer: None,
+                row_tip_timer: None,
                 park_timer: false,
                 caret_timer: false,
                 caret_idle: false,
@@ -808,15 +815,46 @@ fn note_input(a: &mut App) {
     a.ui.caret_on = true;
 }
 
-/// Reads drives and known folders on a worker (they can block on a dead
-/// network share or an empty card reader); WM_APP_PLACES brings the result.
+/// One-shot dwell timer for row hover tooltips: armed ONLY while waiting out
+/// the 600 ms hover delay, disarmed immediately on fire or leave (0 wake-ups when idle).
+fn arm_row_tip(hwnd: HWND, a: &mut App) {
+    match a.view.row_tip.next_timer(Instant::now()) {
+        Some((seq, ms)) if a.row_tip_timer != Some(seq) => {
+            unsafe { SetTimer(Some(hwnd), view_tooltip::TIMER_ID, ms, None) };
+            a.row_tip_timer = Some(seq);
+        }
+        None if a.row_tip_timer.is_some() => {
+            let _ = unsafe { KillTimer(Some(hwnd), view_tooltip::TIMER_ID) };
+            a.row_tip_timer = None;
+        }
+        _ => {}
+    }
+}
+
+/// Cancels any pending or visible row tooltip and kills its one-shot timer.
+fn cancel_row_tip(hwnd: HWND) {
+    let repaint = with(|a| {
+        if a.row_tip_timer.is_some() {
+            let _ = unsafe { KillTimer(Some(hwnd), view_tooltip::TIMER_ID) };
+            a.row_tip_timer = None;
+        }
+        a.view.row_tip.cancel()
+    })
+    .unwrap_or(false);
+    if repaint {
+        invalidate(hwnd);
+    }
+}
+
+/// Reads drives, known folders (including OneDrive) and WSL distros on a worker
+/// (they can block on a dead network share or an empty card reader); WM_APP_PLACES brings the result.
 fn spawn_places(hwnd: HWND) {
     if PLACES_BUSY.swap(true, Ordering::AcqRel) {
         return;
     }
     let h = hwnd.0 as isize;
     let _ = std::thread::Builder::new().name("tsubame-places".into()).spawn(move || {
-        let r = (places::list_drives(), places::known_folders());
+        let r = (places::list_drives(), places::known_folders(), places::wsl_distros());
         if let Ok(mut g) = PLACES.lock() {
             *g = Some(r);
         }
@@ -832,6 +870,7 @@ fn after_paint(hwnd: HWND, a: &mut App) {
     arm_watch(hwnd, a);
     arm_ops(hwnd, a);
     arm_ctx(hwnd, a);
+    arm_row_tip(hwnd, a);
     arm_park(hwnd, a);
     if a.view.want_drives && !PLACES_BUSY.load(Ordering::Acquire) {
         a.view.want_drives = false;
@@ -1597,16 +1636,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_APP_PLACES => {
                 let got = PLACES.lock().ok().and_then(|mut g| g.take());
-                if let Some((drives, places)) = got {
+                if let Some((drives, places, wsl)) = got {
                     with(|a| {
                         a.view.side.drives = drives;
                         a.view.side.places = places;
+                        a.view.side.wsl = wsl;
                     });
                     invalidate(hwnd);
                 }
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
+                cancel_row_tip(hwnd);
                 let dy = ((wp.0 >> 16) as u16 as i16) as f32 / 120.0;
                 // wheel positions are screen px
                 let mut p = POINT { x: lo(lp), y: hi(lp) };
@@ -1616,6 +1657,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
+                if matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONDBLCLK) {
+                    cancel_row_tip(hwnd);
+                }
                 button_event(hwnd, msg, lp);
                 LRESULT(0)
             }
@@ -1657,6 +1701,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
+                cancel_row_tip(hwnd);
                 with(|a| a.tracking = false);
                 push(hwnd, Event::MouseLeave);
                 LRESULT(0)
@@ -1737,6 +1782,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             // Alt+key shortcuts (Alt+Left/Right/Up, Alt+D) arrive as SYSKEY messages
             WM_KEYDOWN | WM_SYSKEYDOWN => {
+                cancel_row_tip(hwnd);
                 let repeat = lp.0 & (1 << 30) != 0;
                 let key = map_key(wp.0 as u16);
                 // Escape while a context menu is still inside its reveal grace window cancels it.
@@ -1830,6 +1876,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let _ = KillTimer(Some(hwnd), ctxui::TIMER_ID);
                 with(|a| a.ctx_timer = None);
                 invalidate(hwnd);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == view_tooltip::TIMER_ID => {
+                let _ = KillTimer(Some(hwnd), view_tooltip::TIMER_ID);
+                let show = with(|a| {
+                    a.row_tip_timer = None;
+                    a.view.row_tip.on_timer()
+                })
+                .unwrap_or(false);
+                if show {
+                    invalidate(hwnd);
+                }
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == CARET_TIMER => {
