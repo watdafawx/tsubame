@@ -13,7 +13,7 @@ use crate::dnd::{self, DragPayload, PinSlot};
 use crate::overlay::{self, MenuItem};
 use tsubame_config::Pinned;
 use tsubame_ui::{Button, Canvas, Cursor, Id, Key, Pt, Rect, Sense, TextInput, Theme, Ui, f, text_input};
-use tsubame_win::places::{Drive, DriveKind, Place};
+use tsubame_win::places::{Drive, DriveKind, Place, RECYCLE_BIN_SHELL, WslDistro};
 
 const ID: Id = Id::new("sidebar");
 const ID_MENU: Id = Id::new("sidebar-menu");
@@ -35,14 +35,35 @@ pub const PC: usize = 3;
 pub const NETWORK: usize = 4;
 /// P4.F6: tags with counts (shown while the tags extension is on)
 pub const TAGS: usize = 5;
+/// WSL distributions (shown only when WSL is installed and `show_wsl` is on)
+pub const LINUX: usize = 6;
 /// config names of the sections (`sidebar.closed`) and their titles
-pub const SECTIONS: [(&str, &str); 6] = [("pinned", "Pinned"), ("quick", "Quick access"), ("recent", "Recent"), ("pc", "This PC"), ("network", "Network"), ("tags", "Tags")];
+pub const SECTIONS: [(&str, &str); 7] = [
+    ("pinned", "Pinned"),
+    ("quick", "Quick access"),
+    ("recent", "Recent"),
+    ("pc", "This PC"),
+    ("network", "Network"),
+    ("tags", "Tags"),
+    ("linux", "Linux"),
+];
 /// the places shown under Quick access, in this order
-const QUICK_NAMES: [(&str, &str); 7] = [("Home", "\u{E80F}"), ("Desktop", "\u{E7F4}"), ("Downloads", "\u{E896}"), ("Documents", "\u{E8A5}"), ("Pictures", "\u{E91B}"), ("Music", "\u{E8D6}"), ("Videos", "\u{E714}")];
+const QUICK_NAMES: [(&str, &str); 8] = [
+    ("Home", "\u{E80F}"),
+    ("Desktop", "\u{E7F4}"),
+    ("Downloads", "\u{E896}"),
+    ("Documents", "\u{E8A5}"),
+    ("Pictures", "\u{E91B}"),
+    ("Music", "\u{E8D6}"),
+    ("Videos", "\u{E714}"),
+    ("OneDrive", "\u{E753}"),
+];
 const G_STAR: &str = "\u{E734}";
 const G_RECENT: &str = "\u{E81C}";
 const G_DRIVE: &str = "\u{EDA2}";
 const G_NET: &str = "\u{E968}";
+const G_RECYCLE: &str = "\u{E74D}";
+const G_LINUX: &str = "\u{E756}";
 const G_UNPIN: &str = "\u{E77A}";
 const G_CHEV_DOWN: &str = "\u{E70D}";
 const G_CHEV_RIGHT: &str = "\u{E76C}";
@@ -60,6 +81,8 @@ pub enum Act {
     TagFilter(u8),
     /// the Tags header's "+"
     NewTag,
+    /// a shell virtual folder (e.g. `shell:RecycleBinFolder`) opened via `ShellExecuteW`
+    OpenShell(String),
     /// the width or the rail state changed: the view rebuilds its theme
     Layout,
 }
@@ -123,9 +146,11 @@ enum Kind {
     Header(usize),
     Pinned(usize),
     Quick(usize),
+    RecycleBin,
     Recent(usize),
     Drive(usize),
     Net(usize),
+    Wsl(usize),
     Tag(usize),
     Empty(usize),
     Sep,
@@ -143,11 +168,17 @@ pub struct Sidebar {
     pub shell_menu: Option<(String, Pt)>,
     pub drives: Vec<Drive>,
     pub places: Vec<Place>,
+    /// installed WSL distributions (async from `places::wsl_distros`; empty if WSL absent)
+    pub wsl: Vec<WslDistro>,
     pub pinned: Vec<Pinned>,
     /// newest first
     pub recents: Vec<String>,
     /// folded sections, in `SECTIONS` order
-    pub closed: [bool; 6],
+    pub closed: [bool; 7],
+    /// hide-per-user toggles from Settings > General
+    pub show_onedrive: bool,
+    pub show_wsl: bool,
+    pub show_recycle: bool,
     /// the Tags section (`None`: tags are off, no section)
     pub tags: Option<Vec<SideTag>>,
     /// the 48 px icon rail
@@ -184,9 +215,13 @@ impl Default for Sidebar {
             shell_menu: None,
             drives: Vec::new(),
             places: Vec::new(),
+            wsl: Vec::new(),
             pinned: Vec::new(),
             recents: Vec::new(),
-            closed: [false; 6],
+            closed: [false; 7],
+            show_onedrive: true,
+            show_wsl: true,
+            show_recycle: true,
             tags: None,
             rail: false,
             dirty: false,
@@ -417,8 +452,22 @@ impl Sidebar {
         self.scroll
     }
 
+    /// True when `path` is the root of a removable / USB / optical drive.
+    pub fn is_removable_drive(&self, path: &str) -> bool {
+        let b = path.as_bytes();
+        if b.len() < 2 || b[1] != b':' {
+            return false;
+        }
+        let l = (b[0] as char).to_ascii_uppercase();
+        self.drives.iter().any(|d| d.letter == l && d.is_ejectable())
+    }
+
     fn quick_places(&self) -> Vec<(&'static str, &'static str, &str)> {
-        QUICK_NAMES.iter().filter_map(|(n, g)| self.place_path(n).map(|p| (*n, *g, p))).collect()
+        QUICK_NAMES
+            .iter()
+            .filter(|(n, _)| *n != "OneDrive" || self.show_onedrive)
+            .filter_map(|(n, g)| self.place_path(n).map(|p| (*n, *g, p)))
+            .collect()
     }
 
     fn pc_drives(&self) -> Vec<usize> {
@@ -440,6 +489,14 @@ impl Sidebar {
         if let Some(i) = quick.iter().position(|(_, _, q)| norm(q) == p) {
             return Some(Kind::Quick(i));
         }
+        if self.show_wsl
+            && let Some(i) = self.wsl.iter().position(|w| {
+                let wp = norm(&w.path);
+                p == wp || p.strip_prefix(&wp).is_some_and(|rest| rest.starts_with('\\'))
+            })
+        {
+            return Some(Kind::Wsl(i));
+        }
         let b = path.as_bytes();
         if b.len() >= 2 && b[1] == b':' {
             let l = (b[0] as char).to_ascii_uppercase();
@@ -454,6 +511,7 @@ impl Sidebar {
             Kind::Quick(i) => self.quick_places().get(i).map(|(_, _, p)| p.to_string()),
             Kind::Recent(i) => self.recents.get(i).cloned(),
             Kind::Drive(i) | Kind::Net(i) => self.drives.get(i).map(|d| d.root.clone()),
+            Kind::Wsl(i) => self.wsl.get(i).map(|w| w.path.clone()),
             _ => None,
         }
     }
@@ -465,14 +523,20 @@ impl Sidebar {
         let mut y = 4.0;
         let pc = self.pc_drives();
         let net = self.net_drives();
+        let quick_n = self.quick_places().len();
+        let quick_total = quick_n + usize::from(self.show_recycle);
         let ntags = self.tags.as_ref().map_or(0, |t| t.len());
-        let counts = [self.pinned.len(), self.quick_places().len(), self.recents.len(), pc.len(), net.len(), ntags];
+        let nwsl = if self.show_wsl { self.wsl.len() } else { 0 };
+        let counts = [self.pinned.len(), quick_total, self.recents.len(), pc.len(), net.len(), ntags, nwsl];
         let mut first = true;
         for (sec, &count) in counts.iter().enumerate() {
             if rail && (sec == RECENT || sec == TAGS || count == 0) {
                 continue;
             }
             if sec == TAGS && self.tags.is_none() {
+                continue;
+            }
+            if sec == LINUX && (!self.show_wsl || self.wsl.is_empty()) {
                 continue;
             }
             if rail {
@@ -490,10 +554,16 @@ impl Sidebar {
             let h = if rail { RAIL_ITEM } else { ROW_H };
             match sec {
                 PINNED => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Pinned(i), h)),
-                QUICK => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Quick(i), h)),
+                QUICK => {
+                    (0..quick_n).for_each(|i| add(&mut v, &mut y, Kind::Quick(i), h));
+                    if self.show_recycle {
+                        add(&mut v, &mut y, Kind::RecycleBin, h);
+                    }
+                }
                 RECENT => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Recent(i), h)),
                 PC => pc.iter().for_each(|&i| add(&mut v, &mut y, Kind::Drive(i), if rail { RAIL_ITEM } else { 32.0 })),
                 TAGS => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Tag(i), ROW_H)),
+                LINUX => (0..nwsl).for_each(|i| add(&mut v, &mut y, Kind::Wsl(i), h)),
                 _ => net.iter().for_each(|&i| add(&mut v, &mut y, Kind::Net(i), if rail { RAIL_ITEM } else { 32.0 })),
             }
             if count == 0 && !rail {
@@ -572,7 +642,7 @@ impl Sidebar {
                 }
             }
             if target.is_none() && pin_slot.is_none() && dragging {
-                target = items.iter().find(|i| !matches!(i.kind, Kind::Header(_) | Kind::Sep | Kind::Empty(_) | Kind::Pinned(_)) && Rect::new(inner.x, i.y - self.scroll + body.y, inner.w, i.h).contains_pt(mouse)).map(|i| i.kind);
+                target = items.iter().find(|i| !matches!(i.kind, Kind::Header(_) | Kind::Sep | Kind::Empty(_) | Kind::Pinned(_) | Kind::RecycleBin) && Rect::new(inner.x, i.y - self.scroll + body.y, inner.w, i.h).contains_pt(mouse)).map(|i| i.kind);
             }
         }
 
@@ -718,12 +788,14 @@ impl Sidebar {
         let id = match kind {
             Kind::Pinned(i) => ID.child("pin").with(i as u64),
             Kind::Quick(i) => ID.child("q").with(i as u64),
+            Kind::RecycleBin => ID.child("recycle"),
             Kind::Recent(i) => ID.child("r").with(i as u64),
             Kind::Drive(i) => ID.child("d").with(i as u64),
             Kind::Net(i) => ID.child("n").with(i as u64),
+            Kind::Wsl(i) => ID.child("wsl").with(i as u64),
             _ => return None,
         };
-        let path = self.path_of(kind)?;
+        let path = if kind == Kind::RecycleBin { RECYCLE_BIN_SHELL.to_string() } else { self.path_of(kind)? };
         let it = ui.interact(id, r, Sense::click().cursor(Cursor::Hand));
         let mouse = ui.mouse();
         let hover = it.hovered && self.reorder.is_none();
@@ -749,12 +821,14 @@ impl Sidebar {
                 let q = self.quick_places();
                 (q[i].1, q[i].0.to_string(), None)
             }
+            Kind::RecycleBin => (G_RECYCLE, "Recycle Bin".to_string(), None),
             Kind::Recent(i) => {
                 let p = &self.recents[i];
                 let parent = crate::nav::parent(p).map(|pp| default_label(&pp));
                 (G_RECENT, default_label(p), parent)
             }
             Kind::Drive(i) | Kind::Net(i) => (if matches!(kind, Kind::Net(_)) { G_NET } else { G_DRIVE }, self.drives[i].display_name(), None),
+            Kind::Wsl(i) => (G_LINUX, self.wsl[i].name.clone(), None),
             _ => ("", String::new(), None),
         };
         let icon_col = if active { t.text } else { t.text_dim };
@@ -877,9 +951,9 @@ impl Sidebar {
             if !matches!(kind, Kind::Pinned(_)) {
                 self.kb = None;
             }
-            act = Some(Act::Go(path.clone()));
+            act = Some(if kind == Kind::RecycleBin { Act::OpenShell(path.clone()) } else { Act::Go(path.clone()) });
         }
-        if it.clicked == Some(Button::Middle) {
+        if it.clicked == Some(Button::Middle) && kind != Kind::RecycleBin {
             act = Some(Act::NewTab(path));
         } else if it.clicked == Some(Button::Right) && matches!(kind, Kind::Drive(_)) {
             self.shell_menu = Some((path, it.click_pos));
@@ -1189,7 +1263,7 @@ mod tests {
         t.set_closed_names(&s.closed_names());
         assert_eq!(t.closed, s.closed);
         t.set_closed_names(&[]);
-        assert_eq!(t.closed, [false; 6]);
+        assert_eq!(t.closed, [false; 7]);
     }
 
     fn drive(letter: char, kind: DriveKind) -> Drive {
@@ -1261,5 +1335,40 @@ mod tests {
         assert!(!s.rail);
         assert!(!s.closed[PC], "This PC unfolded for drive D:");
         assert!(s.scroll_offset() > 0.0, "scrolled down toward drive D:");
+    }
+
+    #[test]
+    fn onedrive_recycle_wsl_and_hide_toggles() {
+        let mut s = Sidebar {
+            drives: vec![drive('C', DriveKind::Fixed), drive('E', DriveKind::Removable)],
+            places: vec![
+                Place { name: "Home", path: "C:\\Users\\me".into() },
+                Place { name: "OneDrive", path: "C:\\Users\\me\\OneDrive".into() },
+            ],
+            wsl: vec![
+                WslDistro { name: "Ubuntu".into(), path: "\\\\wsl.localhost\\Ubuntu".into() },
+                WslDistro { name: "Debian".into(), path: "\\\\wsl.localhost\\Debian".into() },
+            ],
+            ..Default::default()
+        };
+        assert!(!s.is_removable_drive("C:\\"));
+        assert!(s.is_removable_drive("E:\\"));
+        assert_eq!(s.current("\\\\wsl.localhost\\Ubuntu\\home"), Some(Kind::Wsl(0)));
+
+        let items = s.items(false);
+        assert!(items.iter().any(|i| i.kind == Kind::Header(LINUX)), "Linux section shown when WSL distros exist");
+        assert_eq!(items.iter().filter(|i| matches!(i.kind, Kind::Wsl(_))).count(), 2);
+        assert!(items.iter().any(|i| i.kind == Kind::RecycleBin));
+        assert_eq!(s.quick_places().len(), 2, "Home + OneDrive");
+
+        // Hide-per-user toggles hide each entry/section cleanly
+        s.show_onedrive = false;
+        assert_eq!(s.quick_places().len(), 1);
+        s.show_recycle = false;
+        assert!(!s.items(false).iter().any(|i| i.kind == Kind::RecycleBin));
+        s.show_wsl = false;
+        assert!(!s.items(false).iter().any(|i| i.kind == Kind::Header(LINUX)));
+        assert!(!s.items(false).iter().any(|i| matches!(i.kind, Kind::Wsl(_))));
+        assert_eq!(s.current("\\\\wsl.localhost\\Ubuntu\\home"), None);
     }
 }

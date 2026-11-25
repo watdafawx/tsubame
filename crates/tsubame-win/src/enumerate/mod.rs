@@ -58,6 +58,30 @@ pub const NT_BUFFER_BYTES: usize = 64 * 1024;
 pub const ATTR_HIDDEN: u32 = 0x0000_0002;
 pub const ATTR_DIRECTORY: u32 = 0x0000_0010;
 pub const ATTR_REPARSE_POINT: u32 = 0x0000_0400;
+pub const ATTR_OFFLINE: u32 = 0x0000_1000;
+pub const ATTR_RECALL_ON_OPEN: u32 = 0x0004_0000;
+pub const ATTR_PINNED: u32 = 0x0008_0000;
+pub const ATTR_UNPINNED: u32 = 0x0010_0000;
+pub const ATTR_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+pub const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+pub const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+
+/// True when `tag` is one of the Cloud Filter placeholder reparse tags (`IO_REPARSE_TAG_CLOUD*`).
+#[inline]
+pub const fn is_cloud_reparse_tag(tag: u32) -> bool {
+    (tag & 0xFFFF_0FFF) == 0x9000_001A
+}
+
+/// True when `(attrs, reparse_tag)` represents a symlink or directory junction (not a cloud placeholder).
+#[inline]
+pub const fn is_link_reparse(attrs: u32, reparse_tag: u32) -> bool {
+    if reparse_tag != 0 {
+        reparse_tag == IO_REPARSE_TAG_SYMLINK || reparse_tag == IO_REPARSE_TAG_MOUNT_POINT
+    } else {
+        let cloud_attrs = ATTR_PINNED | ATTR_UNPINNED | ATTR_RECALL_ON_OPEN | ATTR_RECALL_ON_DATA_ACCESS;
+        (attrs & ATTR_REPARSE_POINT) != 0 && (attrs & cloud_attrs) == 0
+    }
+}
 
 /// One entry inside a [`Batch`]. 64 bytes; the name lives in the batch's
 /// `names` buffer, so a batch is two allocations no matter how many entries.

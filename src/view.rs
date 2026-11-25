@@ -387,6 +387,8 @@ pub struct View {
     nav_hold: Option<crate::nav_menu::HoldState>,
     /// B10-B: cached chevron anchors per pane for UIA Invoke/Expand
     crumb_anchors: [Vec<(usize, Pt)>; 2],
+    /// Delayed hover tooltip for file rows (Details and Grid)
+    pub row_tip: crate::view_tooltip::RowTooltip,
 }
 
 impl View {
@@ -491,6 +493,7 @@ impl View {
             nav_menu: None,
             nav_hold: None,
             crumb_anchors: [Vec::new(), Vec::new()],
+            row_tip: crate::view_tooltip::RowTooltip::new(),
         }
     }
 
@@ -1067,6 +1070,7 @@ impl View {
             Some(Act::OtherPane(p)) => self.open_in_other_pane(&p),
             Some(Act::DropOn(p)) => self.drop_selection_on(&p),
             Some(Act::TagFilter(_) | Act::NewTag) => {}
+            Some(Act::OpenShell(p)) => self.open_paths.push(p),
             Some(Act::Layout) => {
                 if let Some(w) = self.side.want_width.take() {
                     self.sidebar_width = w;
@@ -1886,6 +1890,7 @@ impl View {
         }
         let t = ui.theme;
         self.tags_frame();
+        self.row_tip.begin_frame();
         crate::uia_rows::begin_frame();
         if self.other.is_some() {
             self.paint_dual(ui, g, shell, (w, h), &t);
@@ -1934,6 +1939,18 @@ impl View {
         }
         let oa = self.side.paint_overlay(ui, g, self.other.is_some());
         self.side_act(ui, oa);
+        let tip_allowed = self.prefs.general.row_tooltips
+            && !self.tab().settings
+            && self.palette.is_none()
+            && self.search.is_none()
+            && self.ctx.is_none()
+            && !self.preview.quick_look_open()
+            && !self.tags.picker_open()
+            && self.rename.is_none()
+            && self.batch.is_none()
+            && self.drag.is_none()
+            && ui.popups_open() == 0;
+        self.row_tip.finish_and_paint(g, &t, (w, h), tip_allowed, std::time::Instant::now());
         self.paint_batch_preview(g, &t, (w, h));
         self.paint_palette(ui, g, (w, h));
         self.paint_search(ui, g, (w, h));
@@ -2460,6 +2477,7 @@ impl View {
         } else {
         let tab = &mut self.tabs.items[self.tabs.active];
         tab.list.row_h = t.height_list_row;
+        let tab_nav_key = tab.nav_key();
         {
             let Tab { store, sel, list: lstate, band_base, band_mode, path, synthetic, tag_fids, .. } = &mut *tab;
             let in_archive = crate::archive_ui::is_archive_path(path);
@@ -2471,6 +2489,11 @@ impl View {
                 .then_some(&self.meta.size_map);
             let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, age, base: band_base, band_mode, tags };
             let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
+            if let Some(pos) = lr.hovered
+                && let Some(id) = rows.store.at(pos)
+            {
+                self.row_tip.note_hover(crate::view_tooltip::HoverKey { slot: self.live, nav_key: tab_nav_key, entry_id: id }, ui.mouse(), rows.store, rows.row);
+            }
             if crate::uia_rows::on() {
                 let area = Rect::new(list_r.x, list_r.y, list_r.w - ui.theme.layout_scrollbar_width, list_r.h);
                 let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
@@ -2558,12 +2581,18 @@ impl View {
         let rows_vis = (grid_r.h / ch).ceil() as usize + 1;
         shell.set_grid(GridPic { box_dip, icon_dip, dpi }, cols * rows_vis);
         let label_font = t.font().c();
+        let tab_nav_key = tab.nav_key();
         let (gr, activated) = {
             let Tab { store, sel, grid: gstate, band_base, band_mode, path, synthetic, tag_fids, .. } = &mut *tab;
             let root = if *synthetic || crate::archive_ui::is_archive_path(path) { None } else { Some(path.as_str()) };
             let tags = root.and_then(|p| self.tags.rows(p, tag_fids));
             let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, band_mode, labels: &mut self.labels, box_dip, font: label_font, tags };
             let gr = grid(ui, g, pid(self.live, ID_LIST), grid_r, gstate, &mut tiles);
+            if let Some(pos) = gr.hovered
+                && let Some(id) = tiles.store.at(pos)
+            {
+                self.row_tip.note_hover(crate::view_tooltip::HoverKey { slot: self.live, nav_key: tab_nav_key, entry_id: id }, ui.mouse(), tiles.store, tiles.row);
+            }
             if crate::uia_rows::on() {
                 let area = Rect::new(grid_r.x, grid_r.y, grid_r.w - ui.theme.layout_scrollbar_width, grid_r.h);
                 let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
@@ -2935,6 +2964,7 @@ impl ListSource for Rows<'_> {
                 }
             }
         }
+        crate::icon_overlay::draw(g, ir, crate::icon_overlay::classify(row));
         let name_c = if row.hidden { t.text_dim } else { crate::packs::name_color(row.name_str(), row.is_dir()).unwrap_or(t.text) };
         let name_w = (sp[0].1 - 32.0 - 8.0).max(0.0);
         let tmask = self.tags.as_mut().and_then(|tg| tg.mask(id, row.name_str()));
@@ -4964,4 +4994,7 @@ mod tests {
     // B10-B Explorer parity
     #[path = "../../view_b10b_tests.rs"]
     mod b10b;
+    // B10-D: sidebar parity, eject, row tooltips, icon overlays
+    #[path = "../../view_b10d_tests.rs"]
+    mod b10d;
 }

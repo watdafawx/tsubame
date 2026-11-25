@@ -348,7 +348,17 @@ pub const APP_VERBS: [&str; 5] = ["delete", "cut", "copy", "paste", "rename"];
 
 /// Tsubame built-in command -> the shell verb it replaces in the native part
 /// (so the menu never shows "Copy" twice).
-pub const BUILTIN_VERBS: [(&str, &str); 8] = [("file.open", "open"), ("file.cut", "cut"), ("file.copy", "copy"), ("file.paste", "paste"), ("file.rename", "rename"), ("file.delete", "delete"), ("file.properties", "properties"), ("file.copy-path", "copyaspath")];
+pub const BUILTIN_VERBS: [(&str, &str); 9] = [
+    ("file.open", "open"),
+    ("file.cut", "cut"),
+    ("file.copy", "copy"),
+    ("file.paste", "paste"),
+    ("file.rename", "rename"),
+    ("file.delete", "delete"),
+    ("file.properties", "properties"),
+    ("file.copy-path", "copyaspath"),
+    ("drive.eject", "eject"),
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {

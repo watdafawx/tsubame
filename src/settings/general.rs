@@ -61,7 +61,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
 
     pg.section("Files and folders");
-    let mut c = pg.card(4, 52.0);
+    let mut c = pg.card(5, 52.0);
     if let Some(v) = pg.toggle_row(&mut c, "Show hidden files", "Same as Ctrl+H. Items with the hidden attribute are drawn in a dimmer colour.", g.show_hidden, true) {
         g.show_hidden = v;
         cx.changed |= C_HIDE;
@@ -77,6 +77,25 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
     if let Some(v) = pg.toggle_row(&mut c, "Typing in a folder filters it", "Off (like Explorer): typing letters jumps to the first name that starts with them; Ctrl+F opens the filter. On: typing starts the filter.", vw.type_ahead_filters, true) {
         vw.type_ahead_filters = v;
+        cx.changed |= C_OTHER;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Row hover tooltips", "Show Name, Type, Size and Date modified when hovering a row in Details or Grid.", g.row_tooltips, true) {
+        g.row_tooltips = v;
+        cx.changed |= C_OTHER;
+    }
+
+    pg.section("Sidebar");
+    let mut c = pg.card(3, 52.0);
+    if let Some(v) = pg.toggle_row(&mut c, "Show OneDrive", "Show your OneDrive folder under Quick access when OneDrive is installed.", g.show_sidebar_onedrive, true) {
+        g.show_sidebar_onedrive = v;
+        cx.changed |= C_OTHER;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Show Linux (WSL)", "Show installed WSL distributions under a Linux section when WSL is installed.", g.show_sidebar_wsl, true) {
+        g.show_sidebar_wsl = v;
+        cx.changed |= C_OTHER;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Show Recycle Bin", "Show Recycle Bin under Quick access.", g.show_sidebar_recycle, true) {
+        g.show_sidebar_recycle = v;
         cx.changed |= C_OTHER;
     }
 

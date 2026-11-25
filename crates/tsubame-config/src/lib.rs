@@ -213,11 +213,34 @@ pub struct General {
     pub confirm_delete: bool,
     #[serde(default = "yes")]
     pub delete_to_recycle: bool,
+    /// Show a hover tooltip after ~600 ms over a file or folder row.
+    #[serde(default = "yes")]
+    pub row_tooltips: bool,
+    /// Show OneDrive in the sidebar (when installed).
+    #[serde(default = "yes")]
+    pub show_sidebar_onedrive: bool,
+    /// Show the Linux (WSL) section in the sidebar (when installed).
+    #[serde(default = "yes")]
+    pub show_sidebar_wsl: bool,
+    /// Show Recycle Bin in the sidebar.
+    #[serde(default = "yes")]
+    pub show_sidebar_recycle: bool,
 }
 
 impl Default for General {
     fn default() -> Self {
-        General { start_folder: default_start_folder(), restore_session: true, show_hidden: false, show_system: false, confirm_delete: true, delete_to_recycle: true }
+        General {
+            start_folder: default_start_folder(),
+            restore_session: true,
+            show_hidden: false,
+            show_system: false,
+            confirm_delete: true,
+            delete_to_recycle: true,
+            row_tooltips: true,
+            show_sidebar_onedrive: true,
+            show_sidebar_wsl: true,
+            show_sidebar_recycle: true,
+        }
     }
 }
 
@@ -1967,6 +1990,28 @@ hidden = true
         let per = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
         eprintln!("config load: {per:.4} ms per load of {} bytes", fs::metadata(&p).unwrap().len());
         assert!(per < 1.0, "a typical config must load in well under 1 ms, got {per} ms");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn general_tooltip_and_sidebar_toggles_default_on_and_round_trip() {
+        let def = Config::default();
+        assert!(def.general.row_tooltips);
+        assert!(def.general.show_sidebar_onedrive);
+        assert!(def.general.show_sidebar_wsl);
+        assert!(def.general.show_sidebar_recycle);
+
+        let d = temp_dir("b10d-general");
+        let p = d.join("config.toml");
+        let mut cfg = Config::default();
+        cfg.general.row_tooltips = false;
+        cfg.general.show_sidebar_onedrive = false;
+        cfg.general.show_sidebar_wsl = false;
+        cfg.general.show_sidebar_recycle = false;
+        ConfigFile::new(cfg.clone()).save(&p).unwrap();
+        let loaded = ConfigFile::load(&p);
+        assert_eq!(loaded.status, LoadStatus::Loaded);
+        assert_eq!(loaded.value.config.general, cfg.general);
         let _ = fs::remove_dir_all(&d);
     }
 }

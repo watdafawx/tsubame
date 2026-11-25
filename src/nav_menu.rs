@@ -242,7 +242,7 @@ impl NavMenu {
                                     }
                                     let name = String::from_utf16_lossy(name_u16);
                                     let is_active = active_child.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(&name));
-                                    let fl = flags_of(raw.attrs, true, raw.is_reparse_point());
+                                    let fl = flags_of(raw.attrs, true, raw.is_reparse_point(), raw.reparse_tag);
                                     if !is_active && (fl & hide) != 0 {
                                         continue;
                                     }

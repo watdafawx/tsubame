@@ -29,8 +29,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tsubame_core::{
-    EntryId, EntryInput, EntryStore, FOLDER, HIDDEN, READONLY, REPARSE, SYSTEM, Selection,
-    StoreError, Upsert,
+    CLOUD_ONLINE, CLOUD_PINNED, CLOUD_UNPINNED, EntryId, EntryInput, EntryStore, FOLDER, HIDDEN,
+    READONLY, REPARSE, SYMLINK, SYSTEM, Selection, StoreError, Upsert,
 };
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Storage::FileSystem::{
@@ -91,8 +91,12 @@ pub struct Resolved {
     pub listed: bool,
 }
 
-/// Store flags from Win32 attributes (the same mapping the listing uses).
-pub fn flags_of(attrs: u32) -> u16 {
+/// Store flags from Win32 attributes and optional reparse tag (the same mapping the listing uses).
+pub fn flags_of_with_tag(attrs: u32, reparse_tag: u32) -> u16 {
+    use crate::enumerate::{
+        ATTR_PINNED, ATTR_RECALL_ON_DATA_ACCESS, ATTR_REPARSE_POINT, ATTR_UNPINNED,
+        is_cloud_reparse_tag, is_link_reparse,
+    };
     let mut f = 0;
     if attrs & 0x10 != 0 {
         f |= FOLDER;
@@ -106,10 +110,27 @@ pub fn flags_of(attrs: u32) -> u16 {
     if attrs & 0x1 != 0 {
         f |= READONLY;
     }
-    if attrs & 0x400 != 0 {
+    if attrs & ATTR_REPARSE_POINT != 0 || reparse_tag != 0 {
         f |= REPARSE;
     }
+    if is_link_reparse(attrs, reparse_tag) {
+        f |= SYMLINK;
+    }
+    if attrs & ATTR_RECALL_ON_DATA_ACCESS != 0 {
+        f |= CLOUD_ONLINE;
+    }
+    if attrs & ATTR_PINNED != 0 {
+        f |= CLOUD_PINNED;
+    }
+    if attrs & ATTR_UNPINNED != 0 || (is_cloud_reparse_tag(reparse_tag) && attrs & (ATTR_RECALL_ON_DATA_ACCESS | ATTR_PINNED) == 0) {
+        f |= CLOUD_UNPINNED;
+    }
     f
+}
+
+/// Store flags from Win32 attributes (when no reparse tag is available).
+pub fn flags_of(attrs: u32) -> u16 {
+    flags_of_with_tag(attrs, 0)
 }
 
 fn ft(t: FILETIME) -> i64 {
@@ -165,10 +186,15 @@ fn stat(path: &[u16], name: &[u16]) -> Option<Stat> {
     }
     let len = data.cFileName.iter().position(|&c| c == 0).unwrap_or(data.cFileName.len());
     let real = &data.cFileName[..len];
+    let tag = if data.dwFileAttributes & crate::enumerate::ATTR_REPARSE_POINT != 0 {
+        data.dwReserved0
+    } else {
+        0
+    };
     Some(Stat {
         size: ((data.nFileSizeHigh as u64) << 32) | data.nFileSizeLow as u64,
         mtime: ft(data.ftLastWriteTime),
-        flags: flags_of(data.dwFileAttributes),
+        flags: flags_of_with_tag(data.dwFileAttributes, tag),
         canonical: (real != name && !real.is_empty()).then(|| real.to_vec()),
     })
 }
@@ -188,10 +214,7 @@ fn list_wanted(dir: &Path, wanted: &HashMap<&[u16], usize>, stats: &mut [Option<
             Message::Batch(b) => {
                 for (name, e) in b.iter() {
                     if let Some(&i) = wanted.get(name) {
-                        let mut flags = flags_of(e.attrs);
-                        if e.is_reparse_point() {
-                            flags |= REPARSE;
-                        }
+                        let flags = flags_of_with_tag(e.attrs, e.reparse_tag);
                         stats[i] = Some(Stat { size: e.size, mtime: e.mtime as i64, flags, canonical: None });
                     }
                 }

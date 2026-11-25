@@ -200,6 +200,8 @@ pub struct ListResponse {
     /// Ctrl + wheel notches over the list this frame (+1 = away from the user);
     /// the list does not scroll for them, the app zooms
     pub zoom: f32,
+    /// row currently under the pointer (not banding, within the list)
+    pub hovered: Option<usize>,
 }
 
 /// The list in `rect`, with its scrollbar on the right.
@@ -385,6 +387,7 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
     resp.range = (first, last);
     let off = (st.scroll - first as f64 * rh as f64) as f32;
     let hot_row = (it.hovered && ui.active().is_none_or(|a| a == id) && rows.contains_pt(ui.mouse()) && !st.banding()).then(|| st.row_at_offset(ui.mouse().y - rows.y));
+    resp.hovered = hot_row.filter(|&r| r < len);
     let focused = it.focused && ui.window_focused();
     let theme = &ui.theme;
     c.clip(rows);

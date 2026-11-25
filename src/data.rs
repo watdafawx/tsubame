@@ -58,12 +58,14 @@ pub struct RowBuf {
     pub kind: u8,
     /// Win32 attributes rebuilt from the store flags (read-only/system/hidden)
     pub attrs: u32,
+    /// Full `tsubame_core` entry flags (`FOLDER`, `REPARSE`, `SYMLINK`, `CLOUD_*`, ...)
+    pub flags: u16,
     pub hidden: bool,
 }
 
 impl RowBuf {
     pub const fn new() -> Self {
-        RowBuf { name: [0; 768], name_len: 0, size: 0, mtime: 0, kind: 0, attrs: 0, hidden: false }
+        RowBuf { name: [0; 768], name_len: 0, size: 0, mtime: 0, kind: 0, attrs: 0, flags: 0, hidden: false }
     }
     pub fn name_str(&self) -> &str {
         std::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
@@ -127,6 +129,7 @@ impl RowBuf {
         self.mtime = filetime_to_unix(rec.modified);
         self.kind = kind_of(self.name_str(), dir);
         self.attrs = (if rec.flags & READONLY != 0 { ATTR_READONLY } else { 0 }) | (if rec.flags & SYSTEM != 0 { ATTR_SYSTEM } else { 0 }) | (if rec.flags & HIDDEN != 0 { ATTR_HIDDEN } else { 0 });
+        self.flags = rec.flags;
         self.hidden = rec.flags & HIDDEN != 0;
     }
 }

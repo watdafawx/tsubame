@@ -22,7 +22,7 @@ mod apply;
 mod coalesce;
 mod hub;
 
-pub use apply::{ApplyStats, Resolved, apply_batch, apply_resolved, flags_of, resolve};
+pub use apply::{ApplyStats, Resolved, apply_batch, apply_resolved, flags_of, flags_of_with_tag, resolve};
 pub use coalesce::{Batch, ChangeKind, ChangeRef, Coalescer, RawKind};
 
 pub use crate::enumerate::{Wake, Win32Error};

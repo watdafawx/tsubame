@@ -178,6 +178,8 @@ pub struct Target {
     pub keyboard: bool,
     /// screen px: the shell's `ptInvoke` and the classic menu
     pub screen: (i32, i32),
+    /// right-clicked a removable / USB drive in the sidebar (shows "Eject")
+    pub removable_drive: bool,
 }
 
 /// A pick, run after the frame.
@@ -370,6 +372,10 @@ fn own_parts(target: &Target, entries: &[MenuEntry], dual: bool) -> (Vec<MenuIte
             if matches!(row.action.as_str(), "file.cut" | "file.delete" | "file.rename") {
                 row.flags |= flag::DISABLED;
             }
+        }
+        if target.removable_drive && target.paths.len() == 1 {
+            let eject = MenuItem { key: "app:drive.eject".into(), ..MenuItem::command(ItemSource::Tsubame, "Eject", "drive.eject") };
+            tsubame.push(eject);
         }
     }
     // a selection without a folder has nothing to open in a tab or new window

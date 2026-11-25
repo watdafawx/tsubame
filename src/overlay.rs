@@ -16,7 +16,8 @@ pub fn tooltip(c: &mut dyn Canvas, t: &Theme, win: (f32, f32), at: Pt, title: &s
     for l in lines {
         w = w.max(c.measure(l, lf));
     }
-    let w = w + 2.0 * PAD;
+    let max_text_w = (win.0 - 8.0 - 2.0 * PAD).clamp(60.0, 360.0);
+    let w = (w.ceil() + 2.0).min(max_text_w) + 2.0 * PAD;
     let h = 8.0 + 16.0 + lines.len() as f32 * 15.0;
     let x = (at.x + 14.0).min(win.0 - w - 4.0).max(4.0);
     let y = (at.y + 18.0).min(win.1 - h - 4.0).max(4.0);
