@@ -24,6 +24,10 @@ fn tree_rig(tag: &str) -> Rig {
     r.key(Key::Char('4'), Mods::CTRL_SHIFT);
     assert_eq!(r.v.mode, ViewMode::Tree);
     tree_wait(&mut r, "tree lists", |r| r.v.tab().tree_on && r.v.tab().tree.as_ref().is_some_and(|m| m.len() == 3 && m.loading_count() == 0));
+    // the tab's folder watcher arms on a worker: a change made before it would never show
+    tree_wait(&mut r, "the folder watcher is armed", |r| r.v.tab().watched());
+    std::thread::sleep(Duration::from_millis(400));
+    r.v.pump();
     r.frame();
     r
 }
@@ -72,7 +76,8 @@ fn f2_renames_a_tree_row_inline_and_selects_it_again() {
     r.key(Key::Enter, Mods::NONE);
     assert!(r.v.rename.is_none());
     let to = r.dir.join("Zeta");
-    tree_wait(&mut r, "renamed on disk and shown", |r| to.exists() && r.c.has_text("Zeta"));
+    tree_wait(&mut r, "renamed on disk", |_| to.exists());
+    tree_wait(&mut r, "shown in the tree", |r| r.c.has_text("Zeta"));
     assert!(!r.dir.join("Docs").exists());
     tree_wait(&mut r, "the renamed row is selected", |r| r.v.tab().selected_paths(8).iter().any(|p| p.ends_with("Zeta")));
 }
@@ -108,7 +113,8 @@ fn f2_renames_in_miller_columns_and_the_new_name_is_selected() {
     r.v.rename.as_mut().unwrap().input.set_text("Zeta");
     r.key(Key::Enter, Mods::NONE);
     let to = r.dir.join("Zeta");
-    tree_wait(&mut r, "renamed on disk and shown", |r| to.exists() && r.c.has_text("Zeta"));
+    tree_wait(&mut r, "renamed on disk", |_| to.exists());
+    tree_wait(&mut r, "shown in the tree", |r| r.c.has_text("Zeta"));
     tree_wait(&mut r, "the renamed entry is selected", |r| r.v.tab().miller.as_ref().and_then(|m| m.selected_path()).is_some_and(|p| p.ends_with("Zeta")));
 }
 

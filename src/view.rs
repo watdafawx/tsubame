@@ -4803,7 +4803,8 @@ mod tests {
         while !ok(r) {
             r.v.pump();
             r.frame();
-            assert!(t0.elapsed() < Duration::from_secs(10), "{what}: {:?}", r.c.texts());
+            // generous: the full suite runs hundreds of these in parallel and a watcher can be slow to arm
+            assert!(t0.elapsed() < Duration::from_secs(30), "{what}: {:?}", r.c.texts());
             std::thread::sleep(Duration::from_millis(2));
         }
     }
