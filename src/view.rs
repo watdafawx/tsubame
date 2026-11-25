@@ -36,6 +36,8 @@ mod edit;
 mod u4;
 #[path = "view_tags.rs"]
 mod tagsv;
+#[path = "view_tree.rs"]
+mod treev;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
 use crate::ops::Ops;
@@ -50,11 +52,13 @@ pub enum ViewMode {
     Details,
     GridSmall,
     GridLarge,
+    /// P4.F6: Details made hierarchical (`tsubame.ext.tree`)
+    Tree,
 }
 
 impl ViewMode {
     pub fn is_grid(self) -> bool {
-        self != ViewMode::Details
+        matches!(self, ViewMode::GridSmall | ViewMode::GridLarge)
     }
     /// (cell width, cell height, picture box, type icon) in DIPs. The cell is
     /// the picture box, a 6 DIP gap, two label lines and 8 DIP of padding.
@@ -68,7 +72,7 @@ impl ViewMode {
         match self {
             ViewMode::Details => ViewMode::GridSmall,
             ViewMode::GridSmall => ViewMode::GridLarge,
-            ViewMode::GridLarge => ViewMode::Details,
+            ViewMode::GridLarge | ViewMode::Tree => ViewMode::Details,
         }
     }
     pub fn parse(s: &str) -> Option<ViewMode> {
@@ -76,6 +80,7 @@ impl ViewMode {
             "details" | "list" => Some(ViewMode::Details),
             "grid-small" | "small" | "grid" => Some(ViewMode::GridSmall),
             "grid-large" | "large" => Some(ViewMode::GridLarge),
+            "tree" => Some(ViewMode::Tree),
             _ => None,
         }
     }
@@ -85,6 +90,7 @@ impl ViewMode {
             ViewMode::Details => tsubame_config::ViewMode::Details,
             ViewMode::GridSmall => tsubame_config::ViewMode::GridSmall,
             ViewMode::GridLarge => tsubame_config::ViewMode::GridLarge,
+            ViewMode::Tree => tsubame_config::ViewMode::Tree,
         }
     }
     pub fn from_config(m: tsubame_config::ViewMode) -> ViewMode {
@@ -92,6 +98,7 @@ impl ViewMode {
             tsubame_config::ViewMode::Details => ViewMode::Details,
             tsubame_config::ViewMode::GridSmall => ViewMode::GridSmall,
             tsubame_config::ViewMode::GridLarge => ViewMode::GridLarge,
+            tsubame_config::ViewMode::Tree => ViewMode::Tree,
         }
     }
     pub fn name(self) -> &'static str {
@@ -99,6 +106,7 @@ impl ViewMode {
             ViewMode::Details => "details",
             ViewMode::GridSmall => "grid-small",
             ViewMode::GridLarge => "grid-large",
+            ViewMode::Tree => "tree",
         }
     }
 }
@@ -220,6 +228,8 @@ pub struct View {
     pub zebra: bool,
     /// details or grid (one setting for every tab)
     pub mode: ViewMode,
+    /// P4.F6 Tree pane / drawer state (`view_tree.rs`)
+    tree_ui: treev::TreeUi,
     /// width of the sidebar in DIPs, from the config
     pub sidebar_width: f32,
     /// a setting the user changed: main writes the config (debounced)
@@ -375,6 +385,7 @@ impl View {
             dark,
             zebra: false,
             mode: ViewMode::Details,
+            tree_ui: treev::TreeUi::default(),
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             config_dirty: false,
             dpi: 96.0,
@@ -823,6 +834,9 @@ impl View {
     /// its pack `open_with` rule or goes to the shell on a worker.
     pub fn activate(&mut self, pos: usize) {
         self.press = None;
+        if self.tree_activate(pos) {
+            return;
+        }
         if let Some((path, dir)) = self.tab().entry_at(pos) {
             if dir {
                 self.go(&path);
@@ -883,6 +897,7 @@ impl View {
             changed |= p.changed;
             self.pump_more |= p.more;
         }
+        changed |= self.pump_trees();
         changed |= self.watch_pane();
         // a typed path that failed to open: back to the old folder, error shown
         if let Some((id, prev, typed)) = self.edit_nav.take() {
@@ -1065,6 +1080,7 @@ impl View {
             self.preview.release_worker();
         }
         self.sync_tags();
+        self.sync_tree_ext();
     }
 
     /// Switches extension `id` on or off, live, and records it in the config
@@ -1093,6 +1109,10 @@ impl View {
 
     /// The core extension's handler: every built-in command (`commands::BUILTIN`).
     pub(crate) fn run_builtin(&mut self, ui: &mut Ui, cmd: u32) {
+        if self.run_tree(cmd) {
+            ui.request_repaint();
+            return;
+        }
         if self.run_u4(ui, cmd) {
             ui.request_repaint();
             return;
@@ -1666,7 +1686,16 @@ impl View {
         if mode == self.mode {
             return;
         }
+        if mode == ViewMode::Tree && !crate::tree::enabled() {
+            return;
+        }
         let was_grid = self.mode.is_grid();
+        if self.mode == ViewMode::Tree {
+            // back to plain rows: the cursor goes to the top-level entry it was in
+            for t in &mut self.tabs.items {
+                t.cursor_to_root_row();
+            }
+        }
         self.mode = mode;
         self.config_dirty = true;
         for t in &mut self.tabs.items {
@@ -1715,6 +1744,10 @@ impl View {
     /// else just `row` (at most 64).
     pub fn menu_paths(&self, row: usize) -> Vec<String> {
         let t = self.tab();
+        if t.tree_on && t.tree.is_some() {
+            let m = t.tree.as_ref().expect("tree");
+            return if m.is_selected(row, Some(&t.store)) { t.selected_paths(64) } else { t.entry_at(row).map(|e| vec![e.0]).unwrap_or_default() };
+        }
         if t.store.at(row).is_some_and(|id| t.sel.contains(id)) {
             t.selected_paths(64)
         } else {
@@ -1843,6 +1876,11 @@ impl View {
         }
         // typing in the list starts the filter
         let typed: Vec<char> = if self.tab().settings || self.palette.is_some() || self.search.is_some() || self.tags.picker_open() || self.preview.quick_look_open() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
+        if self.tree_keys(ui) {
+            again = true;
+        }
+        // Tree rows: letters are type-ahead, not the filter
+        let typed: Vec<char> = if self.tree_rows_on() && !ui.has_focus(pid(self.live, ID_FILTER)) { Vec::new() } else { typed };
         for c in typed {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
@@ -2061,6 +2099,7 @@ impl View {
             ViewMode::Details => "\u{E8FD}",
             ViewMode::GridSmall => "\u{F0E2}",
             ViewMode::GridLarge => "\u{E8A9}",
+            ViewMode::Tree => "\u{E8FD}",
         };
         if icon_button(ui, g, t, pid(self.live, ID_VIEW), vb, glyph, true) {
             let m = self.mode.next();
@@ -2273,10 +2312,12 @@ impl View {
         if self.paint_tag_results(ui, g, main, t) {
             return;
         }
+        let main = self.paint_tree_pane(ui, g, shell, main, t);
         if self.mode.is_grid() {
             self.paint_grid_main(ui, g, shell, main, t);
             return;
         }
+        let tree_rows = self.tree_rows_on() && self.tab().tree.is_some();
         let mut area = main;
         let header_r = area.cut_top(t.height_column_header);
         let list_r = area;
@@ -2285,6 +2326,8 @@ impl View {
         let total = main.w - t.layout_scrollbar_width;
         // a narrow pane of two drops the Type column
         let hide_type = self.other.is_some() && panes::hide_type_column(main.w);
+        // Tree rows in a small window: Modified hides first, then Size (the same rule as the mock)
+        let (hide_date, hide_size) = (tree_rows && main.w < treev::NARROW_DATE, tree_rows && main.w < treev::NARROW_SIZE);
         // the registry's columns, in its order (fixed arrays: nothing allocated per frame)
         self.sync_cols();
         self.sync_active_git();
@@ -2292,7 +2335,7 @@ impl View {
         let mut shown = [Col::Name; crate::cols::NUM_COLS];
         let mut n = 0;
         for &c in set.order() {
-            if !(hide_type && c == Col::Type) {
+            if !(hide_type && c == Col::Type) && !(hide_date && c == Col::Modified) && !(hide_size && c == Col::Size) {
                 shown[n] = c;
                 n += 1;
             }
@@ -2327,9 +2370,12 @@ impl View {
         let was_renaming = self.rename.is_some();
         let age = crate::age::frame(&self.prefs.file_age, self.dark, g, t);
         g.fill(list_r, t.row);
+        let (lr, activated) = if tree_rows {
+            self.paint_tree_list(ui, g, shell, list_r, spans, t)
+        } else {
         let tab = &mut self.tabs.items[self.tabs.active];
         tab.list.row_h = t.height_list_row;
-        let (lr, activated) = {
+        {
             let Tab { store, sel, list: lstate, band_base, band_mode, path, synthetic, tag_fids, .. } = &mut *tab;
             let in_archive = crate::archive_ui::is_archive_path(path);
             let root = if *synthetic || in_archive { None } else { Some(path.as_str()) };
@@ -2343,6 +2389,7 @@ impl View {
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
             (lr, lr.activated)
+        }
         };
         let scroll = self.tabs.items[self.tabs.active].list.scroll;
         self.tags.note_scroll(scroll);
@@ -2526,8 +2573,8 @@ impl View {
             failed: matches!(tab.load, Load::Failed(_)),
             shown: tab.shown(),
             total: tab.store.len(),
-            selected: tab.sel.count(),
-            selected_bytes: tab.sel.total_size().min(u64::MAX as u128) as u64,
+            selected: tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.count(), |m| m.sel_count()),
+            selected_bytes: tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.total_size().min(u64::MAX as u128) as u64, |m| m.selected_total_size(Some(&tab.store))),
             free: self.side.volume_of(&tab.path),
             other_side: hints.then_some(side),
             batch: self.batch.is_some() && self.batch_slot == self.live,
@@ -4687,5 +4734,61 @@ mod tests {
         r.key(Key::Char('A'), Mods::CTRL);
         r.v.run_command(&mut r.ui, crate::commands::CMD_BATCH_RENAME);
         assert!(r.v.batch.is_some(), "file.batch_rename opens the bar");
+    }
+
+    fn tree_wait(r: &mut Rig, what: &str, ok: impl Fn(&Rig) -> bool) {
+        let t0 = Instant::now();
+        while !ok(r) {
+            r.v.pump();
+            r.frame();
+            assert!(t0.elapsed() < Duration::from_secs(10), "{what}: {:?}", r.c.texts());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn tree_mode_expands_with_right_and_collapses_with_left() {
+        let mut r = Rig::new("tree");
+        std::fs::write(r.dir.join("Docs").join("inner.txt"), b"x").unwrap();
+        r.key(Key::Char('4'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::Tree);
+        r.key(Key::Right, Mods::NONE);
+        tree_wait(&mut r, "inner.txt shows", |r| r.c.has_text("inner.txt"));
+        assert_eq!(r.v.tab().shown(), 4);
+        r.key(Key::Left, Mods::NONE);
+        r.frame();
+        assert!(!r.c.has_text("inner.txt"));
+        assert_eq!(r.v.tab().shown(), 3);
+    }
+
+    #[test]
+    fn tree_mode_typing_is_type_ahead_not_the_filter() {
+        let mut r = Rig::new("treetype");
+        r.key(Key::Char('4'), Mods::CTRL_SHIFT);
+        r.ui.push(Event::Char('b'));
+        r.frame();
+        assert!(r.v.tab().filter.is_empty());
+        assert_eq!(r.v.tab().list.cursor, 2, "beta.txt");
+    }
+
+    #[test]
+    fn switching_the_extension_off_leaves_tree_mode() {
+        let mut r = Rig::new("treeoff");
+        r.key(Key::Char('4'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::Tree);
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::tree::EXT_TREE, false), Ok(true));
+        assert_eq!(r.v.mode, ViewMode::Details);
+        r.v.run_command(&mut r.ui, crate::commands::CMD_VIEW_TREE);
+        assert_eq!(r.v.mode, ViewMode::Details, "the command is gone with the extension");
+    }
+
+    #[test]
+    fn the_tree_pane_opens_and_lists_folders_of_the_drive() {
+        let mut r = Rig::new("treepane");
+        r.key(Key::Char('T'), Mods { ctrl: false, shift: true, alt: true });
+        assert!(r.v.prefs.tree.pane);
+        tree_wait(&mut r, "pane lists", |r| r.c.has_text("Folders") && r.v.tab().tree_pane.as_ref().is_some_and(|m| m.len() > 0));
+        r.key(Key::Char('T'), Mods { ctrl: false, shift: true, alt: true });
+        assert!(!r.v.prefs.tree.pane);
     }
 }

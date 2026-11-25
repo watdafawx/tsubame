@@ -97,7 +97,11 @@ impl View {
         {
             if let Some(row) = p.collapse {
                 let t = self.tab_mut();
-                t.sel.single(&t.store, row);
+                if t.tree_on && let Some(m) = t.tree.as_mut() {
+                    m.select_single(row, Some(&t.store));
+                } else {
+                    t.sel.single(&t.store, row);
+                }
                 ui.request_repaint();
             }
             if p.slow {
@@ -189,6 +193,11 @@ impl View {
 
     /// F2: renames the cursor row; several selected rows open the batch bar.
     pub fn begin_rename(&mut self, ui: &mut Ui) {
+        if self.tree_rows_on() {
+            self.ops.message = Some("Rename is not available in Tree rows yet. Switch to Details to rename.".into());
+            ui.request_repaint();
+            return;
+        }
         if self.tab().is_archive() {
             self.ops.message = Some(crate::archive_ui::READ_ONLY_MSG.into());
             ui.request_repaint();

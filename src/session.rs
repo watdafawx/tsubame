@@ -63,6 +63,7 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
         scroll_first_row: row,
         scroll_first_name: first.and_then(|i| tab.entry_at(i)).and_then(|(p, _)| p.rsplit('\\').next().map(str::to_string)),
         selected,
+        expanded: tab.tree_paths(),
     }
 }
 
@@ -149,6 +150,7 @@ fn attach(t: &mut Tab, st: &SessionTab) {
     t.sort = tsubame_core::Sort { column, descending: st.sort_descending, folders_first: true };
     t.store.sort(t.sort);
     t.restore = Some(Restore { scroll_first_row: st.scroll_first_row, selected: st.selected.clone() });
+    t.tree_seed.0 = st.expanded.iter().take(crate::tree::RESTORE_CAP).cloned().collect();
 }
 
 /// The folder a tab's listing should use: the saved path, or the nearest

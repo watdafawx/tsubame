@@ -37,6 +37,8 @@ pub struct SessionTab {
     pub scroll_first_name: Option<String>,
     /// Selected entry names (not full paths), optional.
     pub selected: Vec<String>,
+    /// Tree view: full paths of the expanded folders (P4.F6), capped.
+    pub expanded: Vec<String>,
 }
 
 /// One pane's tabs. Today the app has a single pane; the schema already has
