@@ -151,6 +151,8 @@ fn warmable(folder: &str) -> bool {
 /// below normal priority, so the first right click does not wait for DLLs
 /// (cold `QueryContextMenu` ~1 s, warm ~15 ms). Nothing comes back to draw.
 pub fn prewarm(pool: &mut Pool, folder: &str, icon_px: u32) {
+    // the "New" submenu's registered types: one scan per session, off the UI thread
+    tsubame_win::shellnew::ensure_started();
     if warmable(folder) && !shell_warm() {
         WARM.store(WARM_PENDING, Ordering::Relaxed);
         pool.submit(Request::CtxWarm { folder: folder.to_string(), icon_px });
@@ -315,9 +317,14 @@ pub fn is_root(path: &str) -> bool {
 pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
     let c = |l: &str, a: &str| MenuItem { key: format!("app:{a}"), ..MenuItem::command(ItemSource::Tsubame, l, a) };
     match kind {
-        Kind::Background => vec![c("Paste", "file.paste"), c("New folder", "x.new-folder"), c("New text file", "x.new-file"), c("Copy as path", "file.copy-path"), c("Open terminal here", "x.terminal"), c("Refresh", "x.refresh")],
+        // "New >" (folder, text document, the types Windows registers) replaces the two flat rows
+        Kind::Background => vec![c("Paste", "file.paste"), c("Paste shortcut", "edit.paste-shortcut"), crate::newmenu::submenu(), c("Copy as path", "file.copy-path"), c("Open terminal here", "x.terminal"), c("Refresh", "x.refresh")],
         _ => {
             let mut v = vec![c("Copy name", "x.copy-name"), c("Open terminal here", "x.terminal")];
+            // a shortcut beside the item (a drive root has no folder to hold one)
+            if !matches!(kind, Kind::Drive) {
+                v.insert(1, c("Create shortcut", "file.create-shortcut"));
+            }
             if dual && n == 1 && matches!(kind, Kind::Folder | Kind::Drive) {
                 v.insert(0, c("Open in other pane", "x.other-pane"));
             }
@@ -1284,6 +1291,9 @@ pub fn glyph(action: &str, verb: Option<&str>) -> Option<char> {
         "file.delete" => '\u{E74D}',
         "file.properties" => '\u{E946}',
         ctxmodel::ACTION_CLASSIC => '\u{E712}',
+        "x.new" => '\u{E710}',
+        "file.create-shortcut" => '\u{E71B}',
+        "edit.paste-shortcut" => '\u{E77F}',
         "x.new-folder" => '\u{E8F4}',
         "x.new-file" => '\u{E8A5}',
         "x.terminal" => '\u{E756}',
@@ -1401,7 +1411,7 @@ impl Rows<'_> {
             None => glyph(action, it.verb.as_deref()).map_or(RowIcon::None, RowIcon::Glyph),
         };
         let mut disabled = it.disabled();
-        if action == "file.paste" && !self.paste_ok {
+        if matches!(action, "file.paste" | "edit.paste-shortcut") && !self.paste_ok {
             disabled = true;
         }
         MenuRow {
@@ -1586,7 +1596,26 @@ mod tests {
         assert!(!labels(&tsubame_rows(&e, Kind::Folder, "", 2, true)).contains(&"Open in other pane"), "one folder only");
         let bg_rows = tsubame_rows(&e, Kind::Background, "", 1, false);
         let bg = labels(&bg_rows);
-        assert_eq!(bg, ["Paste", "New folder", "New text file", "Copy as path", "Open terminal here", "Refresh", "--", ctxmodel::CLASSIC_LABEL]);
+        assert_eq!(bg, ["Paste", "Paste shortcut", "New", "Copy as path", "Open terminal here", "Refresh", "--", ctxmodel::CLASSIC_LABEL]);
+        // "New >" holds the folder and text document rows (the registered types follow the scan)
+        let new = bg_rows.iter().find(|r| r.label == "New").unwrap();
+        assert_eq!(new.kind, ItemKind::Submenu);
+        assert_eq!(new.children[0].action, "x.new-folder");
+        assert_eq!(new.children[1].action, "x.new-file");
+    }
+
+    #[test]
+    fn items_get_create_shortcut_but_a_drive_does_not() {
+        let e = default_entries();
+        for kind in [Kind::File, Kind::Folder, Kind::Multiple] {
+            let rows = tsubame_rows(&e, kind, "", 2, true);
+            let l = labels(&rows);
+            assert!(l.contains(&"Create shortcut"), "{kind:?}: {l:?}");
+        }
+        let rows = tsubame_rows(&e, Kind::Drive, "", 1, true);
+        assert!(!labels(&rows).contains(&"Create shortcut"), "{:?}", labels(&rows));
+        let rows = tsubame_rows(&e, Kind::Background, "", 1, false);
+        assert!(!labels(&rows).contains(&"Create shortcut"), "{:?}", labels(&rows));
     }
 
     /// First right click on empty space: every static row exists before the
@@ -1602,7 +1631,7 @@ mod tests {
         assert!(m.native.is_empty() && m.packaged.is_empty());
         let rows = m.rows(&menu);
         let l = labels(&rows);
-        for want in ["Paste", "New folder", "New text file", "Copy as path", "Open terminal here", "Refresh", ctxmodel::CLASSIC_LABEL] {
+        for want in ["Paste", "Paste shortcut", "New", "Copy as path", "Open terminal here", "Refresh", ctxmodel::CLASSIC_LABEL] {
             assert!(l.contains(&want), "{want} missing: {l:?}");
         }
         const { assert!(LOADING_SHOW_MS >= 150) };
