@@ -1761,8 +1761,9 @@ impl View {
             // one selected entry: the row that was pressed became it
             return t.entry_at(row).map(|e| vec![e.0]).unwrap_or_default();
         }
-        if t.tree_on && t.tree.is_some() {
-            let m = t.tree.as_ref().expect("tree");
+        if t.tree_on
+            && let Some(m) = t.tree.as_ref()
+        {
             return if m.is_selected(row, Some(&t.store)) { t.selected_paths(64) } else { t.entry_at(row).map(|e| vec![e.0]).unwrap_or_default() };
         }
         if t.store.at(row).is_some_and(|id| t.sel.contains(id)) {
@@ -4811,7 +4812,7 @@ mod tests {
         let mut r = Rig::new("treepane");
         r.key(Key::Char('T'), Mods { ctrl: false, shift: true, alt: true });
         assert!(r.v.prefs.tree.pane);
-        tree_wait(&mut r, "pane lists", |r| r.c.has_text("Folders") && r.v.tab().tree_pane.as_ref().is_some_and(|m| m.len() > 0));
+        tree_wait(&mut r, "pane lists", |r| r.c.has_text("Folders") && r.v.tab().tree_pane.as_ref().is_some_and(|m| !m.is_empty()));
         r.key(Key::Char('T'), Mods { ctrl: false, shift: true, alt: true });
         assert!(!r.v.prefs.tree.pane);
     }

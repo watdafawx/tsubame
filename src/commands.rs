@@ -141,20 +141,22 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_RESET_KEYS, "settings.reset-keys", "Reset all keyboard shortcuts", [], G),
 ];
 
-/// Archive extension (`tsubame.vfs.archive`) commands.
+/// Archive extension (`tsubame.vfs.archive`) commands. The extension commands take the
+/// `Alt+letter` family (`Alt+P` preview, `Alt+T` tags): `Alt+E` extracts here, `Shift+Alt+E`
+/// extracts the selection, `Alt+S` calculates sizes, `Alt+H` hashes (checksum).
 pub static ARCHIVE_COMMANDS: &[CommandSpec] = &[
-    cmd!(CMD_ARCHIVE_EXTRACT_HERE, "archive.extract_here", "Extract archive here", [], F),
-    cmd!(CMD_ARCHIVE_EXTRACT_SELECTED, "archive.extract_selected", "Extract selected from archive", [], F),
+    cmd!(CMD_ARCHIVE_EXTRACT_HERE, "archive.extract_here", "Extract archive here", ["Alt+E"], F),
+    cmd!(CMD_ARCHIVE_EXTRACT_SELECTED, "archive.extract_selected", "Extract selected from archive", ["Shift+Alt+E"], F),
 ];
 
 /// Folder-sizes extension (`tsubame.ext.folder_sizes`) commands.
 pub static FOLDER_SIZE_COMMANDS: &[CommandSpec] = &[
-    cmd!(CMD_FOLDER_CALC_SIZES, "folder.calc_sizes", "Calculate folder sizes", [], F),
+    cmd!(CMD_FOLDER_CALC_SIZES, "folder.calc_sizes", "Calculate folder sizes", ["Alt+S"], F),
 ];
 
 /// Checksum extension (`tsubame.ext.checksum`) commands.
 pub static CHECKSUM_COMMANDS: &[CommandSpec] = &[
-    cmd!(CMD_FILE_CHECKSUM, "file.checksum", "Copy file checksums (SHA-256 / SHA-1 / MD5 / CRC32)", [], F),
+    cmd!(CMD_FILE_CHECKSUM, "file.checksum", "Copy file checksums (SHA-256 / SHA-1 / MD5 / CRC32)", ["Alt+H"], F),
 ];
 
 /// Global-search extension (`tsubame.ext.global_search`) commands.
@@ -348,10 +350,10 @@ mod tests {
     ];
 
     const FEATURE_BEFORE: &[Before] = &[
-        (CMD_ARCHIVE_EXTRACT_HERE, &[], false),
-        (CMD_ARCHIVE_EXTRACT_SELECTED, &[], false),
-        (CMD_FOLDER_CALC_SIZES, &[], false),
-        (CMD_FILE_CHECKSUM, &[], false),
+        (CMD_ARCHIVE_EXTRACT_HERE, &[(Key::Char('E'), AL)], false),
+        (CMD_ARCHIVE_EXTRACT_SELECTED, &[(Key::Char('E'), AS)], false),
+        (CMD_FOLDER_CALC_SIZES, &[(Key::Char('S'), AL)], false),
+        (CMD_FILE_CHECKSUM, &[(Key::Char('H'), AL)], false),
         (CMD_GLOBAL_SEARCH, &[(Key::Char('F'), CS)], true),
         (CMD_PREVIEW_TOGGLE, &[(Key::Char('P'), AL)], false),
         (CMD_PREVIEW_QUICK_LOOK, &[(Key::Space, NM), (Key::F(3), NM)], false),
@@ -415,6 +417,64 @@ mod tests {
                 seen.push((c.key, c.mods, cmd.id));
             }
         }
+    }
+
+    /// The default-chord tables of `docs/keys.md`, generated from the command table.
+    fn keys_doc_tables() -> String {
+        use crate::keymap::{CATEGORIES, category};
+        let mut out = String::new();
+        for cat in CATEGORIES {
+            let rows: Vec<&CommandSpec> = all_builtin().filter(|c| category(&c.name) == *cat && !c.keys.is_empty()).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("### {cat}\n\n| Command | Name | Default keys |\n|---|---|---|\n"));
+            for c in rows {
+                let keys: Vec<String> = c.keys.iter().map(|k| format!("`{k}`")).collect();
+                out.push_str(&format!("| {} | `{}` | {} |\n", c.title, c.name, keys.join(", ")));
+            }
+            out.push('\n');
+        }
+        out.push_str("### No default key\n\n| Command | Name |\n|---|---|\n");
+        for c in all_builtin().filter(|c| c.keys.is_empty()) {
+            out.push_str(&format!("| {} | `{}` |\n", c.title, c.name));
+        }
+        out
+    }
+
+    const KEYS_START: &str = "<!-- keys:start (generated: cargo test keys_doc; TSUBAME_UPDATE_KEYS_DOC=1 rewrites it) -->\n\n";
+    const KEYS_END: &str = "\n<!-- keys:end -->";
+
+    /// `docs/keys.md` lists every default chord of the command table, so a
+    /// chord change that forgets the doc fails here. `TSUBAME_UPDATE_KEYS_DOC=1`
+    /// rewrites the generated part.
+    #[test]
+    fn keys_doc_matches_the_command_table() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/keys.md");
+        // a Windows checkout may have CRLF line ends
+        let doc = std::fs::read_to_string(path).expect("docs/keys.md").replace("\r\n", "\n");
+        let (a, rest) = doc.split_once(KEYS_START).expect("start marker");
+        let (body, z) = rest.split_once(KEYS_END).expect("end marker");
+        let want = keys_doc_tables();
+        if body != want && std::env::var_os("TSUBAME_UPDATE_KEYS_DOC").is_some() {
+            std::fs::write(path, format!("{a}{KEYS_START}{want}{KEYS_END}{z}")).unwrap();
+            return;
+        }
+        assert_eq!(body, want, "docs/keys.md is stale: run `TSUBAME_UPDATE_KEYS_DOC=1 cargo test keys_doc`");
+    }
+
+    /// The four commands that once had no chord have one now, and the
+    /// three view chords are unchanged.
+    #[test]
+    fn extension_commands_have_default_chords() {
+        let key = |name: &str| by_name(name).unwrap().keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(key("archive.extract_here"), ["Alt+E"]);
+        assert_eq!(key("archive.extract_selected"), ["Shift+Alt+E"]);
+        assert_eq!(key("file.checksum"), ["Alt+H"]);
+        assert_eq!(key("folder.calc_sizes"), ["Alt+S"]);
+        assert_eq!(key("view.grid-large"), ["Ctrl+Shift+3"]);
+        assert_eq!(key("view.tree"), ["Ctrl+Shift+4"]);
+        assert_eq!(key("view.miller"), ["Ctrl+Shift+5"]);
     }
 
     #[test]

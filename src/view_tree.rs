@@ -169,11 +169,11 @@ impl View {
             }
             CMD_BACKSPACE_UP if self.tree_rows_on() && !self.tab().settings && self.tab().tree.is_some() => {
                 let tab = &mut self.tabs.items[self.tabs.active];
-                if let Some(m) = tab.tree.as_mut() {
-                    if !to_parent(m, Some(&tab.store), &mut tab.list) {
-                        // a top-level row: Backspace goes up one folder as usual
-                        return false;
-                    }
+                if let Some(m) = tab.tree.as_mut()
+                    && !to_parent(m, Some(&tab.store), &mut tab.list)
+                {
+                    // a top-level row: Backspace goes up one folder as usual
+                    return false;
                 }
             }
             _ => return false,

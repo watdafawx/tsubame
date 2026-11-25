@@ -369,14 +369,17 @@ impl TreeModel {
     }
 
     /// Folders currently expanded below the root (live `Dir`s).
+    #[cfg(test)]
     pub fn expanded_count(&self) -> usize {
         self.dirs.iter().skip(1).filter(|d| d.is_some()).count()
     }
 
+    #[cfg(test)]
     pub fn loading_count(&self) -> usize {
         self.dirs.iter().flatten().filter(|d| d.load.is_some() || d.check.is_some()).count()
     }
 
+    #[cfg(test)]
     pub fn watched_count(&self) -> usize {
         self.dirs.iter().flatten().filter(|d| d.watch.is_some()).count()
     }
@@ -841,11 +844,9 @@ impl TreeModel {
         // the loading row becomes due after 80 ms
         let now = Instant::now();
         for d in self.dirs.iter_mut().flatten() {
-            if !d.loading_due && d.published.is_none() && d.load.is_some() || d.check.is_some() && !d.loading_due {
-                if now.duration_since(d.started) >= LOADING_AFTER {
-                    d.loading_due = true;
-                    self.dirty = true;
-                }
+            if (!d.loading_due && d.published.is_none() && d.load.is_some() || d.check.is_some() && !d.loading_due) && now.duration_since(d.started) >= LOADING_AFTER {
+                d.loading_due = true;
+                self.dirty = true;
             }
         }
         let cs = self.cursor.map_or(0, |k| k.slot);
@@ -1085,11 +1086,11 @@ impl TreeModel {
             }
         }
         // the cursor follows its entry
-        if let Some(k) = self.cursor {
-            if self.row_of(k, root).is_none() {
-                // the entry is hidden by a collapse: the nearest visible ancestor takes it
-                self.cursor = self.ancestor_key(k, root);
-            }
+        if let Some(k) = self.cursor
+            && self.row_of(k, root).is_none()
+        {
+            // the entry is hidden by a collapse: the nearest visible ancestor takes it
+            self.cursor = self.ancestor_key(k, root);
         }
     }
 
@@ -1537,7 +1538,7 @@ impl TreeModel {
             }
             let _ = i;
             if let Some(d) = self.dir(r.slot)
-                && let Some(id) = self.store(r.slot, None).and_then(|s| s.at(r.pos as usize)).or_else(|| None)
+                && let Some(id) = self.store(r.slot, None).and_then(|s| s.at(r.pos as usize))
                 && let Some(&c) = d.kids.get(&id)
                 && seen.insert(c)
                 && let Some(cd) = self.dir(c)
@@ -1713,7 +1714,7 @@ mod tests {
     }
 
     /// A model whose root is listed by the model itself (pane-style, all entries).
-    fn model(root: &PathBuf, folders_only: bool) -> TreeModel {
+    fn model(root: &std::path::Path, folders_only: bool) -> TreeModel {
         let mut m = TreeModel::new(root.to_str().unwrap(), folders_only, true, wake(), sort(), 0);
         settle(&mut m);
         m

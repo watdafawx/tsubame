@@ -46,10 +46,9 @@ jobs:
         shell: pwsh
         run: cargo clippy -p tsubame-update --all-targets --locked -- -D warnings
 
-      - name: cargo clippy (workspace, report only)
-        continue-on-error: true
+      - name: cargo clippy (workspace, warnings are errors)
         shell: pwsh
-        run: cargo clippy --workspace --all-targets --locked
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Updater maintainer tools still build
         shell: pwsh

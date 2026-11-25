@@ -441,6 +441,30 @@ mod tests {
     const CT: Mods = Mods::CTRL;
     const CS: Mods = Mods::CTRL_SHIFT;
 
+    /// The extension commands that had no default key show up on the Keys page
+    /// with their chord, can be rebound or cleared, and the change is saved as an override.
+    #[test]
+    fn extract_checksum_and_sizes_are_listed_and_rebindable() {
+        let mut km = KeyMap::defaults();
+        let ids = [CMD_ARCHIVE_EXTRACT_HERE, CMD_ARCHIVE_EXTRACT_SELECTED, CMD_FILE_CHECKSUM, CMD_FOLDER_CALC_SIZES];
+        let shown: Vec<u32> = (0..km.commands().len()).filter(|&i| matches("", &km, i)).map(|i| km.commands()[i].id).collect();
+        for id in ids {
+            assert!(shown.contains(&id), "{id} is on the page");
+            assert!(!km.label(id).is_empty(), "{id} has a default chord");
+        }
+        // the search finds them by title and by chord
+        let find = |q: &str| (0..km.commands().len()).any(|i| matches(q, &km, i) && km.commands()[i].id == CMD_FILE_CHECKSUM);
+        assert!(find("checksum") && find("alt+h"));
+        let mut rec = Rec::new(CMD_FILE_CHECKSUM, 0);
+        assert_eq!(on_key(&mut rec, &mut km, Key::Char('K'), CS), RecOut::Changed);
+        assert_eq!(km.label(CMD_FILE_CHECKSUM), "Ctrl+Shift+K", "rebound");
+        let o = km.to_overrides(&Default::default());
+        assert_eq!(o.get("file.checksum").map(|v| v.as_slice()), Some(&["Ctrl+Shift+K".to_string()][..]));
+        let mut rec = Rec::new(CMD_FOLDER_CALC_SIZES, 0);
+        assert_eq!(on_key(&mut rec, &mut km, Key::Backspace, Mods::NONE), RecOut::Changed);
+        assert!(km.chords(CMD_FOLDER_CALC_SIZES).is_empty(), "Backspace clears the slot");
+    }
+
     #[test]
     fn a_free_chord_binds_at_once() {
         let mut km = KeyMap::defaults();
