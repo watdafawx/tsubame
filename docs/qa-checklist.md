@@ -222,6 +222,21 @@ installed on the rig; they change the item set but not the open behaviour.
 | CTX-6 | Invoke Open, Copy, Cut, Paste, Rename, Delete, Copy path and Properties in turn. | Each acts once and the menu closes; Delete is red; Paste disabled with an empty clipboard; no stale menu, no modal ghost, no duplicate window; the list selection and focus survive. | |
 | CTX-7 | Open a menu, leave it static for 30 s, then use only the keyboard (`↑`/`↓`, `→`/`←` submenus, `Enter`, `Esc`). | No repaint or CPU while static (see IDLE-4); keyboard focus is visible, submenus open/close with the arrows, `Enter` invokes, `Esc` closes and returns focus to the list. | |
 
+### 2.7b Screen reader rows (`docs/uia-views.md`)
+
+Setup: read the tree with a UIA client (PowerShell `System.Windows.Automation`, Accessibility Insights,
+or Narrator). Use `basic` (tags on a few rows, file-age colouring on) and a deep folder for Tree and Miller.
+
+| ID | Steps | Expected | Verdict |
+|---|---|---|---|
+| UIA-1 | With a client attached, in Details read the window's List and its first rows; repeat in Grid (`Ctrl+Shift+2`). | A `List` named for the folder; `ListItem`s named with the file name (`, tags: …` when tagged); Value is type, size, modified (and the age bucket when file-age is on); `ItemCount` is the full folder count, children are only the visible rows. | |
+| UIA-2 | Select rows with `Ctrl+click`; use `SelectionItemPattern.Select/AddToSelection/RemoveFromSelection` from the client; `InvokePattern.Invoke` on a folder row and a file row. | `IsSelected` follows the real selection; Select/Add/Remove change it; Invoke on a folder enters it, on a file opens it. | |
+| UIA-3 | `Ctrl+Shift+4` (Tree rows), then `Shift+Alt+T` (folders pane). Read the Tree and `TreeItem`s. | Rows are `TreeItem` with `Level` (depth + 1), `PositionInSet`, `SizeOfSet`; folders report Collapsed/Expanded, files LeafNode; `ExpandCollapsePattern.Expand/Collapse` opens and closes the folder; the pane's items do the same and Invoke goes to the folder. | |
+| UIA-4 | `Ctrl+Shift+5` in a folder with sub-folders. Read each column. | One `List` per column named by its folder; the selected row of each ancestor column is `IsSelected`; Select on a row in an earlier column moves the path; Invoke enters a folder. | |
+| UIA-5 | Open the tags picker (`Alt+T`); invoke the tag rows, `New tag`, then in the New tag form a swatch and `Create`/`Cancel` from the client. | Each row acts as a click would (toggle, form opens, swatch selected, tag created or form closed). | |
+| UIA-6 | Scroll fast with a client attached, then detach it (close the client). Check CPU and the tree. | No stale rows (a gone row answers element-not-available); with no client attached the next frames build nothing. | |
+| UIA-7 | Idle 20 s with a client attached and Details open; then with none. | CPU delta about 0 in both; with no client no `ViewSnap` is built (see `docs/uia-views.md`). | |
+
 ### 2.8 Idle CPU (10 s window)
 
 Runs on the rig in the app's desktop session (a plain remote shell cannot open threads). Budget:
