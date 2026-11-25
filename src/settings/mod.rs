@@ -9,6 +9,7 @@
 pub mod lay;
 
 mod advanced;
+mod age_card;
 mod appearance;
 mod defaultfm_page;
 mod extensions_page;
@@ -91,7 +92,7 @@ impl Page {
             Page::Keys => "keyboard shortcuts keybindings hotkeys rebind chord",
             Page::Updates => "update version check download install rollback signature",
             Page::DefaultFm => "explorer default folder registry win+e shim",
-            Page::Extensions => "extension plugin built-in switch on off batch rename preview archive search checksum folder sizes",
+            Page::Extensions => "extension plugin built-in switch on off batch rename preview archive search checksum folder sizes file age colours heat modified date tint palette thresholds pips",
             Page::Advanced => "config folder reset diagnostics log memory portable",
         }
     }
@@ -158,6 +159,7 @@ pub struct Settings {
     pub menu: menu_ed::State,
     pub dfm: defaultfm_page::State,
     pub adv: advanced::State,
+    pub ext: extensions_page::State,
     pub upd: updates_page::State,
     /// the page was just switched: scroll to the top, rebuild lazily
     fresh: bool,
@@ -169,7 +171,7 @@ pub fn lighten(c: u32, amt: f32) -> u32 {
 
 impl Settings {
     pub fn new(page: Page) -> Settings {
-        Settings { page, find: TextInput::default(), scroll: 0.0, content_h: 0.0, general: Default::default(), appear: Default::default(), keys: Default::default(), menu: Default::default(), dfm: Default::default(), adv: Default::default(), upd: Default::default(), fresh: true }
+        Settings { page, find: TextInput::default(), scroll: 0.0, content_h: 0.0, general: Default::default(), appear: Default::default(), keys: Default::default(), menu: Default::default(), dfm: Default::default(), adv: Default::default(), ext: Default::default(), upd: Default::default(), fresh: true }
     }
 
     pub fn set_page(&mut self, page: Page) {
@@ -215,7 +217,7 @@ impl Settings {
                 Page::Keys => keys_page::paint(&mut pg, &mut self.keys, cx),
                 Page::Updates => updates_page::paint(&mut pg, &mut self.upd, cx),
                 Page::DefaultFm => defaultfm_page::paint(&mut pg, &mut self.dfm, cx),
-                Page::Extensions => extensions_page::paint(&mut pg, cx),
+                Page::Extensions => extensions_page::paint(&mut pg, &mut self.ext, cx),
                 Page::Advanced => advanced::paint(&mut pg, &mut self.adv, cx),
             }
             end = pg.y;

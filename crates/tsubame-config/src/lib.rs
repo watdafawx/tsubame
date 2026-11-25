@@ -146,6 +146,9 @@ lossy_enum! {
     , "columns" => Vertical, "rows" => Horizontal
 }
 
+mod age;
+pub use age::*;
+
 fn yes() -> bool {
     true
 }
@@ -513,6 +516,7 @@ pub struct Config {
     pub context_menu: ContextMenu,
     pub advanced: Advanced,
     pub extensions: Extensions,
+    pub file_age: FileAge,
     pub window: WindowState,
 }
 
@@ -530,6 +534,7 @@ impl Default for Config {
             context_menu: ContextMenu::default(),
             advanced: Advanced::default(),
             extensions: Extensions::default(),
+            file_age: FileAge::default(),
             window: WindowState::default(),
         }
     }

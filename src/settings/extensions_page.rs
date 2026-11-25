@@ -4,6 +4,7 @@
 //! `[extensions] disabled` in the config. Columns have their own switches in
 //! the column menu, so only feature extensions are listed here.
 
+use super::age_card;
 use super::Cx;
 use super::lay::Pg;
 use tsubame_ext_api::Tier;
@@ -16,12 +17,18 @@ fn describe(id: &str) -> &'static str {
         "tsubame.ext.checksum" => "Copy CRC32, MD5, SHA-1 and SHA-256 of the selected files.",
         "tsubame.ext.global_search" => "Search every drive (Ctrl+Shift+F).",
         "tsubame.ext.preview" => "Preview pane (Alt+P) and Quick Look (Space / F3).",
+        "tsubame.ext.file_age" => "Colour files by how recently they changed (settings below).",
         "tsubame.ext.batch_rename" => "F2 on several items: pattern bar with live preview, one undo step. Adds Rename N items to the context menu.",
         _ => "",
     }
 }
 
-pub fn paint(pg: &mut Pg, cx: &mut Cx) {
+#[derive(Default)]
+pub struct State {
+    pub age: age_card::State,
+}
+
+pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     pg.heading("Extensions", "Built-in features you can switch off. A switched-off feature removes its commands, shortcuts and menu entries.");
     let rows: Vec<(String, String, bool)> = crate::ext::read(|r| {
         r.extensions()
@@ -40,4 +47,5 @@ pub fn paint(pg: &mut Pg, cx: &mut Cx) {
             cx.ext_toggle = Some((id.clone(), v));
         }
     }
+    age_card::paint(pg, &mut st.age, cx);
 }

@@ -168,6 +168,7 @@ pub fn sync_config(view: &View, cfg: &mut tsubame_config::Config) {
     cfg.keys = view.prefs.keys.clone();
     cfg.context_menu = view.prefs.context_menu.clone();
     cfg.advanced = view.prefs.advanced.clone();
+    cfg.file_age = view.prefs.file_age.clone();
     cfg.appearance.density = config_density(view.density);
     cfg.appearance.zebra = view.zebra;
     cfg.appearance.view_mode = view.mode.to_config();
