@@ -251,6 +251,10 @@ pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
             if dual && n == 1 && matches!(kind, Kind::Folder | Kind::Drive) {
                 v.insert(0, c("Open in other pane", "x.other-pane"));
             }
+            // tsubame.ext.batch_rename: gone with the extension
+            if n > 1 && crate::batchui::is_enabled() {
+                v.insert(0, c(&format!("Rename {n} items\u{2026}"), "file.batch_rename"));
+            }
             // P4.F6: opens the tag picker (own popup, not a submenu)
             if !matches!(kind, Kind::Drive) && crate::tags::enabled() {
                 v.push(c("Tags\u{2026}", "tags.pick"));
@@ -1159,7 +1163,7 @@ pub fn glyph(action: &str, verb: Option<&str>) -> Option<char> {
         "x.copy-name" => '\u{E8EC}',
         "file.paste" => '\u{E77F}',
         "file.copy-path" => '\u{E71B}',
-        "file.rename" => '\u{E8AC}',
+        "file.rename" | "file.batch_rename" => '\u{E8AC}',
         "file.delete" => '\u{E74D}',
         "file.properties" => '\u{E946}',
         ctxmodel::ACTION_CLASSIC => '\u{E712}',

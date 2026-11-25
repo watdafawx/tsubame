@@ -43,6 +43,7 @@
 //! icons, TSUBAME_HANG_MS sets the hung-worker threshold (default 3000),
 //! TSUBAME_DATA_DIR overrides the config/session directory.
 
+mod age;
 mod archive_ui;
 mod batchui;
 mod bench;

@@ -259,12 +259,13 @@ impl View {
             restart: false,
             rollback: false,
             reload_packs: false,
+            ext_toggle: None,
             message: None,
             private_bytes: self.private_bytes,
             tags: self.tags.page_cx(&self.env.config_path),
         };
         st.paint(ui, g, area, &mut cx);
-        let Cx { changed, open, reset_all, restart, rollback, reload_packs, message, tags, .. } = cx;
+        let Cx { changed, open, reset_all, restart, rollback, reload_packs, ext_toggle, message, tags, .. } = cx;
         for r in tags.reqs {
             self.tags.send(r);
         }
@@ -274,6 +275,9 @@ impl View {
         }
         if reload_packs {
             self.reload_packs(ui);
+        }
+        if let Some((id, on)) = ext_toggle {
+            let _ = self.set_extension_enabled(ui, &id, on);
         }
         self.open_paths.extend(open);
         if let Some(m) = message {

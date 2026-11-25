@@ -1000,6 +1000,7 @@ fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_
         "file.copy-path" => copy_text(a, path_text(if t.background { &t.paths } else { &paths }), "path"),
         "x.copy-name" => copy_text(a, paths.iter().map(|p| name_of(p)).collect::<Vec<_>>().join("\r\n"), "name"),
         "file.rename" => a.view.rename_request = true,
+        "file.batch_rename" => a.view.run_command(&mut a.ui, crate::commands::CMD_BATCH_RENAME),
         "file.delete" => start_delete(a, paths, shift),
         "x.new-folder" => new_item(a, false),
         "x.new-file" => new_item(a, true),

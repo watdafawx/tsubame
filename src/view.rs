@@ -317,6 +317,8 @@ pub struct View {
     side_target: Option<crate::sidebar::DropTarget>,
     /// the settings as the user has them (U4): Settings edits this, `config_dirty` saves it
     pub prefs: tsubame_config::Config,
+    /// file-age key and legend (`src/age.rs`)
+    pub age: crate::age::AgeUi,
     /// id of the colour theme (`themes::find`)
     pub theme_id: String,
     /// the key map (defaults + `[keys.overrides]`)
@@ -427,6 +429,7 @@ impl View {
             ops_timer: false,
             side_target: None,
             prefs: tsubame_config::Config::default(),
+            age: Default::default(),
             theme_id: tsubame_ui::themes::tsubame(dark).id.to_string(),
             keymap: crate::keymap::KeyMap::defaults(),
             palette: None,
@@ -1053,6 +1056,9 @@ impl View {
         if !crate::search_ui::is_enabled() {
             self.search = None;
         }
+        if !crate::batchui::is_enabled() {
+            self.batch = None;
+        }
         if !crate::preview_ui::is_enabled() {
             self.preview.pane_open = false;
             self.preview.quick_look = false;
@@ -1063,7 +1069,6 @@ impl View {
 
     /// Switches extension `id` on or off, live, and records it in the config
     /// (`[extensions] disabled`). Its commands leave or rejoin the key map.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_extension_enabled(&mut self, ui: &mut Ui, id: &str, on: bool) -> Result<bool, tsubame_ext_api::Error> {
         let changed = crate::ext::write(|r| r.set_enabled(id, on))?;
         self.prefs.extensions.disabled = crate::ext::read(|r| r.disabled());
@@ -1142,6 +1147,7 @@ impl View {
                 }
             }
             CMD_RENAME => self.begin_rename(ui),
+            CMD_BATCH_RENAME => self.begin_batch(ui),
             CMD_SIDEBAR => {
                 self.side.set_rail(!self.side.rail);
                 self.side_act(ui, Some(Act::Layout));
@@ -1795,7 +1801,7 @@ impl View {
             if batch_bar.h > 0.0 {
                 self.paint_batch_bar(ui, g, &t, batch_bar);
             }
-            self.paint_status(g, status, &t, false);
+            self.paint_status(ui, g, status, &t, false);
             self.paint_toolbar(ui, g, toolbar, &t, false, false);
             self.paint_titlebar(ui, g, titlebar, &t, true);
             self.paint_path_error(g, toolbar, &t);
@@ -1941,7 +1947,7 @@ impl View {
         if batch_bar.h > 0.0 {
             self.paint_batch_bar(ui, g, t, batch_bar);
         }
-        self.paint_status(g, status, t, active);
+        self.paint_status(ui, g, status, t, active);
         self.paint_toolbar(ui, g, toolbar, t, panes::compact_toolbar(rect.w), active);
         self.paint_tabs(ui, g, strip_r);
         self.paint_path_error(g, toolbar, t);
@@ -2319,6 +2325,7 @@ impl View {
 
         // the list
         let was_renaming = self.rename.is_some();
+        let age = crate::age::frame(&self.prefs.file_age, self.dark, g, t);
         g.fill(list_r, t.row);
         let tab = &mut self.tabs.items[self.tabs.active];
         tab.list.row_h = t.height_list_row;
@@ -2331,7 +2338,7 @@ impl View {
                 .then_some(&self.meta.git_map);
             let folder_sizes = (!*synthetic && !in_archive && spans[Col::Size.slot()].1 > 0.0 && self.meta.size_map.matches_folder(path))
                 .then_some(&self.meta.size_map);
-            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, base: band_base, band_mode, tags };
+            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, age, base: band_base, band_mode, tags };
             let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
@@ -2508,7 +2515,8 @@ impl View {
 
     /// The status bar of the live pane. `hints`: this is the active pane of
     /// two, so the bar shows the copy / move keys for the other pane.
-    fn paint_status(&mut self, g: &mut dyn Canvas, r: Rect, t: &Theme, hints: bool) {
+    fn paint_status(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme, hints: bool) {
+        let age_key = crate::age::is_enabled() && !self.tabs.items[self.tabs.active].settings;
         let tab = &self.tabs.items[self.tabs.active];
         let loading = matches!(tab.load, Load::Loading).then_some(tab.delivered);
         let side = panes::side_name(self.orient, self.live);
@@ -2524,10 +2532,20 @@ impl View {
             other_side: hints.then_some(side),
             batch: self.batch.is_some() && self.batch_slot == self.live,
             message: if hints || self.other.is_none() { self.status_message() } else { None },
+            reserve_right: if age_key { crate::age::KEY_W + 8.0 } else { 0.0 },
         };
         statusbar::paint(g, t, r, &info, &mut s);
         self.text = s;
         self.paint_tags_status(g, r, t);
+        if age_key {
+            let tab = &self.tabs.items[self.tabs.active];
+            let act = self.age.status_key(ui, g, t, r, self.live as u64, &self.prefs.file_age, self.dark, &tab.store);
+            match act {
+                crate::age::Act::None => {}
+                crate::age::Act::Toggle => self.toggle_age(ui),
+                crate::age::Act::Settings => self.open_settings(Some(crate::settings::Page::Extensions)),
+            }
+        }
     }
 }
 
@@ -2643,6 +2661,8 @@ struct Rows<'a> {
     git_map: Option<&'a crate::meta_ui::GitMap>,
     /// computed folder sizes for the current folder (`None` when disabled or uncomputed)
     folder_sizes: Option<&'a crate::meta_ui::FolderSizeMap>,
+    /// file-age tints for this frame (`None` = off)
+    age: Option<crate::age::AgeFrame>,
     /// selection snapshot before a Ctrl/Shift marquee started
     base: &'a mut Vec<EntryId>,
     band_mode: &'a mut BandMode,
@@ -2804,7 +2824,8 @@ impl ListSource for Rows<'_> {
         // a column not shown has no width: nothing to format or draw
         if sp[1].1 > 0.0 {
             data::fmt_date(row.mtime, self.text);
-            g.text(self.text, Rect::new(x + sp[1].0 + 8.0, r.y, (sp[1].1 - 12.0).max(0.0), r.h), t.font(), t.text_dim);
+            let cell = Rect::new(x + sp[1].0 + 8.0, r.y, (sp[1].1 - 12.0).max(0.0), r.h);
+            crate::age::draw_date(self.age.as_ref(), g, t, row.mtime, row.is_dir(), self.text, cell, r);
         }
         if sp[2].1 > 0.0 {
             row.type_text(self.text);
@@ -4616,5 +4637,55 @@ mod tests {
         // Re-enabling extension restores clean state for subsequent tests.
         assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::preview_ui::EXT_PREVIEW, true), Ok(true));
         r.frame();
+    }
+
+    #[test]
+    fn batch_rename_extension_switches_f2_on_several_items() {
+        let mut r = Rig::new("f4-ext");
+        r.settle();
+        assert!(crate::batchui::is_enabled(), "default on");
+        // on: F2 with two or more selected opens the bar
+        r.key(Key::Char('A'), Mods::CTRL);
+        assert!(r.v.tab().sel.count() > 1);
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.batch.is_some() && r.v.rename.is_none());
+        assert!(r.v.ops.message.as_deref().is_none_or(|m| !m.contains("switched off")));
+        // switching off closes an open bar
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::batchui::EXT_BATCH_RENAME, false), Ok(true));
+        assert!(r.v.batch.is_none(), "an open bar goes with the extension");
+        assert!(!r.v.prefs.extensions.disabled.is_empty());
+        // off: the command is gone, F2 renames the focused item inline and says so
+        assert!(crate::ext::command(crate::commands::CMD_BATCH_RENAME).is_none());
+        r.v.run_command(&mut r.ui, crate::commands::CMD_BATCH_RENAME);
+        assert!(r.v.batch.is_none());
+        r.v.ops.message = None;
+        assert!(r.v.tab().sel.count() > 1);
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.batch.is_none());
+        assert!(r.v.rename.is_some(), "focused item renames inline");
+        assert_eq!(r.v.ops.message.as_deref(), Some(crate::batchui::OFF_MSG));
+        // the context menu loses its entry
+        let rows = crate::ctxui::extras(tsubame_config::menu::Target::Multiple, 3, false);
+        assert!(rows.iter().all(|m| m.action != "file.batch_rename"));
+        r.key(Key::Escape, Mods::NONE);
+        // single item: F2 unchanged and silent
+        r.v.ops.message = None;
+        let t = r.v.tab_mut();
+        t.sel.single(&t.store, 0);
+        t.list.cursor = 0;
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.rename.is_some() && r.v.batch.is_none());
+        assert!(r.v.ops.message.is_none());
+        r.key(Key::Escape, Mods::NONE);
+        // back on: entry and bar return
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::batchui::EXT_BATCH_RENAME, true), Ok(true));
+        assert!(r.v.prefs.extensions.disabled.is_empty());
+        let rows = crate::ctxui::extras(tsubame_config::menu::Target::Multiple, 3, false);
+        let row = rows.iter().find(|m| m.action == "file.batch_rename").expect("entry back");
+        assert_eq!(row.label, "Rename 3 items\u{2026}");
+        assert!(crate::ctxui::extras(tsubame_config::menu::Target::File, 1, false).iter().all(|m| m.action != "file.batch_rename"));
+        r.key(Key::Char('A'), Mods::CTRL);
+        r.v.run_command(&mut r.ui, crate::commands::CMD_BATCH_RENAME);
+        assert!(r.v.batch.is_some(), "file.batch_rename opens the bar");
     }
 }

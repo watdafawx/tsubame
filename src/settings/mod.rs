@@ -1,5 +1,5 @@
 //! Settings, drawn inside a tab (U4): a navigation list on the left, one page on the right.
-//! Pages: General, Appearance, Context menu, Keys, Updates, Default file manager, Advanced.
+//! Pages: General, Appearance, Context menu, Keys, Updates, Default file manager, Extensions, Advanced.
 //!
 //! The state here is built the first time the tab opens and dropped when it closes. Every
 //! change is applied the moment it is made: a page edits `Cx::prefs` (the config) or
@@ -9,8 +9,10 @@
 pub mod lay;
 
 mod advanced;
+mod age_card;
 mod appearance;
 mod defaultfm_page;
+mod extensions_page;
 mod general;
 mod keys_page;
 mod menu_ed;
@@ -49,13 +51,14 @@ pub enum Page {
     Keys,
     Updates,
     DefaultFm,
+    Extensions,
     Advanced,
     /// P4.F6
     Tags,
 }
 
 impl Page {
-    pub const ALL: [Page; 8] = [Page::General, Page::Appearance, Page::ContextMenu, Page::Keys, Page::Tags, Page::Updates, Page::DefaultFm, Page::Advanced];
+    pub const ALL: [Page; 9] = [Page::General, Page::Appearance, Page::ContextMenu, Page::Keys, Page::Tags, Page::Updates, Page::DefaultFm, Page::Extensions, Page::Advanced];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -65,6 +68,7 @@ impl Page {
             Page::Keys => "Keys",
             Page::Updates => "Updates",
             Page::DefaultFm => "Default file manager",
+            Page::Extensions => "Extensions",
             Page::Advanced => "Advanced",
             Page::Tags => "Tags",
         }
@@ -78,6 +82,7 @@ impl Page {
             Page::Keys => "\u{E765}",
             Page::Updates => "\u{E896}",
             Page::DefaultFm => "\u{E8B7}",
+            Page::Extensions => "\u{EA86}",
             Page::Advanced => "\u{E90F}",
             Page::Tags => "\u{E8EC}",
         }
@@ -92,6 +97,7 @@ impl Page {
             Page::Keys => "keyboard shortcuts keybindings hotkeys rebind chord",
             Page::Updates => "update version check download install rollback signature",
             Page::DefaultFm => "explorer default folder registry win+e shim",
+            Page::Extensions => "extension plugin built-in switch on off batch rename preview archive search checksum folder sizes file age colours heat modified date tint palette thresholds pips",
             Page::Advanced => "config folder reset diagnostics log memory portable",
             Page::Tags => "tag tags colour color label mark shape export import",
         }
@@ -140,6 +146,8 @@ pub struct Cx<'a> {
     pub rollback: bool,
     /// "Reload packs" on the Advanced page was pressed
     pub reload_packs: bool,
+    /// an extension switch on the Extensions page was flipped: (id, on)
+    pub ext_toggle: Option<(String, bool)>,
     /// a message for the status bar
     pub message: Option<String>,
     /// private bytes of the process, for the Advanced page (the view reads it once a second)
@@ -159,6 +167,7 @@ pub struct Settings {
     pub menu: menu_ed::State,
     pub dfm: defaultfm_page::State,
     pub adv: advanced::State,
+    pub ext: extensions_page::State,
     pub upd: updates_page::State,
     pub tags: tags_page::State,
     /// the page was just switched: scroll to the top, rebuild lazily
@@ -171,7 +180,7 @@ pub fn lighten(c: u32, amt: f32) -> u32 {
 
 impl Settings {
     pub fn new(page: Page) -> Settings {
-        Settings { page, find: TextInput::default(), scroll: 0.0, content_h: 0.0, general: Default::default(), appear: Default::default(), keys: Default::default(), menu: Default::default(), dfm: Default::default(), adv: Default::default(), upd: Default::default(), tags: Default::default(), fresh: true }
+        Settings { page, find: TextInput::default(), scroll: 0.0, content_h: 0.0, general: Default::default(), appear: Default::default(), keys: Default::default(), menu: Default::default(), dfm: Default::default(), adv: Default::default(), ext: Default::default(), upd: Default::default(), tags: Default::default(), fresh: true }
     }
 
     pub fn set_page(&mut self, page: Page) {
@@ -217,6 +226,7 @@ impl Settings {
                 Page::Keys => keys_page::paint(&mut pg, &mut self.keys, cx),
                 Page::Updates => updates_page::paint(&mut pg, &mut self.upd, cx),
                 Page::DefaultFm => defaultfm_page::paint(&mut pg, &mut self.dfm, cx),
+                Page::Extensions => extensions_page::paint(&mut pg, &mut self.ext, cx),
                 Page::Advanced => advanced::paint(&mut pg, &mut self.adv, cx),
                 Page::Tags => tags_page::paint(&mut pg, &mut self.tags, cx),
             }
@@ -304,7 +314,7 @@ mod tests {
         s.find.set_text("update");
         assert_eq!(s.matching(), vec![Page::Updates]);
         s.find.set_text("");
-        assert_eq!(s.matching().len(), 8);
+        assert_eq!(s.matching().len(), 9);
         s.find.set_text("zzz");
         assert!(s.matching().is_empty());
     }

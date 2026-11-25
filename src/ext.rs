@@ -70,6 +70,8 @@ pub fn builtin() -> Registry {
     r.add(&crate::search_ui::GlobalSearchExtension).expect("global-search extension registers");
     r.add(&crate::preview_ui::PreviewExtension).expect("preview extension registers");
     r.add(&crate::tags::TagsExtension).expect("tags extension registers");
+    r.add(&crate::age::FileAgeExtension).expect("file-age extension registers");
+    r.add(&crate::batchui::BatchRenameExtension).expect("batch-rename extension registers");
     r
 }
 
@@ -119,6 +121,9 @@ mod tests {
         assert_eq!(r.is_enabled(crate::meta_ui::EXT_CHECKSUM), Some(true));
         assert_eq!(r.is_enabled(crate::search_ui::EXT_GLOBAL_SEARCH), Some(true));
         assert_eq!(r.is_enabled(crate::preview_ui::EXT_PREVIEW), Some(true));
+        assert_eq!(r.is_enabled(crate::age::EXT_FILE_AGE), Some(true));
+        assert_eq!(r.is_enabled(crate::batchui::EXT_BATCH_RENAME), Some(true));
+        assert!(r.command(crate::commands::CMD_BATCH_RENAME).is_some());
         assert!(r.command(crate::commands::CMD_RENAME).is_some());
         assert!(r.command(crate::commands::CMD_GLOBAL_SEARCH).is_some());
         assert!(r.command(crate::commands::CMD_PREVIEW_TOGGLE).is_some());
@@ -139,6 +144,9 @@ mod tests {
         assert_eq!(r.set_enabled(crate::archive_ui::EXT_ARCHIVE, false), Ok(true));
         assert!(r.command(crate::commands::CMD_ARCHIVE_EXTRACT_HERE).is_none());
         assert_eq!(r.set_enabled(crate::preview_ui::EXT_PREVIEW, false), Ok(true));
+        assert_eq!(r.set_enabled(crate::batchui::EXT_BATCH_RENAME, false), Ok(true));
+        assert!(r.command(crate::commands::CMD_BATCH_RENAME).is_none());
+        assert!(r.command(crate::commands::CMD_RENAME).is_some(), "plain rename stays core");
         assert!(r.command(crate::commands::CMD_PREVIEW_TOGGLE).is_none());
         assert!(r.command(crate::commands::CMD_PREVIEW_QUICK_LOOK).is_none());
     }

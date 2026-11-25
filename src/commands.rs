@@ -68,6 +68,10 @@ pub const CMD_GLOBAL_SEARCH: u32 = 60;
 pub const CMD_PREVIEW_TOGGLE: u32 = 61;
 pub const CMD_PREVIEW_QUICK_LOOK: u32 = 62;
 pub const CMD_TAGS_PICK: u32 = 80;
+/// F6 file-age colouring (`tsubame.ext.file_age`)
+pub const CMD_AGE_COLOURS: u32 = 70;
+// F4 batch rename (id kept clear of the other P4 batches in flight)
+pub const CMD_BATCH_RENAME: u32 = 72;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -164,6 +168,17 @@ pub static PREVIEW_COMMANDS: &[CommandSpec] = &[
     cmd!(CMD_PREVIEW_QUICK_LOOK, "preview.quick_look", "Quick Look", ["Space", "F3"], F),
 ];
 
+/// File-age colouring extension (`tsubame.ext.file_age`) commands.
+pub static AGE_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_AGE_COLOURS, "view.age_colours", "Age colours: toggle", [], G),
+];
+
+/// Batch-rename extension (`tsubame.ext.batch_rename`) commands. F2 stays on
+/// `file.rename`, which hands several items to this one while the extension is on.
+pub static BATCH_RENAME_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_BATCH_RENAME, "file.batch_rename", "Batch rename selected items\u{2026}", [], F),
+];
+
 /// Every built-in command across `tsubame.core` and the P4 built-in extensions,
 /// in registration order.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -176,6 +191,8 @@ pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
         .chain(SEARCH_COMMANDS)
         .chain(PREVIEW_COMMANDS)
         .chain(TAGS_COMMANDS)
+        .chain(AGE_COMMANDS)
+        .chain(BATCH_RENAME_COMMANDS)
 }
 
 /// Total number of commands registered by `crate::ext::builtin()`.
@@ -188,6 +205,8 @@ pub const fn builtin_count() -> usize {
         + SEARCH_COMMANDS.len()
         + PREVIEW_COMMANDS.len()
         + TAGS_COMMANDS.len()
+        + AGE_COMMANDS.len()
+        + BATCH_RENAME_COMMANDS.len()
 }
 
 /// Binds every default key (tests and the bench; the app binds its key map,
@@ -316,13 +335,15 @@ mod tests {
         (CMD_PREVIEW_TOGGLE, &[(Key::Char('P'), AL)], false),
         (CMD_PREVIEW_QUICK_LOOK, &[(Key::Space, NM), (Key::F(3), NM)], false),
         (CMD_TAGS_PICK, &[(Key::Char('T'), AL)], false),
+        (CMD_AGE_COLOURS, &[], true),
+        (CMD_BATCH_RENAME, &[], false),
     ];
 
     /// What ran with the Settings tab in front before the registry.
     fn settings_tab_allowed_before(cmd: u32) -> bool {
         matches!(
             cmd,
-            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH
+            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS
         ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
     }
 
@@ -402,5 +423,6 @@ mod tests {
         assert_eq!(by_name("search.global").map(|c| c.id), Some(CMD_GLOBAL_SEARCH));
         assert_eq!(by_name("preview.toggle_pane").map(|c| c.id), Some(CMD_PREVIEW_TOGGLE));
         assert_eq!(by_name("preview.quick_look").map(|c| c.id), Some(CMD_PREVIEW_QUICK_LOOK));
+        assert_eq!(by_name("view.age_colours").map(|c| c.id), Some(CMD_AGE_COLOURS));
     }
 }
