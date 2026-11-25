@@ -322,6 +322,14 @@ read the previous manifest can still finish that download.
 There is no env-var override of the API base or the channel in the app (the repo has no such pattern);
 tests use the CLI with `--api-base` and the `test-server` feature.
 
+Looking at the Settings > Updates banners without a real release: a debug build (not release) reads
+`TSUBAME_FAKE_UPDATE=<kind>[:<channel>[:<version>]]` (kind: `available`, `downloading`, `staged`,
+`ready`; e.g. `available:nightly:0.1.1-nightly.20261125.123`) and only changes what the page
+*draws*. Nothing is checked, downloaded or installed. Use it with a scratch `TSUBAME_DATA_DIR`.
+Layout rules for the banners (`Banner` in `src/settings/updates_page.rs`): buttons on the right while the
+text keeps its room, under the text otherwise (stacked below about 260 DIP), text cut with a tooltip
+only when it cannot fit even full width.
+
 ## Rate limiting and politeness
 
 Anonymous GitHub API: 60 requests/hour per IP. A check is 1 request (the `releases/latest` JSON) plus, only when there is

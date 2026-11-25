@@ -72,7 +72,19 @@ fn data_object_round_trip() {
 }
 
 fn clip_text() -> Option<String> {
-    let obj = unsafe { windows::Win32::System::Ole::OleGetClipboard() }.ok()?;
+    // The clipboard is system-wide: a clipboard history or manager can hold it open for a moment
+    // right after a change (CLIPBRD_E_CANT_OPEN), so wait a little instead of reading "nothing".
+    let mut tries = 0;
+    let obj = loop {
+        match unsafe { windows::Win32::System::Ole::OleGetClipboard() } {
+            Ok(o) => break o,
+            Err(_) if tries < 40 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    };
     let b = dnd::get_bytes(&obj, CF_UNICODETEXT.0, -1, 16 << 20)?;
     let u: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     let end = u.iter().position(|&c| c == 0).unwrap_or(u.len());
