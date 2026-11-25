@@ -71,6 +71,7 @@ pub fn builtin() -> Registry {
     r.add(&crate::preview_ui::PreviewExtension).expect("preview extension registers");
     r.add(&crate::tags::TagsExtension).expect("tags extension registers");
     r.add(&crate::tree::TreeExtension).expect("tree extension registers");
+    r.add(&crate::miller::MillerExtension).expect("miller extension registers");
     r.add(&crate::age::FileAgeExtension).expect("file-age extension registers");
     r.add(&crate::batchui::BatchRenameExtension).expect("batch-rename extension registers");
     r
@@ -126,6 +127,8 @@ mod tests {
         assert_eq!(r.is_enabled(crate::tree::EXT_TREE), Some(true));
         assert!(r.command(crate::commands::CMD_VIEW_TREE).is_some());
         assert!(r.command(crate::commands::CMD_PANE_TREE).is_some());
+        assert_eq!(r.is_enabled(crate::miller::EXT_MILLER), Some(true));
+        assert!(r.command(crate::commands::CMD_VIEW_MILLER).is_some());
         assert_eq!(r.is_enabled(crate::batchui::EXT_BATCH_RENAME), Some(true));
         assert!(r.command(crate::commands::CMD_BATCH_RENAME).is_some());
         assert!(r.command(crate::commands::CMD_RENAME).is_some());
@@ -156,5 +159,7 @@ mod tests {
         assert_eq!(r.set_enabled(crate::tree::EXT_TREE, false), Ok(true));
         assert!(r.command(crate::commands::CMD_VIEW_TREE).is_none());
         assert!(r.command(crate::commands::CMD_PANE_TREE).is_none());
+        assert_eq!(r.set_enabled(crate::miller::EXT_MILLER, false), Ok(true));
+        assert!(r.command(crate::commands::CMD_VIEW_MILLER).is_none());
     }
 }

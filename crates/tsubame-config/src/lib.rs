@@ -127,7 +127,7 @@ lossy_enum! {
 
 lossy_enum! {
     /// How the listing is drawn. The grid modes arrive with the thumbnail view.
-    ViewMode { Details => "details", GridSmall => "grid-small", GridLarge => "grid-large", Tree => "tree" }
+    ViewMode { Details => "details", GridSmall => "grid-small", GridLarge => "grid-large", Tree => "tree", Miller => "miller" }
     default Details
     , "grid" => GridSmall, "thumbnails" => GridLarge, "list" => Details
 }
@@ -360,6 +360,35 @@ impl Default for TreeConfig {
     }
 }
 
+/// `[miller]`: the Miller columns view (P4.F6, `tsubame.ext.miller`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MillerConfig {
+    /// Default column width in DIPs (140 to 480). A drag resizes one column
+    /// for the session; a double-click on its edge returns it to this width.
+    #[serde(default = "default_miller_col_width")]
+    pub col_width: u32,
+}
+
+impl MillerConfig {
+    pub const MIN_COL_WIDTH: u32 = 140;
+    pub const MAX_COL_WIDTH: u32 = 480;
+    /// The width clamped to what the view can hold (a bad value never breaks a load).
+    pub fn sanitized(&self) -> MillerConfig {
+        MillerConfig { col_width: self.col_width.clamp(Self::MIN_COL_WIDTH, Self::MAX_COL_WIDTH) }
+    }
+}
+
+fn default_miller_col_width() -> u32 {
+    220
+}
+
+impl Default for MillerConfig {
+    fn default() -> Self {
+        MillerConfig { col_width: 220 }
+    }
+}
+
 /// `[preview]`: the split preview pane and Quick Look (P4.F2).
 ///
 /// Defaults come from `docs/preview-mock.md`: a 320 px pane that starts
@@ -580,6 +609,7 @@ pub struct Config {
     pub preview: PreviewConfig,
     pub tags: TagsConfig,
     pub tree: TreeConfig,
+    pub miller: MillerConfig,
     pub sidebar: Sidebar,
     pub updates: Updates,
     pub keys: Keys,
@@ -600,6 +630,7 @@ impl Default for Config {
             preview: PreviewConfig::default(),
             tags: TagsConfig::default(),
             tree: TreeConfig::default(),
+            miller: MillerConfig::default(),
             sidebar: Sidebar::default(),
             updates: Updates::default(),
             keys: Keys::default(),
@@ -1105,6 +1136,22 @@ pub fn timed_load_config(path: &Path) -> (Loaded<ConfigFile>, f64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn miller_config_defaults_and_clamps() {
+        assert_eq!(MillerConfig::default().col_width, 220);
+        let c: Config = toml::from_str("[miller]
+col_width = 9000
+").unwrap();
+        assert_eq!(c.miller.sanitized().col_width, 480);
+        let c: Config = toml::from_str("[miller]
+col_width = 3
+").unwrap();
+        assert_eq!(c.miller.sanitized().col_width, 140);
+        assert_eq!(ViewMode::Miller, toml::from_str::<Config>("[appearance]
+view_mode = \"miller\"
+").unwrap().appearance.view_mode);
+    }
+
     #[test]
     fn tree_config_defaults_and_clamps() {
         let d = TreeConfig::default();

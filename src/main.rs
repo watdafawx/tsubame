@@ -65,6 +65,7 @@ mod leak;
 mod lru;
 mod memdiag;
 mod meta_ui;
+mod miller;
 mod nav;
 mod ole_glue;
 mod ops;

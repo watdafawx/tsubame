@@ -176,6 +176,10 @@ pub struct Tab {
     pub tree_pane: Option<Box<crate::tree::TreeModel>>,
     /// scroll and cursor of the Tree pane's list
     pub pane_list: ListState,
+    /// P4.F6 Miller columns: the model of this tab (`tsubame.ext.miller`)
+    pub miller: Option<Box<crate::miller::MillerModel>>,
+    /// the view shows this tab in Miller columns mode
+    pub miller_on: bool,
 }
 
 /// What `pump` found.
@@ -275,6 +279,8 @@ impl Tab {
             tree_seed: (Vec::new(), Vec::new()),
             tree_pane: None,
             pane_list: ListState::new(row_h),
+            miller: None,
+            miller_on: false,
         }
     }
 
@@ -340,6 +346,14 @@ impl Tab {
     /// old one can never reach the store: the channel is replaced and every
     /// message carries its generation.
     pub fn start(&mut self, path: &str, wake: Wake) {
+        // Miller columns list their own folders: this tab only follows the path
+        if self.miller.is_some() {
+            if crate::archive_ui::is_archive_path(path) {
+                self.miller = None;
+            } else {
+                return self.start_miller(path, wake);
+            }
+        }
         // the same folder again (refresh): its expanded folders and selection come back
         if let Some(m) = self.tree.take()
             && path.eq_ignore_ascii_case(&self.path)
@@ -476,6 +490,11 @@ impl Tab {
         self.visible = visible;
         if let Some(m) = self.tree.as_mut() {
             m.set_visible(visible);
+        }
+        if let Some(m) = self.miller.as_mut() {
+            // the model watches its own columns; this tab has no listing of its own
+            m.set_visible(visible);
+            return;
         }
         if self.synthetic || self.pending || self.is_archive() {
             return;
@@ -853,6 +872,9 @@ impl Tab {
 
     /// Entries shown (after the filter).
     pub fn shown(&self) -> usize {
+        if self.miller_on && let Some(m) = &self.miller {
+            return m.active_shown();
+        }
         if self.tree_on && let Some(m) = &self.tree {
             return m.len();
         }
@@ -861,6 +883,9 @@ impl Tab {
 
     /// Full path of the entry at view position `pos`, and whether it is a folder.
     pub fn entry_at(&self, pos: usize) -> Option<(String, bool)> {
+        if self.miller_on && let Some(m) = &self.miller {
+            return m.active_entry_at(pos);
+        }
         if self.tree_on && let Some(m) = &self.tree {
             return m.path_of(pos, Some(&self.store));
         }
@@ -872,6 +897,9 @@ impl Tab {
 
     /// Paths of up to `n` selected entries in view order (for the shell menu).
     pub fn selected_paths(&self, n: usize) -> Vec<String> {
+        if self.miller_on && let Some(m) = &self.miller {
+            return m.selected_path().into_iter().take(n).collect();
+        }
         if self.tree_on && let Some(m) = &self.tree {
             return m.selected_paths(n, Some(&self.store));
         }
@@ -902,6 +930,107 @@ impl Tab {
     /// Heap bytes this tab holds in its store (diagnostics).
     pub fn memory_bytes(&self) -> usize {
         self.store.memory_bytes()
+    }
+}
+
+impl Tab {
+    /// True when this tab shows Miller columns (the rows come from the model).
+    pub fn miller_rows(&self) -> bool {
+        self.miller_on && self.miller.is_some()
+    }
+
+    /// Builds the Miller model for this tab's folder when it has none. The tab's
+    /// own listing and watcher go: the model lists every column itself.
+    pub fn ensure_miller(&mut self, default_w: f32) {
+        if self.settings || self.synthetic || self.pending || self.is_archive() {
+            self.miller = None;
+            return;
+        }
+        if self.miller.is_some() {
+            return;
+        }
+        let Some(wake) = self.wake.clone() else { return };
+        let hide = self.store.hide();
+        self.drop_listing();
+        let mut m = crate::miller::MillerModel::new(&self.path, wake, self.sort, hide, default_w);
+        m.set_visible(self.visible);
+        self.miller = Some(Box::new(m));
+    }
+
+    /// The tab's own listing, watcher and pending work stop (Miller owns the listing).
+    fn drop_listing(&mut self) {
+        self.enumerator = None;
+        self.rx = None;
+        self.archive_rx = None;
+        self.watching = Watching::default();
+        self.watch_changed = false;
+        self.want = None;
+        self.restore = None;
+        self.store.end_stream();
+        self.store.clear();
+        self.tag_fids = Vec::new();
+        self.tree = None;
+        self.sel.clear();
+        self.load = Load::Done;
+        self.delivered = 0;
+    }
+
+    /// A navigation while Miller columns show: the model follows the path, no listing runs here.
+    fn start_miller(&mut self, path: &str, wake: Wake) {
+        self.drop_listing();
+        self.wake = Some(wake);
+        let same = self.miller.as_ref().is_some_and(|m| crate::miller::same_path(m.active_path(), path));
+        self.path = path.to_string();
+        self.title_s = Self::make_title(path);
+        self.filter.clear();
+        self.reset_view();
+        self.timing = Timing::new();
+        self.enum_gen = self.token.next_generation();
+        if let Some(m) = self.miller.as_mut() {
+            m.set_filter("");
+            if same {
+                m.relist_all();
+            } else {
+                m.goto(path);
+            }
+        }
+    }
+
+    /// The active column moved to another folder (a key, a click): the tab's path
+    /// and history follow it. No listing. True when the path changed.
+    pub fn follow_miller(&mut self) -> bool {
+        let Some(m) = self.miller.as_mut() else { return false };
+        let p = m.active_path().to_string();
+        if p.is_empty() || crate::miller::same_path(&p, &self.path) {
+            return false;
+        }
+        m.synced = p.clone();
+        self.history.push(&p);
+        self.path = p.clone();
+        self.title_s = Self::make_title(&p);
+        self.enum_gen = self.token.next_generation();
+        true
+    }
+
+    /// Moves what the Miller workers delivered into the model. UI thread, no disk.
+    pub fn pump_miller(&mut self, preview_on: bool) -> bool {
+        let sort = self.sort;
+        let hide = self.store.hide();
+        let Some(m) = self.miller.as_mut() else { return false };
+        m.set_rules(sort, hide);
+        m.set_filter(&self.filter);
+        m.pump(preview_on)
+    }
+
+    /// Leaves Miller columns: the model goes, the folder lists again.
+    pub fn leave_miller(&mut self) {
+        self.miller_on = false;
+        if self.miller.take().is_some()
+            && let Some(w) = self.wake.clone()
+        {
+            let p = self.path.clone();
+            self.start(&p, w);
+        }
     }
 }
 

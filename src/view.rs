@@ -38,6 +38,8 @@ mod u4;
 mod tagsv;
 #[path = "view_tree.rs"]
 mod treev;
+#[path = "view_miller.rs"]
+mod millerv;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
 use crate::ops::Ops;
@@ -54,6 +56,8 @@ pub enum ViewMode {
     GridLarge,
     /// P4.F6: Details made hierarchical (`tsubame.ext.tree`)
     Tree,
+    /// P4.F6: one column per folder level (`tsubame.ext.miller`)
+    Miller,
 }
 
 impl ViewMode {
@@ -72,7 +76,7 @@ impl ViewMode {
         match self {
             ViewMode::Details => ViewMode::GridSmall,
             ViewMode::GridSmall => ViewMode::GridLarge,
-            ViewMode::GridLarge | ViewMode::Tree => ViewMode::Details,
+            ViewMode::GridLarge | ViewMode::Tree | ViewMode::Miller => ViewMode::Details,
         }
     }
     pub fn parse(s: &str) -> Option<ViewMode> {
@@ -81,6 +85,7 @@ impl ViewMode {
             "grid-small" | "small" | "grid" => Some(ViewMode::GridSmall),
             "grid-large" | "large" => Some(ViewMode::GridLarge),
             "tree" => Some(ViewMode::Tree),
+            "miller" | "columns" => Some(ViewMode::Miller),
             _ => None,
         }
     }
@@ -91,6 +96,7 @@ impl ViewMode {
             ViewMode::GridSmall => tsubame_config::ViewMode::GridSmall,
             ViewMode::GridLarge => tsubame_config::ViewMode::GridLarge,
             ViewMode::Tree => tsubame_config::ViewMode::Tree,
+            ViewMode::Miller => tsubame_config::ViewMode::Miller,
         }
     }
     pub fn from_config(m: tsubame_config::ViewMode) -> ViewMode {
@@ -99,6 +105,7 @@ impl ViewMode {
             tsubame_config::ViewMode::GridSmall => ViewMode::GridSmall,
             tsubame_config::ViewMode::GridLarge => ViewMode::GridLarge,
             tsubame_config::ViewMode::Tree => ViewMode::Tree,
+            tsubame_config::ViewMode::Miller => ViewMode::Miller,
         }
     }
     pub fn name(self) -> &'static str {
@@ -107,6 +114,7 @@ impl ViewMode {
             ViewMode::GridSmall => "grid-small",
             ViewMode::GridLarge => "grid-large",
             ViewMode::Tree => "tree",
+            ViewMode::Miller => "miller",
         }
     }
 }
@@ -898,6 +906,7 @@ impl View {
             self.pump_more |= p.more;
         }
         changed |= self.pump_trees();
+        changed |= self.pump_millers();
         changed |= self.watch_pane();
         // a typed path that failed to open: back to the old folder, error shown
         if let Some((id, prev, typed)) = self.edit_nav.take() {
@@ -1081,6 +1090,7 @@ impl View {
         }
         self.sync_tags();
         self.sync_tree_ext();
+        self.sync_miller_ext();
     }
 
     /// Switches extension `id` on or off, live, and records it in the config
@@ -1109,7 +1119,7 @@ impl View {
 
     /// The core extension's handler: every built-in command (`commands::BUILTIN`).
     pub(crate) fn run_builtin(&mut self, ui: &mut Ui, cmd: u32) {
-        if self.run_tree(cmd) {
+        if self.run_tree(cmd) || self.run_miller(cmd) {
             ui.request_repaint();
             return;
         }
@@ -1689,6 +1699,9 @@ impl View {
         if mode == ViewMode::Tree && !crate::tree::enabled() {
             return;
         }
+        if mode == ViewMode::Miller && !crate::miller::enabled() {
+            return;
+        }
         let was_grid = self.mode.is_grid();
         if self.mode == ViewMode::Tree {
             // back to plain rows: the cursor goes to the top-level entry it was in
@@ -1744,6 +1757,10 @@ impl View {
     /// else just `row` (at most 64).
     pub fn menu_paths(&self, row: usize) -> Vec<String> {
         let t = self.tab();
+        if t.miller_rows() {
+            // one selected entry: the row that was pressed became it
+            return t.entry_at(row).map(|e| vec![e.0]).unwrap_or_default();
+        }
         if t.tree_on && t.tree.is_some() {
             let m = t.tree.as_ref().expect("tree");
             return if m.is_selected(row, Some(&t.store)) { t.selected_paths(64) } else { t.entry_at(row).map(|e| vec![e.0]).unwrap_or_default() };
@@ -1876,11 +1893,11 @@ impl View {
         }
         // typing in the list starts the filter
         let typed: Vec<char> = if self.tab().settings || self.palette.is_some() || self.search.is_some() || self.tags.picker_open() || self.preview.quick_look_open() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
-        if self.tree_keys(ui) {
+        if self.tree_keys(ui) || self.miller_keys(ui) {
             again = true;
         }
         // Tree rows: letters are type-ahead, not the filter
-        let typed: Vec<char> = if self.tree_rows_on() && !ui.has_focus(pid(self.live, ID_FILTER)) { Vec::new() } else { typed };
+        let typed: Vec<char> = if (self.tree_rows_on() || self.miller_showing()) && !ui.has_focus(pid(self.live, ID_FILTER)) { Vec::new() } else { typed };
         for c in typed {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
@@ -2099,7 +2116,7 @@ impl View {
             ViewMode::Details => "\u{E8FD}",
             ViewMode::GridSmall => "\u{F0E2}",
             ViewMode::GridLarge => "\u{E8A9}",
-            ViewMode::Tree => "\u{E8FD}",
+            ViewMode::Tree | ViewMode::Miller => "\u{E8FD}",
         };
         if icon_button(ui, g, t, pid(self.live, ID_VIEW), vb, glyph, true) {
             let m = self.mode.next();
@@ -2313,6 +2330,10 @@ impl View {
             return;
         }
         let main = self.paint_tree_pane(ui, g, shell, main, t);
+        if self.miller_showing() {
+            self.paint_miller_main(ui, g, shell, main, t);
+            return;
+        }
         if self.mode.is_grid() {
             self.paint_grid_main(ui, g, shell, main, t);
             return;
@@ -2572,9 +2593,9 @@ impl View {
             loading,
             failed: matches!(tab.load, Load::Failed(_)),
             shown: tab.shown(),
-            total: if tab.tree_on && tab.tree.is_some() { tab.shown() } else { tab.store.len() },
-            selected: tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.count(), |m| m.sel_count()),
-            selected_bytes: tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.total_size().min(u64::MAX as u128) as u64, |m| m.selected_total_size(Some(&tab.store))),
+            total: if (tab.tree_on && tab.tree.is_some()) || tab.miller_rows() { tab.shown() } else { tab.store.len() },
+            selected: if tab.miller_rows() { usize::from(tab.selected_paths(1).len() == 1) } else { tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.count(), |m| m.sel_count()) },
+            selected_bytes: if let Some(m) = tab.miller.as_ref().filter(|_| tab.miller_on) { m.info().map_or(0, |i| i.size) } else { tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.total_size().min(u64::MAX as u128) as u64, |m| m.selected_total_size(Some(&tab.store))) },
             free: self.side.volume_of(&tab.path),
             other_side: hints.then_some(side),
             batch: self.batch.is_some() && self.batch_slot == self.live,
@@ -4790,5 +4811,63 @@ mod tests {
         tree_wait(&mut r, "pane lists", |r| r.c.has_text("Folders") && r.v.tab().tree_pane.as_ref().is_some_and(|m| m.len() > 0));
         r.key(Key::Char('T'), Mods { ctrl: false, shift: true, alt: true });
         assert!(!r.v.prefs.tree.pane);
+    }
+
+    #[test]
+    fn miller_mode_drills_with_right_and_goes_back_with_left() {
+        let mut r = Rig::new("miller");
+        std::fs::write(r.dir.join("Docs").join("inner.txt"), b"x").unwrap();
+        let start = r.v.tab().path.clone();
+        r.key(Key::Char('5'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::Miller);
+        // folders first: Docs is selected, its column lists inner.txt next to the folder's own
+        tree_wait(&mut r, "inner.txt shows", |r| r.c.has_text("inner.txt"));
+        assert_eq!(r.v.tab().path, start, "selecting does not move the tab");
+        r.key(Key::Right, Mods::NONE);
+        tree_wait(&mut r, "the tab follows the active column", |r| r.v.tab().path.ends_with("Docs"));
+        assert_eq!(r.v.tab().shown(), 1, "inner.txt");
+        r.key(Key::Left, Mods::NONE);
+        tree_wait(&mut r, "back in the parent", |r| r.v.tab().path == start);
+        assert!(r.v.tab().store.is_empty(), "the tab holds no listing of its own");
+    }
+
+    #[test]
+    fn miller_mode_typing_is_type_ahead_not_the_filter() {
+        let mut r = Rig::new("millertype");
+        r.key(Key::Char('5'), Mods::CTRL_SHIFT);
+        tree_wait(&mut r, "columns list", |r| r.v.tab().miller.as_ref().is_some_and(|m| !m.loading() && m.active_shown() > 0));
+        r.ui.push(Event::Char('b'));
+        r.frame();
+        assert!(r.v.tab().filter.is_empty());
+        let name = r.v.tab().miller.as_ref().and_then(|m| m.selected_path()).unwrap_or_default();
+        assert!(name.ends_with("beta.txt"), "{name}");
+    }
+
+    #[test]
+    fn miller_mode_blocks_rename_and_leaving_it_lists_the_folder_again() {
+        let mut r = Rig::new("millerleave");
+        r.key(Key::Char('5'), Mods::CTRL_SHIFT);
+        tree_wait(&mut r, "columns list", |r| r.v.tab().miller.as_ref().is_some_and(|m| !m.loading() && m.active_shown() > 0));
+        r.key(Key::F(2), Mods::NONE);
+        assert!(r.v.rename.is_none());
+        assert!(r.v.ops.message.as_deref().is_some_and(|m| m.contains("Miller")));
+        r.key(Key::Char('1'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::Details);
+        tree_wait(&mut r, "details lists again", |r| r.v.tab().miller.is_none() && r.v.tab().shown() == 3);
+    }
+
+    #[test]
+    fn switching_the_extension_off_leaves_miller_mode() {
+        let mut r = Rig::new("milleroff");
+        r.key(Key::Char('5'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::Miller);
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::miller::EXT_MILLER, false), Ok(true));
+        assert_eq!(r.v.mode, ViewMode::Details);
+        assert!(r.v.tab().miller.is_none());
+        r.v.run_command(&mut r.ui, crate::commands::CMD_VIEW_MILLER);
+        assert_eq!(r.v.mode, ViewMode::Details, "the command is gone with the extension");
+        assert_eq!(r.v.set_extension_enabled(&mut r.ui, crate::miller::EXT_MILLER, true), Ok(true));
+        r.key(Key::Char('5'), Mods::CTRL_SHIFT);
+        assert_eq!(r.v.mode, ViewMode::Miller, "and back with it");
     }
 }
