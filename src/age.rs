@@ -274,6 +274,7 @@ fn threshold_text(cfg: &FileAge, b: usize, out: &mut String) {
 impl AgeUi {
     /// The key at the right of the status bar `r` of pane `slot`, and its legend.
     /// Click: switches the colours on if they are off, and opens or closes the legend.
+    #[allow(clippy::too_many_arguments)]
     pub fn status_key(&mut self, ui: &mut Ui, g: &mut dyn Canvas, t: &Theme, r: Rect, slot: u64, cfg: &FileAge, dark: bool, store: &EntryStore) -> Act {
         let kr = Rect::new(r.r() - 12.0 - KEY_W, r.y + 3.0, KEY_W, (r.h - 5.0).max(0.0));
         let id = ID_KEY.with(slot);

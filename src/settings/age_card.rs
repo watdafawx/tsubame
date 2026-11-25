@@ -48,7 +48,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
     let ext_on = crate::age::is_enabled();
     pg.section("File age colours");
-    let mut c = pg.card(10, 52.0);
+    let mut c = pg.card(9, 52.0);
     let fa = &mut cx.prefs.file_age;
     if let Some(v) = pg.toggle_row(&mut c, "Colour files by age", "Tints the Modified date (or the row) by how recently the file changed. Off by default.", fa.enabled, ext_on) {
         fa.enabled = v;
@@ -68,17 +68,21 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
     // palette cards
     let row = pg.next_row(&mut c);
-    pg.row_text(row, "Palette", "Every palette keeps the date at 4.5:1 or better. The last two also show pips.", 3.0 * 132.0 + 16.0, true);
+    // cards shrink in a narrow window so they never cover the label
+    let cw = ((row.w - 32.0 - 150.0 - 16.0) / 3.0).clamp(84.0, 124.0);
+    let step = cw + 8.0;
+    pg.row_text(row, "Palette", "Every palette keeps the date at 4.5:1 or better. The last two also show pips.", 3.0 * step + 16.0, true);
     let dark = t.row < 0x80_8080;
     for (i, (p, name)) in PALETTES.iter().enumerate() {
-        let r = Rect::new(row.r() - 16.0 - (3 - i) as f32 * 132.0 + 8.0, row.y + 6.0, 124.0, row.h - 12.0);
+        let r = Rect::new(row.r() - 16.0 - (3 - i) as f32 * step + 8.0, row.y + 6.0, cw, row.h - 12.0);
         let it = pg.ui.interact(ID_PAL.with(i as u64), r, Sense::click());
         let sel = fa.palette == *p;
         pg.g.round(r, t.radius_md, if sel { t.selected } else if it.hovered { t.hover } else { t.field });
         pg.g.round_stroke(r, t.radius_md, if sel { t.focus } else { t.border }, 1.0);
         pg.g.text(name, Rect::new(r.x + 8.0, r.y + 2.0, r.w - 12.0, 16.0), t.font_small().b(), t.text);
         for (k, col) in crate::age::palette_colours(*p, dark).iter().enumerate() {
-            pg.g.round(Rect::new(r.x + 8.0 + k as f32 * 21.0, r.y + 22.0, 18.0, 10.0), 2.0, *col);
+            let sw = ((cw - 16.0) / 5.0 - 3.0).clamp(10.0, 18.0);
+            pg.g.round(Rect::new(r.x + 8.0 + k as f32 * (sw + 3.0), r.y + 22.0, sw, 10.0), 2.0, *col);
         }
         if it.clicked == Some(tsubame_ui::Button::Left) && !sel {
             fa.palette = *p;

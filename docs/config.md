@@ -174,6 +174,14 @@ maximized = false
 | `preview.syntax_highlight` | `true` | 6-token syntax tinting in text/code preview (Settings > General, live) |
 | `preview.hex_auto_width` | `true` | auto-switch hex dump to 8 bytes/row in docked panes narrower than 420 px (Settings > General, live) |
 | `preview.direct_hex_binaries` | `true` | show hex directly for `.exe`/`.dll`/`.bin`/`.dat` instead of an Unsupported card (Settings > General, live) |
+| `file_age.enabled` | `false` | file-age colouring (built-in extension `tsubame.ext.file_age`); status-bar key and `view.age_colours` toggle it (live). Off = Details looks as before |
+| `file_age.style` | `"text"` | `text` (tints the Modified date), `chip` (tinted rect behind the date), `accent` (3 px bar on the row's left edge). Unknown value = `text` |
+| `file_age.palette` | `"heat"` | `heat`, `colour_blind` (blue/yellow safe) or `mono` (grey steps, bold for the newest). Unknown value = `heat` |
+| `file_age.pips` | `false` | four small bars before the date (4 = today, 0 = older). Always on for `colour_blind` and `mono` |
+| `file_age.today` | `"midnight"` | `midnight` = since local midnight (DST-safe), `last24h` = the last 24 hours |
+| `file_age.week_days` / `month_days` / `year_days` | `7` / `30` / `365` | bucket limits in days, inclusive (a file exactly on a limit is in the newer bucket). Must grow (`week < month < year`), 1–36500; an invalid set is ignored as a whole and the defaults apply (Settings > Extensions keeps the last valid values and says why) |
+| `file_age.folders` | `false` | tint folder dates too. A folder's date changes only with its direct children, so it can mislead |
+| `extensions.disabled` | empty | ids of built-in extensions switched off, e.g. `["tsubame.ext.file_age"]` removes the age key and command |
 | `sidebar.pinned` | empty | `[[sidebar.pinned]]` `name` + `path` (both strings; write the path in single quotes, `path = 'D:\work'`), shown in the Pinned section. Extra keys in an entry are ignored |
 | `sidebar.closed` | empty | sidebar sections folded by the user |
 | `updates.auto_check` | `true` | background check at start (<= 1 per 24 h). `false` = no network from the automatic path |
