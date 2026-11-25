@@ -433,6 +433,13 @@ pub struct MenuState {
     a11y_req: Vec<(usize, u64, A11yReq)>,
     /// top-left corner the menu opens at (it flips left / up from here)
     pub anchor: Pt,
+    /// Height the top level keeps at least (DIPs; 0: none). The app sets it
+    /// while rows are still to come, so the flip-up / flip-left choice is made
+    /// against the expected final size and the rows arriving fill the reserved
+    /// space instead of resizing or moving the menu.
+    pub reserve_h: f32,
+    /// Width the top level keeps at least (like [`MenuState::reserve_h`]).
+    pub reserve_w: f32,
     /// opened from the keyboard (Shift+F10, Menu key): accelerators are
     /// underlined and the first row has the focus
     pub keyboard: bool,
@@ -1598,6 +1605,7 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
         };
         st.levels[lv].hdr = hdr;
         let full_h = content + hdr + 2.0 * m.inset();
+        let w = if lv == 0 { w.max(st.reserve_w).min(m.max_w) } else { w };
         let last = st.levels[lv].rect;
         let frozen = lv == 0 && last.w > 0.0 && ((ui.mouse_in() && last.contains_pt(ui.mouse())) || st.filtering());
         let rect = if lv > 0 {
@@ -1608,9 +1616,9 @@ pub fn menu(ui: &mut Ui, c: &mut dyn Canvas, id: Id, st: &mut MenuState, src: &d
             // down, scroll past the edge
             let b = style.bounds.b() - m.keep;
             let x = last.x.min((style.bounds.r() - m.keep - w).max(style.bounds.x + m.keep));
-            Rect::new(x, last.y, w, full_h.min((b - last.y).max(m.row + hdr + 2.0 * m.inset())))
+            Rect::new(x, last.y, w, full_h.max(st.reserve_h).min((b - last.y).max(m.row + hdr + 2.0 * m.inset())))
         } else {
-            place(st.anchor, w, full_h, style.bounds, m.keep)
+            place(st.anchor, w, full_h.max(st.reserve_h), style.bounds, m.keep)
         };
         st.levels[lv].rect = rect;
         // keyboard-opened submenus focus their first row once it is there
