@@ -203,3 +203,34 @@ fn probe_ctx_batches() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+/// The startup pre-warm answers `Payload::Warm`, sends no menu batch, and the
+/// first real background menu after it arrives with warm timings.
+#[test]
+fn ctx_prewarm_answers_and_leaves_no_menu_behind() {
+    use tsubame_win::shell::ctxmodel::Part;
+    use tsubame_win::shell::{CtxHandle, CtxOpts};
+    let mut pool = Pool::new(2, 0, 0x8001);
+    let w = pool.submit(Request::CtxWarm { folder: r"C:\Windows".into(), icon_px: 16 });
+    let r = wait(&mut pool, 1, Duration::from_secs(30));
+    assert_eq!(r.len(), 1, "the warm job answers once");
+    assert_eq!(r[0].id, w.id);
+    assert!(matches!(r[0].payload, Payload::Warm));
+    let h = CtxHandle::new();
+    let t0 = Instant::now();
+    pool.submit(Request::ctx(vec![r"C:\Windows".into()], 5, CtxOpts { background: true, submenus: false, ..Default::default() }, &h));
+    let mut top_ms = None;
+    while t0.elapsed() < Duration::from_secs(20) && top_ms.is_none() {
+        for r in pool.drain() {
+            if let Payload::Ctx(b) = r.payload
+                && matches!(b.part, Part::Native(_))
+            {
+                top_ms = Some(t0.elapsed().as_millis());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let top_ms = top_ms.expect("the top level arrives");
+    eprintln!("first menu after prewarm: top level {top_ms} ms");
+    assert!(top_ms < 400, "warm first menu took {top_ms} ms");
+}

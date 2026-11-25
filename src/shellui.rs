@@ -628,7 +628,7 @@ impl ShellUi {
                 false
             }
             // own-drawn context menu (CM1): nothing submits it yet
-            Payload::Ctx(_) => false,
+            Payload::Ctx(_) | Payload::Warm => false,
         }
     }
 

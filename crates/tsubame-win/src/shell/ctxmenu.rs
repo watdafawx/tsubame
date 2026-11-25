@@ -319,6 +319,34 @@ pub(super) fn run(host: Option<HWND>, ui: HWND, paths: &[String], generation: u6
     last
 }
 
+/// Pre-warm (see [`super::Request::CtxWarm`]): builds the background menu of
+/// `folder` and the item menu of `folder` itself the way a click would
+/// (bind, `QueryContextMenu`, top-level walk, packaged scan), then releases
+/// them. The handler DLLs stay loaded in the process, so the first real menu
+/// pays warm costs. Nothing is sent to the UI.
+pub(super) fn warm(host: Option<HWND>, folder: &str, icon_px: u32) {
+    let paths = [folder.to_string()];
+    for background in [true, false] {
+        let opts = CtxOpts { background, submenus: false, icon_px, ..Default::default() };
+        let Ok(Built { cm, hmenu, host, .. }) = build(host, &paths, &opts, 0, false) else { continue };
+        menu::set_handlers(Some(&cm));
+        let px = icon_px.clamp(8, 64);
+        let mut ctx = Walk { cm: &cm, host, icon_px: px, drawn: 0, subs: Vec::new() };
+        let top = ctx.level(hmenu, false, 0);
+        if let Some(mut s) = packaged::Session::new(&paths, px) {
+            let classes: Vec<(packaged::ItemClass, String)> = if background { vec![(packaged::ItemClass::Background, String::new())] } else { paths.iter().map(|p| packaged::class_of(p)).collect() };
+            let skip: Vec<String> = top.iter().filter_map(|r| r.verb.as_deref()).filter(|v| v.starts_with('{')).map(packaged::norm_clsid).collect();
+            let _ = s.top(&classes, &skip, 0);
+        }
+        pump();
+        menu::set_handlers(None);
+        unsafe {
+            let _ = DestroyMenu(hmenu);
+        }
+        drop(cm);
+    }
+}
+
 fn pump() {
     unsafe {
         let mut msg = MSG::default();

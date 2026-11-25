@@ -247,6 +247,12 @@ Kept current as work lands: every measurement surprise, QA finding or improvemen
 | 2026-11-24 | Preview pane default shows 564 px wide at 200% scale (config default is 320 DIP, so about 640 px). | Check the DIP to px conversion |
 | 2026-11-25 | P4.F4 shipped: batch rename is the built-in extension `tsubame.ext.batch_rename` (switchable, default on, not required). Added `file.batch_rename` (id 72, no default key; F2 stays on `file.rename`, which delegates), a "Rename N items" context-menu row, and a new Settings > Extensions page (one switch per optional built-in; live via `set_extension_enabled`). Off: command and menu row gone, open bar closed, F2 on several items renames the focused item inline and the status bar says "Batch rename is switched off (Settings > Extensions). Renaming one item." Engine untouched. Rig (slot 1, debug): on, off and the settings page checked by screenshot; idle CPU 0.016 s over 15 s (one timer tick) | Done |
 
+## 9. Findings log (newest first)
+
+| Date | Finding | Action |
+|---|---|---|
+| 2026-11-25 | First right click showed a thin loading bar and the shell rows ~0.6 to 0.8 s late; later clicks were fine. Cause: cold `QueryContextMenu` (~1 s in `ctxmenu_dump`, 16 ms warm) loads every shell-extension DLL on first use; the own rows were never the problem (first paint ~2 ms, Paste state is a synchronous clipboard-format probe). Rig, release, first background menu: top level 561 ms / all rows 797 ms before, 122 / 125 ms after. | `Request::CtxWarm`: one worker job 400 ms after the first frame (below-normal priority, background + item menu of the open folder, packaged scan too) loads the handlers; the loading bar shows only after 200 ms (`ctxui::LOADING_SHOW_MS`). Off with `TSUBAME_CTX_WARM=0`; `TSUBAME_CTX_LOG=<file>` logs menu timings. Cold start unchanged (timer is armed after the first paint, one-shot, killed when it fires). Shots: `docs/shots/ctx-first-*-{before,after}.png`. |
+
 ## Sources
 
 - File Pilot roadmap and release notes: https://filepilot.tech/roadmap
