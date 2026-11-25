@@ -2572,7 +2572,7 @@ impl View {
             loading,
             failed: matches!(tab.load, Load::Failed(_)),
             shown: tab.shown(),
-            total: tab.store.len(),
+            total: if tab.tree_on && tab.tree.is_some() { tab.shown() } else { tab.store.len() },
             selected: tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.count(), |m| m.sel_count()),
             selected_bytes: tab.tree.as_ref().filter(|_| tab.tree_on).map_or_else(|| tab.sel.total_size().min(u64::MAX as u128) as u64, |m| m.selected_total_size(Some(&tab.store))),
             free: self.side.volume_of(&tab.path),
