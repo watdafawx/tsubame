@@ -769,11 +769,15 @@ mod tests {
         // A junction (or symlink) back to the parent must not be traversed.
         let link = tree.path().join("loop");
         let created = std::os::windows::fs::symlink_dir(tree.path(), &link).is_ok()
-            || std::process::Command::new("cmd")
-                .args(["/c", "mklink", "/J"])
-                .arg(&link)
-                .arg(tree.path())
-                .output()
+            || {
+                use std::os::windows::process::CommandExt;
+                std::process::Command::new("cmd")
+                    .args(["/c", "mklink", "/J"])
+                    .arg(&link)
+                    .arg(tree.path())
+                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                    .output()
+            }
                 .map(|o| o.status.success())
                 .unwrap_or(false);
         if !created {

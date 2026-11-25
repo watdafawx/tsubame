@@ -1165,14 +1165,16 @@ MM staged-and-modified.txt\0";
         }
 
         let tree = TempDir::new("real-repo");
-        let init = Command::new("git")
+        let mut init_cmd = Command::new("git");
+        init_cmd
             .arg("-C")
             .arg(tree.path())
             .args(["init", "-q"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stderr(Stdio::null());
+        hide_console(&mut init_cmd);
+        let init = init_cmd.status();
         if !init.map(|s| s.success()).unwrap_or(false) {
             return;
         }

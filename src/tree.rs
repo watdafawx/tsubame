@@ -1917,7 +1917,7 @@ mod tests {
         let d = temp("junction");
         std::fs::create_dir_all(d.join("real").join("x")).unwrap();
         let link = d.join("link");
-        let ok = std::process::Command::new("cmd").args(["/C", "mklink", "/J", link.to_str().unwrap(), d.join("real").to_str().unwrap()]).output().map(|o| o.status.success()).unwrap_or(false);
+        let ok = { use std::os::windows::process::CommandExt; std::process::Command::new("cmd").args(["/C", "mklink", "/J", link.to_str().unwrap(), d.join("real").to_str().unwrap()]).creation_flags(0x0800_0000).output() }.map(|o| o.status.success()).unwrap_or(false);
         if !ok {
             eprintln!("mklink /J unavailable: skipped");
             return;
@@ -1942,7 +1942,7 @@ mod tests {
         let d = temp("loop");
         std::fs::create_dir_all(d.join("sub")).unwrap();
         let link = d.join("sub").join("up");
-        let ok = std::process::Command::new("cmd").args(["/C", "mklink", "/J", link.to_str().unwrap(), d.to_str().unwrap()]).output().map(|o| o.status.success()).unwrap_or(false);
+        let ok = { use std::os::windows::process::CommandExt; std::process::Command::new("cmd").args(["/C", "mklink", "/J", link.to_str().unwrap(), d.to_str().unwrap()]).creation_flags(0x0800_0000).output() }.map(|o| o.status.success()).unwrap_or(false);
         if !ok {
             eprintln!("mklink /J unavailable: skipped");
             return;

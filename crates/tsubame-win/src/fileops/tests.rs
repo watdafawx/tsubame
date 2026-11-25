@@ -1065,10 +1065,12 @@ mod benchmarks {
             10_000.0 / elapsed.as_secs_f64()
         );
         let start = Instant::now();
+        use std::os::windows::process::CommandExt;
         let status = std::process::Command::new("robocopy")
             .arg(&source)
             .arg(root.join("robocopy"))
             .args(["/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:0", "/W:0"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .stdout(std::process::Stdio::null())
             .status()
             .unwrap();
