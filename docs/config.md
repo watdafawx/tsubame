@@ -117,7 +117,7 @@ path = 'D:\work'            # single quotes: backslashes are literal
 [updates]
 auto_check = true            # background check at most once per 24 h
 auto_install = false         # download in the background; it still installs only at restart
-channel = "stable"           # read; the updater is pinned to stable
+channel = "stable"           # "stable" (default) or "nightly" (test builds, see TESTERS.md)
 
 [keys]
 profile = "default"          # read, not used (no profiles yet)
@@ -193,7 +193,7 @@ maximized = false
 | `sidebar.closed` | empty | sidebar sections folded by the user |
 | `updates.auto_check` | `true` | background check at start (<= 1 per 24 h). `false` = no network from the automatic path |
 | `updates.auto_install` | `false` | download without a click; installing is still only at restart |
-| `updates.channel` | `"stable"` | read, not wired (updater pinned to stable) |
+| `updates.channel` | `"stable"` | `"stable"` or `"nightly"`; anything else means stable. Nightly also follows stable releases and never downgrades when switched back (`docs/updater.md`, "Channels"). Settings > Updates > Update channel; applied at once |
 | `keys.overrides` | empty | rebound shortcuts, applied live; Settings > Keys, format in `docs/u4-settings.md` |
 | `keys.profile` | `"default"` | read, not wired |
 | `context_menu.entries` | empty | what Tsubame adds to the native context menu (`docs/u4-settings.md`) |

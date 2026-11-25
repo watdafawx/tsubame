@@ -2,7 +2,8 @@
 
 Everything a release needs is in the repo: `tools\release.ps1` (build, package, sign), the
 `release` GitHub workflow (runs it on a tag and publishes), `installer\tsubame.iss` (Inno Setup).
-Design of the updater itself: `docs\updater.md`.
+Design of the updater itself: `docs\updater.md`. Automatic test builds for testers: "Nightly channel"
+below (`nightly` workflow); stable releases stay manual and owner-gated.
 
 ## What a release contains
 
@@ -76,7 +77,8 @@ signed with the old key, then switch signing to the new key. Remove the old key 
 
 ## Cutting a release (every time)
 
-1. Pick the version. `X.Y.Z` only (stable channel; no pre-release tags).
+1. Pick the version. `X.Y.Z` only (stable channel; no pre-release tags; nightlies are separate, see
+   "Nightly channel").
    ```powershell
    pwsh tools\release.ps1 -Bump patch -SkipInstaller -DevKey -OutDir dist\rehearsal   # optional dry run
    ```
@@ -189,6 +191,72 @@ matrix (Windows 11 24H2/25H2, Windows 10 22H2 if still supported, Server 2022) i
 Record the VM build, the SmartScreen wording, any Defender finding and the update result in the release
 notes or the release PR.
 
+## Nightly channel
+
+A rolling test build for testers who opt in (`[updates] channel = "nightly"`, or Settings > Updates >
+Update channel). Stable stays the default and is never affected. Design and the updater side:
+`docs\updater.md`, "Channels". Tester-facing page: `TESTERS.md`.
+
+**What publishes it.** `.github/workflows/nightly.yml`, triggered by a successful `ci` run of a **push to
+main** of this repository (`workflow_run`), or by hand (Actions > nightly > Run workflow, main only). Never
+for forks or pull requests (every job checks the event, the branch and the head repository; no
+`pull_request_target`). One nightly at a time (`concurrency: nightly`): a newer trigger waits for the
+running one and replaces any older queued one; a running publish is never cancelled halfway.
+
+**What it does.**
+1. `build` (windows, `contents: read`): checks out the exact commit CI tested, runs the updater tests, then
+   `tools\release.ps1 -Channel nightly -NightlyRun <run number> -Commit <sha>`: the same build as a stable
+   release (same pinned actions, plughost left out, Inno Setup, optional Authenticode secrets, unsigned
+   today). The `UPDATE_SIGNING_KEY` secret is visible only to that one step and passed by name. It then
+   checks the file list, `SHA256SUMS`, and the manifest signature against the key pinned in `keys.rs`, and
+   uploads the files as a 7-day workflow artifact.
+2. `publish` (ubuntu, the only job with `contents: write`; no checkout, runs no repository code): downloads
+   that artifact and updates the single pre-release tagged `nightly`: uploads the new zip and installer,
+   then `SHA256SUMS`, the signature and `tsubame-update-nightly.json`, then moves the `nightly` tag to the
+   commit and rewrites the title and notes (version, commit SHA, the commits since the previous nightly
+   from the compare API), marked `--prerelease --latest=false`. Only after that it deletes nightly zips and
+   installers older than the two previous builds, and checks the release is still a pre-release and not
+   "latest".
+
+Version: `X.Y.(Z+1)-nightly.N` from Cargo.toml's `X.Y.Z` and the run number N (`docs\updater.md`,
+"Channels"). Files on the `nightly` release:
+
+| File | What |
+|---|---|
+| `tsubame-X.Y.Z-nightly.N-win-x64.zip` | portable build (the current one plus up to two previous) |
+| `tsubame-X.Y.Z-nightly.N-x64-setup.exe` | installer (same) |
+| `tsubame-update-nightly.json` + `.sig` | nightly manifest, signed with the release key |
+| `SHA256SUMS` | of the current build |
+
+Locally: `pwsh tools\release.ps1 -Channel nightly -NightlyRun 5 -DevKey -SkipInstaller -OutDir dist\nightly-rehearsal`.
+Lint the workflows offline (YAML, pinned actions, permissions, secrets only in `env:`, no `${{ }}` of
+event data or step outputs inside `run:`): `python tools\lint-workflows.py` (needs PyYAML).
+
+### First-time setup for the nightly channel (owner, once)
+
+1. Merge the branch to main. `workflow_run` only fires for a workflow file that is on the default branch.
+2. Settings > Actions > General > Workflow permissions: either setting works ("Read repository contents" is
+   enough, the publish job asks for `contents: write` itself), but "Allow GitHub Actions to create and
+   approve pull requests" is not needed. If an organization policy caps workflow permissions at read-only,
+   the publish job fails; allow write for this repository.
+3. `UPDATE_SIGNING_KEY` already exists for stable releases; nothing new. Do not add the secret to an
+   environment with required reviewers unless you want to approve every nightly (then add
+   `environment: <name>` to the `build` job).
+4. Tag rules: if a ruleset or tag protection covers `*` or `nightly`, allow GitHub Actions to create, update
+   and force-move the `nightly` tag (it is moved on every run). A rule on `v*` is fine.
+5. Start the first run by hand: Actions > nightly > Run workflow, branch main. It creates the `nightly`
+   tag and the pre-release. Check on the Releases page that it is marked **Pre-release** and that the
+   newest `vX.Y.Z` is still **Latest**.
+6. Never rename or move `nightly.yml`: the run number (and so the nightly version) restarts at 1 for a new
+   workflow file, and testers would not be offered builds with a lower number until it catches up. If it
+   ever has to happen, bump Cargo.toml's patch version at the same time so the new nightlies sort above the
+   old ones.
+7. Optional: point testers at `TESTERS.md`.
+
+To pause nightlies: Actions > nightly > ... > Disable workflow. To withdraw a bad nightly: delete its zip
+and installer from the `nightly` release, or re-run the workflow for a good commit (testers already on the
+bad build stay there until a newer nightly or stable appears; the updater never downgrades).
+
 ## Testing an update end to end
 
 ### Without GitHub (any time, no network, nothing GUI)
@@ -199,7 +267,9 @@ pwsh tools\release-e2e.ps1
 Builds the test CLI and a fake GitHub (`tsubame-update-testserver`, feature `test-server`), builds two
 releases with the real `release.ps1`, then runs `check`, `download`, `apply`, `rollback` against it, and the
 refusals: tampered zip, manifest edited after signing, manifest signed by another key, signing with an
-unpinned key. Ends with `e2e: ALL CHECKS PASSED`. The "app" is a stand-in file, so nothing is executed.
+unpinned key. It also builds a nightly next to the stable one and checks the channel rules (stable never
+sees it, nightly gets it from its own manifest, a nightly manifest posing as stable is refused, switching
+back to stable does not downgrade). Ends with `e2e: ALL CHECKS PASSED`. The "app" is a stand-in file, so nothing is executed.
 
 Unit and integration tests (including a fake release over real WinHTTP and a watchdog test that starts a
 real process and rolls back when it exits early): `cargo test -p tsubame-update`.
@@ -241,3 +311,4 @@ tsubame-plughost.exe> /DOutDir=<out> installer\tsubame.iss`; stand-in exe files 
 - [ ] Add repo secret `UPDATE_SIGNING_KEY`.
 - [ ] (later) Buy or apply for a signing certificate, add secrets, pin the signer.
 - [ ] Wire the updater into the app (`docs\updater.md`, "Wiring").
+- [ ] Nightly channel: the one-time steps in "First-time setup for the nightly channel".
