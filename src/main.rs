@@ -85,6 +85,7 @@ mod stress;
 mod tab;
 mod tabs;
 mod tags;
+mod tree;
 mod timing;
 mod updates;
 mod view;

@@ -164,6 +164,18 @@ pub struct Tab {
     /// P4.F6: (file id, name hash) per `EntryId`, kept only while tags want
     /// them (`tags::want_fids`); empty otherwise
     pub tag_fids: Vec<(u128, u32)>,
+    /// P4.F6 Tree rows: the expanded folders of this tab (`tsubame.ext.tree`)
+    pub tree: Option<Box<crate::tree::TreeModel>>,
+    /// the view shows this tab in Tree rows mode (rows come from `tree`)
+    pub tree_on: bool,
+    /// the root listing changed since the tree last flattened
+    pub tree_dirty: bool,
+    /// expanded folders (and the selected path) to restore when the model is built
+    pub tree_seed: (Vec<String>, Vec<String>),
+    /// P4.F6 Tree pane: folders only, its own root
+    pub tree_pane: Option<Box<crate::tree::TreeModel>>,
+    /// scroll and cursor of the Tree pane's list
+    pub pane_list: ListState,
 }
 
 /// What `pump` found.
@@ -181,7 +193,7 @@ pub struct Pumped {
 /// UI thread from painting while a big folder streams in.
 pub const PUMP_BUDGET: Duration = Duration::from_millis(6);
 
-fn flags_of(attrs: u32, is_dir: bool, reparse: bool) -> u16 {
+pub(crate) fn flags_of(attrs: u32, is_dir: bool, reparse: bool) -> u16 {
     let mut f = 0;
     if is_dir {
         f |= FOLDER;
@@ -216,6 +228,7 @@ impl Tab {
             return;
         }
         self.store.set_hide(mask);
+        self.tree_dirty = true;
         self.sel.clear();
         self.reset_view();
     }
@@ -256,6 +269,12 @@ impl Tab {
             wake: None,
             want: None,
             tag_fids: Vec::new(),
+            tree: None,
+            tree_on: false,
+            tree_dirty: true,
+            tree_seed: (Vec::new(), Vec::new()),
+            tree_pane: None,
+            pane_list: ListState::new(row_h),
         }
     }
 
@@ -311,11 +330,22 @@ impl Tab {
         self.load == Load::Loading
     }
 
+    /// The wake-up the listing workers use (set by `start`).
+    pub fn wake_handle(&self) -> Option<Wake> {
+        self.wake.clone()
+    }
+
     /// Lists `path` (the history is the caller's business): drops the old
     /// listing, cancels its worker, starts a new one. Stale batches of the
     /// old one can never reach the store: the channel is replaced and every
     /// message carries its generation.
     pub fn start(&mut self, path: &str, wake: Wake) {
+        // the same folder again (refresh): its expanded folders and selection come back
+        if let Some(m) = self.tree.take()
+            && path.eq_ignore_ascii_case(&self.path)
+        {
+            self.tree_seed = (m.expanded_paths_in(Some(&self.store)), m.selected_paths(64, Some(&self.store)));
+        }
         self.enumerator = None; // cancels and detaches
         self.rx = None;
         self.archive_rx = None;
@@ -332,6 +362,8 @@ impl Tab {
         self.synthetic = false;
         self.store.clear();
         self.tag_fids = Vec::new();
+        self.tree = None;
+        self.tree_dirty = true;
         self.store.sort(self.sort);
         // batches append; only the first screens stay sorted until Done
         // sorts everything once (no O(n) merge per batch)
@@ -428,6 +460,7 @@ impl Tab {
             }
         }
         out.changed |= self.pump_watch();
+        self.tree_dirty |= out.changed;
         out
     }
 
@@ -441,6 +474,9 @@ impl Tab {
             return;
         }
         self.visible = visible;
+        if let Some(m) = self.tree.as_mut() {
+            m.set_visible(visible);
+        }
         if self.synthetic || self.pending || self.is_archive() {
             return;
         }
@@ -778,6 +814,7 @@ impl Tab {
     pub fn sort_by(&mut self, col: tsubame_core::Column) {
         self.sort = if self.sort.column == col { Sort { descending: !self.sort.descending, ..self.sort } } else { Sort { column: col, descending: false, folders_first: true } };
         self.store.sort(self.sort);
+        self.tree_dirty = true;
         self.list.scroll = 0.0;
         self.grid.scroll = 0.0;
     }
@@ -809,17 +846,24 @@ impl Tab {
         let mode = if text.contains(['*', '?']) { FilterMode::Glob } else { FilterMode::Substring };
         self.filter = text.to_string();
         self.store.filter(text, mode);
+        self.tree_dirty = true;
         self.reset_view();
         self.sel.clear();
     }
 
     /// Entries shown (after the filter).
     pub fn shown(&self) -> usize {
+        if self.tree_on && let Some(m) = &self.tree {
+            return m.len();
+        }
         self.store.view().len()
     }
 
     /// Full path of the entry at view position `pos`, and whether it is a folder.
     pub fn entry_at(&self, pos: usize) -> Option<(String, bool)> {
+        if self.tree_on && let Some(m) = &self.tree {
+            return m.path_of(pos, Some(&self.store));
+        }
         let id = self.store.at(pos)?;
         let name = String::from_utf16_lossy(self.store.name(id)?);
         let dir = self.store.record(id)?.flags & FOLDER != 0;
@@ -828,6 +872,9 @@ impl Tab {
 
     /// Paths of up to `n` selected entries in view order (for the shell menu).
     pub fn selected_paths(&self, n: usize) -> Vec<String> {
+        if self.tree_on && let Some(m) = &self.tree {
+            return m.selected_paths(n, Some(&self.store));
+        }
         self.store.view().iter().enumerate().filter(|(_, id)| self.sel.contains(**id)).take(n).filter_map(|(pos, _)| self.entry_at(pos).map(|e| e.0)).collect()
     }
 

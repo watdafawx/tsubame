@@ -127,7 +127,7 @@ lossy_enum! {
 
 lossy_enum! {
     /// How the listing is drawn. The grid modes arrive with the thumbnail view.
-    ViewMode { Details => "details", GridSmall => "grid-small", GridLarge => "grid-large" }
+    ViewMode { Details => "details", GridSmall => "grid-small", GridLarge => "grid-large", Tree => "tree" }
     default Details
     , "grid" => GridSmall, "thumbnails" => GridLarge, "list" => Details
 }
@@ -308,6 +308,55 @@ pub struct TagsConfig {
 impl Default for TagsConfig {
     fn default() -> Self {
         TagsConfig { shapes: true, column: false }
+    }
+}
+
+/// `[tree]`: the tree view (P4.F6, `tsubame.ext.tree`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TreeConfig {
+    /// Recursive expand (`*`, `Shift+Right`) stops after this many folders.
+    #[serde(default = "default_tree_expand_cap")]
+    pub expand_cap: u32,
+    /// An expanded folder shows at most this many children.
+    #[serde(default = "default_tree_child_cap")]
+    pub child_cap: u32,
+    /// The folders-only Tree pane left of the list is open (`Alt+Shift+T`).
+    pub pane: bool,
+    /// Width of the Tree pane in DIPs (160 to 480).
+    #[serde(default = "default_tree_pane_width")]
+    pub pane_width: u32,
+}
+
+impl TreeConfig {
+    pub const MAX_EXPAND_CAP: u32 = 5_000;
+    pub const MAX_CHILD_CAP: u32 = 50_000;
+    pub const MIN_PANE_WIDTH: u32 = 160;
+    pub const MAX_PANE_WIDTH: u32 = 480;
+    /// Caps clamped to what the view can hold (a bad value never breaks a load).
+    pub fn sanitized(&self) -> TreeConfig {
+        TreeConfig {
+            expand_cap: self.expand_cap.clamp(1, Self::MAX_EXPAND_CAP),
+            child_cap: self.child_cap.clamp(100, Self::MAX_CHILD_CAP),
+            pane: self.pane,
+            pane_width: self.pane_width.clamp(Self::MIN_PANE_WIDTH, Self::MAX_PANE_WIDTH),
+        }
+    }
+}
+
+fn default_tree_expand_cap() -> u32 {
+    500
+}
+fn default_tree_child_cap() -> u32 {
+    5_000
+}
+fn default_tree_pane_width() -> u32 {
+    260
+}
+
+impl Default for TreeConfig {
+    fn default() -> Self {
+        TreeConfig { expand_cap: 500, child_cap: 5_000, pane: false, pane_width: 260 }
     }
 }
 
@@ -530,6 +579,7 @@ pub struct Config {
     pub panes: Panes,
     pub preview: PreviewConfig,
     pub tags: TagsConfig,
+    pub tree: TreeConfig,
     pub sidebar: Sidebar,
     pub updates: Updates,
     pub keys: Keys,
@@ -549,6 +599,7 @@ impl Default for Config {
             panes: Panes::default(),
             preview: PreviewConfig::default(),
             tags: TagsConfig::default(),
+            tree: TreeConfig::default(),
             sidebar: Sidebar::default(),
             updates: Updates::default(),
             keys: Keys::default(),
@@ -1054,6 +1105,22 @@ pub fn timed_load_config(path: &Path) -> (Loaded<ConfigFile>, f64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tree_config_defaults_and_clamps() {
+        let d = TreeConfig::default();
+        assert_eq!((d.expand_cap, d.child_cap, d.pane), (500, 5000, false));
+        let c: Config = toml::from_str("[tree]
+expand_cap = 0
+child_cap = 9999999
+pane_width = 5
+").unwrap();
+        let s = c.tree.sanitized();
+        assert_eq!((s.expand_cap, s.child_cap, s.pane_width), (1, 50_000, 160));
+        assert_eq!(ViewMode::Tree, toml::from_str::<Config>("[appearance]
+view_mode = \"tree\"
+").unwrap().appearance.view_mode);
+    }
+
     use super::*;
 
     fn temp_dir(tag: &str) -> PathBuf {

@@ -185,6 +185,10 @@ maximized = false
 | `file_age.style` | `"text"` | `text` (tints the Modified date), `chip` (tinted rect behind the date), `accent` (3 px bar on the row's left edge). Unknown value = `text` |
 | `file_age.palette` | `"heat"` | `heat`, `colour_blind` (blue/yellow safe) or `mono` (grey steps, bold for the newest). Unknown value = `heat` |
 | `file_age.pips` | `false` | four small bars before the date (4 = today, 0 = older). Always on for `colour_blind` and `mono` |
+| `tree.expand_cap` | `500` | Tree rows: recursive expand (`Shift+Right`, `*`) stops after this many folders (1 to 5,000); the status bar says so. Never follows junctions or symlinks |
+| `tree.child_cap` | `5000` | Tree rows: children listed per expanded folder, then a "Showing first 5,000 of N" row (100 to 50,000) |
+| `tree.pane` | `false` | folders-only Tree pane left of the list (`Shift+Alt+T`, command `pane.tree`; a 248 px drawer below 560 px) |
+| `tree.pane_width` | `260` | Tree pane width in px (160 to 480) |
 | `file_age.today` | `"midnight"` | `midnight` = since local midnight (DST-safe), `last24h` = the last 24 hours |
 | `file_age.week_days` / `month_days` / `year_days` | `7` / `30` / `365` | bucket limits in days, inclusive (a file exactly on a limit is in the newer bucket). Must grow (`week < month < year`), 1–36500; an invalid set is ignored as a whole and the defaults apply (Settings > Extensions keeps the last valid values and says why) |
 | `file_age.folders` | `false` | tint folder dates too. A folder's date changes only with its direct children, so it can mislead |
@@ -242,6 +246,7 @@ sort_descending = false
 scroll_first_row = 0        # index of the first visible row
 scroll_first_name = "a.txt" # optional, informational
 selected = ["a.txt"]        # optional, entry names, at most 500
+expanded = ["C:\Users\me\Documents\src"]  # optional, Tree rows: expanded folders (full paths, at most 256)
 
 [[panes.tabs]]
 path = "D:\\Downloads"
