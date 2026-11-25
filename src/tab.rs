@@ -161,6 +161,9 @@ pub struct Tab {
     wake: Option<Wake>,
     /// names to select once they show up (after a copy / move / rename)
     want: Option<(Vec<String>, Instant)>,
+    /// P4.F6: (file id, name hash) per `EntryId`, kept only while tags want
+    /// them (`tags::want_fids`); empty otherwise
+    pub tag_fids: Vec<(u128, u32)>,
 }
 
 /// What `pump` found.
@@ -252,6 +255,7 @@ impl Tab {
             watch_changed: false,
             wake: None,
             want: None,
+            tag_fids: Vec::new(),
         }
     }
 
@@ -297,6 +301,7 @@ impl Tab {
         self.title_s = Self::make_title(label);
         self.delivered = store.len();
         self.store = store;
+        self.tag_fids = Vec::new();
         self.sel = Selection::new();
         self.load = Load::Done;
         self.synthetic = true;
@@ -326,6 +331,7 @@ impl Tab {
         self.title_s = Self::make_title(path);
         self.synthetic = false;
         self.store.clear();
+        self.tag_fids = Vec::new();
         self.store.sort(self.sort);
         // batches append; only the first screens stay sorted until Done
         // sorts everything once (no O(n) merge per batch)
@@ -625,6 +631,7 @@ impl Tab {
         let started = Instant::now();
         let inputs: Vec<EntryInput> =
             b.iter().map(|(name, e)| EntryInput { name, size: e.size, modified: e.mtime as i64, flags: flags_of(e.attrs, e.is_dir(), e.is_reparse_point()) }).collect();
+        let first_id = self.store.id_bound();
         // generation is the store's own (bumped by `start`): only this tab's
         // current listing ever gets here, so it always matches
         if let Err(e) = self.store.push_batch(self.store.generation(), &inputs) {
@@ -633,6 +640,11 @@ impl Tab {
             self.enumerator = None;
             self.rx = None;
             return;
+        }
+        if crate::tags::want_fids() {
+            // ids are handed out in batch order; the name hash catches a mismatch
+            self.tag_fids.resize(first_id, (0, 0));
+            self.tag_fids.extend(b.iter().map(|(name, e)| (e.file_id, crate::tags::ui::name_hash16(name))));
         }
         self.timing.store_cpu += started.elapsed();
         self.delivered += b.len();

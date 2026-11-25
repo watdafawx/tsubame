@@ -19,6 +19,13 @@ Portable mode is on when either marker file exists next to the exe:
 `tsubame.portable` (empty; the app's own marker) or `portable.txt` (the
 updater's marker, `docs/updater.md`), or with `--portable`.
 
+Tags (P4.F6) live in `tags.db` next to `config.toml` (so `--config` and
+portable mode move them too), with `tags.db.bak` (last clean state),
+`tags.db.lock` (only one process writes; a second one shows tags read-only)
+and, after damage, `tags.db.bad` kept aside. Export and import in
+Settings > Tags use `tags-export.json` in the same folder. Files themselves are
+never touched: no sidecar files, no NTFS streams.
+
 Nothing is written until something changed. The first start with no file
 writes nothing; the file is created on the first change (theme, density,
 zebra, view mode, sidebar) or when the window closes with a geometry worth
@@ -192,6 +199,8 @@ maximized = false
 | `context_menu.entries` | empty | what Tsubame adds to the native context menu (`docs/u4-settings.md`) |
 | `context_menu.items` | empty | hide / rename of the menu's other rows, keyed by `key`, never by label: `windows.verb:<verb>` (classic item with a canonical verb), `windows.label:<label>` (classic item without one), `windows.pkg:<package family>/{clsid}` (packaged Win11 item), `app:<action>` (Tsubame rows such as Copy name). Learned from real menus (at most 400; the oldest unedited ones go first); Settings > Context menu and the menu's own edit menu change them. A wrong-shaped item is dropped alone. Old `source = "windows"` entries in `entries` (and CM7's `windows.verb:{clsid}` keys) are still honoured, read only |
 | `context_menu.groups` | empty | group order, top to bottom: `tsubame`, `windows`, `apps`, `custom`; duplicates are dropped, missing ones follow in that order, an unknown value is dropped alone |
+| `tags.shapes` | `true` | each tag colour also has its own shape (circle, square, triangle ...); `false` draws plain dots |
+| `tags.column` | `false` | the Details Tags column (168 px, two chips then +N); tags after the name and in Grid show either way |
 | `advanced.diagnostics` | `false` | persists; no log writer behind it yet |
 | `window.*` | `0,0,1120,720,false` | geometry on a plain start |
 

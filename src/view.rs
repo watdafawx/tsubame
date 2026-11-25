@@ -34,6 +34,8 @@ use tsubame_win::enumerate::Wake;
 mod edit;
 #[path = "view_u4.rs"]
 mod u4;
+#[path = "view_tags.rs"]
+mod tagsv;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
 use crate::ops::Ops;
@@ -135,6 +137,8 @@ pub fn pid(slot: usize, base: Id) -> Id {
 pub enum DropDest {
     Folder(String),
     Pin(usize),
+    /// P4.F6: a sidebar tag (the files get it; nothing moves)
+    Tag(u8),
 }
 
 /// The per-pane state that is swapped in and out of the view: the pane that
@@ -347,6 +351,8 @@ pub struct View {
     pub(crate) preview: crate::preview_ui::PreviewState,
     /// text produced by a background command (e.g. SHA-256) to copy on the next frame
     copy_clipboard: Option<String>,
+    /// P4.F6: tags (row cache, picker, filter results; the store is on a worker)
+    pub(crate) tags: crate::tags::ui::TagsUi,
 }
 
 impl View {
@@ -441,6 +447,7 @@ impl View {
             search: None,
             preview: crate::preview_ui::PreviewState::default(),
             copy_clipboard: None,
+            tags: crate::tags::ui::TagsUi::new(),
         }
     }
 
@@ -619,6 +626,7 @@ impl View {
     }
 
     fn after_nav(&mut self) {
+        self.tags_after_nav();
         self.close_edits();
         self.meta.cancel_folder_sizes();
         self.meta.reset_git();
@@ -858,6 +866,7 @@ impl View {
             changed |= s.pump();
         }
         changed |= self.preview.pump();
+        changed |= self.tags.pump();
         if self.tab_mut().take_watch_changed() {
             let p = self.tab().path.clone();
             self.meta.invalidate_git(&p);
@@ -976,11 +985,15 @@ impl View {
 
     /// What the sidebar asked for.
     fn side_act(&mut self, ui: &mut Ui, act: Option<Act>) {
+        if let Some(a) = &act {
+            self.tags_side_act(ui, a);
+        }
         match act {
             Some(Act::Go(p)) => self.go(&p),
             Some(Act::NewTab(p)) => self.open_in_new_tab(&p),
             Some(Act::OtherPane(p)) => self.open_in_other_pane(&p),
             Some(Act::DropOn(p)) => self.drop_selection_on(&p),
+            Some(Act::TagFilter(_) | Act::NewTag) => {}
             Some(Act::Layout) => {
                 if let Some(w) = self.side.want_width.take() {
                     self.sidebar_width = w;
@@ -1027,7 +1040,7 @@ impl View {
     /// Picks up a registry change (an extension switched on or off) for the columns.
     fn sync_cols(&mut self) {
         let g = crate::ext::generation();
-        if self.colset.generation != g {
+        if self.colset.generation != g || self.colset.tags != (crate::tags::column_shown() && crate::tags::enabled()) {
             self.colset = ColSet::current();
         }
     }
@@ -1051,6 +1064,7 @@ impl View {
             self.preview.quick_look = false;
             self.preview.release_worker();
         }
+        self.sync_tags();
     }
 
     /// Switches extension `id` on or off, live, and records it in the config
@@ -1194,6 +1208,7 @@ impl View {
             CMD_GLOBAL_SEARCH => self.toggle_global_search(ui),
             CMD_PREVIEW_TOGGLE => self.toggle_preview_pane(ui),
             CMD_PREVIEW_QUICK_LOOK => self.toggle_quick_look(ui),
+            CMD_TAGS_PICK => self.open_tags_picker(ui, None, false),
             _ => {}
         }
         ui.request_repaint();
@@ -1752,6 +1767,7 @@ impl View {
             ui.set_focus(Some(pid(self.live, ID_LIST)));
         }
         let t = ui.theme;
+        self.tags_frame();
         if self.other.is_some() {
             self.paint_dual(ui, g, shell, (w, h), &t);
         } else if self.tab().settings {
@@ -1802,6 +1818,7 @@ impl View {
         self.paint_batch_preview(g, &t, (w, h));
         self.paint_palette(ui, g, (w, h));
         self.paint_search(ui, g, (w, h));
+        self.paint_tags_picker(ui, g, (w, h));
         self.paint_quick_look(ui, g, (w, h));
         // the context menu is on top of everything
         if let Some(c) = self.ctx.as_mut() {
@@ -1825,7 +1842,7 @@ impl View {
             again = true;
         }
         // typing in the list starts the filter
-        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() || self.search.is_some() || self.preview.quick_look_open() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
+        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() || self.search.is_some() || self.tags.picker_open() || self.preview.quick_look_open() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
         for c in typed {
             if c.is_control() || (c == ' ' && self.filter.text.is_empty()) {
                 continue;
@@ -2144,6 +2161,9 @@ impl View {
             }
             return;
         }
+        if self.paint_tag_crumbs(ui, g, bar, t) {
+            return;
+        }
         // breadcrumb mode
         g.round(bar, t.radius_md, t.field);
         g.round_stroke(bar, t.radius_md, t.border, 1.0);
@@ -2249,6 +2269,10 @@ impl View {
     fn paint_main(&mut self, ui: &mut Ui, g: &mut dyn Canvas, shell: &mut ShellUi, main: Rect, t: &Theme) {
         // a new folder / another tab: pending shell work and thumbnails go
         shell.sync_generation(self.shell_key());
+        let main = self.paint_tags_banner(ui, g, main, t);
+        if self.paint_tag_results(ui, g, main, t) {
+            return;
+        }
         if self.mode.is_grid() {
             self.paint_grid_main(ui, g, shell, main, t);
             return;
@@ -2306,19 +2330,24 @@ impl View {
         let tab = &mut self.tabs.items[self.tabs.active];
         tab.list.row_h = t.height_list_row;
         let (lr, activated) = {
-            let Tab { store, sel, list: lstate, band_base, band_mode, path, synthetic, .. } = &mut *tab;
+            let Tab { store, sel, list: lstate, band_base, band_mode, path, synthetic, tag_fids, .. } = &mut *tab;
             let in_archive = crate::archive_ui::is_archive_path(path);
             let root = if *synthetic || in_archive { None } else { Some(path.as_str()) };
+            let tags = root.and_then(|p| self.tags.rows(p, tag_fids));
             let git_map = (!*synthetic && !in_archive && spans[Col::Git.slot()].1 > 0.0 && self.meta.git_map.matches_folder(path))
                 .then_some(&self.meta.git_map);
             let folder_sizes = (!*synthetic && !in_archive && spans[Col::Size.slot()].1 > 0.0 && self.meta.size_map.matches_folder(path))
                 .then_some(&self.meta.size_map);
-            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, age, base: band_base, band_mode };
+            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, age, base: band_base, band_mode, tags };
             let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
             (lr, lr.activated)
         };
+        let scroll = self.tabs.items[self.tabs.active].list.scroll;
+        self.tags.note_scroll(scroll);
+        self.tags.flush();
+        self.paint_tags_progress(g, list_r, t);
         self.last_range = lr.range;
         if lr.pressed && self.other.is_some() && self.live != self.active {
             self.focus_pane = Some(self.live);
@@ -2393,13 +2422,18 @@ impl View {
         shell.set_grid(GridPic { box_dip, icon_dip, dpi }, cols * rows_vis);
         let label_font = t.font().c();
         let (gr, activated) = {
-            let Tab { store, sel, grid: gstate, band_base, band_mode, path, synthetic, .. } = &mut *tab;
+            let Tab { store, sel, grid: gstate, band_base, band_mode, path, synthetic, tag_fids, .. } = &mut *tab;
             let root = if *synthetic || crate::archive_ui::is_archive_path(path) { None } else { Some(path.as_str()) };
-            let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, band_mode, labels: &mut self.labels, box_dip, font: label_font };
+            let tags = root.and_then(|p| self.tags.rows(p, tag_fids));
+            let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, band_mode, labels: &mut self.labels, box_dip, font: label_font, tags };
             let gr = grid(ui, g, pid(self.live, ID_LIST), grid_r, gstate, &mut tiles);
             tiles.prefetch(gstate);
             (gr, gr.activated)
         };
+        let scroll = self.tabs.items[self.tabs.active].grid.scroll;
+        self.tags.note_scroll(scroll);
+        self.tags.flush();
+        self.paint_tags_progress(g, grid_r, t);
         self.last_range = gr.range;
         if gr.pressed && self.other.is_some() && self.live != self.active {
             self.focus_pane = Some(self.live);
@@ -2502,6 +2536,7 @@ impl View {
         };
         statusbar::paint(g, t, r, &info, &mut s);
         self.text = s;
+        self.paint_tags_status(g, r, t);
         if age_key {
             let tab = &self.tabs.items[self.tabs.active];
             let act = self.age.status_key(ui, g, t, r, self.live as u64, &self.prefs.file_age, self.dark, &tab.store);
@@ -2631,6 +2666,8 @@ struct Rows<'a> {
     /// selection snapshot before a Ctrl/Shift marquee started
     base: &'a mut Vec<EntryId>,
     band_mode: &'a mut BandMode,
+    /// P4.F6 tags of the rows (`None`: tags off or no tagged item anywhere)
+    tags: Option<crate::tags::ui::RowTags<'a>>,
 }
 
 /// Shared marquee selection begin/update/end logic for both Details and Grid views.
@@ -2756,7 +2793,34 @@ impl ListSource for Rows<'_> {
             }
         }
         let name_c = if row.hidden { t.text_dim } else { crate::packs::name_color(row.name_str(), row.is_dir()).unwrap_or(t.text) };
-        g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, (sp[0].1 - 32.0 - 8.0).max(0.0), r.h), t.font(), name_c);
+        let name_w = (sp[0].1 - 32.0 - 8.0).max(0.0);
+        let tmask = self.tags.as_mut().and_then(|tg| tg.mask(id, row.name_str()));
+        match (&mut self.tags, tmask) {
+            (Some(tg), Some(m)) if m != 0 => {
+                // the name, then up to 3 marks (+N) right after it
+                let font = t.font();
+                let defs = tg.defs().to_vec();
+                let cw = crate::tags::marks::cluster_w(g, t, &defs, m, 3, &mut tg.buf);
+                let nw = g.measure(row.name_str(), font).min((name_w - cw - crate::tags::marks::LEAD).max(24.0));
+                g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, nw + 1.0, r.h), font, name_c);
+                let shapes = tg.shapes();
+                crate::tags::marks::draw_cluster(g, t, &defs, m, shapes, x + sp[0].0 + 32.0 + nw + crate::tags::marks::LEAD, r.y + r.h / 2.0, 3, crate::tags::marks::MARK, crate::tags::marks::GAP, &mut tg.buf);
+                if sp[5].1 > 0.0 {
+                    crate::tags::marks::draw_chips(g, t, &defs, m, shapes, Rect::new(x + sp[5].0 + 8.0, r.y, (sp[5].1 - 12.0).max(0.0), r.h), 2, &mut tg.buf);
+                }
+            }
+            (Some(tg), None) if tg.reading() => {
+                // not read yet while the reconcile runs: a dashed mark, "reading…"
+                let font = t.font();
+                let nw = g.measure(row.name_str(), font).min((name_w - 14.0).max(24.0));
+                g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, nw + 1.0, r.h), font, name_c);
+                crate::tags::marks::draw(g, crate::tags::marks::Mark::Pending, t.text_dim, x + sp[0].0 + 32.0 + nw + crate::tags::marks::LEAD + 5.0, r.y + r.h / 2.0, crate::tags::marks::MARK);
+                if sp[5].1 > 0.0 {
+                    g.text("reading\u{2026}", Rect::new(x + sp[5].0 + 8.0, r.y, (sp[5].1 - 12.0).max(0.0), r.h), t.font_small(), t.text_disabled);
+                }
+            }
+            _ => g.text(row.name_str(), Rect::new(x + sp[0].0 + 32.0, r.y, name_w, r.h), t.font(), name_c),
+        }
         // a column not shown has no width: nothing to format or draw
         if sp[1].1 > 0.0 {
             data::fmt_date(row.mtime, self.text);
@@ -2823,6 +2887,8 @@ struct Tiles<'a> {
     labels: &'a mut [(u64, u32)],
     box_dip: f32,
     font: Font,
+    /// P4.F6 tags of the cells
+    tags: Option<crate::tags::ui::RowTags<'a>>,
 }
 
 impl Tiles<'_> {
@@ -2887,9 +2953,24 @@ impl GridSource for Tiles<'_> {
         let color = if row.hidden { t.text_dim } else { crate::packs::name_color(name, row.is_dir()).unwrap_or(t.text) };
         let y = boxr.b() + 6.0;
         let (l1, l2) = name.split_at(n);
-        c.text(l1, Rect::new(r.x + 4.0, y, lw, LABEL_LINE), self.font, color);
-        if !l2.is_empty() {
-            c.text(l2, Rect::new(r.x + 4.0, y + LABEL_LINE, lw, LABEL_LINE), self.font, color);
+        let tmask = self.tags.as_mut().and_then(|tg| tg.mask(id, name)).filter(|m| *m != 0);
+        // a shape row under the name (up to 4, +N): a long name keeps one line when the cell has no room for both
+        let lines = if l2.is_empty() { 1.0 } else { 2.0 };
+        let room = tmask.is_some() && y + lines * LABEL_LINE + 12.0 > r.b();
+        if room {
+            c.text(name, Rect::new(r.x + 4.0, y, lw, LABEL_LINE), self.font, color);
+        } else {
+            c.text(l1, Rect::new(r.x + 4.0, y, lw, LABEL_LINE), self.font, color);
+            if !l2.is_empty() {
+                c.text(l2, Rect::new(r.x + 4.0, y + LABEL_LINE, lw, LABEL_LINE), self.font, color);
+            }
+        }
+        if let (Some(m), Some(tg)) = (tmask, self.tags.as_mut()) {
+            let defs = tg.defs().to_vec();
+            let shapes = tg.shapes();
+            let cw = crate::tags::marks::cluster_w(c, t, &defs, m, 4, &mut tg.buf);
+            let ty = y + if room { LABEL_LINE } else { lines * LABEL_LINE } + 6.0;
+            crate::tags::marks::draw_cluster(c, t, &defs, m, shapes, r.x + (r.w - cw) / 2.0, ty, 4, crate::tags::marks::MARK, crate::tags::marks::GAP, &mut tg.buf);
         }
     }
 }

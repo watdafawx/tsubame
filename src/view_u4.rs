@@ -101,6 +101,7 @@ impl View {
             self.sync_space_binding(ui);
         }
         // a pack switched on or off, or reloaded: its themes and menu entries follow
+        self.sync_tags();
         let packs_changed = crate::packs::sync();
         if bits & C_MENU != 0 || packs_changed {
             crate::shellops::set_menu_entries(&self.prefs.context_menu.entries);
@@ -261,9 +262,13 @@ impl View {
             ext_toggle: None,
             message: None,
             private_bytes: self.private_bytes,
+            tags: self.tags.page_cx(&self.env.config_path),
         };
         st.paint(ui, g, area, &mut cx);
-        let Cx { changed, open, reset_all, restart, rollback, reload_packs, ext_toggle, message, .. } = cx;
+        let Cx { changed, open, reset_all, restart, rollback, reload_packs, ext_toggle, message, tags, .. } = cx;
+        for r in tags.reqs {
+            self.tags.send(r);
+        }
         self.settings = Some(st);
         if changed != 0 {
             self.apply_prefs(ui, changed);

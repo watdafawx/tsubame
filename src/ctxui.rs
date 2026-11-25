@@ -255,6 +255,10 @@ pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
             if n > 1 && crate::batchui::is_enabled() {
                 v.insert(0, c(&format!("Rename {n} items\u{2026}"), "file.batch_rename"));
             }
+            // P4.F6: opens the tag picker (own popup, not a submenu)
+            if !matches!(kind, Kind::Drive) && crate::tags::enabled() {
+                v.push(c("Tags\u{2026}", "tags.pick"));
+            }
             v
         }
     }
@@ -1167,6 +1171,7 @@ pub fn glyph(action: &str, verb: Option<&str>) -> Option<char> {
         "x.new-file" => '\u{E8A5}',
         "x.terminal" => '\u{E756}',
         "x.refresh" => '\u{E72C}',
+        "tags.pick" => '\u{E1CB}',
         _ => match verb? {
             "open" => '\u{E8E5}',
             "openas" | "openwith" => '\u{E7AC}',

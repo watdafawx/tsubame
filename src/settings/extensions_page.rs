@@ -19,6 +19,7 @@ fn describe(id: &str) -> &'static str {
         "tsubame.ext.preview" => "Preview pane (Alt+P) and Quick Look (Space / F3).",
         "tsubame.ext.file_age" => "Colour files by how recently they changed (settings below).",
         "tsubame.ext.batch_rename" => "F2 on several items: pattern bar with live preview, one undo step. Adds Rename N items to the context menu.",
+        "tsubame.ext.tags" => "Tags and colours on files (Alt+T picker, marks, sidebar Tags section). Manage them in Settings > Tags.",
         _ => "",
     }
 }

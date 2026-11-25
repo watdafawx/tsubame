@@ -84,6 +84,7 @@ mod single;
 mod stress;
 mod tab;
 mod tabs;
+mod tags;
 mod timing;
 mod updates;
 mod view;

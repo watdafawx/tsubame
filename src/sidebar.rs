@@ -33,8 +33,10 @@ pub const QUICK: usize = 1;
 pub const RECENT: usize = 2;
 pub const PC: usize = 3;
 pub const NETWORK: usize = 4;
+/// P4.F6: tags with counts (shown while the tags extension is on)
+pub const TAGS: usize = 5;
 /// config names of the sections (`sidebar.closed`) and their titles
-pub const SECTIONS: [(&str, &str); 5] = [("pinned", "Pinned"), ("quick", "Quick access"), ("recent", "Recent"), ("pc", "This PC"), ("network", "Network")];
+pub const SECTIONS: [(&str, &str); 6] = [("pinned", "Pinned"), ("quick", "Quick access"), ("recent", "Recent"), ("pc", "This PC"), ("network", "Network"), ("tags", "Tags")];
 /// the places shown under Quick access, in this order
 const QUICK_NAMES: [(&str, &str); 7] = [("Home", "\u{E80F}"), ("Desktop", "\u{E7F4}"), ("Downloads", "\u{E896}"), ("Documents", "\u{E8A5}"), ("Pictures", "\u{E91B}"), ("Music", "\u{E8D6}"), ("Videos", "\u{E714}")];
 const G_STAR: &str = "\u{E734}";
@@ -54,6 +56,10 @@ pub enum Act {
     OtherPane(String),
     /// files were dropped on this folder
     DropOn(String),
+    /// a tag row was clicked: filter by it (again: clear)
+    TagFilter(u8),
+    /// the Tags header's "+"
+    NewTag,
     /// the width or the rail state changed: the view rebuilds its theme
     Layout,
 }
@@ -77,6 +83,20 @@ pub enum DropTarget {
     Folder(String),
     /// between bookmarks: pins the dragged folder at this index
     Pin(usize),
+    /// a tag row: applies the tag to the dragged files
+    Tag(u8),
+}
+
+/// One row of the Tags section (the view fills these from the tag store).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SideTag {
+    pub slot: u8,
+    pub name: String,
+    pub rgb: u32,
+    pub mark: crate::tags::marks::Mark,
+    pub count: usize,
+    /// the filter shows this tag
+    pub on: bool,
 }
 
 #[derive(Default)]
@@ -106,6 +126,7 @@ enum Kind {
     Recent(usize),
     Drive(usize),
     Net(usize),
+    Tag(usize),
     Empty(usize),
     Sep,
 }
@@ -126,7 +147,9 @@ pub struct Sidebar {
     /// newest first
     pub recents: Vec<String>,
     /// folded sections, in `SECTIONS` order
-    pub closed: [bool; 5],
+    pub closed: [bool; 6],
+    /// the Tags section (`None`: tags are off, no section)
+    pub tags: Option<Vec<SideTag>>,
     /// the 48 px icon rail
     pub rail: bool,
     /// pins or folds changed: main writes config.toml
@@ -147,6 +170,8 @@ pub struct Sidebar {
     /// width the resize edge asks for; the view takes it (and clears it)
     pub want_width: Option<f32>,
     tip: Option<(Rect, String)>,
+    /// the Tags header's "+" was clicked this frame
+    new_tag: bool,
 }
 
 impl Default for Sidebar {
@@ -157,7 +182,8 @@ impl Default for Sidebar {
             places: Vec::new(),
             pinned: Vec::new(),
             recents: Vec::new(),
-            closed: [false; 5],
+            closed: [false; 6],
+            tags: None,
             rail: false,
             dirty: false,
             recents_dirty: false,
@@ -171,6 +197,7 @@ impl Default for Sidebar {
             resizing: false,
             want_width: None,
             tip: None,
+            new_tag: false,
         }
     }
 }
@@ -372,10 +399,14 @@ impl Sidebar {
         let mut y = 4.0;
         let pc = self.pc_drives();
         let net = self.net_drives();
-        let counts = [self.pinned.len(), self.quick_places().len(), self.recents.len(), pc.len(), net.len()];
+        let ntags = self.tags.as_ref().map_or(0, |t| t.len());
+        let counts = [self.pinned.len(), self.quick_places().len(), self.recents.len(), pc.len(), net.len(), ntags];
         let mut first = true;
         for (sec, &count) in counts.iter().enumerate() {
-            if rail && (sec == RECENT || count == 0) {
+            if rail && (sec == RECENT || sec == TAGS || count == 0) {
+                continue;
+            }
+            if sec == TAGS && self.tags.is_none() {
                 continue;
             }
             if rail {
@@ -396,6 +427,7 @@ impl Sidebar {
                 QUICK => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Quick(i), h)),
                 RECENT => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Recent(i), h)),
                 PC => pc.iter().for_each(|&i| add(&mut v, &mut y, Kind::Drive(i), if rail { RAIL_ITEM } else { 32.0 })),
+                TAGS => (0..count).for_each(|i| add(&mut v, &mut y, Kind::Tag(i), ROW_H)),
                 _ => net.iter().for_each(|&i| add(&mut v, &mut y, Kind::Net(i), if rail { RAIL_ITEM } else { 32.0 })),
             }
             if count == 0 && !rail {
@@ -485,11 +517,18 @@ impl Sidebar {
                     }
                 }
                 Kind::Sep => c.fill(Rect::new(ir.x + 10.0, ir.y + 4.0, ir.w - 20.0, 1.0), t.border),
+                Kind::Tag(i) => {
+                    let is_target = target == Some(item.kind) && dragging;
+                    if let Some(a) = self.tag_row(ui, c, &t, ir, i, is_target) {
+                        act = Some(a);
+                    }
+                }
                 Kind::Empty(sec) => {
                     let msg = match sec {
                         PINNED => "Drag a folder here to pin it",
                         RECENT => "No recent folders",
                         NETWORK => "No network locations",
+                        TAGS => "No tags",
                         _ => "Nothing here",
                     };
                     c.text(msg, Rect::new(ir.x + 32.0, ir.y, ir.w - 36.0, ir.h), t.font_small(), t.text_disabled);
@@ -527,6 +566,9 @@ impl Sidebar {
             ui.request_repaint();
         }
 
+        if std::mem::take(&mut self.new_tag) {
+            act = Some(Act::NewTag);
+        }
         self.footer(ui, c, &t, Rect::new(inner.x, body.b(), inner.w, FOOTER_H), &mut act);
         self.resize_edge(ui, c, &t, r, &mut act);
 
@@ -547,6 +589,7 @@ impl Sidebar {
         if dragging {
             out.target = match (pin_slot, target) {
                 (Some(k), _) if drag.folder.is_some() => Some(DropTarget::Pin(k)),
+                (_, Some(Kind::Tag(i))) => self.tags.as_ref().and_then(|v| v.get(i)).map(|tg| DropTarget::Tag(tg.slot)),
                 (_, Some(k)) => self.path_of(k).map(DropTarget::Folder),
                 _ => None,
             };
@@ -559,13 +602,27 @@ impl Sidebar {
     fn header(&mut self, ui: &mut Ui, c: &mut dyn Canvas, t: &Theme, r: Rect, sec: usize) -> bool {
         let it = ui.interact(ID.child("sec").with(sec as u64), r, Sense::click());
         let mut changed = false;
-        if it.clicked == Some(Button::Left) {
+        let on_plus = sec == TAGS && ui.mouse().x >= r.r() - 26.0;
+        if it.clicked == Some(Button::Left) && !on_plus {
             self.toggle_section(sec);
             changed = true;
         }
         let chev = if self.closed[sec] { G_CHEV_RIGHT } else { G_CHEV_DOWN };
         c.text(chev, Rect::new(r.x + 6.0, r.y, 14.0, r.h), f(8.0).icon().c(), t.text_dim);
         c.text(SECTIONS[sec].1, Rect::new(r.x + 24.0, r.y, r.w - 30.0, r.h), t.font(), t.text_dim);
+        if sec == TAGS {
+            let b = Rect::new(r.r() - 26.0, r.y + 3.0, 20.0, r.h - 6.0);
+            let hit = ui.interact(ID.child("newtag"), b, Sense::click().cursor(Cursor::Hand));
+            if hit.hovered {
+                c.round(b, t.radius_sm, t.hover);
+                self.tip = Some((b, "New tag".into()));
+            }
+            c.text("\u{E710}", b, f(10.0).icon().c(), t.text_dim);
+            if hit.clicked == Some(Button::Left) {
+                self.new_tag = true;
+                changed = true;
+            }
+        }
         if sec == RECENT && !self.recents.is_empty() && !self.closed[sec] {
             let w = c.measure("Clear", t.font_small()) + 12.0;
             let b = Rect::new(r.r() - w - 6.0, r.y + 3.0, w, r.h - 6.0);
@@ -755,6 +812,29 @@ impl Sidebar {
             self.shell_menu = Some((path, it.click_pos));
         }
         act
+    }
+
+    /// A Tags row: mark, name, count. A click filters by the tag.
+    fn tag_row(&mut self, ui: &mut Ui, c: &mut dyn Canvas, t: &Theme, r: Rect, i: usize, drop_target: bool) -> Option<Act> {
+        let tg = self.tags.as_ref()?.get(i)?.clone();
+        let it = ui.interact(ID.child("tag").with(tg.slot as u64), r, Sense::click().cursor(Cursor::Hand));
+        let rr = Rect::new(r.x + 4.0, r.y, r.w - 8.0, r.h);
+        if drop_target {
+            c.round(rr, t.radius_md, t.selected);
+            c.round_stroke(rr.inset(1.0, 1.0), t.radius_md, t.focus, 1.0);
+        } else if tg.on {
+            c.round(rr, t.radius_md, t.selected_inactive);
+            c.round(Rect::new(rr.x, rr.y + 5.0, 3.0, rr.h - 10.0), 1.5, t.accent);
+        } else if it.hovered {
+            c.round(rr, t.radius_md, t.hover);
+        }
+        crate::tags::marks::draw(c, tg.mark, tg.rgb, r.x + 12.0 + 8.0, r.y + r.h / 2.0, 11.0);
+        let n = crate::tags::ui::sep(tg.count);
+        let cw = c.measure(&n, f(t.font_size_xs)) + 4.0;
+        c.text(&n, Rect::new(r.r() - 10.0 - cw, r.y, cw, r.h), f(t.font_size_xs).r(), if tg.on { t.text } else { t.text_dim });
+        let font = if tg.on { t.font().b() } else { t.font() };
+        c.text(&tg.name, Rect::new(r.x + 36.0, r.y, (r.w - 36.0 - cw - 14.0).max(0.0), r.h), font, t.text);
+        (it.clicked == Some(Button::Left)).then_some(Act::TagFilter(tg.slot))
     }
 
     /// Keys while the panel has the focus: F2, Delete, arrows, Enter.
@@ -1036,7 +1116,7 @@ mod tests {
         t.set_closed_names(&s.closed_names());
         assert_eq!(t.closed, s.closed);
         t.set_closed_names(&[]);
-        assert_eq!(t.closed, [false; 5]);
+        assert_eq!(t.closed, [false; 6]);
     }
 
     fn drive(letter: char, kind: DriveKind) -> Drive {

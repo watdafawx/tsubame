@@ -127,4 +127,6 @@ does not draw provider columns yet; that arrives with wasm plugins.
 | `tsubame.ext.checksum` | No | `file.checksum` background CRC32 / MD5 / SHA-1 / SHA-256 copy |
 | `tsubame.ext.batch_rename` | No | `file.batch_rename`, "Rename N items" context-menu entry, bar. F2 on several items opens it; off: F2 renames the focused item inline and the status bar says so. Pattern engine stays in core (`src/rename.rs`) |
 | `tsubame.ext.global_search` | No | `search.global` (`Ctrl+Shift+F`) Everything IPC + parallel walk search overlay |
+| `tsubame.ext.tags` | No | Tags and colours (P4.F6): `tags.pick` (`Alt+T`) picker, marks after the name and in Grid, the sidebar Tags section (filter across folders, drop to tag), Settings > Tags. Off: no `tags.db` is opened and nothing runs |
+| `tsubame.column.tags` | No | Tags column (`order: 5`, right after Name, opt-in with `[tags] column = true`); needs `tsubame.ext.tags` |
 | `tsubame.ext.file_age` | No | `view.age_colours` and the status-bar key: tints the Modified date by age (`[file_age]`, `src/age.rs`, Settings > Extensions). Off switch removes the key and the command; colours themselves are off by default |

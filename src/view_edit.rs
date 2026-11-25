@@ -275,6 +275,7 @@ impl View {
         let replace = matches!(out, RenameOut::Commit { replace: true });
         if self.ops.rename(&e.path, &to, replace) {
             self.ops.message = Some(format!("Renaming to \"{}\"...", e.name()));
+            self.tags_moved(&[(e.path.clone(), to.clone())]);
         }
         if out == RenameOut::CommitNext {
             self.rename_next(ui, &e.path);
@@ -378,6 +379,7 @@ impl View {
         let n = pairs.len();
         if self.ops.rename_batch(&pairs) {
             self.ops.message = Some(format!("Renaming {n} items..."));
+            self.tags_moved(&pairs);
         }
         ui.request_repaint();
     }
@@ -566,6 +568,7 @@ impl View {
         let mut hint = String::new();
         let mut dest: Option<String> = None;
         let mut pin: Option<usize> = None;
+        let mut tag: Option<u8> = None;
         let mut over_pane: Option<(usize, Option<usize>)> = None;
         let mut over_tab = false;
         match side_target {
@@ -574,6 +577,10 @@ impl View {
                 pin = Some(*k);
             }
             Some(crate::sidebar::DropTarget::Folder(p)) => dest = Some(p.clone()),
+            Some(crate::sidebar::DropTarget::Tag(s)) => {
+                hint = self.tag_drop_hint(*s, count);
+                tag = Some(*s);
+            }
             None => {
                 if let Some((_, folder)) = self.tab_drop_folder(m, t.height_tab, t.layout_tab_min_width, t.layout_tab_width) {
                     over_tab = true;
@@ -601,6 +608,7 @@ impl View {
             }
         }
         self.drop_dest = match (pin, &dest) {
+            _ if tag.is_some() => tag.map(DropDest::Tag),
             (Some(k), _) => Some(DropDest::Pin(k)),
             (None, Some(dir)) => Some(DropDest::Folder(dir.clone())),
             _ => None,
