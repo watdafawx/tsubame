@@ -4193,8 +4193,8 @@ mod tests {
         if first > 0 {
             cx += ELLIPSIS_W + SEP_W;
         }
-        for i in first..(n - 2) {
-            cx += r.v.crumbs.widths[i] + 2.0 * CRUMB_PAD + SEP_W;
+        for w in &r.v.crumbs.widths[first..(n - 2)] {
+            cx += w + 2.0 * CRUMB_PAD + SEP_W;
         }
         let parent_x = cx + CRUMB_PAD + r.v.crumbs.widths[n - 2] / 2.0;
         mid_click(&mut r, parent_x, bar_y);
