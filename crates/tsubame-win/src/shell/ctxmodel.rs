@@ -480,6 +480,11 @@ fn clean_separators(items: &mut Vec<MenuItem>) {
     *items = out;
 }
 
+/// The shell's own "New" submenu of a background menu.
+fn is_shell_new(n: &MenuItem) -> bool {
+    n.kind == ItemKind::Submenu && (n.verb.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("new") || v.eq_ignore_ascii_case("newmenu")) || (n.verb.is_none() && n.label.eq_ignore_ascii_case("new")))
+}
+
 /// The menu as drawn: Tsubame's group, the native items (minus verbs a
 /// Tsubame row already covers, with the user's edits), then the user's
 /// entries. Groups are split by separators.
@@ -494,7 +499,9 @@ pub fn compose(tsubame: &[MenuItem], native: &[MenuItem], user: &[MenuItem], men
 /// so "Edit in Notepad" never shows twice. One menu, no "Show more options".
 pub fn compose_all(tsubame: &[MenuItem], native: &[MenuItem], packaged: &[MenuItem], user: &[MenuItem], menu: &ContextMenu) -> Vec<MenuItem> {
     let covered: Vec<&str> = tsubame.iter().filter_map(|t| BUILTIN_VERBS.iter().find(|(c, _)| *c == t.action).map(|(_, v)| *v)).collect();
-    let mut nat: Vec<MenuItem> = native.iter().filter(|n| !n.verb.as_deref().is_some_and(|v| covered.contains(&v))).cloned().collect();
+    // our own "New >" replaces the shell's
+    let own_new = tsubame.iter().any(|t| t.action == "x.new");
+    let mut nat: Vec<MenuItem> = native.iter().filter(|n| !n.verb.as_deref().is_some_and(|v| covered.contains(&v)) && !(own_new && is_shell_new(n))).cloned().collect();
     apply_overrides(&mut nat, menu);
     let mut pkg = dedupe_packaged(packaged, native, tsubame);
     apply_overrides(&mut pkg, menu);
@@ -1437,6 +1444,23 @@ mod tests {
         let native = build_native(&[verb(raw(9, "Copy as path"), "copyaspath"), raw(10, "7-Zip")], &mut IconCache::new(2));
         let l = labels(&compose(&ts, &native, &[], &cm(entries.clone())));
         assert_eq!(l.iter().filter(|s| *s == "Copy as path").count(), 1, "{l:?}");
+    }
+
+    #[test]
+    fn the_shells_new_submenu_is_dropped_when_our_own_is_there() {
+        let mut icons = IconCache::new(4);
+        let mut shell_new = raw(5, "&New");
+        shell_new.submenu = Some(vec![]);
+        shell_new.sub = 0x1_0000;
+        let native = build_native(&[raw(1, "7-Zip"), shell_new, raw(2, "Properties")], &mut icons);
+        let mut ours = MenuItem::command(ItemSource::Tsubame, "New", "x.new");
+        ours.kind = ItemKind::Submenu;
+        let l = labels(&compose(&[ours.clone()], &native, &[], &ContextMenu::default()));
+        assert_eq!(l.iter().filter(|s| *s == "New").count(), 1, "{l:?}");
+        // without ours the shell's stays
+        let plain = MenuItem::command(ItemSource::Tsubame, "Paste", "file.paste");
+        let l = labels(&compose(&[plain], &native, &[], &ContextMenu::default()));
+        assert!(l.contains(&"New".to_string()), "{l:?}");
     }
 
     #[test]
