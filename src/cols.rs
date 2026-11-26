@@ -179,8 +179,7 @@ impl ColSet {
                 n += 1;
             }
         }
-        for i in 0..self.n {
-            let c = self.order[i];
+        for &c in &self.order[..self.n] {
             if c != Col::Name && !out[..n].contains(&c) {
                 out[n] = c;
                 n += 1;
