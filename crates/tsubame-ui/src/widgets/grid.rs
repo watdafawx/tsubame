@@ -115,6 +115,10 @@ impl GridState {
     pub fn content_h(&self, len: usize) -> f64 {
         if self.geo.active { self.geo.total() } else { self.rows_for(len) as f64 * self.cell_h as f64 }
     }
+    /// The last frame laid the cells out in groups (`cell_origin` / `cell_at` do not apply).
+    pub fn geo_active(&self) -> bool {
+        self.geo.active
+    }
     /// Group whose header has the keyboard focus (grouped grid).
     pub fn header_focus(&self) -> Option<usize> {
         self.header.filter(|&(_, at)| at == self.cursor).map(|(g, _)| g)

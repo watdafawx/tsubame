@@ -95,7 +95,9 @@ mod timing;
 mod uia_rows;
 mod updates;
 mod view;
+mod view_group;
 mod view_tooltip;
+mod viewmenu;
 mod wakelog;
 
 use std::cell::RefCell;

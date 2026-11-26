@@ -49,7 +49,7 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
     // a tab restored from the session but never shown has not listed yet: its
     // scroll row and selection are still in `restore`, not in the list/selection
     let restore = tab.restore.as_ref().filter(|_| tab.pending);
-    let row = restore.map(|r| r.scroll_first_row).unwrap_or_else(|| (tab.list.scroll / tab.list.row_h.max(1.0) as f64).round() as usize);
+    let row = restore.map(|r| r.scroll_first_row).unwrap_or_else(|| tab.item_at_top_row((tab.list.scroll / tab.list.row_h.max(1.0) as f64).round() as usize));
     let first = tab.shown().checked_sub(1).map(|last| row.min(last));
     let selected = match restore {
         Some(r) => r.selected.clone(),
@@ -64,6 +64,7 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
         scroll_first_name: first.and_then(|i| tab.entry_at(i)).and_then(|(p, _)| p.rsplit('\\').next().map(str::to_string)),
         selected,
         expanded: tab.tree_paths(),
+        group_by: Some(tab.group.by.name().to_string()),
     }
 }
 
@@ -151,6 +152,9 @@ fn attach(t: &mut Tab, st: &SessionTab) {
     t.store.sort(t.sort);
     t.restore = Some(Restore { scroll_first_row: st.scroll_first_row, selected: st.selected.clone() });
     t.tree_seed.0 = st.expanded.iter().take(crate::tree::RESTORE_CAP).cloned().collect();
+    if let Some(by) = st.group_by.as_deref().and_then(tsubame_core::grouping::GroupBy::parse) {
+        t.group.set_by(by);
+    }
 }
 
 /// The folder a tab's listing should use: the saved path, or the nearest

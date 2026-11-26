@@ -73,7 +73,22 @@ pub fn zoom_step(mode: ViewMode, size: u32, dir: i32) -> Option<(ViewMode, u32)>
 /// repeats cycle through the entries of that letter; a longer text looks from the cursor itself.
 /// `have_sel`: something is selected (otherwise the first match from the cursor wins at once).
 pub fn type_ahead_find(store: &EntryStore, typed: &str, cursor: usize, have_sel: bool) -> Option<usize> {
-    let len = store.view().len();
+    type_ahead_seq(store, typed, cursor, have_sel, store.view().len(), Some)
+}
+
+/// `type_ahead_find` over grouped rows: only entries on screen (collapsed groups are skipped),
+/// in the order the groups show them. `cursor` is an entry.
+pub fn type_ahead_grouped(store: &EntryStore, g: &dyn tsubame_ui::GroupRows, typed: &str, cursor: usize, have_sel: bool) -> Option<usize> {
+    let from = g.item_row(cursor).unwrap_or(0);
+    type_ahead_seq(store, typed, from, have_sel, g.row_count(), |r| match g.row_at(r) {
+        tsubame_ui::GroupRow::Item(i) => Some(i),
+        tsubame_ui::GroupRow::Header(_) => None,
+    })
+}
+
+/// The search of `type_ahead_find` over `len` places in some order: `cursor` is a place and
+/// `entry` maps a place to the entry (position in the view) it shows, if any.
+fn type_ahead_seq(store: &EntryStore, typed: &str, cursor: usize, have_sel: bool, len: usize, entry: impl Fn(usize) -> Option<usize>) -> Option<usize> {
     let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
     let typed: Vec<char> = typed.chars().map(lower).collect();
     let (&first, _) = typed.split_first()?;
@@ -83,7 +98,7 @@ pub fn type_ahead_find(store: &EntryStore, typed: &str, cursor: usize, have_sel:
     let cycling = typed.len() > 1 && typed.iter().all(|c| *c == first);
     let want: &[char] = if cycling { &typed[..1] } else { &typed };
     let start = if (typed.len() == 1 || cycling) && have_sel { cursor + 1 } else { cursor };
-    (0..len).map(|k| (start + k) % len).find(|&j| {
+    (0..len).map(|k| (start + k) % len).filter_map(&entry).find(|&j| {
         let Some(name) = store.at(j).and_then(|id| store.name(id)) else { return false };
         let mut it = char::decode_utf16(name.iter().copied()).map(|c| lower(c.unwrap_or('\u{fffd}')));
         want.iter().all(|w| it.next() == Some(*w))
@@ -139,6 +154,7 @@ impl View {
     /// Applies the config's `[view]` section to what draws (names without extensions).
     pub(super) fn sync_basics(&mut self) {
         data::set_show_extensions(self.prefs.view.show_extensions);
+        crate::view_group::set_default(tsubame_core::grouping::GroupBy::parse(&self.prefs.view.group_by).unwrap_or_default());
     }
 
     /// A view mode picked by name (`view.grid-small`, the toolbar button): the grid modes bring
@@ -203,7 +219,11 @@ impl View {
             }
             let text = self.basics.type_push(c, Instant::now()).to_string();
             let t = self.tab();
-            if let Some(j) = type_ahead_find(&t.store, &text, t.cursor_row(), t.sel.count() > 0) {
+            let found = match t.group.rows() {
+                Some(g) => type_ahead_grouped(&t.store, g, &text, t.cursor_row(), t.sel.count() > 0),
+                None => type_ahead_find(&t.store, &text, t.cursor_row(), t.sel.count() > 0),
+            };
+            if let Some(j) = found {
                 self.jump_to(j);
             }
             did = true;
@@ -215,12 +235,7 @@ impl View {
     fn jump_to(&mut self, j: usize) {
         let grid = self.mode.is_grid();
         let t = self.tab_mut();
-        let len = t.store.view().len();
-        if grid {
-            t.grid.move_cursor(j, len);
-        } else {
-            t.list.move_cursor(j, len);
-        }
+        t.move_cursor_to(grid, j);
         select_entry(&t.store, &mut t.sel, j, Mods::NONE, SelectBy::Key);
     }
 
@@ -235,7 +250,11 @@ impl View {
             CMD_SELECT_INVERT => {
                 let t = self.tab_mut();
                 if !(t.miller_on || t.tree_on) {
-                    t.sel.invert(&t.store);
+                    match t.group.rows() {
+                        // collapsed groups are not on screen: they keep what they have
+                        Some(g) => crate::view_group::invert_visible(&t.store, &mut t.sel, g),
+                        None => t.sel.invert(&t.store),
+                    }
                 }
             }
             CMD_VIEW_EXTENSIONS => {
@@ -360,8 +379,25 @@ impl View {
         }
         let mut items: Vec<MenuItem> = rows.iter().map(|(_, _, label, on, can)| MenuItem::new(label, "").check(*on).off(!*can)).collect();
         items.push(MenuItem::new("Size all columns to fit", "").sep());
+        // "Group by": one check row per mode, the current one ticked
+        let can_group = !(self.tab().tree_on || self.tab().miller_on);
+        let by = self.tab().group.by;
+        if can_group {
+            const LABELS: [&str; 5] = ["Group by: none", "Group by: name", "Group by: type", "Group by: date modified", "Group by: size"];
+            for (k, m) in tsubame_core::grouping::GroupBy::ALL.iter().enumerate() {
+                let item = MenuItem::new(LABELS[k], "").check(*m == by);
+                items.push(if k == 0 { item.sep() } else { item });
+            }
+        }
         let Some(picked) = overlay::menu(ui, g, id, at, &items) else { return };
         self.basics.col_menu = None;
+        if let Some(k) = picked.checked_sub(rows.len() + 1).filter(|_| can_group)
+            && let Some(&m) = tsubame_core::grouping::GroupBy::ALL.get(k)
+        {
+            self.set_group_by(m);
+            ui.request_repaint();
+            return;
+        }
         match rows.get(picked) {
             Some(&(Col::Tags, _, _, on, _)) => {
                 self.prefs.tags.column = !on;
@@ -377,7 +413,7 @@ impl View {
     }
 
     /// The label the details header shows for `col` (the registry's, else the built-in's).
-    fn colset_label(&self, col: Col, fallback: &str) -> String {
+    pub(super) fn colset_label(&self, col: Col, fallback: &str) -> String {
         let l = self.colset.label(col);
         if l.is_empty() { fallback.to_string() } else { l.to_string() }
     }
