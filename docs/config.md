@@ -26,6 +26,21 @@ and, after damage, `tags.db.bad` kept aside. Export and import in
 Settings > Tags use `tags-export.json` in the same folder. Files themselves are
 never touched: no sidecar files, no NTFS streams.
 
+Per-folder views (B11-G) live in `folder-views.tsv` next to `session.toml`
+(the data folder; portable mode moves it too). One line per folder, tab
+separated: `mode`, grid size, sort column, descending (`0`/`1`), then the
+folder (lower case, no trailing backslash); a `default` line holds the sort of
+the global default. At most 2,000 folders, the least recently used one is
+dropped first; lines are in use order, oldest first. It is read once at startup
+on a worker thread and written lazily on a worker thread, riding the config's
+2 s save gate and the window close, only when a view changed. Tree and Miller
+views, archives, virtual folders and the Settings tab are never stored. The
+file is safe to delete (every folder then shows the default) or to hand edit;
+a bad line is skipped. Commands: `view.reset-folder-views` forgets every
+folder, `view.apply-to-all-folders` makes the current view the default and
+forgets the folders. The global default (`appearance.view_mode`,
+`view.grid_size`) stays what the config says, not whatever folder was open last.
+
 Nothing is written until something changed. The first start with no file
 writes nothing; the file is created on the first change (theme, density,
 zebra, view mode, sidebar) or when the window closes with a geometry worth
@@ -87,6 +102,7 @@ row_tooltips = true          # hover tooltip on Details / Grid rows after ~600 m
 show_sidebar_onedrive = true # show OneDrive in Quick access when installed
 show_sidebar_wsl = true      # show Linux (WSL) section when WSL is installed
 show_sidebar_recycle = true  # show Recycle Bin in Quick access
+remember_folder_views = true # each folder keeps its own view mode, icon size and sort (folder-views.tsv in the data folder); false: one view for every folder
 
 [appearance]
 theme = "tsubame-dark"       # "tsubame-dark" | "tsubame-light" ("dark"/"light" too)
@@ -100,6 +116,9 @@ view_mode = "details"        # "details" | "grid-small" | "grid-large"
 grid_size = 96               # grid cell width in DIPs, 48-256 in steps of 8 (Ctrl+wheel, Ctrl+Plus / Ctrl+Minus)
 type_ahead_filters = false   # true: typing in the list starts the filter (old behaviour); false: typing jumps to the first name that starts with it
 show_extensions = true       # false: file names are drawn without their extension (rename still edits the full name; sorting uses the real name)
+
+[columns]
+order = ["core.size", "core.modified"]  # Details column order after Name (drag a header cell); absent or empty = default order. Name is always first and not listed. "Reset columns" in the header menu clears it.
 
 [panes]
 dual = false
@@ -176,6 +195,8 @@ maximized = false
 | `general.confirm_delete` / `delete_to_recycle` | `true` | Delete key: ask first / Recycle Bin vs permanent (Shift+Delete does the other one) |
 | `general.row_tooltips` | `true` | Details and Grid row hover tooltip (~600 ms dwell: Name, Type, Size, Date modified; folders omit Size); Settings > General (live) |
 | `general.show_sidebar_onedrive` / `show_sidebar_wsl` / `show_sidebar_recycle` | `true` | show or hide OneDrive, the Linux (WSL) section, and Recycle Bin in the sidebar; Settings > General (live) |
+| `general.remember_folder_views` | `true` | each folder keeps its own view mode, icon size and sort; a folder with no memory shows the default view (Settings > General, live) |
+| `columns.order` | `[]` | Details column order after Name, as ids (`core.modified`, `core.type`, `core.size`, `core.git`, `core.tags`, or an extension column's id). Drag a header cell to reorder; "Reset columns" (header menu, `view.reset-columns`) clears it. Unknown ids are ignored; columns not listed follow in the default order |
 | `appearance.theme` | `"tsubame-dark"` | `View::dark`, Ctrl+Shift+L; Settings > Appearance picks any of the 19 themes (live) |
 | `appearance.density` | `"compact"` | row height, Ctrl+Shift+D, Settings > Appearance (live) |
 | `appearance.zebra` | `true` | alternating rows, Ctrl+Shift+Z, Settings > Appearance (live) |

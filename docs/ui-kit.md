@@ -55,7 +55,8 @@ Every coordinate is f32 DIPs. Colours are `0xRRGGBB` (`Color = u32`).
 | `list(ui, c, id, rect, &mut ListState, &mut impl ListSource)` | Fixed row height, f64 scroll, only visible rows are drawn. Wheel moves 3 rows; arrows, PgUp/PgDn, Home/End move the cursor. Selection goes to the app via `ListSource::select(i, mods, SelectBy)`. Returns range, activated (Enter or double-click), context (right-click), and Shift+F10 / menu key. |
 | `vscrollbar` | Thumb drag (keeps the grab offset) and track click (pages). Used inside `list`. |
 | `text_input` | Caret, selection, mouse and double-click word select, Home/End, Ctrl+arrows, Backspace/Delete (with Ctrl: whole word), Ctrl+A/C/X/V through `ui.clipboard`, IME slot. Scrolls horizontally to keep the caret visible. Measures text only while focused. |
-| `button`, `tab_strip` (add, close, drag-reorder, overflow scroll), `splitter` | |
+| `button`, `tab_strip` (add, close, drag-reorder, overflow scroll, right-click `context`), `splitter` | |
+| `column_header_ex` + `HeaderDrag` | Sort click, edge resize and drag-to-reorder: press a cell (not the first) and move past 6 DIPs, an accent 2 px line shows the gap it would land in, letting go reports `reorder = (from, gap)` and no sort click. `column_header` is the same without reordering. |
 
 **Writing a widget:**
 1. Compute the rect.
