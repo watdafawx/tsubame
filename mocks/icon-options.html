@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tsubame icon options (B12-C)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--navy:#16233f;--cream:#f3ecdf;--red:#e0492c;--bg:#14161a;--panel:#1d2026;--line:#2c313a;--text:#e6e8ec;--dim:#8b93a1}
+  *{box-sizing:border-box}
+  body{margin:0;padding:24px 28px 60px;background:var(--bg);color:var(--text);font:13px/1.45 "Segoe UI",system-ui,sans-serif}
+  h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:0 0 2px} p{margin:0 0 8px;color:var(--dim)}
+  .opt{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin:18px 0}
+  .row{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end;margin:10px 0}
+  .bgd,.bgl{padding:12px 14px;border-radius:4px;display:flex;gap:14px;align-items:flex-end;border:1px solid var(--line)}
+  .bgd{background:#1b1b1b}.bgl{background:#f3f3f3}
+  .cell{display:flex;flex-direction:column;align-items:center;gap:5px;font-size:10px;color:#888}
+  .zoom canvas{image-rendering:pixelated;border:1px solid var(--line);background:#1b1b1b}
+  .zoom.light canvas{background:#f3f3f3}
+  .strip{display:flex;align-items:center;border-radius:3px;border:1px solid var(--line)}
+  .task{height:48px;padding:0 10px;gap:4px}
+  .task .ti{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:4px;position:relative}
+  .task .ti.act::after{content:"";position:absolute;bottom:2px;width:16px;height:3px;border-radius:2px;background:#4cc2ff}
+  .task .ti.ghost{opacity:.55}
+  .task.dark{background:#202020}.task.dark .ti.act{background:#ffffff14}
+  .task.light{background:#e8eef7}.task.light .ti.act{background:#ffffffaa}.task.light .ti.act::after{background:#005fb8}
+  .title{height:32px;padding:0 0 0 10px;gap:10px;font-size:12px}
+  .title.dark{background:#1b1d22;color:#ddd}.title.light{background:#f6f6f6;color:#222}
+  .cur{border-left:3px solid var(--red);padding-left:10px}
+  .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:3px;background:var(--line);color:var(--text);margin-left:6px}
+  .rec{background:var(--red);color:#fff}
+  .note{font-size:12px;color:var(--dim)}
+  svg{display:block}
+</style>
+</head>
+<body>
+<h1>Tsubame app icon options <span class="tag">B12-C mock</span></h1>
+<p>Why the old one fails: a 40&deg;-rotated bird on a tile reads as a "shortcut arrow", and the in-app title bar does not even draw it (it draws a text arrow glyph). Every option below is upright and unmistakably a swallow: forked tail, pointed swept wings. Flat, no shadows. Small cut (16/20/24 px) is hand-simplified; large cut (32+) keeps detail. Zoom boxes are the browser's own 16 px raster, blown up 8x unsmoothed.</p>
+<div id="root"></div>
+
+<script>
+var NAVY='#16233f',CREAM='#f3ecdf',RED='#e0492c';
+
+/* ---------- silhouettes (100 grid, big cut) ---------- */
+// top-down, symmetric: right half then mirrored by transform
+var TD_HALF='M50 11C54.5 11 57 15.5 57 22L58 30C71 28 86 35 96 51C83 46 70 47 60 52C61 63 63 77 67 93C58 85 53 78 50 72Z';
+// side-on, head left, wing swept up/back, forked tail
+var SIDE='M10 54L21 47C27 43.5 33 43 39 45C52 33 71 21 93 12C81 28 71 43 63 53C73 55 85 63 95 71C85 70 77 70 71 70C80 78 86 85 90 94C76 86 64 76 55 67C45 67 31 63 22 57Z';
+// side-on, narrower, bolder wing (option D)
+var SIDE2=SIDE;
+
+function topdown(fill){return '<path fill="'+fill+'" d="'+TD_HALF+'"/><path fill="'+fill+'" transform="matrix(-1 0 0 1 100 0)" d="'+TD_HALF+'"/>';}
+function sideon(fill){return '<path fill="'+fill+'" d="'+SIDE+'"/>';}
+
+/* ---------- small cuts: integer 16-grid, pixel-snapped ---------- */
+var P16_TD='8,2 9,3 9,4 15,11 10,9 11,14 8,11 5,14 6,9 1,11 7,4 7,3';
+var P16_SIDE='1,9 3,7 5,6 7,6 12,2 11,6 9,9 15,11 11,11 14,15 7,12 4,11';
+
+function tile(fill,r){return '<rect width="100" height="100" rx="'+r+'" fill="'+fill+'"/>';}
+function tile16(fill){return '<rect width="16" height="16" rx="3.5" fill="'+fill+'"/>';}
+
+/* each option: big() -> inner svg (viewBox 0 0 100 100); small() -> inner svg (viewBox 0 0 16 16) */
+var OPTIONS=[
+{ id:'A', name:'A. Soaring, top-down (navy tile)', rec:true,
+  blurb:'Symmetric swallow seen from above: swept wings, two long tail streamers, small red throat. Closest to the brand, reads at once as a bird (a diagonal arrow cannot be symmetric).',
+  big:function(){return tile(NAVY,22)+'<g transform="translate(9 8) scale(.82)">'+topdown(CREAM)+'<circle cx="50" cy="26" r="3.6" fill="'+RED+'"/></g>';},
+  small:function(){return tile16(NAVY)+'<polygon fill="'+CREAM+'" points="'+P16_TD+'"/>';} },
+{ id:'B', name:'B. Side-on, wings up (navy tile)',
+  blurb:'Classic side-on swallow emblem: head left, one long wing swept back and up, forked tail trailing. Most "bird in flight", least symmetric; the diagonal is carried by a bird body, not an arrow shaft.',
+  big:function(){return tile(NAVY,22)+'<g transform="translate(8 9) scale(.84)">'+sideon(CREAM)+'<circle cx="26" cy="51" r="3" fill="'+RED+'"/></g>';},
+  small:function(){return tile16(NAVY)+'<polygon fill="'+CREAM+'" points="'+P16_SIDE+'"/>';} },
+{ id:'C', name:'C. Inverted: navy swallow on cream tile',
+  blurb:'Same top-down silhouette, colours swapped. Cream tile pops on dark taskbars (the navy tile of A/B/D nearly vanishes on a #202020 bar) and navy bird keeps full contrast. Red throat stays.',
+  big:function(){return tile(CREAM,22)+'<g transform="translate(9 8) scale(.82)">'+topdown(NAVY)+'<circle cx="50" cy="26" r="3.6" fill="'+RED+'"/></g>';},
+  small:function(){return tile16(CREAM)+'<polygon fill="'+NAVY+'" points="'+P16_TD+'"/>';} },
+{ id:'D', name:'D. Red sun disc + side-on swallow',
+  blurb:'Navy tile, red disc (rising sun, brand accent used big) behind a cream side-on swallow. The red disc is the identity at 16 px: unique colour in any taskbar, bird crosses it for the shape.',
+  big:function(){return tile(NAVY,22)+'<circle cx="54" cy="46" r="31" fill="'+RED+'"/><g transform="translate(8 10) scale(.84)">'+sideon(CREAM)+'</g>';},
+  small:function(){return tile16(NAVY)+'<circle cx="9" cy="7.5" r="5.5" fill="'+RED+'"/><polygon fill="'+CREAM+'" points="'+P16_SIDE+'"/>';} }
+];
+
+/* current shipped icon, verbatim from res/tsubame.svg and res/tsubame-small.svg */
+var CURRENT={ id:'now', name:'CURRENT (res/tsubame.svg, res/tsubame-small.svg)',
+  blurb:'Shipped today: swallow rotated 40 deg. Note the title bar in the app does not use it at all, it draws a text "↗".',
+  big:function(){return tile(NAVY,22)+'<g transform="translate(13 13) scale(.74)"><g transform="rotate(40 50 53) translate(4 5) scale(.92)"><path fill="'+CREAM+'" d="M50 10C55.5 10 59 15 59 23C73 25 88 36 96 56C84 45 71 42 60 43C60 58 63 78 70 97C61 86 54 75 50 64C46 75 39 86 30 97C37 78 40 58 40 43C29 42 16 45 4 56C12 36 27 25 41 23C41 15 44.5 10 50 10Z"/><circle cx="50" cy="20" r="4.5" fill="'+RED+'"/></g></g>';},
+  smallBig:function(){return tile(NAVY,22)+'<g transform="translate(13 13) scale(.74)"><g transform="rotate(40 50 53) translate(2 3) scale(.96)"><path fill="'+CREAM+'" d="M50 12C57 12 61 18 61 26C74 28 87 38 94 54C82 47 72 46 63 48C64 62 68 78 74 94C63 86 55 78 50 70C45 78 37 86 26 94C32 78 36 62 37 48C28 46 18 47 6 54C13 38 26 28 39 26C39 18 43 12 50 12Z"/></g></g>';} };
+
+function svg(size,o){
+  var small=size<=24;
+  var vb=(small&&!o.smallBig)?'0 0 16 16':'0 0 100 100';
+  var inner=small?(o.smallBig?o.smallBig():o.small()):o.big();
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="'+size+'" height="'+size+'" viewBox="'+vb+'">'+inner+'</svg>';
+}
+function cell(size,o,label){return '<div class="cell">'+svg(size,o)+'<span>'+(label||size)+'</span></div>';}
+function sizesRow(o,cls){
+  var h='<div class="'+cls+'">';
+  [16,20,24,32,48,256].forEach(function(s){h+=cell(s,o);});
+  return h+'</div>';
+}
+function zoomBox(o,cls){
+  var id='z'+o.id+cls;
+  return '<div class="zoom '+cls+' cell"><canvas id="'+id+'" width="128" height="128"></canvas><span>16 px raster x8</span></div>';
+}
+function taskbar(o,th){
+  var other=[CURRENT===o?OPTIONS[0]:CURRENT];
+  return '<div class="strip task '+th+'">'+
+    '<div class="ti ghost">'+svg(24,{small:function(){return '<rect x="2" y="2" width="12" height="12" rx="2" fill="#888"/>';},big:function(){return '';}})+'</div>'+
+    '<div class="ti act">'+svg(24,o)+'</div>'+
+    '<div class="ti ghost">'+svg(24,{small:function(){return '<circle cx="8" cy="8" r="6" fill="#888"/>';},big:function(){return '';}})+'</div></div>';
+}
+function titlebar(o,th){
+  return '<div class="strip title '+th+'">'+svg(16,o)+'<span>Downloads – Tsubame</span></div>';
+}
+function build(o,isCur){
+  var h='<div class="opt'+(isCur?' cur':'')+'"><h2>'+o.name+(o.rec?'<span class="tag rec">recommended</span>':'')+'</h2><p>'+o.blurb+'</p>';
+  h+='<div class="row">'+sizesRow(o,'bgd')+sizesRow(o,'bgl')+zoomBox(o,'dark')+zoomBox(o,'light')+'</div>';
+  h+='<div class="row">'+taskbar(o,'dark')+taskbar(o,'light')+titlebar(o,'dark')+titlebar(o,'light')+'</div>';
+  return h+'</div>';
+}
+var root=document.getElementById('root'),html=build(CURRENT,true);
+OPTIONS.forEach(function(o){html+=build(o);});
+root.innerHTML=html;
+
+/* zoom canvases: rasterise the 16 px svg, scale up unsmoothed */
+function draw(o){
+  ['dark','light'].forEach(function(cls){
+    var c=document.getElementById('z'+o.id+cls); if(!c) return;
+    var img=new Image();
+    img.onload=function(){
+      var t=document.createElement('canvas');t.width=16;t.height=16;
+      t.getContext('2d').drawImage(img,0,0,16,16);
+      var x=c.getContext('2d');x.imageSmoothingEnabled=false;x.clearRect(0,0,128,128);x.drawImage(t,0,0,128,128);
+    };
+    img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg(16,o));
+  });
+}
+draw(CURRENT);OPTIONS.forEach(draw);
+</script>
+</body>
+</html>
