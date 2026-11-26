@@ -475,10 +475,10 @@ mod tests {
 
     #[test]
     fn overrides_apply_and_to_overrides_round_trips() {
-        let o = ov(&[("tab.new", &["Ctrl+J", "Ctrl+Alt+T"]), ("tab.close", &[])]);
+        let o = ov(&[("tab.new", &["Ctrl+J", "Ctrl+Alt+J"]), ("tab.close", &[])]);
         let (m, warn) = KeyMap::from_overrides(&o);
         assert!(warn.is_empty(), "{warn:?}");
-        assert_eq!(m.chords(CMD_NEW_TAB), &[Chord::new(Key::Char('J'), Mods::CTRL), Chord::new(Key::Char('T'), Mods { ctrl: true, shift: false, alt: true })]);
+        assert_eq!(m.chords(CMD_NEW_TAB), &[Chord::new(Key::Char('J'), Mods::CTRL), Chord::new(Key::Char('J'), Mods { ctrl: true, shift: false, alt: true })]);
         assert!(m.chords(CMD_CLOSE_TAB).is_empty(), "empty list = unbound");
         assert_eq!(m.label(CMD_NEXT_TAB), "Ctrl+Tab", "others keep their defaults");
         assert_eq!(m.changed(), 2);

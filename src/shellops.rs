@@ -865,7 +865,7 @@ fn new_kind(a: &mut App, kind: NewKind) {
     }
 }
 
-fn open_terminal(folder: String) {
+pub(crate) fn open_terminal(folder: String) {
     let _ = std::thread::Builder::new().name("tsubame-terminal".into()).spawn(move || {
         use std::os::windows::process::CommandExt;
         // Windows Terminal reads ';' as a command separator

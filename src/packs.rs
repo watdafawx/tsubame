@@ -1124,7 +1124,7 @@ mod example_tests {
         assert_eq!(name_color("Cargo.toml", false), Some(0xb58900));
         let km = crate::keymap::KeyMap::defaults();
         let id = ext::read(|r| r.command_named("pack.open-in-terminal.terminal").unwrap().spec.id);
-        assert_eq!(km.label(id), "Ctrl+Alt+T");
+        assert_eq!(km.label(id), "Ctrl+Alt+Y");
         let m = menu_entries();
         assert_eq!(m.len(), 1);
         assert_eq!((m[0].command.as_str(), m[0].args.as_str()), ("wt.exe", "-d {dir}"));

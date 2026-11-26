@@ -23,6 +23,7 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Rename (several items: batch rename) | `file.rename` | `F2` |
 | Undo the last file operation | `file.undo` | `Ctrl+Z` |
 | Redo | `file.redo` | `Ctrl+Y` |
+| Open a terminal in this folder | `file.open-terminal` | `Ctrl+Alt+T` |
 | Copy file checksums (SHA-256 / SHA-1 / MD5 / CRC32) | `file.checksum` | `Alt+H` |
 
 ### Edit
@@ -38,7 +39,7 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Command | Name | Default keys |
 |---|---|---|
 | Edit the path | `nav.focus-path` | `Ctrl+L`, `F4`, `Alt+D` |
-| Filter this folder | `nav.find` | `Ctrl+F` |
+| Filter this folder | `nav.find` | `Ctrl+F`, `Ctrl+E` |
 | Back | `nav.back` | `Alt+Left` |
 | Forward | `nav.forward` | `Alt+Right` |
 | Up one folder | `nav.up` | `Alt+Up` |
@@ -127,6 +128,9 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Create shortcut | `file.create-shortcut` |
 | Paste shortcut | `edit.paste-shortcut` |
 | Rename: commit and rename the previous item | `rename.previous` |
+| Copy address | `nav.copy-address` |
+| Copy address as text with quotes | `nav.copy-address-quoted` |
+| Paste the clipboard as an address and go | `nav.paste-and-go` |
 | Age colours: toggle | `view.age_colours` |
 | Batch rename selected items… | `file.batch_rename` |
 
