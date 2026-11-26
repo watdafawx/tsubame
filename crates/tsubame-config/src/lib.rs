@@ -330,6 +330,10 @@ pub struct ViewConfig {
     /// rename still edits the full name and sorting uses the real name.
     #[serde(default = "yes")]
     pub show_extensions: bool,
+    /// Group files in a new tab by: `none`, `name`, `type`, `date` or `size`. Each tab keeps its
+    /// own choice afterwards (Group by in the right-click menu, View > Group by). Anything else
+    /// reads as `none`.
+    pub group_by: String,
 }
 
 impl ViewConfig {
@@ -357,7 +361,7 @@ pub const DEFAULT_GRID_SIZE: u32 = 96;
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { grid_size: DEFAULT_GRID_SIZE, type_ahead_filters: false, show_extensions: true }
+        ViewConfig { grid_size: DEFAULT_GRID_SIZE, type_ahead_filters: false, show_extensions: true, group_by: "none".into() }
     }
 }
 
@@ -1320,6 +1324,7 @@ maximized = true
         let c = Config::default();
         assert_eq!(c.view, ViewConfig::default());
         assert_eq!((c.view.grid_size, c.view.type_ahead_filters, c.view.show_extensions), (96, false, true));
+        assert_eq!(c.view.group_by, "none");
         assert_eq!(ViewConfig::snap_grid(10.0), 48);
         assert_eq!(ViewConfig::snap_grid(9999.0), 256);
         assert_eq!(ViewConfig::snap_grid(101.0), 104);
@@ -1328,7 +1333,9 @@ maximized = true
 grid_size = 130
 type_ahead_filters = true
 show_extensions = false
+group_by = \"date\"
 ").unwrap();
+        assert_eq!(c.view.group_by, "date");
         assert_eq!(c.view.grid_size_dip(), 128.0, "off-step values snap when read");
         assert!(c.view.type_ahead_filters && !c.view.show_extensions);
         let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();

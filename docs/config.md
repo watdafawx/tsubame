@@ -100,6 +100,7 @@ view_mode = "details"        # "details" | "grid-small" | "grid-large"
 grid_size = 96               # grid cell width in DIPs, 48-256 in steps of 8 (Ctrl+wheel, Ctrl+Plus / Ctrl+Minus)
 type_ahead_filters = false   # true: typing in the list starts the filter (old behaviour); false: typing jumps to the first name that starts with it
 show_extensions = true       # false: file names are drawn without their extension (rename still edits the full name; sorting uses the real name)
+group_by = "none"            # none | name | type | date | size: how a new tab groups its files (Group by in the right-click menu changes it per tab; the choice is kept in the session). See docs/grouping.md
 
 [panes]
 dual = false
