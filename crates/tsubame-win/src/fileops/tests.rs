@@ -1254,6 +1254,24 @@ fn pause_holds_the_worker_and_resume_continues() {
     assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 2, "both operations ran after resume");
 }
 
+/// Rig: Cancel on a running copy showed "1 failed" with Retry. A cancel that
+/// interrupts an item ends the job as cancelled and reports no error.
+#[test]
+fn cancel_mid_item_is_not_an_error() {
+    let (q, rx, ran) = chunky(5);
+    let t = q.submit(vec![Operation::NewFile("a".into()), Operation::NewFile("b".into())]).unwrap();
+    loop {
+        if let Event::Progress { .. } = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            break;
+        }
+    }
+    t.cancellation.cancel();
+    let o = finish_with(&rx, None);
+    assert!(o.cancelled);
+    assert!(o.errors.is_empty(), "errors: {:?}", o.errors);
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1, "the second item never starts");
+}
+
 #[test]
 fn cancel_wakes_a_paused_job() {
     let (q, rx, _) = chunky(5);

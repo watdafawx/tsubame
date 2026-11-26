@@ -592,6 +592,8 @@ impl Worker {
                         Mode::RedoAt(i) => journal.mark_redone_at(i, inverse, reason),
                     }
                 }
+                // The cancel interrupted this item: the job ends cancelled, not failed.
+                Err(_) if job.cancel.is_cancelled() => break,
                 Err(e) => self.send(Event::Error {
                     id,
                     item: shown,
