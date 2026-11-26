@@ -1182,6 +1182,9 @@ unsafe fn on_bench_tick(hwnd: HWND) {
     let r = with(|a| {
         let b = a.bench.as_mut()?;
         let r = b.tick(a.view.tab_mut());
+        if std::env::var_os("TSUBAME_BENCH_OPS").is_some_and(|v| v != "0") {
+            a.view.ops.panel.bench_tick(Instant::now());
+        }
         if b.just_started {
             b.just_started = false;
             if a.hang_bench {

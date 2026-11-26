@@ -436,6 +436,24 @@ impl Panel {
         !self.cards.is_empty() && self.collapsed && self.cards.iter().any(|c| c.shown)
     }
 
+    /// `--bench` with `TSUBAME_BENCH_OPS=1`: one copy card that runs through
+    /// the whole scroll run (2 GB at 400 MB/s, wrapping), so the scroll budget
+    /// is measured with the panel open and its numbers changing every frame.
+    pub fn bench_tick(&mut self, now: Instant) {
+        const KEY: Key = Key::Queue(1 << 32); // far above real ids; a11y keys multiply it
+        const TOTAL: u64 = 2_000_000_000;
+        if self.card_mut(KEY).is_none() {
+            self.add(Card::new(KEY, "Copying", "Copied", 1406).with_folders("G:\\rig-scratch\\src", "G:\\rig-scratch\\dst"));
+            self.started(KEY, now.checked_sub(OPEN_DELAY).unwrap_or(now));
+            self.tick(now);
+        }
+        let Some(start) = self.card_mut(KEY).and_then(|c| c.started) else { return };
+        let done = (now.saturating_duration_since(start).as_millis() as u64 * 400_000) % TOTAL;
+        let file = 1_400_000;
+        let job = Totals { files_done: done / file, files_total: 1406, bytes_done: done, bytes_total: TOTAL };
+        self.progress(KEY, now, job, (done / file) as usize, Path::new("G:\\rig-scratch\\src\\big\\big3.bin"), done % 256_000_000, 256_000_000);
+    }
+
     pub fn started(&mut self, key: Key, now: Instant) {
         if let Some(c) = self.card_mut(key)
             && c.state == State::Waiting
@@ -1745,5 +1763,22 @@ mod tests {
             }
         }
         assert_eq!(seen, 2, "{:?}", g.texts());
+    }
+
+
+    #[test]
+    fn bench_card_opens_at_once_and_moves() {
+        let t = t0();
+        let mut p = Panel::default();
+        p.bench_tick(t);
+        assert!(p.open && p.cards.len() == 1 && p.cards[0].shown);
+        let a = p.cards[0].totals.bytes_done;
+        p.bench_tick(t + Duration::from_millis(500));
+        assert_eq!(p.cards.len(), 1, "one card for the whole run");
+        assert!(p.cards[0].totals.bytes_done > a && p.cards[0].dirty);
+        for ms in [1000, 5000, 10_000] {
+            p.bench_tick(t + Duration::from_millis(ms));
+            let _ = frame(&mut p, t + Duration::from_millis(ms));
+        }
     }
 }
