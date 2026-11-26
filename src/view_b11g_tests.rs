@@ -133,6 +133,29 @@ fn a_folder_remembers_its_mode_and_sort_and_the_others_show_the_default() {
     let _ = std::fs::remove_file(&file);
 }
 
+/// Smoke bug: the right-click background menu's "Sort by >" changed the sort but the folder
+/// forgot it; header clicks were remembered. Every route shares `remember_folder_view`.
+#[test]
+fn sort_by_from_the_background_menu_is_remembered_per_folder() {
+    let mut r = Rig::new("b11fix-sortmenu");
+    let file = fv_file("sortmenu");
+    attach(&mut r, &file);
+    let (root, docs) = (r.dir.to_string_lossy().into_owned(), path_of(&r, "Docs"));
+    r.v.go(&docs);
+    r.settle();
+    r.v.apply_view_pick(crate::viewmenu::Pick::Sort(Column::Size));
+    r.v.apply_view_pick(crate::viewmenu::Pick::Direction { descending: true });
+    assert_eq!(r.v.folder_views.len(), 1, "Docs remembers the menu's sort");
+    r.v.go(&root);
+    r.settle();
+    assert_eq!(r.v.tab().sort.column, Column::Name, "another folder keeps the default");
+    r.v.go(&docs);
+    r.settle();
+    assert_eq!(r.v.tab().sort.column, Column::Size);
+    assert!(r.v.tab().sort.descending);
+    let _ = std::fs::remove_file(&file);
+}
+
 #[test]
 fn memory_stays_off_without_a_file_or_with_the_setting_off() {
     // no file attached (tests, --dev): the old behaviour, one global view

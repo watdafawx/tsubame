@@ -87,6 +87,8 @@ impl View {
         let t = self.tab_mut();
         if t.sort.column != col {
             t.sort_by(col);
+            // the folder remembers it like a header click does
+            self.remember_folder_view();
         }
     }
 
@@ -96,6 +98,7 @@ impl View {
         if t.sort.descending != descending {
             let col = t.sort.column;
             t.sort_by(col);
+            self.remember_folder_view();
         }
     }
 }

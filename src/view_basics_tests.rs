@@ -376,3 +376,23 @@ fn the_header_menu_switches_columns_and_fits_them() {
     assert_ne!(r.v.cols, before, "the columns were fitted");
     assert_eq!(r.c.clip_depth(), 0);
 }
+
+/// Smoke bug: "Size all columns to fit" left Date modified too narrow (`2026-03-15 04:...`).
+/// The fit measures the widest date the format can make, bold too, plus the cell's padding
+/// (the cell is the column minus 12), and the age pips' pad when they are on.
+#[test]
+fn fitting_the_date_column_leaves_room_for_the_whole_date_and_its_padding() {
+    let mut r = Rig::new("fit-date");
+    let t = r.ui.theme;
+    r.v.fit_columns(&mut r.c, &t, &[Col::Modified]);
+    let widest = ('0'..='9').map(|d| {
+        let s = format!("{d}{d}{d}{d}-{d}{d}-{d}{d} {d}{d}:{d}{d}");
+        r.c.measure(&s, t.font()).max(r.c.measure(&s, t.font().b()))
+    });
+    let widest = widest.fold(0.0f32, f32::max);
+    let w = r.v.cols.w[0];
+    assert!(w - 12.0 >= widest, "the date cell ({}) holds the widest date ({widest})", w - 12.0);
+    // pips need their 17 DIPs on top
+    let plain = date_fit_w(&mut r.c, &t, &tsubame_config::FileAge { enabled: false, ..Default::default() }, true);
+    assert!(plain >= widest + 12.0 && plain < widest + 40.0, "{plain} vs {widest}");
+}

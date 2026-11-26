@@ -243,8 +243,38 @@ impl Default for Sidebar {
     }
 }
 
-fn norm(p: &str) -> String {
-    p.trim_end_matches('\\').to_ascii_lowercase()
+pub(crate) fn norm(p: &str) -> String {
+    clean(p).to_lowercase()
+}
+
+/// One spelling per folder: no `\\?\` prefix (`\\?\UNC\s\x` is `\\s\x`), `\` for `/`, no doubled
+/// separators (a UNC path keeps its two leading ones) and no trailing `\` (a drive root keeps
+/// its one: `c:\`). Case is left alone; `norm` lowers it for comparing.
+pub fn clean(p: &str) -> String {
+    let p = p.trim();
+    let p = match p.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => p.strip_prefix(r"\\?\").unwrap_or(p).to_string(),
+    };
+    let unc = p.starts_with(r"\\") || p.starts_with("//");
+    let mut out = String::with_capacity(p.len());
+    let mut last_sep = false;
+    for c in p.chars() {
+        let sep = c == '\\' || c == '/';
+        if sep && last_sep && !(unc && out.len() == 1) {
+            continue;
+        }
+        last_sep = sep;
+        out.push(if sep { '\\' } else { c });
+    }
+    while out.len() > 3 && out.ends_with('\\') {
+        out.pop();
+    }
+    // "c:" and "c:\" are one folder: the drive root
+    if out.len() == 2 && out.ends_with(':') {
+        out.push('\\');
+    }
+    out
 }
 
 /// The label a bookmark gets by default: the folder name (or the drive).
@@ -350,14 +380,33 @@ impl Sidebar {
     /// A folder was opened: it goes to the top of Recent (no duplicates,
     /// `RECENT_CAP` kept). Drive roots count too.
     pub fn push_recent(&mut self, path: &str) -> bool {
-        if path.is_empty() || self.recents.first().is_some_and(|p| norm(p) == norm(path)) {
+        let path = clean(path);
+        if path.is_empty() || self.recents.first().is_some_and(|p| norm(p) == norm(&path)) {
             return false;
         }
-        self.recents.retain(|p| norm(p) != norm(path));
-        self.recents.insert(0, path.to_string());
+        self.recents.retain(|p| norm(p) != norm(&path));
+        self.recents.insert(0, path);
         self.recents.truncate(RECENT_CAP);
         self.recents_dirty = true;
         true
+    }
+
+    /// Recent as the session saved it (newest first): one spelling per folder, duplicates
+    /// (also from older versions that spelled one folder several ways) dropped, capped.
+    pub fn set_recents(&mut self, saved: &[String]) {
+        let mut out: Vec<String> = Vec::with_capacity(RECENT_CAP);
+        for p in saved {
+            let p = clean(p);
+            if !p.is_empty() && !out.iter().any(|q| norm(q) == norm(&p)) {
+                out.push(p);
+                if out.len() == RECENT_CAP {
+                    break;
+                }
+            }
+        }
+        // a cleaned-up list is saved again
+        self.recents_dirty |= out != *saved;
+        self.recents = out;
     }
 
     /// A folder that could not be opened must not stay in Recent.
@@ -1242,6 +1291,34 @@ mod tests {
         s.recents_dirty = false;
         s.clear_recents();
         assert!(s.recents.is_empty() && s.recents_dirty);
+    }
+
+    /// Smoke bug: `alpha` listed twice. One folder reached Recent under several spellings.
+    #[test]
+    fn recents_dedupe_every_spelling_on_insert_and_on_load() {
+        let mut s = Sidebar::default();
+        assert!(s.push_recent(r"X:\Dev\alpha"));
+        assert!(!s.push_recent(r"x:\dev\ALPHA\"), "case and trailing slash");
+        assert!(!s.push_recent(r"\\?\X:\Dev\alpha"), "extended-length prefix");
+        assert!(!s.push_recent("X:/Dev/alpha"), "forward slashes");
+        assert!(s.push_recent(r"X:\Dev\beta"));
+        assert!(s.push_recent(r"\\?\X:\Dev\alpha\"), "moves to the front, once");
+        assert_eq!(s.recents, vec![r"X:\Dev\alpha".to_string(), r"X:\Dev\beta".to_string()]);
+        assert!(s.push_recent(r"\\?\UNC\srv\share\x"));
+        assert_eq!(s.recents[0], r"\\srv\share\x");
+        assert_eq!(clean("c:"), r"c:\");
+        assert_eq!(clean(r"C:\"), r"C:\");
+
+        // a session written by an older version
+        let mut l = Sidebar::default();
+        let saved: Vec<String> = [r"X:\Dev\alpha", r"x:\dev\alpha\", r"X:\Dev\beta", r"\\?\X:\Dev\ALPHA", r"X:\Dev\gamma"].iter().map(|p| p.to_string()).collect();
+        l.set_recents(&saved);
+        assert_eq!(l.recents, vec![r"X:\Dev\alpha".to_string(), r"X:\Dev\beta".to_string(), r"X:\Dev\gamma".to_string()], "first (newest) spelling wins, order kept");
+        assert!(l.recents_dirty, "the cleaned list is saved again");
+        let again = l.recents.clone();
+        l.recents_dirty = false;
+        l.set_recents(&again);
+        assert!(!l.recents_dirty && l.recents == again);
     }
 
     #[test]

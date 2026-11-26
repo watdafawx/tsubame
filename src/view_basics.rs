@@ -34,6 +34,26 @@ const ID_COLMENU: Id = Id::new("col-menu");
 /// 96 and 152 give the old small (96, 118, 64, 48) and large (152, 182, 128, 64) cells; the
 /// picture box takes what the sides leave (`cell - pad`), the cell is the box, a 6 DIP gap, two
 /// label lines and 8 DIP of padding.
+/// The width a Modified column needs: the widest date the format can make ("YYYY-MM-DD HH:MM"
+/// with the font's widest digit everywhere, regular and bold), the pips' pad and the future mark
+/// when the age colours are on, and the cell's side padding. Measured, not guessed from one row:
+/// the fitted column used to cut the time (`2026-03-15 04:...`).
+pub(super) fn date_fit_w(g: &mut dyn Canvas, t: &Theme, age: &tsubame_config::FileAge, dark: bool) -> f32 {
+    let font = t.font();
+    let mut s = String::with_capacity(16);
+    let mut w = 0.0f32;
+    for d in '0'..='9' {
+        s.clear();
+        s.extend("0000-00-00 00:00".chars().map(|c| if c == '0' { d } else { c }));
+        w = w.max(g.measure(&s, font)).max(g.measure(&s, font.b()));
+    }
+    if let Some(af) = crate::age::frame(age, dark, g, t) {
+        w += af.date_extra();
+    }
+    // the cell is the column minus 8 on the left and 4 on the right; two more DIPs of slack
+    w + 14.0
+}
+
 pub fn grid_dims(cell: f32) -> (f32, f32, f32, f32) {
     let pad = if cell <= 96.0 { 16.0 + (cell - 48.0).max(0.0) / 3.0 } else { 32.0 - 8.0 * ((cell - 96.0) / 56.0).clamp(0.0, 1.0) };
     let boxd = (cell - pad).round().max(24.0);
@@ -180,9 +200,16 @@ impl View {
         self.config_dirty = true;
     }
 
-    /// "Reset columns": the default order and widths.
+    /// "Reset columns": the default order, widths and shown columns. The Tags column goes back to
+    /// what `tags.column` defaults to (off); an extension's column (Git) stays as its extension
+    /// is switched, that is not a column setting.
     pub fn reset_columns(&mut self) {
         self.prefs.columns.order.clear();
+        let tags_default = tsubame_config::TagsConfig::default().column;
+        if self.prefs.tags.column != tags_default {
+            self.prefs.tags.column = tags_default;
+            self.sync_tags();
+        }
         self.cols = crate::cols::Columns::default();
         self.refresh_colset();
         self.config_dirty = true;
@@ -353,17 +380,13 @@ impl View {
             let n = tab.store.view().len().min(FIT_ROWS);
             // known file types share a type text: measured once each
             let mut kind_w = [-1.0f32; crate::data::KINDS.len()];
-            let mut date_done = false;
             let wants = |c: Col| cols.contains(&c);
+            if wants(Col::Modified) {
+                want[Col::Modified.slot()] = want[Col::Modified.slot()].max(date_fit_w(g, t, &self.prefs.file_age, self.dark));
+            }
             for i in 0..n {
                 let Some(id) = tab.store.at(i) else { break };
                 row.fill(&tab.store, id);
-                if wants(Col::Modified) && !date_done {
-                    // digits are tabular: any date is as wide as any other
-                    data::fmt_date(row.mtime, &mut text);
-                    want[Col::Modified.slot()] = want[Col::Modified.slot()].max(g.measure(&text, font) + 14.0);
-                    date_done = true;
-                }
                 if wants(Col::Type) {
                     let k = row.kind as usize;
                     let w = if k < kind_w.len() && kind_w[k] >= 0.0 {

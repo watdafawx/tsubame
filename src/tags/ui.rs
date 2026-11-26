@@ -411,7 +411,9 @@ impl TagsUi {
     /// locked or unwritable. Returns the height used.
     pub fn paint_banner(&mut self, ui: &mut Ui, g: &mut dyn Canvas, r: Rect, t: &Theme) -> f32 {
         let Some(s) = &self.snap else { return 0.0 };
-        if !self.on || (s.mode == Mode::Rw && s.note.is_none()) {
+        // a second window of the same user (another process holds the lock) is normal: it reads
+        // the tags and says so in the status bar, no banner
+        if !self.on || (s.mode == Mode::Rw && s.note.is_none()) || (s.mode == Mode::Locked && s.note.is_none()) {
             return 0.0;
         }
         let h = 26.0;
@@ -502,7 +504,7 @@ impl TagsUi {
             return Some((m.to_string(), false));
         }
         if self.read_only() {
-            return Some(("Tags read-only".into(), true));
+            return Some((if self.snap.as_ref().is_some_and(|s| s.mode == Mode::Locked) { "Tags read-only: open in another window" } else { "Tags read-only" }.into(), true));
         }
         if let Some((done, total)) = self.progress {
             return Some((format!("Tags: reconciling {} / {} · background, pauses while you scroll", sep(done), sep(total)), false));
@@ -1149,6 +1151,31 @@ mod tests {
         assert_eq!(dir_hash("C:\\A"), dir_hash("c:\\a"));
     }
 
+    /// Smoke bug: "Move to new window" opened a process that showed a banner "tags.db is locked
+    /// by another process". That is normal for a second window: no banner, a status text; a
+    /// real problem (unwritable folder, damaged store) keeps its banner.
+    #[test]
+    fn a_second_windows_locked_store_is_quiet_but_real_problems_still_show() {
+        let snap = |mode: Mode, note: Option<&str>| Snapshot { defs: model::defaults(), counts: [0; model::MAX_TAGS], mode, note: note.map(String::from), items: 0, usage: 0.0 };
+        let paint = |tags: &mut TagsUi| {
+            let mut ui = Ui::new(tsubame_ui::DARK);
+            let mut g = tsubame_ui::TestCanvas::new(800.0, 200.0);
+            ui.begin_frame((800.0, 200.0));
+            let h = tags.paint_banner(&mut ui, &mut g, Rect::new(0.0, 0.0, 800.0, 100.0), &tsubame_ui::DARK);
+            let _ = ui.end_frame();
+            h
+        };
+        let mut tags = TagsUi::new();
+        tags.on = true;
+        tags.snap = Some(snap(Mode::Locked, None));
+        assert_eq!(paint(&mut tags), 0.0, "no banner for a locked store");
+        assert!(tags.read_only() && !tags.writable(), "still read-only");
+        assert_eq!(tags.status().map(|s| s.0).as_deref(), Some("Tags read-only: open in another window"));
+        tags.snap = Some(snap(Mode::Unwritable("access denied".into()), None));
+        assert!(paint(&mut tags) > 0.0, "an unwritable folder is a problem the user must see");
+        tags.snap = Some(snap(Mode::Locked, Some("tags.db was damaged")));
+        assert!(paint(&mut tags) > 0.0, "a damage note keeps the banner");
+    }
     #[test]
     fn picker_toggles_like_the_mock_for_a_mixed_selection() {
         let defs = model::defaults();

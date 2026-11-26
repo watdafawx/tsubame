@@ -25,6 +25,8 @@ const DAY: u32 = 86_400;
 pub const COUNT_CAP: usize = 1_000_000;
 /// Width before the date when pips are shown (four bars and a gap).
 const PIP_PAD: f32 = 17.0;
+/// The gap and icon after the date of a file from the future.
+const FUTURE_MARK_W: f32 = 18.0;
 /// Width reserved at the right of the status bar for the key.
 pub const KEY_W: f32 = 150.0;
 const LEGEND_W: f32 = 316.0;
@@ -128,6 +130,13 @@ impl AgeFrame {
             colours: palette_colours(cfg.palette, dark),
             chip_w,
         }
+    }
+
+    /// What a Modified cell needs beyond the plain date: the pips' pad and the mark of a date in
+    /// the future (`draw_date` draws both inside the cell).
+    pub fn date_extra(&self) -> f32 {
+        let pips = if self.pips { PIP_PAD } else { 0.0 };
+        pips + FUTURE_MARK_W
     }
 
     /// The bucket of an age in seconds: today, week, month, year, older. A
