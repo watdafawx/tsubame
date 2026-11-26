@@ -2,6 +2,7 @@ pub mod button;
 pub mod controls;
 pub mod colheader;
 pub mod grid;
+pub mod grouping;
 pub mod list;
 pub mod menu;
 pub mod scrollbar;
