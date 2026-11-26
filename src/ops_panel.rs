@@ -362,9 +362,17 @@ impl Card {
         let t = self.totals;
         if self.counts_items() { t.files_total.saturating_sub(t.files_done) } else { t.bytes_total.saturating_sub(t.bytes_done) }
     }
-    /// Can the Undo link run (it is shown only then).
+    /// Can the Undo link run (it is shown only then). A job cancelled before
+    /// its first item finished left nothing to undo.
     pub fn can_undo(&self) -> bool {
-        !self.history && !self.permanent && matches!(self.key, Key::Queue(_)) && matches!(self.state, State::Done | State::Cancelled)
+        !self.history
+            && !self.permanent
+            && matches!(self.key, Key::Queue(_))
+            && match self.state {
+                State::Done => true,
+                State::Cancelled => self.totals.files_done > 0,
+                _ => false,
+            }
     }
     /// Sets the current item and the two after it, from the operation list.
     fn set_current(&mut self, index: usize, current: &Path) {
@@ -1576,7 +1584,24 @@ mod tests {
         assert_eq!((c.state, c.done_at_cancel), (State::Cancelled, 6));
         p.finished(Key::Queue(1), t + Duration::from_secs(1), true, Totals { files_done: 7, files_total: 14, bytes_done: 70, bytes_total: 140 });
         assert_eq!(p.card(Key::Queue(1)).unwrap().state, State::Cancelled);
+        assert!(p.card(Key::Queue(1)).unwrap().can_undo(), "7 items were copied");
         assert!(p.next_dismiss().is_some());
+    }
+
+    #[test]
+    fn a_cancel_before_the_first_item_offers_no_undo() {
+        let t = t0();
+        let mut p = Panel::default();
+        p.add(Card::new(Key::Queue(1), "Copying", "Copied", 1));
+        p.started(Key::Queue(1), t);
+        p.tick(t + OPEN_DELAY);
+        p.cancelled(Key::Queue(1), t + OPEN_DELAY);
+        p.finished(Key::Queue(1), t + OPEN_DELAY, true, Totals { files_done: 0, files_total: 1, bytes_done: 50, bytes_total: 100 });
+        let c = p.card(Key::Queue(1)).unwrap();
+        assert_eq!(c.state, State::Cancelled);
+        assert!(!c.can_undo());
+        let (g, _) = frame(&mut p, t + OPEN_DELAY);
+        assert!(!g.texts().contains(&"Undo"), "{:?}", g.texts());
     }
 
     #[test]
