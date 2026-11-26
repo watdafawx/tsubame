@@ -422,6 +422,38 @@ mod tests {
     }
 
     #[test]
+    fn each_tab_keeps_its_group_mode_and_the_scroll_position_stays_an_entry() {
+        use tsubame_core::grouping::GroupBy;
+        let d = temp_dir("group");
+        let one = d.join("one").to_str().unwrap().to_string();
+        let two = d.join("two").to_str().unwrap().to_string();
+        let mut v = view(&one);
+        settle(&mut v);
+        v.tab_mut().set_group_by(GroupBy::Type, false);
+        let tab = v.pending_tab(&two);
+        v.tabs.items.push(tab);
+        v.tabs.items[1].group.set_by(GroupBy::Date);
+        let s = capture(&v, tsubame_config::WindowState::default());
+        assert_eq!(s.tabs()[0].group_by.as_deref(), Some("type"));
+        assert_eq!(s.tabs()[1].group_by.as_deref(), Some("date"));
+
+        let mut v2 = view(&one);
+        apply(&mut v2, &s);
+        assert_eq!(v2.tabs.items[0].group.by, GroupBy::Type);
+        assert_eq!(v2.tabs.items[1].group.by, GroupBy::Date);
+        settle(&mut v2);
+        v2.tab_mut().sync_group();
+        assert!(v2.tab().group.on(), "the restored mode groups the listing");
+        // an old session (no mode) leaves the tab on the default
+        let mut old = s.clone();
+        old.panes[0].tabs[0].group_by = None;
+        let mut v3 = view(&one);
+        apply(&mut v3, &old);
+        assert_eq!(v3.tab().group.by, crate::view_group::default_by());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn two_panes_round_trip() {
         let d = temp_dir("dual");
         let one = d.join("one").to_str().unwrap().to_string();

@@ -127,6 +127,15 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Create shortcut | `file.create-shortcut` |
 | Paste shortcut | `edit.paste-shortcut` |
 | Rename: commit and rename the previous item | `rename.previous` |
+| Group by: next mode | `view.group-by` |
+| Group by: none | `view.group-none` |
+| Group by: name | `view.group-name` |
+| Group by: type | `view.group-type` |
+| Group by: date modified | `view.group-date` |
+| Group by: size | `view.group-size` |
+| Collapse or expand the group of the cursor | `view.group-toggle` |
+| Collapse all groups | `view.group-collapse-all` |
+| Expand all groups | `view.group-expand-all` |
 | Age colours: toggle | `view.age_colours` |
 | Batch rename selected items… | `file.batch_rename` |
 

@@ -252,6 +252,19 @@ mod tests {
     }
 
     #[test]
+    fn the_group_mode_of_a_tab_round_trips_and_an_old_file_has_none() {
+        let mut s = session(&[r"C:\a", r"C:\b"], 0);
+        s.panes[0].tabs[0].group_by = Some("date".into());
+        let text = s.to_toml();
+        assert!(text.contains("group_by = \"date\""));
+        let back: Session = toml::from_str(&text).unwrap();
+        assert_eq!(back.tabs()[0].group_by.as_deref(), Some("date"));
+        assert_eq!(back.tabs()[1].group_by, None, "a tab without one follows [view] group_by");
+        let old: Session = toml::from_str("version = 1\n[[panes]]\nactive_tab = 0\n[[panes.tabs]]\npath = 'C:\\x'\n").unwrap();
+        assert_eq!(old.tabs()[0].group_by, None);
+    }
+
+    #[test]
     fn two_panes_and_recents_round_trip() {
         let mut s = session(&["C:\\a", "C:\\b"], 0);
         s.panes.push(SessionPane { active_tab: 0, tabs: vec![tab("D:\\right")] });
