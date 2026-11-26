@@ -261,19 +261,37 @@ fn copy_stream(s: &IStream, f: &mut std::fs::File, limit: u64) -> Option<u64> {
     }
 }
 
-/// Creates `<name> - Shortcut.lnk` in `folder` for each target (a free name).
+/// File name (no folder) of the shortcut to `target`, like Explorer's: `<stem> - Shortcut.lnk`
+/// for a file (extension stripped, `a.txt` -> `a - Shortcut.lnk`), `<name> - Shortcut.lnk` for a
+/// folder or a drive.
+pub fn link_base(target: &Path, is_dir: bool) -> String {
+    let name = match target.file_name() {
+        Some(n) if is_dir => n.to_string_lossy().into_owned(),
+        Some(_) => target.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        None => target.to_string_lossy().trim_end_matches(['\\', ':']).to_string(),
+    };
+    format!("{name} - Shortcut")
+}
+
+/// `<base>.lnk`, then `<base> (2).lnk`, `(3)`, ... the first name `taken` does not claim.
+pub fn free_link_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut name = format!("{base}.lnk");
+    let mut k = 2;
+    while taken(&name) && k < 1000 {
+        name = format!("{base} ({k}).lnk");
+        k += 1;
+    }
+    name
+}
+
+/// Creates `<stem> - Shortcut.lnk` in `folder` for each target (a free name).
 /// Returns the names made.
 pub fn make_links(targets: &[PathBuf], folder: &Path) -> Result<Vec<String>, String> {
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
     let mut made = Vec::new();
     for t in targets {
-        let name = t.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| t.to_string_lossy().trim_end_matches(['\\', ':']).to_string());
-        let mut dest = folder.join(format!("{name} - Shortcut.lnk"));
-        let mut k = 2;
-        while dest.exists() && k < 1000 {
-            dest = folder.join(format!("{name} - Shortcut ({k}).lnk"));
-            k += 1;
-        }
+        let base = link_base(t, t.is_dir());
+        let dest = folder.join(free_link_name(&base, |n| folder.join(n).exists()));
         unsafe {
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| format!("ShellLink {:?}", e.code()))?;
             let tw = crate::wide(&t.to_string_lossy());
@@ -292,4 +310,37 @@ pub fn make_links(targets: &[PathBuf], folder: &Path) -> Result<Vec<String>, Str
         made.push(dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
     }
     Ok(made)
+}
+
+#[cfg(test)]
+mod link_name_tests {
+    use super::*;
+
+    #[test]
+    fn file_shortcut_drops_the_extension() {
+        assert_eq!(link_base(Path::new(r"C:\d\a.txt"), false), "a - Shortcut");
+        assert_eq!(link_base(Path::new(r"C:\d\a.tar.gz"), false), "a.tar - Shortcut");
+        assert_eq!(link_base(Path::new(r"C:\d\noext"), false), "noext - Shortcut");
+    }
+
+    #[test]
+    fn folder_and_drive_keep_the_whole_name() {
+        assert_eq!(link_base(Path::new(r"C:\d\my.folder"), true), "my.folder - Shortcut");
+        assert_eq!(link_base(Path::new(r"C:\d\Name"), true), "Name - Shortcut");
+        assert_eq!(link_base(Path::new(r"D:\"), true), "D - Shortcut");
+    }
+
+    #[test]
+    fn shortcut_to_a_shortcut_is_one_suffix_per_level() {
+        // `a.lnk` -> `a - Shortcut.lnk`, never `a.lnk - Shortcut.lnk`
+        assert_eq!(link_base(Path::new(r"C:\d\a.lnk"), false), "a - Shortcut");
+        assert_eq!(link_base(Path::new(r"C:\d\a - Shortcut.lnk"), false), "a - Shortcut - Shortcut");
+    }
+
+    #[test]
+    fn taken_names_get_a_numbered_suffix() {
+        assert_eq!(free_link_name("a - Shortcut", |_| false), "a - Shortcut.lnk");
+        assert_eq!(free_link_name("a - Shortcut", |n| n == "a - Shortcut.lnk"), "a - Shortcut (2).lnk");
+        assert_eq!(free_link_name("a - Shortcut", |n| n != "a - Shortcut (3).lnk"), "a - Shortcut (3).lnk");
+    }
 }

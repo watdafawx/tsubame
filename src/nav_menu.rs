@@ -62,10 +62,16 @@ impl HoldState {
 
     /// Remaining ms until the hold triggers, or `None` if already fired.
     pub fn next_tick_ms(&self) -> Option<u32> {
-        if self.fired {
+        self.tick_ms_at(self.started.elapsed().as_millis() as u64)
+    }
+
+    /// `next_tick_ms` for `el` ms since the press. A hold nobody resolved (released
+    /// outside the button, tab switched, button disabled) must not keep a 1 ms timer
+    /// and a repaint loop alive: past twice the threshold it asks for nothing.
+    fn tick_ms_at(&self, el: u64) -> Option<u32> {
+        if self.fired || el >= HOLD_MS * 2 {
             return None;
         }
-        let el = self.started.elapsed().as_millis() as u64;
         Some(HOLD_MS.saturating_sub(el).max(1) as u32)
     }
 }
@@ -505,6 +511,19 @@ pub fn nat_cmp_ci(a: &str, b: &str) -> Ordering {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unresolved_hold_stops_asking_for_a_timer() {
+        let h = HoldState::new(0, false);
+        assert_eq!(h.tick_ms_at(0), Some(HOLD_MS as u32));
+        assert_eq!(h.tick_ms_at(HOLD_MS - 1), Some(1));
+        // due but never resolved by a paint: still bounded
+        assert_eq!(h.tick_ms_at(HOLD_MS), Some(1));
+        assert_eq!(h.tick_ms_at(HOLD_MS * 2), None, "no endless 1 ms timer");
+        let mut fired = h.clone();
+        fired.fired = true;
+        assert_eq!(fired.tick_ms_at(0), None);
+    }
+
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;

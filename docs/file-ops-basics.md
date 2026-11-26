@@ -41,7 +41,7 @@ gives up after 5 s). The native shell menu ("Show more options") keeps its own N
 
 ## Shortcuts
 
-- `file.create-shortcut` makes `<name> - Shortcut.lnk` next to each selected item
+- `file.create-shortcut` makes `<stem> - Shortcut.lnk` (extension stripped for files, like Explorer) next to each selected item
   (IShellLinkW + IPersistFile on an STA shell worker; the working directory of a
   file target is its folder).
 - `edit.paste-shortcut` makes shortcuts in the shown folder to the files on the
