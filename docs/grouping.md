@@ -78,8 +78,9 @@ listing, mode or sort direction changes. Scrolling reads the cached rows and
 allocates nothing per row (`GroupState` keeps the header texts). With grouping
 off the list and grid take the same code path as before.
 
-The real 4K scroll numbers per `docs/bench.md` (`--bench --group type|date`) are
-in `docs/bench-log.md`.
+Real 4K scroll (`--bench --group type|date`, 100,006 entries, release): paint p95 3.78 ms
+grouped by Type and 3.44 ms grouped by Date (budget 5 ms), private bytes 91-93 MB, idle CPU 0 after
+use. Details in `docs/bench-log.md`.
 
 ## UIA
 
