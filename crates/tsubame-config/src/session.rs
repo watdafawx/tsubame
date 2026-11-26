@@ -39,6 +39,8 @@ pub struct SessionTab {
     pub selected: Vec<String>,
     /// Tree view: full paths of the expanded folders (P4.F6), capped.
     pub expanded: Vec<String>,
+    /// Group by mode (`none`, `name`, `type`, `date`, `size`); absent: the `[view] group_by` default.
+    pub group_by: Option<String>,
 }
 
 /// One pane's tabs. Today the app has a single pane; the schema already has

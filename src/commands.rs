@@ -87,6 +87,16 @@ pub const CMD_REOPEN_TAB: u32 = 120;
 pub const CMD_NEW_WINDOW: u32 = 121;
 pub const CMD_FULLSCREEN: u32 = 122;
 pub const CMD_REVEAL_SIDEBAR: u32 = 123;
+// B11-F2: group by (id range 200-219)
+pub const CMD_VIEW_GROUP_BY: u32 = 200;
+pub const CMD_GROUP_NONE: u32 = 201;
+pub const CMD_GROUP_NAME: u32 = 202;
+pub const CMD_GROUP_TYPE: u32 = 203;
+pub const CMD_GROUP_DATE: u32 = 204;
+pub const CMD_GROUP_SIZE: u32 = 205;
+pub const CMD_GROUP_TOGGLE: u32 = 206;
+pub const CMD_GROUP_COLLAPSE_ALL: u32 = 207;
+pub const CMD_GROUP_EXPAND_ALL: u32 = 208;
 // B10-C: file operation basics
 pub const CMD_CREATE_SHORTCUT: u32 = 140;
 pub const CMD_PASTE_SHORTCUT: u32 = 141;
@@ -167,6 +177,20 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_RENAME_PREV, "rename.previous", "Rename: commit and rename the previous item", [], F),
 ];
 
+/// Group by: part of the core extension, registered right after `BUILTIN`. No default keys
+/// (the group header and the context menus carry the mouse side).
+pub static GROUP_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_VIEW_GROUP_BY, "view.group-by", "Group by: next mode", [], F),
+    cmd!(CMD_GROUP_NONE, "view.group-none", "Group by: none", [], F),
+    cmd!(CMD_GROUP_NAME, "view.group-name", "Group by: name", [], F),
+    cmd!(CMD_GROUP_TYPE, "view.group-type", "Group by: type", [], F),
+    cmd!(CMD_GROUP_DATE, "view.group-date", "Group by: date modified", [], F),
+    cmd!(CMD_GROUP_SIZE, "view.group-size", "Group by: size", [], F),
+    cmd!(CMD_GROUP_TOGGLE, "view.group-toggle", "Collapse or expand the group of the cursor", [], F),
+    cmd!(CMD_GROUP_COLLAPSE_ALL, "view.group-collapse-all", "Collapse all groups", [], F),
+    cmd!(CMD_GROUP_EXPAND_ALL, "view.group-expand-all", "Expand all groups", [], F),
+];
+
 /// Archive extension (`tsubame.vfs.archive`) commands. The extension commands take the
 /// `Alt+letter` family (`Alt+P` preview, `Alt+T` tags): `Alt+E` extracts here, `Shift+Alt+E`
 /// extracts the selection, `Alt+S` calculates sizes, `Alt+H` hashes (checksum).
@@ -229,6 +253,7 @@ pub static BATCH_RENAME_COMMANDS: &[CommandSpec] = &[
 pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
     BUILTIN
         .iter()
+        .chain(GROUP_COMMANDS)
         .chain(ARCHIVE_COMMANDS)
         .chain(FOLDER_SIZE_COMMANDS)
         .chain(CHECKSUM_COMMANDS)
@@ -245,6 +270,7 @@ pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
 #[cfg_attr(not(test), allow(dead_code))]
 pub const fn builtin_count() -> usize {
     BUILTIN.len()
+        + GROUP_COMMANDS.len()
         + ARCHIVE_COMMANDS.len()
         + FOLDER_SIZE_COMMANDS.len()
         + CHECKSUM_COMMANDS.len()
@@ -387,6 +413,15 @@ mod tests {
     ];
 
     const FEATURE_BEFORE: &[Before] = &[
+        (CMD_VIEW_GROUP_BY, &[], false),
+        (CMD_GROUP_NONE, &[], false),
+        (CMD_GROUP_NAME, &[], false),
+        (CMD_GROUP_TYPE, &[], false),
+        (CMD_GROUP_DATE, &[], false),
+        (CMD_GROUP_SIZE, &[], false),
+        (CMD_GROUP_TOGGLE, &[], false),
+        (CMD_GROUP_COLLAPSE_ALL, &[], false),
+        (CMD_GROUP_EXPAND_ALL, &[], false),
         (CMD_ARCHIVE_EXTRACT_HERE, &[(Key::Char('E'), AL)], false),
         (CMD_ARCHIVE_EXTRACT_SELECTED, &[(Key::Char('E'), AS)], false),
         (CMD_FOLDER_CALC_SIZES, &[(Key::Char('S'), AL)], false),
