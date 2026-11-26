@@ -534,7 +534,7 @@ impl Ui {
                     } else if let Some(cmd) = self.shortcuts.lookup(key, mods, true).filter(|_| !self.claimed.contains(&(key, mods))) {
                         self.commands.push(cmd);
                         self.queue[i].used = true;
-                    } else if key == Key::Tab && !mods.ctrl && !mods.alt {
+                    } else if key == Key::Tab && !mods.ctrl && !mods.alt && !self.claimed.contains(&(key, mods)) {
                         self.focus_step(!mods.shift);
                         self.queue[i].used = true;
                     }

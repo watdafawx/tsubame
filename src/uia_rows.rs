@@ -34,6 +34,8 @@ pub const PART_LIST: u32 = 1;
 pub const PART_PANE: u32 = 2;
 /// Path bar breadcrumb chevrons (each invokes/expands its subfolder menu).
 pub const PART_CRUMBS: u32 = 3;
+/// The path edit's autocomplete dropdown (each row invokes: opens that folder).
+pub const PART_SUGGEST: u32 = 4;
 /// Miller column `i` is `PART_MILLER + i` (at most 13 live columns).
 pub const PART_MILLER: u32 = 16;
 
@@ -429,6 +431,48 @@ pub fn crumbs(slot: usize, bar: Rect, chevrons: &[CrumbUia]) {
         name: "Path bar".into(),
         desc: format!("{size} folder segment{}", if size == 1 { "" } else { "s" }),
         rect: px(bar),
+        focused: false,
+        multi: false,
+        size,
+        items,
+    });
+}
+
+// ---- Path edit autocomplete ---------------------------------------------------
+
+/// One dropdown row: (label, folder it opens, row rect, highlighted).
+pub struct SuggestUia {
+    pub label: String,
+    pub path: String,
+    pub rect: Rect,
+    pub selected: bool,
+}
+
+/// Publishes the autocomplete rows as a `PART_SUGGEST` list (row key = its index).
+pub fn suggestions(slot: usize, area: Rect, rows: &[SuggestUia]) {
+    let items: Vec<VItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| VItem {
+            key: i as u64,
+            name: r.label.clone(),
+            value: r.path.clone(),
+            kind: "Folder suggestion".into(),
+            rect: px(r.rect),
+            selected: r.selected,
+            pos: i as u32 + 1,
+            selectable: false,
+            invokable: true,
+            ..Default::default()
+        })
+        .collect();
+    let size = items.len() as u32;
+    push(VSurface {
+        key: skey(slot, PART_SUGGEST),
+        tree: false,
+        name: "Address suggestions".into(),
+        desc: format!("{size} suggestion{}", if size == 1 { "" } else { "s" }),
+        rect: px(area),
         focused: false,
         multi: false,
         size,

@@ -76,6 +76,7 @@ mod overlay;
 mod packs;
 mod palette;
 mod panes;
+mod path_suggest;
 mod preview_ui;
 mod rename;
 mod search_ui;
@@ -197,6 +198,7 @@ struct App {
     ctx_timer: Option<u32>,
     /// the one-shot 600 ms row-tooltip dwell timer is armed for this hover sequence
     row_tip_timer: Option<u64>,
+    suggest_timer: Option<u64>,
     /// the GPU park timer is armed
     park_timer: bool,
     /// the blink timer exists
@@ -622,6 +624,7 @@ fn main() {
                 watch_armed: false,
                 ctx_timer: None,
                 row_tip_timer: None,
+                suggest_timer: None,
                 park_timer: false,
                 caret_timer: false,
                 caret_idle: false,
@@ -851,6 +854,22 @@ fn arm_row_tip(hwnd: HWND, a: &mut App) {
     }
 }
 
+/// One-shot debounce timer for the path-edit autocomplete: armed only while a
+/// keystroke waits out its 80 ms, killed on fire or when the dropdown goes away.
+fn arm_suggest(hwnd: HWND, a: &mut App) {
+    match a.view.suggest_timer(Instant::now()) {
+        Some((seq, ms)) if a.suggest_timer != Some(seq) => {
+            unsafe { SetTimer(Some(hwnd), path_suggest::TIMER_ID, ms, None) };
+            a.suggest_timer = Some(seq);
+        }
+        None if a.suggest_timer.is_some() => {
+            let _ = unsafe { KillTimer(Some(hwnd), path_suggest::TIMER_ID) };
+            a.suggest_timer = None;
+        }
+        _ => {}
+    }
+}
+
 /// Cancels any pending or visible row tooltip and kills its one-shot timer.
 fn cancel_row_tip(hwnd: HWND) {
     let repaint = with(|a| {
@@ -891,6 +910,7 @@ fn after_paint(hwnd: HWND, a: &mut App) {
     arm_ops(hwnd, a);
     arm_ctx(hwnd, a);
     arm_row_tip(hwnd, a);
+    arm_suggest(hwnd, a);
     arm_park(hwnd, a);
     if a.view.want_drives && !PLACES_BUSY.load(Ordering::Acquire) {
         a.view.want_drives = false;
@@ -1973,6 +1993,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let show = with(|a| {
                     a.row_tip_timer = None;
                     a.view.row_tip.on_timer()
+                })
+                .unwrap_or(false);
+                if show {
+                    invalidate(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == path_suggest::TIMER_ID => {
+                let _ = KillTimer(Some(hwnd), path_suggest::TIMER_ID);
+                let show = with(|a| {
+                    a.suggest_timer = None;
+                    a.view.on_suggest_timer()
                 })
                 .unwrap_or(false);
                 if show {

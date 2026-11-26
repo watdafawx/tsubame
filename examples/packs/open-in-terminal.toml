@@ -17,7 +17,7 @@ id = "terminal"
 title = "Windows Terminal here"
 program = "wt.exe"
 args = "-d {dir}"
-keys = ["Ctrl+Alt+T"]
+keys = ["Ctrl+Alt+Y"]
 
 # A context-menu entry (shown after Tsubame's own rows, tagged "Pack"). With
 # `command` it runs that command's program and arguments. {path} is the folder

@@ -13,6 +13,7 @@ covers the file views: file rows, Tree, Miller columns, and the tags picker.
 | Folders-only Tree pane | Tree | TreeItem, same as above | SelectionItem, ExpandCollapse, Invoke |
 | Miller column `i` | List (one per column) | ListItem: name, value, selected | SelectionItem, Invoke, Value |
 | Path bar chevrons (`PART_CRUMBS`) | List (`"Path bar"`) | ListItem: `"Subfolders of <name>"`, path | Invoke, ExpandCollapse, Value |
+| Path edit autocomplete (`PART_SUGGEST`) | List (`"Address suggestions"`) | ListItem: folder name, folder path as value, `"Folder suggestion"` | Invoke (opens the folder) |
 | Tags picker & navigation menus | menu-style rows (CM10 snapshot) | row name, toggled state (`"Back history"`, `"Forward history"`, `"Subfolders of <name>"`) | Invoke (and Toggle) |
 
 - **Name** of a file row is the file name, plus `, tags: A, B` when it has tags

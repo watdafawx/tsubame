@@ -188,6 +188,44 @@ fn focus_follows_press_and_tab_chain() {
 }
 
 #[test]
+fn a_claimed_tab_stays_in_the_field_for_one_frame() {
+    let mut h = Harness::new();
+    let (mut t1, mut t2) = (TextInput::default(), TextInput::default());
+    let (i1, i2) = (Id::new("c1"), Id::new("c2"));
+    let mut seen = 0;
+    let mut draw = |h: &mut Harness, claim: bool, seen: &mut i32| {
+        h.frame(|ui, c| {
+            text_input(ui, c, i1, Rect::new(10.0, 10.0, 200.0, 24.0), &mut t1, "");
+            text_input(ui, c, i2, Rect::new(10.0, 50.0, 200.0, 24.0), &mut t2, "");
+            if claim {
+                // an autocomplete list asks for Tab for the next frame
+                ui.claimed.push((Key::Tab, Mods::NONE));
+                for (i, ev) in ui.key_input(i1) {
+                    if matches!(ev, Event::KeyDown { key: Key::Tab, .. }) {
+                        *seen += 1;
+                        ui.consume(i);
+                    }
+                }
+            }
+        })
+    };
+    draw(&mut h, false, &mut seen);
+    h.down(20.0, 20.0);
+    h.up(20.0, 20.0);
+    draw(&mut h, true, &mut seen);
+    assert_eq!(h.ui.focus(), Some(i1));
+    h.key(Key::Tab, Mods::NONE);
+    draw(&mut h, true, &mut seen);
+    assert_eq!(seen, 1, "the widget got the Tab");
+    assert_eq!(h.ui.focus(), Some(i1), "and the focus did not move");
+    // not claimed again: Tab moves the focus as before
+    draw(&mut h, false, &mut seen);
+    h.key(Key::Tab, Mods::NONE);
+    draw(&mut h, false, &mut seen);
+    assert_eq!(h.ui.focus(), Some(i2));
+}
+
+#[test]
 fn idle_frames_ask_for_nothing() {
     let mut h = Harness::new();
     let mut clicks = Vec::new();

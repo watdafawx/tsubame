@@ -30,6 +30,7 @@ Every coordinate is f32 DIPs. Colours are `0xRRGGBB` (`Color = u32`).
 - **Active** starts at the press and ends at the release. While a widget is active, the platform holds mouse capture (`Output.capture`).
 - **Focus** moves to a focusable widget when it is pressed. Tab and Shift+Tab walk the focus chain from last frame's order. `set_focus` moves it in code.
 - `FocusLost` clears active and closes popups.
+- `ui.claimed` chords (and a claimed Tab) skip the window-level handling for the next frame, so a focused widget (an autocomplete list on a text field) gets them. A widget that has the focus claims them again each frame it draws.
 - `Sense.cells` reports hover per row or per tab. A mouse move inside one row then causes no repaint.
 
 ## Events and frames

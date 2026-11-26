@@ -51,6 +51,8 @@ mod fmem;
 #[path = "tab_menu.rs"]
 mod tabmenu;
 pub use fmem::FILE_NAME as FOLDER_VIEWS_FILE;
+#[path = "view_suggest.rs"]
+mod suggestv;
 pub use navv::spawn_new_window;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
@@ -410,12 +412,15 @@ pub struct View {
     tab_windows: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
     /// B11-G: a header cell is being dragged to reorder the columns
     col_drag: tsubame_ui::HeaderDrag,
+    /// B11-H: path edit autocomplete (`view_suggest.rs`)
+    psug: crate::path_suggest::PathSuggest,
 }
 
 impl View {
     pub fn new(start: &str, wake: Wake, dark: bool, density: Density) -> View {
         let mut tab = Tab::new(1, start, density.row_h());
         tab.start(start, wake.clone());
+        let wake_for_suggest = wake.clone();
         View {
             tabs: Tabs::new(tab),
             next_tab_id: 2,
@@ -523,6 +528,7 @@ impl View {
             tab_menu: None,
             tab_windows: Default::default(),
             col_drag: tsubame_ui::HeaderDrag::new(),
+            psug: crate::path_suggest::PathSuggest::new(wake_for_suggest),
         }
     }
 
@@ -954,6 +960,7 @@ impl View {
         changed |= self.pump_nav_menu();
         changed |= self.pump_folder_views();
         changed |= self.pump_tab_windows();
+        changed |= self.psug.pump();
         if self.tab_mut().take_watch_changed() {
             let p = self.tab().path.clone();
             self.meta.invalidate_git(&p);
@@ -1068,13 +1075,14 @@ impl View {
         self.editing = true;
         self.edit_frames = 0;
         self.path_error = None;
+        self.psug.close();
         ui.set_focus(Some(pid(self.live, ID_PATH_EDIT)));
         ui.request_repaint();
     }
 
     fn submit_path(&mut self) {
         let typed = self.path_text.text.trim().to_string();
-        match nav::normalize(&typed) {
+        match nav::normalize(&crate::path_suggest::expand_env(&typed, &crate::path_suggest::system_env)) {
             Some(p) => {
                 let prev = self.tab().path.clone();
                 let id = self.tab().id;
@@ -1210,7 +1218,7 @@ impl View {
             ui.request_repaint();
             return;
         }
-        if self.run_u4(ui, cmd) || self.run_basics(ui, cmd) || self.run_folder_views(ui, cmd) || self.run_tab_menu_cmd(ui, cmd) {
+        if self.run_u4(ui, cmd) || self.run_basics(ui, cmd) || self.run_folder_views(ui, cmd) || self.run_tab_menu_cmd(ui, cmd) || self.run_suggest(ui, cmd) {
             ui.request_repaint();
             return;
         }
@@ -1974,6 +1982,7 @@ impl View {
             self.paint_toolbar(ui, g, toolbar, &t, false, false);
             self.paint_titlebar(ui, g, titlebar, &t, true);
             self.paint_path_error(g, toolbar, &t);
+            self.paint_path_suggest(ui, g, &t);
         }
         // a context menu asked for in the other pane: that pane is the active
         // one before main opens the menu (its rows, its folder)
@@ -2151,6 +2160,7 @@ impl View {
         self.paint_toolbar(ui, g, toolbar, t, panes::compact_toolbar(rect.w), active);
         self.paint_tabs(ui, g, strip_r);
         self.paint_path_error(g, toolbar, t);
+        self.paint_path_suggest(ui, g, t);
     }
 
     /// The tab strip of the live pane in `r`.
@@ -2343,7 +2353,10 @@ impl View {
         if self.editing {
             self.edit_frames += 1;
             self.path_text.pad_left = 22.0;
+            self.suggest_sync(bar);
+            let sugg = self.suggest_keys(ui);
             let resp = text_input(ui, g, pid(self.live, ID_PATH_EDIT), bar, &mut self.path_text, "Type a path");
+            let resp = self.suggest_after(ui, resp, sugg);
             g.text("\u{E8B7}", Rect::new(bar.x + 8.0, bar.y, 16.0, bar.h), f(13.0).icon().c(), t.folder);
             if self.path_error.is_some() {
                 g.round_stroke(bar, t.radius_md, t.danger, 1.0);
@@ -2370,12 +2383,19 @@ impl View {
         if self.paint_tag_crumbs(ui, g, bar, t) {
             return;
         }
+        if self.psug.active && self.psug.slot == self.live {
+            self.psug.close();
+        }
         // breadcrumb mode
         g.round(bar, t.radius_md, t.field);
         g.round_stroke(bar, t.radius_md, t.border, 1.0);
         let it = ui.interact(pid(self.live, ID_PATH), bar, Sense::click().cursor(Cursor::IBeam));
         if it.clicked == Some(Button::Left) {
             self.begin_edit(ui);
+            return;
+        }
+        if it.clicked == Some(Button::Right) {
+            self.open_path_menu(ui, Pt::new(it.click_pos.x, bar.b() + 2.0));
             return;
         }
         // cache crumbs and their widths
@@ -2421,6 +2441,11 @@ impl View {
                 g.unclip();
                 self.open_in_new_tab(&p);
                 ui.request_repaint();
+                return;
+            }
+            if hit.clicked == Some(Button::Right) {
+                g.unclip();
+                self.open_path_menu(ui, Pt::new(hit.click_pos.x, bar.b() + 2.0));
                 return;
             }
             x += ELLIPSIS_W;
@@ -5063,4 +5088,7 @@ mod tests {
     // B11-G: per-folder view memory, tab context menu, column reorder
     #[path = "../../view_b11g_tests.rs"]
     mod b11g;
+    // B11-H: path autocomplete, Ctrl+E, Ctrl+Alt+T, path bar menu
+    #[path = "../../view_b11h_tests.rs"]
+    mod b11h;
 }

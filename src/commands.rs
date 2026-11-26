@@ -99,6 +99,11 @@ pub const CMD_CLOSE_TABS_RIGHT: u32 = 223;
 pub const CMD_DUPLICATE_TAB: u32 = 224;
 pub const CMD_TAB_TO_WINDOW: u32 = 225;
 pub const CMD_RESET_COLUMNS: u32 = 226;
+// B11-H: address bar and terminal (ids 240-259)
+pub const CMD_OPEN_TERMINAL: u32 = 240;
+pub const CMD_COPY_ADDRESS: u32 = 241;
+pub const CMD_COPY_ADDRESS_QUOTED: u32 = 242;
+pub const CMD_PASTE_AND_GO: u32 = 243;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -120,7 +125,7 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_NEXT_TAB, "tab.next", "Next tab", ["Ctrl+Tab"], G),
     cmd!(CMD_PREV_TAB, "tab.prev", "Previous tab", ["Ctrl+Shift+Tab"], G),
     cmd!(CMD_FOCUS_PATH, "nav.focus-path", "Edit the path", ["Ctrl+L", "F4", "Alt+D"], GF),
-    cmd!(CMD_FIND, "nav.find", "Filter this folder", ["Ctrl+F"], G),
+    cmd!(CMD_FIND, "nav.find", "Filter this folder", ["Ctrl+F", "Ctrl+E"], G),
     cmd!(CMD_BACK, "nav.back", "Back", ["Alt+Left"], GF),
     cmd!(CMD_FORWARD, "nav.forward", "Forward", ["Alt+Right"], GF),
     cmd!(CMD_UP, "nav.up", "Up one folder", ["Alt+Up"], GF),
@@ -180,6 +185,10 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_DUPLICATE_TAB, "tab.duplicate", "Duplicate tab", [], GF),
     cmd!(CMD_TAB_TO_WINDOW, "tab.move-to-window", "Move tab to a new window", [], GF),
     cmd!(CMD_RESET_COLUMNS, "view.reset-columns", "Reset columns (order and widths)", [], GF),
+    cmd!(CMD_OPEN_TERMINAL, "file.open-terminal", "Open a terminal in this folder", ["Ctrl+Alt+T"], GF),
+    cmd!(CMD_COPY_ADDRESS, "nav.copy-address", "Copy address", [], F),
+    cmd!(CMD_COPY_ADDRESS_QUOTED, "nav.copy-address-quoted", "Copy address as text with quotes", [], F),
+    cmd!(CMD_PASTE_AND_GO, "nav.paste-and-go", "Paste the clipboard as an address and go", [], F),
 ];
 
 /// Archive extension (`tsubame.vfs.archive`) commands. The extension commands take the
@@ -348,7 +357,7 @@ mod tests {
         (CMD_NEXT_TAB, &[(Key::Tab, CT)], true),
         (CMD_PREV_TAB, &[(Key::Tab, CS)], true),
         (CMD_FOCUS_PATH, &[(Key::Char('L'), CT), (Key::F(4), NM), (Key::Char('D'), AL)], true),
-        (CMD_FIND, &[(Key::Char('F'), CT)], true),
+        (CMD_FIND, &[(Key::Char('F'), CT), (Key::Char('E'), CT)], true),
         (CMD_BACK, &[(Key::Left, AL)], true),
         (CMD_FORWARD, &[(Key::Right, AL)], true),
         (CMD_UP, &[(Key::Up, AL)], true),
@@ -406,6 +415,10 @@ mod tests {
         (CMD_DUPLICATE_TAB, &[], true),
         (CMD_TAB_TO_WINDOW, &[], true),
         (CMD_RESET_COLUMNS, &[], true),
+        (CMD_OPEN_TERMINAL, &[(Key::Char('T'), Mods { ctrl: true, shift: false, alt: true })], true),
+        (CMD_COPY_ADDRESS, &[], false),
+        (CMD_COPY_ADDRESS_QUOTED, &[], false),
+        (CMD_PASTE_AND_GO, &[], false),
     ];
 
     const FEATURE_BEFORE: &[Before] = &[
