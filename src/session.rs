@@ -49,7 +49,7 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
     // a tab restored from the session but never shown has not listed yet: its
     // scroll row and selection are still in `restore`, not in the list/selection
     let restore = tab.restore.as_ref().filter(|_| tab.pending);
-    let row = restore.map(|r| r.scroll_first_row).unwrap_or_else(|| (tab.list.scroll / tab.list.row_h.max(1.0) as f64).round() as usize);
+    let row = restore.map(|r| r.scroll_first_row).unwrap_or_else(|| tab.item_at_top_row((tab.list.scroll / tab.list.row_h.max(1.0) as f64).round() as usize));
     let first = tab.shown().checked_sub(1).map(|last| row.min(last));
     let selected = match restore {
         Some(r) => r.selected.clone(),
@@ -64,6 +64,7 @@ pub fn tab_state(tab: &Tab, view_mode: ViewMode) -> SessionTab {
         scroll_first_name: first.and_then(|i| tab.entry_at(i)).and_then(|(p, _)| p.rsplit('\\').next().map(str::to_string)),
         selected,
         expanded: tab.tree_paths(),
+        group_by: Some(tab.group.by.name().to_string()),
     }
 }
 
@@ -151,6 +152,9 @@ fn attach(t: &mut Tab, st: &SessionTab) {
     t.store.sort(t.sort);
     t.restore = Some(Restore { scroll_first_row: st.scroll_first_row, selected: st.selected.clone() });
     t.tree_seed.0 = st.expanded.iter().take(crate::tree::RESTORE_CAP).cloned().collect();
+    if let Some(by) = st.group_by.as_deref().and_then(tsubame_core::grouping::GroupBy::parse) {
+        t.group.set_by(by);
+    }
 }
 
 /// The folder a tab's listing should use: the saved path, or the nearest
@@ -418,6 +422,38 @@ mod tests {
         settle(&mut v2);
         assert_eq!(v2.tab().shown(), 4);
         assert_eq!(v2.tab().path, one);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn each_tab_keeps_its_group_mode_and_the_scroll_position_stays_an_entry() {
+        use tsubame_core::grouping::GroupBy;
+        let d = temp_dir("group");
+        let one = d.join("one").to_str().unwrap().to_string();
+        let two = d.join("two").to_str().unwrap().to_string();
+        let mut v = view(&one);
+        settle(&mut v);
+        v.tab_mut().set_group_by(GroupBy::Type, false);
+        let tab = v.pending_tab(&two);
+        v.tabs.items.push(tab);
+        v.tabs.items[1].group.set_by(GroupBy::Date);
+        let s = capture(&v, tsubame_config::WindowState::default());
+        assert_eq!(s.tabs()[0].group_by.as_deref(), Some("type"));
+        assert_eq!(s.tabs()[1].group_by.as_deref(), Some("date"));
+
+        let mut v2 = view(&one);
+        apply(&mut v2, &s);
+        assert_eq!(v2.tabs.items[0].group.by, GroupBy::Type);
+        assert_eq!(v2.tabs.items[1].group.by, GroupBy::Date);
+        settle(&mut v2);
+        v2.tab_mut().sync_group();
+        assert!(v2.tab().group.on(), "the restored mode groups the listing");
+        // an old session (no mode) leaves the tab on the default
+        let mut old = s.clone();
+        old.panes[0].tabs[0].group_by = None;
+        let mut v3 = view(&one);
+        apply(&mut v3, &old);
+        assert_eq!(v3.tab().group.by, crate::view_group::default_by());
         let _ = std::fs::remove_dir_all(&d);
     }
 

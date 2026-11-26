@@ -92,10 +92,10 @@ impl View {
         let at = at.unwrap_or_else(|| {
             let tab = self.tab();
             let (x, y) = if self.mode.is_grid() {
-                let (ox, oy) = tab.grid.cell_origin(tab.grid.cursor);
+                let (ox, oy) = tab.cell_origin_of(tab.grid.cursor);
                 (ox + 12.0, oy + tab.grid.cell_h - (tab.grid.scroll as f32))
             } else {
-                (40.0, (tab.list.row_top(tab.list.cursor) - tab.list.scroll) as f32 + tab.list.row_h)
+                (40.0, (tab.row_top_of(tab.list.cursor) - tab.list.scroll) as f32 + tab.list.row_h)
             };
             Pt { x: self.list_r.x + x, y: (self.list_r.y + y).clamp(self.list_r.y, self.list_r.b() - 40.0) }
         });

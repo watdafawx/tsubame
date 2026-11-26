@@ -14,6 +14,7 @@ use crate::input::{Button, Event, Key, Mods};
 use crate::theme::Theme;
 use crate::ui::{Id, Sense, Ui};
 use crate::widgets::grid::BAND_DEADZONE;
+use crate::widgets::grouping::{GroupRows, Row};
 use crate::widgets::scrollbar::{ScrollMetrics, vscrollbar};
 
 /// How a marquee / rubber-band selection combines with the pre-drag selection.
@@ -84,6 +85,26 @@ pub trait ListSource {
     /// covered (`None`: covers no rows).
     fn band_update(&mut self, _rows: Option<(usize, usize)>) {}
     fn band_end(&mut self) {}
+    /// Grouped rows, if the list is grouped. Then `len()` counts items, every
+    /// index the source is handed is an item (source) index, and only the
+    /// band range (`band_update`) and `ListResponse::range` are flat rows.
+    fn groups(&self) -> Option<&dyn GroupRows> {
+        None
+    }
+    /// A click (or key) on the header of group `g`: toggle it (`all`: every group).
+    fn toggle_group(&mut self, _g: usize, _all: bool) {}
+    /// Draws the header row of group `g` in `r` (background already drawn).
+    fn draw_header(&mut self, _c: &mut dyn Canvas, _theme: &Theme, _g: usize, _r: Rect, _st: HeaderState) {}
+}
+
+/// How a group header is drawn this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeaderState {
+    pub collapsed: bool,
+    pub hot: bool,
+    /// the header has the keyboard focus (and the list has it too)
+    pub cursor: bool,
+    pub focused: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -105,11 +126,27 @@ pub struct ListState {
     /// rows area height of the last frame (page size for keys)
     pub view_h: f32,
     band: Option<ListBand>,
+    /// grouped list: the header that has the keyboard focus, and the cursor
+    /// item when it got it (a moved cursor drops the focus)
+    header: Option<(usize, usize)>,
 }
 
 impl ListState {
     pub fn new(row_h: f32) -> ListState {
-        ListState { scroll: 0.0, cursor: 0, row_h, view_h: 0.0, band: None }
+        ListState { scroll: 0.0, cursor: 0, row_h, view_h: 0.0, band: None, header: None }
+    }
+    /// Group whose header has the keyboard focus.
+    pub fn header_focus(&self) -> Option<usize> {
+        self.header.filter(|&(_, at)| at == self.cursor).map(|(g, _)| g)
+    }
+    pub fn set_header_focus(&mut self, g: Option<usize>) {
+        self.header = g.map(|g| (g, self.cursor));
+    }
+    /// Moves the cursor to `item`, shown on flat row `row` of `n`, and scrolls it into view.
+    pub fn cursor_to(&mut self, item: usize, row: usize, n: usize) -> bool {
+        let moved = item != self.cursor;
+        self.cursor = item;
+        self.ensure_visible(row, n) || moved
     }
     /// Is a marquee band being dragged (past the dead zone)?
     pub fn banding(&self) -> bool {
@@ -202,18 +239,73 @@ pub struct ListResponse {
     pub zoom: f32,
     /// row currently under the pointer (not banding, within the list)
     pub hovered: Option<usize>,
+    /// a group header was toggled (click or key): the app rebuilds what it caches
+    pub header_toggled: bool,
+}
+
+/// Flat row and item of the nearest selectable row from `row` (in `forward` direction first).
+fn nav_target(g: &dyn GroupRows, row: usize, forward: bool) -> Option<(usize, usize)> {
+    let r = g.nav_row(row, forward).or_else(|| g.nav_row(row, !forward))?;
+    match g.row_at(r) {
+        Row::Item(s) => Some((r, s)),
+        Row::Header(_) => None,
+    }
+}
+
+/// Arrow / page / Home / End on a grouped list: moves over item rows, headers skipped.
+fn grouped_move(st: &mut ListState, src: &mut dyn ListSource, key: Key, mods: Mods, resp: &mut ListResponse) {
+    let page = st.page_rows();
+    let (n, found) = {
+        let Some(g) = src.groups() else { return };
+        let n = g.row_count();
+        let cur = match st.header_focus() {
+            Some(h) => g.header_row(h),
+            None => g.item_row(st.cursor).or_else(|| g.item_slot(st.cursor).map(|(h, _)| g.header_row(h))).unwrap_or(0),
+        };
+        let (target, forward) = match key {
+            Key::Up => (cur.saturating_sub(1), false),
+            Key::Down => (cur + 1, true),
+            Key::PageUp => (cur.saturating_sub(page), false),
+            Key::PageDown => (cur + page, true),
+            Key::Home => (0, true),
+            _ => (n.saturating_sub(1), false),
+        };
+        let found = nav_target(g, target, forward).map(|(row, item)| {
+            let header_above = row > 0 && matches!(g.row_at(row - 1), Row::Header(_));
+            (row, item, header_above)
+        });
+        (n, found)
+    };
+    let Some((row, item, header_above)) = found else { return };
+    st.header = None;
+    resp.cursor_moved |= st.cursor_to(item, row, n);
+    // the header above the first item of a group comes into view with it
+    if header_above && matches!(key, Key::Up | Key::PageUp | Key::Home) {
+        st.ensure_visible(row - 1, n);
+    }
+    src.select(item, mods, SelectBy::Key);
+}
+
+/// Toggles group `g`, returns the new flat row count.
+fn toggle(src: &mut dyn ListSource, resp: &mut ListResponse, g: usize, all: bool) -> usize {
+    src.toggle_group(g, all);
+    resp.header_toggled = true;
+    src.groups().map_or(0, |g| g.row_count())
 }
 
 /// The list in `rect`, with its scrollbar on the right.
 pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListState, src: &mut dyn ListSource) -> ListResponse {
     let mut resp = ListResponse::default();
     let len = src.len();
+    // flat rows: items alone, or headers and shown items when grouped
+    let grouped = src.groups().is_some();
+    let mut n = src.groups().map_or(len, |g| g.row_count());
     let mut rows = rect;
     let track = rows.cut_right(ui.theme.layout_scrollbar_width);
     st.view_h = rows.h.max(0.0);
     let rh = st.row_h;
     let scroll0 = st.scroll;
-    st.scroll = st.scroll.clamp(0.0, st.max_scroll(len));
+    st.scroll = st.scroll.clamp(0.0, st.max_scroll(n));
     if len > 0 && st.cursor >= len {
         st.cursor = len - 1;
     }
@@ -228,7 +320,7 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
             resp.zoom = it.wheel.1;
         } else {
             let step = it.wheel.1 as f64 * ui.theme.wheel_lines() as f64 * rh as f64;
-            st.set_scroll(st.scroll - step, len);
+            st.set_scroll(st.scroll - step, n);
         }
     }
 
@@ -240,25 +332,39 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
             resp.pressed = true;
         }
         let row = st.row_at_offset(p.pos.y - rows.y);
-        if row < len {
-            match p.button {
+        let at = if row < n { Some(src.groups().map_or(Row::Item(row), |g| g.row_at(row))) } else { None };
+        match at {
+            Some(Row::Header(g)) => {
+                if p.button == Button::Left {
+                    st.band = None;
+                    st.set_header_focus(Some(g));
+                    // the second press of a double click would undo the first
+                    if !p.double {
+                        n = toggle(src, &mut resp, g, p.mods.ctrl);
+                    }
+                } else if p.button == Button::Right {
+                    st.band = None;
+                }
+            }
+            Some(Row::Item(item)) => match p.button {
                 Button::Left => {
                     st.band = None;
-                    resp.cursor_moved |= st.move_cursor(row, len);
-                    src.select(row, p.mods, SelectBy::Click);
+                    st.header = None;
+                    resp.cursor_moved |= st.cursor_to(item, row, n);
+                    src.select(item, p.mods, SelectBy::Click);
                     if p.double {
-                        resp.activated = Some(row);
+                        resp.activated = Some(item);
                     }
                 }
                 Button::Right => {
                     st.band = None;
-                    st.cursor = row;
-                    src.select(row, p.mods, SelectBy::RightClick);
+                    st.header = None;
+                    st.cursor = item;
+                    src.select(item, p.mods, SelectBy::RightClick);
                 }
                 Button::Middle => {}
-            }
-        } else {
-            match p.button {
+            },
+            None => match p.button {
                 Button::Left => {
                     if p.double && p.mods.none() {
                         st.band = None;
@@ -273,17 +379,27 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
                     src.select_none();
                 }
                 Button::Middle => {}
-            }
+            },
         }
     }
     if it.clicked == Some(Button::Right) && rows.contains_pt(it.click_pos) {
         let row = st.row_at_offset(it.click_pos.y - rows.y);
-        resp.context = Some(((row < len).then_some(row), it.click_pos));
+        let item = if row < n {
+            match src.groups().map_or(Row::Item(row), |g| g.row_at(row)) {
+                Row::Item(i) => Some(i),
+                Row::Header(_) => None,
+            }
+        } else {
+            None
+        };
+        resp.context = Some((item, it.click_pos));
     }
     if it.clicked == Some(Button::Middle) && rows.contains_pt(it.click_pos) {
         let row = st.row_at_offset(it.click_pos.y - rows.y);
-        if row < len {
-            resp.middle_clicked = Some(row);
+        if row < n
+            && let Row::Item(i) = src.groups().map_or(Row::Item(row), |g| g.row_at(row))
+        {
+            resp.middle_clicked = Some(i);
         }
     }
 
@@ -298,6 +414,44 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
             ui.clear_active();
             ui.request_repaint();
             continue;
+        }
+        if grouped {
+            match key {
+                Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
+                    ui.consume(qi);
+                    if len > 0 {
+                        grouped_move(st, src, key, mods, &mut resp);
+                    }
+                    continue;
+                }
+                Key::Left | Key::Right if mods.none() && len > 0 => {
+                    if let Some(h) = st.header_focus() {
+                        ui.consume(qi);
+                        let collapsed = src.groups().is_some_and(|g| g.is_collapsed(h));
+                        if collapsed == (key == Key::Right) {
+                            n = toggle(src, &mut resp, h, false);
+                        }
+                    } else if key == Key::Left
+                        && let Some((slot_g, _)) = src.groups().and_then(|g| g.item_slot(st.cursor))
+                    {
+                        // keyboard way onto the header of the group of the cursor
+                        ui.consume(qi);
+                        st.set_header_focus(Some(slot_g));
+                        let row = src.groups().map_or(0, |g| g.header_row(slot_g));
+                        st.ensure_visible(row, n);
+                        resp.cursor_moved = true;
+                    }
+                    continue;
+                }
+                Key::Enter | Key::Space if mods.none() && st.header_focus().is_some() => {
+                    ui.consume(qi);
+                    if let Some(h) = st.header_focus() {
+                        n = toggle(src, &mut resp, h, false);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
         }
         let page = st.page_rows();
         let cur = st.cursor;
@@ -349,11 +503,11 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
             let past = if m.y < rows.y { m.y - rows.y } else if m.y > rows.b() { m.y - rows.b() } else { 0.0 };
             if past != 0.0 && b.started {
                 let speed = (5.0 + past.abs() * 0.4).min(30.0) as f64;
-                if st.set_scroll(st.scroll + speed * past.signum() as f64, len) {
+                if st.set_scroll(st.scroll + speed * past.signum() as f64, n) {
                     ui.request_repaint();
                 }
             }
-            let max_y = st.content_h(len).max(st.scroll + st.view_h as f64).max(1.0);
+            let max_y = st.content_h(n).max(st.scroll + st.view_h as f64).max(1.0);
             let mx = (m.x - rows.x).clamp(0.0, rows.w);
             let my = ((m.y - rows.y) as f64 + st.scroll).clamp(0.0, max_y);
             if !b.started && (mx - b.sx).hypot((my - b.sy) as f32) >= BAND_DEADZONE {
@@ -363,11 +517,11 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
             if b.started {
                 let (x0, x1) = (b.sx.min(mx), b.sx.max(mx));
                 let (y0, y1) = (b.sy.min(my), b.sy.max(my));
-                let content_h = st.content_h(len);
-                let covered = if len > 0 && y0 < content_h && y1 > 0.0 {
+                let content_h = st.content_h(n);
+                let covered = if n > 0 && y0 < content_h && y1 > 0.0 {
                     let r0 = (y0 / rh as f64).floor().max(0.0) as usize;
                     let r1 = (((y1 - 1e-6).max(y0)) / rh as f64).floor().max(0.0) as usize;
-                    (r0 < len).then(|| (r0, r1.min(len - 1)))
+                    (r0 < n).then(|| (r0, r1.min(n - 1)))
                 } else {
                     None
                 };
@@ -378,23 +532,44 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
     }
 
     // scrollbar (registered after the list: on top of it for clicks)
-    let m = ScrollMetrics { content: st.content_h(len), view: st.view_h as f64, page: (st.page_rows() as f64) * rh as f64 };
+    st.scroll = st.scroll.clamp(0.0, st.max_scroll(n));
+    let m = ScrollMetrics { content: st.content_h(n), view: st.view_h as f64, page: (st.page_rows() as f64) * rh as f64 };
     vscrollbar(ui, c, id.child("sb"), track, m, &mut st.scroll);
     resp.scrolled = st.scroll != scroll0;
 
     // rows: only those that intersect the viewport
-    let (first, last) = st.visible(len);
+    let (first, last) = st.visible(n);
     resp.range = (first, last);
     let off = (st.scroll - first as f64 * rh as f64) as f32;
     let hot_row = (it.hovered && ui.active().is_none_or(|a| a == id) && rows.contains_pt(ui.mouse()) && !st.banding()).then(|| st.row_at_offset(ui.mouse().y - rows.y));
-    resp.hovered = hot_row.filter(|&r| r < len);
     let focused = it.focused && ui.window_focused();
     let theme = &ui.theme;
+    let header_cur = st.header_focus();
+    resp.hovered = hot_row.filter(|&r| r < n).and_then(|r| match src.groups().map_or(Row::Item(r), |g| g.row_at(r)) {
+        Row::Item(i) => Some(i),
+        Row::Header(_) => None,
+    });
     c.clip(rows);
     for i in first..last {
         let y = rows.y + (i - first) as f32 * rh - off;
         let r = Rect::new(rows.x, y, rows.w, rh);
-        let rs = RowState { selected: src.is_selected(i), cursor: i == st.cursor, hot: hot_row == Some(i), focused };
+        let hot = hot_row == Some(i);
+        let item = match src.groups().map_or(Row::Item(i), |g| g.row_at(i)) {
+            Row::Item(item) => item,
+            Row::Header(g) => {
+                let collapsed = src.groups().is_some_and(|gr| gr.is_collapsed(g));
+                let cursor = header_cur == Some(g);
+                if hot {
+                    c.fill(r, theme.hover);
+                }
+                if cursor && focused {
+                    c.round_stroke(r, 2.0, theme.focus, 1.0);
+                }
+                src.draw_header(c, theme, g, r, HeaderState { collapsed, hot, cursor, focused });
+                continue;
+            }
+        };
+        let rs = RowState { selected: src.is_selected(item), cursor: item == st.cursor && header_cur.is_none(), hot, focused };
         if rs.selected {
             c.fill(r, if focused { theme.selected } else { theme.selected_inactive });
         } else if rs.hot {
@@ -403,7 +578,7 @@ pub fn list(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut ListSt
         if rs.cursor && focused {
             c.round_stroke(r, 2.0, theme.focus, 1.0);
         }
-        src.draw_row(c, theme, i, r, rs);
+        src.draw_row(c, theme, item, r, rs);
     }
     if let Some(br) = band_rect {
         c.fill_a(br, theme.accent, 0.18);

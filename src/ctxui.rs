@@ -182,6 +182,8 @@ pub struct Target {
     pub screen: (i32, i32),
     /// right-clicked a removable / USB drive in the sidebar (shows "Eject")
     pub removable_drive: bool,
+    /// the active tab's sort and group, for the empty-space menu's "Sort by" / "Group by"
+    pub view: Option<crate::viewmenu::ViewMenu>,
 }
 
 /// A pick, run after the frame.
@@ -316,11 +318,22 @@ pub fn is_root(path: &str) -> bool {
 
 /// App rows that are not in the U4 list.
 /// Keyed `app:<action>`, so they can be hidden and renamed (CM8).
+#[cfg(test)]
 pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
+    extras_with(kind, n, dual, None)
+}
+
+/// `extras`, with the empty-space menu's "Sort by >" and "Group by >" when the tab is known.
+pub fn extras_with(kind: Kind, n: usize, dual: bool, view: Option<&crate::viewmenu::ViewMenu>) -> Vec<MenuItem> {
     let c = |l: &str, a: &str| MenuItem { key: format!("app:{a}"), ..MenuItem::command(ItemSource::Tsubame, l, a) };
     match kind {
         // "New >" (folder, text document, the types Windows registers) replaces the two flat rows
-        Kind::Background => vec![c("Paste", "file.paste"), c("Paste shortcut", "edit.paste-shortcut"), crate::newmenu::submenu(), c("Copy as path", "file.copy-path"), c("Open terminal here", "x.terminal"), c("Refresh", "x.refresh")],
+        Kind::Background => {
+            let mut v = vec![c("Paste", "file.paste"), c("Paste shortcut", "edit.paste-shortcut"), crate::newmenu::submenu(), c("Copy as path", "file.copy-path"), c("Open terminal here", "x.terminal")];
+            v.extend(view.map(crate::viewmenu::background_rows).unwrap_or_default());
+            v.push(c("Refresh", "x.refresh"));
+            v
+        }
         _ => {
             let mut v = vec![c("Copy name", "x.copy-name"), c("Open terminal here", "x.terminal")];
             // a shortcut beside the item (a drive root has no folder to hold one)
@@ -344,8 +357,13 @@ pub fn extras(kind: Kind, n: usize, dual: bool) -> Vec<MenuItem> {
 }
 
 /// The Tsubame group for a click: the U4 built-ins + escape hatch + extras.
+#[cfg(test)]
 pub fn tsubame_rows(entries: &[MenuEntry], kind: Kind, ext: &str, n: usize, dual: bool) -> Vec<MenuItem> {
-    let mut rows = ctxmodel::own_rows(entries, kind, ext, &extras(kind, n, dual));
+    tsubame_rows_with(entries, kind, ext, n, dual, None)
+}
+
+fn tsubame_rows_with(entries: &[MenuEntry], kind: Kind, ext: &str, n: usize, dual: bool, view: Option<&crate::viewmenu::ViewMenu>) -> Vec<MenuItem> {
+    let mut rows = ctxmodel::own_rows(entries, kind, ext, &extras_with(kind, n, dual, view));
     // a new tab only opens folders
     if matches!(kind, Kind::File | Kind::Background) {
         rows.retain(|r| r.action != "tab.open-selected");
@@ -373,7 +391,7 @@ pub fn tsubame_rows(entries: &[MenuEntry], kind: Kind, ext: &str, n: usize, dual
 /// Rename).
 fn own_parts(target: &Target, entries: &[MenuEntry], dual: bool) -> (Vec<MenuItem>, Vec<MenuItem>) {
     let (kind, ext) = kind_of(target);
-    let mut tsubame = tsubame_rows(entries, kind, &ext, target.paths.len(), dual);
+    let mut tsubame = tsubame_rows_with(entries, kind, &ext, target.paths.len(), dual, target.view.as_ref());
     if target.paths.iter().any(|p| is_root(p)) && !target.background {
         for row in &mut tsubame {
             if matches!(row.action.as_str(), "file.cut" | "file.delete" | "file.rename") {

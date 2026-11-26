@@ -139,6 +139,15 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Copy address | `nav.copy-address` |
 | Copy address as text with quotes | `nav.copy-address-quoted` |
 | Paste the clipboard as an address and go | `nav.paste-and-go` |
+| Group by: next mode | `view.group-by` |
+| Group by: none | `view.group-none` |
+| Group by: name | `view.group-name` |
+| Group by: type | `view.group-type` |
+| Group by: date modified | `view.group-date` |
+| Group by: size | `view.group-size` |
+| Collapse or expand the group of the cursor | `view.group-toggle` |
+| Collapse all groups | `view.group-collapse-all` |
+| Expand all groups | `view.group-expand-all` |
 | Age colours: toggle | `view.age_colours` |
 | Batch rename selected items… | `file.batch_rename` |
 

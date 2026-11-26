@@ -144,14 +144,7 @@ impl View {
             let (c, pos) = m.hit_row(p.x, p.y)?;
             return (c == m.active).then_some(pos);
         }
-        let n = self.tab().shown();
-        if self.mode.is_grid() {
-            return self.tab().grid.cell_at(p.x - self.list_r.x, p.y - self.list_r.y, n);
-        }
-        let l = &self.tab().list;
-        let row = ((p.y - self.list_r.y) as f64 + l.scroll) / l.row_h as f64;
-        let row = row as usize;
-        (row < self.tab().shown()).then_some(row)
+        self.tab().item_at_point(self.mode.is_grid(), p.x - self.list_r.x, p.y - self.list_r.y)
     }
 
     /// The press moved far enough: main runs the drag as an OLE drag
@@ -257,12 +250,12 @@ impl View {
         let r = self.list_r;
         if self.mode.is_grid() {
             let g = &self.tab().grid;
-            let (ox, oy) = g.cell_origin(pos);
+            let (ox, oy) = self.tab().cell_origin_of(pos);
             let f = Rect::new(r.x + ox + 4.0, r.y + oy + g.cell_h - 44.0, g.cell_w - 8.0, 26.0);
             return (f.y >= r.y && f.b() <= r.b()).then_some(f);
         }
         let l = &self.tab().list;
-        let y = r.y + l.row_top(pos) as f32;
+        let y = r.y + self.tab().row_top_of(pos) as f32;
         if y < r.y - 0.5 || y + l.row_h > r.b() + 0.5 {
             return None;
         }
@@ -454,13 +447,7 @@ impl View {
         let Some(pos) = t.store.find(&w).and_then(|id| t.store.view().iter().position(|v| *v == id)) else { return };
         let Some(next) = rename::neighbour(pos, t.shown(), forward) else { return };
         t.sel.single(&t.store, next);
-        if grid {
-            t.grid.cursor = next;
-        } else {
-            t.list.cursor = next;
-            let len = t.shown();
-            t.list.ensure_visible(next, len);
-        }
+        t.move_cursor_to(grid, next);
         self.begin_rename(ui);
     }
 
@@ -484,13 +471,7 @@ impl View {
         let t = self.tab_mut();
         let Some(pos) = t.store.find(&wide).and_then(|id| t.store.view().iter().position(|v| *v == id)) else { return };
         t.sel.single(&t.store, pos);
-        if grid {
-            t.grid.cursor = pos;
-        } else {
-            t.list.cursor = pos;
-            let len = t.shown();
-            t.list.ensure_visible(pos, len);
-        }
+        t.move_cursor_to(grid, pos);
         self.rename_wait = None;
         self.begin_rename(ui);
     }
@@ -587,7 +568,7 @@ impl View {
     pub(super) fn reload_tab(&mut self, i: usize, names: &[String]) {
         let wake = self.wake.clone();
         let t = &mut self.tabs.items[i];
-        let row = (t.list.scroll / t.list.row_h as f64) as usize;
+        let row = t.item_at_top_row((t.list.scroll / t.list.row_h as f64) as usize);
         let selected = if names.is_empty() { t.selected_paths(512).iter().map(|p| crate::dnd::name_of(p).to_string()).collect() } else { names.to_vec() };
         let path = t.path.clone();
         t.start(&path, wake);
@@ -846,11 +827,11 @@ impl View {
                 Some(DropRow::Row(r)) => self.with_pane(slot, |v| {
                     if v.mode.is_grid() {
                         let gs = &v.tab().grid;
-                        let (ox, oy) = gs.cell_origin(r);
+                        let (ox, oy) = v.tab().cell_origin_of(r);
                         Rect::new(v.list_r.x + ox, v.list_r.y + oy, gs.cell_w, gs.cell_h)
                     } else {
                         let l = &v.tab().list;
-                        Rect::new(v.list_r.x, v.list_r.y + l.row_top(r) as f32, v.list_r.w - t.layout_scrollbar_width, l.row_h)
+                        Rect::new(v.list_r.x, v.list_r.y + v.tab().row_top_of(r) as f32, v.list_r.w - t.layout_scrollbar_width, l.row_h)
                     }
                 }),
                 None => slot_rect,

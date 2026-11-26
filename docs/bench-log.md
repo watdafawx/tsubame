@@ -303,3 +303,26 @@ section's 1714 KB is in the same class as the 1742 KB row (a pre-U4 binary), as 
 `docs/u4-settings.md`. The 6 MB budget is met with ~3.2 MB to spare, so the PASS verdicts above
 stand; only the sizes were wrong. Later builds (X1, X2) read 3.3-3.5 MB for the same reason:
 new features, same budget.
+
+## B11-F2 Group by scroll - 2026-11-26, benchmark machine, branch `feat/group-by-sort-menu`
+
+Release build via push-to-rig (`tsubame.exe` 5,578,752 B, 5.32 MB), 4K at 200% (3840x2076), real
+enumerator, `--bench --dir <100k> --group <mode>` (list, flat rows with headers, same 5 s fling plan as the
+plain bench). Fixture: 100,006 entries, 15 extensions, 4 sizes, 10 date spreads (`type` 16 groups, `date` 8).
+
+| Metric | Budget | Group by Type | Group by Date |
+|---|---|---|---|
+| Scroll paint p50 / p95 / p99 (all phases) | p95 < 5 ms | 2.18 / **3.78** / 4.42 ms | 1.90 / **3.44** / 4.09 ms |
+| Steady fling 2000 DIP/s p95 | | 2.24 ms | 2.56 ms |
+| Fast fling 20000 DIP/s p95 | | 2.97 ms | 3.03 ms |
+| Page per frame p95 | | 4.42 ms | 3.67 ms |
+| First painted frame | < 100 ms | 78.3 ms | 73.1 ms |
+| Private bytes after scroll | < 110 MB | 91.4 MB | 93.1 MB |
+| Bitmaps made while scrolling (type) | 0 per frame | 0 | |
+
+Idle after use (scroll 30 notches grouped by Type, then `tools/idle-wakes.ps1`, settle 14 s, 3 x 10 s):
+process CPU 0 ms in all three windows; the app's own main thread woke 12 times in window 1 (the GPU park
+at 10 s), 0 in window 2, 0 in window 3 (9 wake-ups there belong to OS and shell threads: `ntdll`, `shcore`,
+`combase`; two of them ended). No timer is added by grouping.
+
+Screenshots: `docs/shots/group-type.png`, `group-date.png`, `group-size-collapsed.png`, `group-menu.png`.

@@ -482,6 +482,394 @@ fn list_selection_hooks_and_activation() {
     assert!(h.move_to(60.0, y(11)), "next row: repaint");
 }
 
+struct GRows {
+    g: Grouping<char>,
+    n: usize,
+    drawn: Vec<usize>,
+    headers: Vec<(usize, bool)>,
+    selected: Vec<usize>,
+    toggled: Vec<(usize, bool)>,
+    band: Option<(usize, usize)>,
+}
+
+impl GRows {
+    // rows: 0 H(A), 1 i0, 2 i1, 3 H(B), 4 i2, 5 i3, 6 i4, 7 H(C), 8 i5, 9 i6, 10 i7
+    fn new() -> GRows {
+        let mut g = Grouping::default();
+        g.rebuild(8, [(0, 'A'), (1, 'A'), (2, 'B'), (3, 'B'), (4, 'B'), (5, 'C'), (6, 'C'), (7, 'C')], false);
+        GRows { g, n: 8, drawn: Vec::new(), headers: Vec::new(), selected: Vec::new(), toggled: Vec::new(), band: None }
+    }
+}
+
+impl ListSource for GRows {
+    fn len(&self) -> usize {
+        self.n
+    }
+    fn is_selected(&self, i: usize) -> bool {
+        self.selected.contains(&i)
+    }
+    fn draw_row(&mut self, _c: &mut dyn Canvas, _t: &Theme, i: usize, _r: Rect, _st: RowState) {
+        self.drawn.push(i);
+    }
+    fn select(&mut self, i: usize, _mods: Mods, _by: SelectBy) {
+        self.selected = vec![i];
+    }
+    fn band_update(&mut self, rows: Option<(usize, usize)>) {
+        self.band = rows;
+        self.selected = rows.into_iter().flat_map(|(a, b)| a..=b).filter_map(|r| self.g.item(r)).collect();
+    }
+    fn groups(&self) -> Option<&dyn GroupRows> {
+        Some(&self.g)
+    }
+    fn toggle_group(&mut self, g: usize, all: bool) {
+        self.toggled.push((g, all));
+        self.g.toggle(g, all);
+    }
+    fn draw_header(&mut self, _c: &mut dyn Canvas, _t: &Theme, g: usize, _r: Rect, st: HeaderState) {
+        self.headers.push((g, st.collapsed));
+    }
+}
+
+fn gframe(h: &mut Harness, st: &mut ListState, rows: &mut GRows) -> ListResponse {
+    rows.drawn.clear();
+    rows.headers.clear();
+    let mut resp = ListResponse::default();
+    h.frame(|ui, c| resp = list(ui, c, LIST, LIST_RECT, st, rows));
+    resp
+}
+
+#[test]
+fn grouped_list_draws_headers_skips_them_with_arrows_and_toggles() {
+    let mut h = Harness::new();
+    let mut st = ListState::new(22.0);
+    let mut rows = GRows::new();
+    let y = |row: usize| LIST_RECT.y + row as f32 * 22.0 + 5.0;
+    let r = gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(r.range, (0, 11), "flat rows: 3 headers + 8 items");
+    assert_eq!(rows.drawn, (0..8).collect::<Vec<_>>());
+    assert_eq!(rows.headers, vec![(0, false), (1, false), (2, false)]);
+
+    // press on item row 4 (= item 2), then arrows skip the header at row 3 / 7
+    h.down(50.0, y(4));
+    h.up(50.0, y(4));
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!((st.cursor, rows.selected.clone()), (2, vec![2]));
+    h.key(Key::Up, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 1, "Up from the first item of B lands on the last of A, not on the header");
+    h.key(Key::Down, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 2);
+    h.key(Key::End, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 7);
+    h.key(Key::Down, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 7, "stays on the last item");
+    h.key(Key::Home, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 0);
+    h.key(Key::PageDown, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 7);
+
+    // click on the header of B collapses it, items hidden, rows shrink
+    let r = gframe(&mut h, &mut st, &mut rows);
+    assert!(!r.header_toggled);
+    h.down(50.0, y(3));
+    h.up(50.0, y(3));
+    let r = gframe(&mut h, &mut st, &mut rows);
+    assert!(r.header_toggled);
+    assert_eq!(rows.toggled, vec![(1, false)]);
+    assert_eq!(r.range, (0, 8), "3 headers + 5 items");
+    assert_eq!(rows.drawn, vec![0, 1, 5, 6, 7]);
+    assert_eq!(rows.headers, vec![(0, false), (1, true), (2, false)]);
+    assert_eq!(st.cursor, 7, "a header click leaves the cursor item alone");
+    // arrows jump over the collapsed group
+    h.key(Key::Home, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    h.key(Key::Down, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 1);
+    h.key(Key::Down, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 5, "A -> C, B is collapsed");
+    // Ctrl+click on a header toggles all
+    h.down_m(50.0, y(0), Mods::CTRL, false);
+    h.up(50.0, y(0));
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(rows.toggled.last(), Some(&(0, true)));
+    assert!(rows.g.is_collapsed(0) && rows.g.is_collapsed(1) && rows.g.is_collapsed(2), "A, B and C: B was collapsed, all become collapsed");
+}
+
+#[test]
+fn grouped_list_header_keys_context_and_marquee() {
+    let mut h = Harness::new();
+    let mut st = ListState::new(22.0);
+    let mut rows = GRows::new();
+    let y = |row: usize| LIST_RECT.y + row as f32 * 22.0 + 5.0;
+    gframe(&mut h, &mut st, &mut rows);
+    h.down(50.0, y(5));
+    h.up(50.0, y(5));
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.cursor, 3);
+    // Left: focus the header of the group; Left again collapses; Right expands
+    h.key(Key::Left, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(st.header_focus(), Some(1));
+    h.key(Key::Left, Mods::NONE);
+    let r = gframe(&mut h, &mut st, &mut rows);
+    assert!(r.header_toggled && rows.g.is_collapsed(1));
+    h.key(Key::Right, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert!(!rows.g.is_collapsed(1));
+    // Enter on the header toggles instead of activating
+    h.key(Key::Enter, Mods::NONE);
+    let r = gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(r.activated, None);
+    assert!(rows.g.is_collapsed(1));
+    h.key(Key::Enter, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert!(!rows.g.is_collapsed(1));
+    // Down from the header goes to the first item of the group
+    h.key(Key::Down, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!((st.cursor, st.header_focus()), (2, None));
+    // Up onto the first item of a group keeps the header in the view, Home scrolls to the top
+    h.key(Key::Home, Mods::NONE);
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!((st.cursor, st.scroll), (0, 0.0));
+
+    // right click: item row gives the item, header row gives none
+    let rc = |h: &mut Harness, row: usize| {
+        h.push(Event::MouseDown { pos: Pt::new(50.0, y(row)), button: Button::Right, mods: Mods::NONE, double: false });
+        h.push(Event::MouseUp { pos: Pt::new(50.0, y(row)), button: Button::Right, mods: Mods::NONE });
+    };
+    rc(&mut h, 4);
+    let r = gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(r.context.map(|c| c.0), Some(Some(2)));
+    rc(&mut h, 3);
+    let r = gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(r.context.map(|c| c.0), Some(None));
+
+    // double click an item: its source index
+    h.down_m(50.0, y(8), Mods::NONE, true);
+    h.up(50.0, y(8));
+    let r = gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(r.activated, Some(5));
+
+    // marquee from empty space below the rows covers flat rows, headers included
+    let below = LIST_RECT.y + 11.0 * 22.0 + 10.0;
+    h.down(300.0, below);
+    gframe(&mut h, &mut st, &mut rows);
+    h.move_to(300.0, y(2));
+    gframe(&mut h, &mut st, &mut rows);
+    assert_eq!(rows.band, Some((2, 10)));
+    h.up(300.0, y(2));
+    gframe(&mut h, &mut st, &mut rows);
+}
+
+
+struct GTiles {
+    g: Grouping<char>,
+    n: usize,
+    drawn: Vec<usize>,
+    headers: Vec<(usize, bool)>,
+    selected: Vec<usize>,
+    toggled: Vec<(usize, bool)>,
+    band: Vec<GroupBand>,
+}
+
+impl GTiles {
+    // A: items 0-6 (two rows of 5), B: 7-9, C: 10-11
+    fn new() -> GTiles {
+        let mut g = Grouping::default();
+        let keys = ['A', 'A', 'A', 'A', 'A', 'A', 'A', 'B', 'B', 'B', 'C', 'C'];
+        g.rebuild(12, keys.iter().copied().enumerate(), false);
+        GTiles { g, n: 12, drawn: Vec::new(), headers: Vec::new(), selected: Vec::new(), toggled: Vec::new(), band: Vec::new() }
+    }
+}
+
+impl GridSource for GTiles {
+    fn len(&self) -> usize {
+        self.n
+    }
+    fn is_selected(&self, i: usize) -> bool {
+        self.selected.contains(&i)
+    }
+    fn draw_cell(&mut self, _c: &mut dyn Canvas, _t: &Theme, i: usize, _r: Rect, _st: RowState) {
+        self.drawn.push(i);
+    }
+    fn select(&mut self, i: usize, _mods: Mods, _by: SelectBy) {
+        self.selected = vec![i];
+    }
+    fn groups(&self) -> Option<&dyn GroupRows> {
+        Some(&self.g)
+    }
+    fn toggle_group(&mut self, g: usize, all: bool) {
+        self.toggled.push((g, all));
+        self.g.toggle(g, all);
+    }
+    fn draw_header(&mut self, _c: &mut dyn Canvas, _t: &Theme, g: usize, _r: Rect, st: HeaderState) {
+        self.headers.push((g, st.collapsed));
+    }
+    fn band_update_groups(&mut self, spans: &[GroupBand], _cols: usize) {
+        self.band = spans.to_vec();
+    }
+}
+
+fn gt_frame(h: &mut Harness, st: &mut GridState, src: &mut GTiles) -> GridResponse {
+    src.drawn.clear();
+    src.headers.clear();
+    let mut resp = GridResponse::default();
+    h.frame(|ui, c| resp = grid(ui, c, GRID, GRID_RECT, st, src));
+    resp
+}
+
+#[test]
+fn grouped_grid_layout_hit_test_and_header_toggle() {
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = GTiles::new();
+    let r = gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(r.cols, 5);
+    // A: header 0..24, rows 24..224. B: header 224..248, row 248..348. C: header 348..372, row 372..472
+    assert_eq!(src.headers, vec![(0, false), (1, false), (2, false)]);
+    assert_eq!(src.drawn, (0..12).collect::<Vec<_>>());
+    assert_eq!(st.content_h(12), 472.0);
+    let hit = |st: &GridState, src: &GTiles, x: f32, y: f32| st.group_hit(&src.g, x, y);
+    assert_eq!(hit(&st, &src, 10.0, 10.0), GroupHit::Header(0));
+    assert_eq!(hit(&st, &src, 10.0, 30.0), GroupHit::Cell(0, 0));
+    assert_eq!(hit(&st, &src, 150.0, 130.0), GroupHit::Cell(0, 6));
+    assert_eq!(hit(&st, &src, 250.0, 130.0), GroupHit::None, "past the short last row");
+    assert_eq!(hit(&st, &src, 550.0, 30.0), GroupHit::None, "right of the columns");
+    assert_eq!(hit(&st, &src, 10.0, 235.0), GroupHit::Header(1));
+    assert_eq!(hit(&st, &src, 110.0, 260.0), GroupHit::Cell(1, 1));
+    assert_eq!(hit(&st, &src, 110.0, 400.0), GroupHit::Cell(2, 1));
+    assert_eq!(st.group_item_origin(&src.g, 8), Some((100.0, 248.0)));
+    assert_eq!(st.group_item_origin(&src.g, 5), Some((0.0, 124.0)));
+
+    // click on B's header: collapses it, the layout shrinks, no cell of B is drawn
+    let sy = |y: f32| GRID_RECT.y + y;
+    h.down(10.0, sy(235.0));
+    h.up(10.0, sy(235.0));
+    let r = gt_frame(&mut h, &mut st, &mut src);
+    assert!(r.header_toggled);
+    assert_eq!(src.toggled, vec![(1, false)]);
+    assert_eq!(src.drawn, vec![0, 1, 2, 3, 4, 5, 6, 10, 11]);
+    assert_eq!(src.headers, vec![(0, false), (1, true), (2, false)]);
+    assert_eq!(st.content_h(12), 372.0);
+    assert_eq!(st.group_item_origin(&src.g, 8), None, "hidden");
+    assert_eq!(st.group_item_origin(&src.g, 10), Some((0.0, 272.0)));
+
+    // click on item 10 (C is at 224+24 now): cursor, selection, nothing toggled
+    h.down(50.0, sy(300.0));
+    h.up(50.0, sy(300.0));
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!((st.cursor, src.selected.clone(), src.toggled.len()), (10, vec![10], 1));
+    // Up lands on the short last row of A (same column), Down comes back, Left walks the visual order
+    h.key(Key::Up, Mods::NONE);
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.cursor, 5);
+    h.key(Key::Down, Mods::NONE);
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.cursor, 10);
+    h.key(Key::Left, Mods::NONE);
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.cursor, 6, "Left from C's first cell: A's last cell, collapsed B skipped");
+    h.key(Key::Right, Mods::NONE);
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.cursor, 10);
+    h.key(Key::End, Mods::NONE);
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.cursor, 11);
+    h.key(Key::Home, Mods::NONE);
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(st.cursor, 0);
+
+    // header keys: click A's header (collapses), Right expands, Enter collapses, Down goes to the next shown item
+    h.down(10.0, sy(10.0));
+    h.up(10.0, sy(10.0));
+    gt_frame(&mut h, &mut st, &mut src);
+    assert!(src.g.is_collapsed(0));
+    assert_eq!(st.header_focus(), Some(0));
+    h.key(Key::Right, Mods::NONE);
+    gt_frame(&mut h, &mut st, &mut src);
+    assert!(!src.g.is_collapsed(0));
+    h.key(Key::Enter, Mods::NONE);
+    let r = gt_frame(&mut h, &mut st, &mut src);
+    assert!(src.g.is_collapsed(0) && r.activated.is_none());
+    h.key(Key::Down, Mods::NONE);
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!((st.cursor, st.header_focus()), (10, None), "A and B are collapsed");
+    // Ctrl+click on a header: all groups
+    h.down_m(10.0, sy(10.0), Mods::CTRL, false);
+    h.up(10.0, sy(10.0));
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(src.toggled.last(), Some(&(0, true)));
+    assert!((0..3).all(|g| !src.g.is_collapsed(g)), "A was collapsed: Ctrl expands every group");
+}
+
+#[test]
+fn grouped_grid_marquee_covers_cells_per_group_and_reflow_keeps_the_top_row() {
+    let mut h = Harness::new();
+    let mut st = GridState::new(100.0, 100.0);
+    let mut src = GTiles::new();
+    gt_frame(&mut h, &mut st, &mut src);
+    let sy = |y: f32| GRID_RECT.y + y;
+    // start right of the columns, drag over A's second row and B's cells
+    h.down(550.0, sy(260.0));
+    gt_frame(&mut h, &mut st, &mut src);
+    h.move_to(150.0, sy(130.0));
+    gt_frame(&mut h, &mut st, &mut src);
+    assert_eq!(
+        src.band,
+        vec![
+            GroupBand { group: 0, cells: BandCells { rows: (1, 1), cols: (1, 4) } },
+            GroupBand { group: 1, cells: BandCells { rows: (0, 0), cols: (1, 4) } },
+        ]
+    );
+    h.up(150.0, sy(130.0));
+    gt_frame(&mut h, &mut st, &mut src);
+
+    // narrower: 2 columns; the row of item 5 stays the top row
+    let mut st = GridState::new(100.0, 100.0);
+    let narrow = Rect::new(0.0, 40.0, 290.0, 200.0);
+    let frame = |h: &mut Harness, st: &mut GridState, src: &mut GTiles, r: Rect| h.frame(|ui, c| {
+        grid(ui, c, GRID, r, st, src);
+    });
+    frame(&mut h, &mut st, &mut src, Rect::new(0.0, 40.0, 600.0, 200.0));
+    st.scroll = 124.0; // A's second row: items 5 and 6
+    frame(&mut h, &mut st, &mut src, Rect::new(0.0, 40.0, 600.0, 200.0));
+    assert_eq!((st.cols, st.scroll), (5, 124.0));
+    frame(&mut h, &mut st, &mut src, narrow);
+    assert_eq!(st.cols, 2);
+    assert_eq!(st.scroll, 24.0 + 200.0, "item 5 is on A's third row of two cells");
+    assert_eq!(st.content_h(12), 24.0 + 400.0 + 24.0 + 200.0 + 24.0 + 100.0);
+}
+
+#[test]
+fn group_nav_moves_over_cells_and_skips_headers_and_collapsed_groups() {
+    let mut src = GTiles::new();
+    let nav = |src: &GTiles, k: Key, cur: usize| group_nav(&src.g, k, cur, 5, 2);
+    assert_eq!(nav(&src, Key::Down, 1), Some(6), "A row 1 has 2 cells; column 1 exists");
+    assert_eq!(nav(&src, Key::Down, 3), Some(6), "short last row: its last cell");
+    assert_eq!(nav(&src, Key::Down, 6), Some(8), "next group, same column");
+    assert_eq!(nav(&src, Key::Up, 7), Some(5), "A's short last row, same column");
+    assert_eq!(nav(&src, Key::Up, 0), None);
+    assert_eq!(nav(&src, Key::Down, 11), None, "nothing below");
+    assert_eq!(nav(&src, Key::PageDown, 0), Some(7), "two rows down: A row 1, then B");
+    assert_eq!(nav(&src, Key::PageUp, 11), Some(6), "up two rows: C -> B -> A last row");
+    assert_eq!(nav(&src, Key::Right, 6), Some(7), "reading order crosses the header");
+    assert_eq!(nav(&src, Key::Left, 7), Some(6));
+    src.g.toggle(1, false);
+    assert_eq!(nav(&src, Key::Right, 6), Some(10), "B is collapsed");
+    assert_eq!(nav(&src, Key::Up, 10), Some(5));
+    assert_eq!(nav(&src, Key::End, 0), Some(11));
+    assert_eq!(nav(&src, Key::Home, 11), Some(0));
+    assert_eq!(nav(&src, Key::Up, 8), None, "a hidden cursor item has no place");
+}
+
 // -------------------------------------------------------------- text input
 
 #[test]

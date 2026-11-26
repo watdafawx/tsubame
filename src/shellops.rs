@@ -886,7 +886,7 @@ fn opts_for(background: bool, paths: &[String]) -> (MenuOpts, Vec<Option<Extra>>
 pub fn open_item_menu(a: &mut App, paths: Vec<String>, folders: Vec<String>, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
     let folder = a.view.tab().path.clone();
     if crate::ctxui::own_enabled() {
-        open_own(a, crate::ctxui::Target { paths, folders, folder, background: false, extended, anchor, keyboard, screen: (sx, sy), removable_drive: false });
+        open_own(a, crate::ctxui::Target { paths, folders, folder, background: false, extended, anchor, keyboard, screen: (sx, sy), removable_drive: false, view: None });
         return;
     }
     native_item_menu(a, paths, folder, sx, sy, extended);
@@ -916,6 +916,9 @@ fn open_own(a: &mut App, mut t: crate::ctxui::Target) {
     a.view.ctx = None;
     if !t.background && t.paths.len() == 1 {
         t.removable_drive = a.view.side.is_removable_drive(&t.paths[0]);
+    }
+    if t.background {
+        t.view = a.view.view_menu();
     }
     let mut menu = a.view.prefs.context_menu.clone();
     menu.entries = tsubame_config::menu::effective(&menu.entries);
@@ -956,7 +959,7 @@ fn ctx_save_edits(a: &mut App) {
 /// After a frame: a right click on empty space opens the folder's menu.
 pub fn open_background_menu(a: &mut App, folder: String, sx: i32, sy: i32, extended: bool, anchor: Pt, keyboard: bool) {
     if crate::ctxui::own_enabled() {
-        let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor, keyboard, screen: (sx, sy), removable_drive: false };
+        let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor, keyboard, screen: (sx, sy), removable_drive: false, view: None };
         open_own(a, t);
     } else {
         native_bg_menu(a, folder, sx, sy, extended);
@@ -1038,7 +1041,7 @@ pub fn after_frame(hwnd: HWND) {
     let (sx, sy) = crate::screen_pt(hwnd, x, y);
     let paint_now = with(|a| {
         if crate::ctxui::own_enabled() {
-            let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor: pt, keyboard: false, screen: (sx, sy), removable_drive: false };
+            let t = crate::ctxui::Target { paths: vec![folder.clone()], folders: vec![folder.clone()], folder, background: true, extended, anchor: pt, keyboard: false, screen: (sx, sy), removable_drive: false, view: None };
             open_own(a, t);
         } else {
             native_bg_menu(a, folder, sx, sy, extended);
@@ -1148,6 +1151,11 @@ fn run_own(a: &mut App, act: &str, t: &crate::ctxui::Target, entries: &[tsubame_
         }
         "x.terminal" => open_terminal(one_dir.unwrap_or_else(|| t.folder.clone())),
         "x.refresh" => a.view.run_command(&mut a.ui, crate::commands::CMD_REFRESH),
+        act if crate::viewmenu::parse(act).is_some() => {
+            if let Some(p) = crate::viewmenu::parse(act) {
+                a.view.apply_view_pick(p);
+            }
+        }
         "tags.pick" => a.view.open_tags_picker(&mut a.ui, None, false),
         "drive.eject" => start_eject(a, &paths),
         id => {

@@ -98,7 +98,9 @@ mod timing;
 mod uia_rows;
 mod updates;
 mod view;
+mod view_group;
 mod view_tooltip;
+mod viewmenu;
 mod wakelog;
 
 use std::cell::RefCell;
@@ -587,8 +589,14 @@ fn main() {
         if let Some(m) = arg_value(&args, "--view").and_then(|v| view::ViewMode::parse(&v)) {
             view.set_mode(m);
         }
+        // `--group none|name|type|date|size`: the tab starts grouped (the bench and the rig checks use it)
+        if let Some(by) = arg_value(&args, "--group").and_then(|v| tsubame_core::grouping::GroupBy::parse(&v)) {
+            let grid = view.mode.is_grid();
+            view.tab_mut().set_group_by(by, grid);
+        }
         if let Some(b) = bench_state.as_mut() {
             b.grid = view.mode.is_grid();
+            b.group = view.tab().group.by.name();
         }
         // each folder remembers its own view (B11-G): the file is read on a worker
         if !dev && arg_value(&args, "--view").is_none() && !timing_mode && !gate_mode {

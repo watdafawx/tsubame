@@ -39,6 +39,8 @@ pub struct SessionTab {
     pub selected: Vec<String>,
     /// Tree view: full paths of the expanded folders (P4.F6), capped.
     pub expanded: Vec<String>,
+    /// Group by mode (`none`, `name`, `type`, `date`, `size`); absent: the `[view] group_by` default.
+    pub group_by: Option<String>,
 }
 
 /// One pane's tabs. Today the app has a single pane; the schema already has
@@ -247,6 +249,19 @@ mod tests {
             panes: vec![SessionPane { active_tab: active, tabs: paths.iter().map(|p| tab(p)).collect() }],
             recents: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_group_mode_of_a_tab_round_trips_and_an_old_file_has_none() {
+        let mut s = session(&[r"C:\a", r"C:\b"], 0);
+        s.panes[0].tabs[0].group_by = Some("date".into());
+        let text = s.to_toml();
+        assert!(text.contains("group_by = \"date\""));
+        let back: Session = toml::from_str(&text).unwrap();
+        assert_eq!(back.tabs()[0].group_by.as_deref(), Some("date"));
+        assert_eq!(back.tabs()[1].group_by, None, "a tab without one follows [view] group_by");
+        let old: Session = toml::from_str("version = 1\n[[panes]]\nactive_tab = 0\n[[panes.tabs]]\npath = 'C:\\x'\n").unwrap();
+        assert_eq!(old.tabs()[0].group_by, None);
     }
 
     #[test]

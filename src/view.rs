@@ -26,7 +26,7 @@ use crate::shellui::GridPic;
 use tsubame_config::DEFAULT_SIDEBAR_WIDTH;
 use tsubame_core::{EntryId, EntryStore, Selection};
 use tsubame_ui::{
-    BandCells, BandMode, Button, Canvas, Cursor, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header_ex, f, grid, list, splitter, tab_strip, text_input,
+    BandCells, BandMode, Button, Canvas, Cursor, Density, Event, Font, GridSource, GridState, GroupBand, GroupRows, GroupRow, HeaderCol, HeaderState, Id, Key, ListResponse, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header_ex, f, grid, list, splitter, tab_strip, text_input,
 };
 use tsubame_win::enumerate::Wake;
 
@@ -55,6 +55,8 @@ pub use fmem::FILE_NAME as FOLDER_VIEWS_FILE;
 mod suggestv;
 #[path = "view_ops.rs"]
 mod opsv;
+#[path = "view_groupcmd.rs"]
+mod groupcmd;
 pub use navv::spawn_new_window;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
@@ -1223,7 +1225,7 @@ impl View {
             ui.request_repaint();
             return;
         }
-        if self.run_u4(ui, cmd) || self.run_basics(ui, cmd) || self.run_folder_views(ui, cmd) || self.run_tab_menu_cmd(ui, cmd) || self.run_suggest(ui, cmd) {
+        if self.run_u4(ui, cmd) || self.run_basics(ui, cmd) || self.run_folder_views(ui, cmd) || self.run_tab_menu_cmd(ui, cmd) || self.run_suggest(ui, cmd) || self.run_group(cmd) {
             ui.request_repaint();
             return;
         }
@@ -1734,13 +1736,8 @@ impl View {
             (cur + delta as usize).min(len - 1)
         };
         let t = self.tab_mut();
-        if is_grid {
-            t.grid.cursor = next;
-            t.grid.reveal = true;
-        } else {
-            t.list.cursor = next;
-            t.list.ensure_visible(next, len);
-        }
+        t.move_cursor_to(is_grid, next);
+        t.grid.reveal = true;
         t.sel.single(&t.store, next);
         self.sync_preview();
     }
@@ -1852,12 +1849,13 @@ impl View {
                 t.list.cursor = t.grid.cursor.min(len.saturating_sub(1));
                 let c = t.list.cursor;
                 if t.list.view_h > 0.0 {
-                    t.list.ensure_visible(c, len);
+                    t.move_cursor_to(false, c);
                 } else {
                     // the list was never drawn (started in a grid): no height
                     // to fit yet, so put the cursor row at the top
-                    let top = t.list.row_top(c);
-                    t.list.set_scroll(top, len);
+                    t.sync_group();
+                    let top = t.list.row_top(t.list_row_of(c));
+                    t.list.set_scroll(top, t.list_rows());
                 }
             }
         }
@@ -1869,15 +1867,15 @@ impl View {
     pub fn row_mid_y(&self, i: usize) -> f32 {
         if self.mode.is_grid() {
             let g = &self.tab().grid;
-            return self.list_top + g.cell_origin(i).1 + g.cell_h / 2.0;
+            return self.list_top + self.tab().cell_origin_of(i).1 + g.cell_h / 2.0;
         }
         let l = &self.tab().list;
-        self.list_top + l.row_top(i) as f32 + l.row_h / 2.0
+        self.list_top + self.tab().row_top_of(i) as f32 + l.row_h / 2.0
     }
 
     /// Keyboard menus follow the focused pane/cell, including horizontal grids.
     pub fn menu_anchor(&self, row: usize) -> Pt {
-        let dx = if self.mode.is_grid() { self.tab().grid.cell_origin(row).0 } else { 0.0 };
+        let dx = if self.mode.is_grid() { self.tab().cell_origin_of(row).0 } else { 0.0 };
         Pt::new(self.list_r.x + dx + 12.0, self.row_mid_y(row))
     }
 
@@ -2569,9 +2567,10 @@ impl View {
         } else {
         let tab = &mut self.tabs.items[self.tabs.active];
         tab.list.row_h = t.height_list_row;
+        tab.sync_group();
         let tab_nav_key = tab.nav_key();
         {
-            let Tab { store, sel, list: lstate, band_base, band_mode, path, synthetic, tag_fids, .. } = &mut *tab;
+            let Tab { store, sel, list: lstate, band_base, band_mode, path, synthetic, tag_fids, group, .. } = &mut *tab;
             let in_archive = crate::archive_ui::is_archive_path(path);
             let root = if *synthetic || in_archive { None } else { Some(path.as_str()) };
             let tags = root.and_then(|p| self.tags.rows(p, tag_fids));
@@ -2579,7 +2578,7 @@ impl View {
                 .then_some(&self.meta.git_map);
             let folder_sizes = (!*synthetic && !in_archive && spans[Col::Size.slot()].1 > 0.0 && self.meta.size_map.matches_folder(path))
                 .then_some(&self.meta.size_map);
-            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, age, base: band_base, band_mode, tags };
+            let mut rows = Rows { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, spans, zebra: self.zebra, root, git_map, folder_sizes, age, base: band_base, band_mode, tags, groups: group.on().then_some(&mut *group) };
             let lr = list(ui, g, pid(self.live, ID_LIST), list_r, lstate, &mut rows);
             if let Some(pos) = lr.hovered
                 && let Some(id) = rows.store.at(pos)
@@ -2589,10 +2588,15 @@ impl View {
             if crate::uia_rows::on() {
                 let area = Rect::new(list_r.x, list_r.y, list_r.w - ui.theme.layout_scrollbar_width, list_r.h);
                 let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
-                crate::uia_rows::details(&geo, lstate, lr.range, rows.store, rows.sel, rows.row, rows.tags.as_mut(), rows.age.as_ref());
+                match rows.groups.as_deref() {
+                    Some(gs) => crate::uia_rows::details_grouped(&geo, lstate, lr.range, gs, rows.store, rows.sel, rows.row, rows.tags.as_mut(), rows.age.as_ref()),
+                    None => crate::uia_rows::details(&geo, lstate, lr.range, rows.store, rows.sel, rows.row, rows.tags.as_mut(), rows.age.as_ref()),
+                }
             }
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
+            // the rows other code asks about are items: the flat rows of a grouped list become their item range
+            let lr = ListResponse { range: rows.groups.as_deref().map_or(lr.range, |gs| gs.item_range(lr.range)), ..lr };
             (lr, lr.activated)
         }
         };
@@ -2667,6 +2671,8 @@ impl View {
         let dpi = self.dpi;
         g.fill(grid_r, t.row);
         let tab = &mut self.tabs.items[self.tabs.active];
+        tab.sync_group();
+        tab.grid.header_h = t.height_list_row;
         tab.grid.set_cell_size(cw, ch);
         // cells one screen shows (thumbnail size is chosen so they all fit the cache)
         let cols = tab.grid.cols_for(grid_r.w - t.layout_scrollbar_width);
@@ -2675,10 +2681,10 @@ impl View {
         let label_font = t.font().c();
         let tab_nav_key = tab.nav_key();
         let (gr, activated) = {
-            let Tab { store, sel, grid: gstate, band_base, band_mode, path, synthetic, tag_fids, .. } = &mut *tab;
+            let Tab { store, sel, grid: gstate, band_base, band_mode, path, synthetic, tag_fids, group, .. } = &mut *tab;
             let root = if *synthetic || crate::archive_ui::is_archive_path(path) { None } else { Some(path.as_str()) };
             let tags = root.and_then(|p| self.tags.rows(p, tag_fids));
-            let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, root, base: band_base, band_mode, labels: &mut self.labels, box_dip, font: label_font, tags };
+            let mut tiles = Tiles { store, sel, shell, row: &mut self.rowbuf, text: &mut self.text, root, base: band_base, band_mode, labels: &mut self.labels, box_dip, font: label_font, tags, groups: group.on().then_some(&mut *group) };
             let gr = grid(ui, g, pid(self.live, ID_LIST), grid_r, gstate, &mut tiles);
             if let Some(pos) = gr.hovered
                 && let Some(id) = tiles.store.at(pos)
@@ -2688,7 +2694,10 @@ impl View {
             if crate::uia_rows::on() {
                 let area = Rect::new(grid_r.x, grid_r.y, grid_r.w - ui.theme.layout_scrollbar_width, grid_r.h);
                 let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
-                crate::uia_rows::grid(&geo, gstate, gr.range, tiles.store, tiles.sel, tiles.row, tiles.tags.as_mut());
+                match tiles.groups.as_deref() {
+                    Some(gs) => crate::uia_rows::grid_grouped(&geo, gstate, gs, tiles.store, tiles.sel, tiles.row, tiles.tags.as_mut()),
+                    None => crate::uia_rows::grid(&geo, gstate, gr.range, tiles.store, tiles.sel, tiles.row, tiles.tags.as_mut()),
+                }
             }
             tiles.prefetch(gstate);
             (gr, gr.activated)
@@ -2938,6 +2947,8 @@ struct Rows<'a> {
     band_mode: &'a mut BandMode,
     /// P4.F6 tags of the rows (`None`: tags off or no tagged item anywhere)
     tags: Option<crate::tags::ui::RowTags<'a>>,
+    /// group by: the grouped rows of the tab (`None`: plain rows)
+    groups: Option<&'a mut crate::view_group::GroupState>,
 }
 
 /// Shared marquee selection begin/update/end logic for both Details and Grid views.
@@ -3000,15 +3011,33 @@ fn select_entry(store: &EntryStore, sel: &mut Selection, i: usize, mods: Mods, b
     }
 }
 
+/// Shift+click / Shift+arrow on grouped rows selects what the screen shows between the
+/// anchor and `i`; everything else is the plain rule.
+fn select_grouped(store: &EntryStore, sel: &mut Selection, groups: Option<&crate::view_group::GroupState>, i: usize, mods: Mods, by: SelectBy) {
+    if mods.shift
+        && matches!(by, SelectBy::Click | SelectBy::Key)
+        && let Some(g) = groups.and_then(|gs| gs.rows())
+    {
+        crate::view_group::extend_visual(store, sel, g, i);
+        return;
+    }
+    select_entry(store, sel, i, mods, by);
+}
+
 impl Rows<'_> {
     /// Asks for the icons of one page of rows above and below `range`, the
     /// nearest first (priority = rows away). Only registers wants; the
-    /// shell's scheduler decides when they run.
+    /// shell's scheduler decides when they run. `range` is flat rows when grouped.
     fn prefetch(&mut self, range: (usize, usize), page: usize) {
-        let len = self.store.view().len();
+        let grouped = self.groups.as_deref().and_then(|gs| gs.rows());
+        let len = grouped.map_or(self.store.view().len(), |g| g.row_count());
         let (a, b) = range;
         for j in (a.saturating_sub(page)..a).chain(b..(b + page).min(len)) {
-            let Some(id) = self.store.at(j) else { continue };
+            let item = match grouped.map_or(GroupRow::Item(j), |g| g.row_at(j)) {
+                GroupRow::Item(i) => i,
+                GroupRow::Header(_) => continue,
+            };
+            let Some(id) = self.store.at(item) else { continue };
             self.row.fill(self.store, id);
             if crate::packs::has_icon(self.row.name_str(), self.row.is_dir()) {
                 continue;
@@ -3027,7 +3056,7 @@ impl ListSource for Rows<'_> {
         self.store.at(i).is_some_and(|id| self.sel.contains(id))
     }
     fn select(&mut self, i: usize, mods: Mods, by: SelectBy) {
-        select_entry(self.store, self.sel, i, mods, by);
+        select_grouped(self.store, self.sel, self.groups.as_deref(), i, mods, by);
     }
     fn select_none(&mut self) {
         self.sel.clear();
@@ -3036,8 +3065,31 @@ impl ListSource for Rows<'_> {
         band_begin_sel(self.store, self.sel, self.base, self.band_mode, mode);
     }
     fn band_update(&mut self, rows: Option<(usize, usize)>) {
-        let covered = rows.into_iter().flat_map(|(a, b)| a..=b);
-        band_update_sel(self.store, self.sel, self.base, *self.band_mode, covered);
+        match self.groups.as_deref().and_then(|gs| gs.rows()) {
+            // flat rows: the headers and the collapsed items between them are not covered
+            Some(g) => {
+                let covered = rows.into_iter().flat_map(|(a, b)| crate::view_group::items_of_rows(g, a, b));
+                band_update_sel(self.store, self.sel, self.base, *self.band_mode, covered);
+            }
+            None => {
+                let covered = rows.into_iter().flat_map(|(a, b)| a..=b);
+                band_update_sel(self.store, self.sel, self.base, *self.band_mode, covered);
+            }
+        }
+    }
+    fn groups(&self) -> Option<&dyn GroupRows> {
+        self.groups.as_deref().and_then(|gs| gs.rows())
+    }
+    fn toggle_group(&mut self, g: usize, all: bool) {
+        if let Some(gs) = self.groups.as_deref_mut() {
+            gs.toggle(g, all);
+        }
+    }
+    fn draw_header(&mut self, c: &mut dyn Canvas, t: &Theme, g: usize, r: Rect, st: HeaderState) {
+        if let Some(gs) = self.groups.as_deref() {
+            let count = gs.rows().map_or(0, |rows| rows.group_len(g));
+            crate::view_group::draw_header(c, t, gs.label(g), count, r, st, self.text);
+        }
     }
     fn band_end(&mut self) {
         band_end_sel(self.base);
@@ -3160,6 +3212,10 @@ struct Tiles<'a> {
     font: Font,
     /// P4.F6 tags of the cells
     tags: Option<crate::tags::ui::RowTags<'a>>,
+    /// scratch for the header's count
+    text: &'a mut String,
+    /// group by: the grouped cells of the tab (`None`: plain cells)
+    groups: Option<&'a mut crate::view_group::GroupState>,
 }
 
 impl Tiles<'_> {
@@ -3195,7 +3251,29 @@ impl GridSource for Tiles<'_> {
         self.store.at(i).is_some_and(|id| self.sel.contains(id))
     }
     fn select(&mut self, i: usize, mods: Mods, by: SelectBy) {
-        select_entry(self.store, self.sel, i, mods, by);
+        select_grouped(self.store, self.sel, self.groups.as_deref(), i, mods, by);
+    }
+    fn groups(&self) -> Option<&dyn GroupRows> {
+        self.groups.as_deref().and_then(|gs| gs.rows())
+    }
+    fn toggle_group(&mut self, g: usize, all: bool) {
+        if let Some(gs) = self.groups.as_deref_mut() {
+            gs.toggle(g, all);
+        }
+    }
+    fn draw_header(&mut self, c: &mut dyn Canvas, t: &Theme, g: usize, r: Rect, st: HeaderState) {
+        if let Some(gs) = self.groups.as_deref() {
+            let count = gs.rows().map_or(0, |rows| rows.group_len(g));
+            crate::view_group::draw_header(c, t, gs.label(g), count, r, st, self.text);
+        }
+    }
+    fn band_update_groups(&mut self, spans: &[GroupBand], cols: usize) {
+        let Some(g) = self.groups.as_deref().and_then(|gs| gs.rows()) else { return };
+        let covered = spans.iter().flat_map(|b| {
+            let shown = g.shown_len(b.group);
+            b.cells.indices(cols, shown).map(move |j| g.group_item(b.group, j))
+        });
+        band_update_sel(self.store, self.sel, self.base, *self.band_mode, covered);
     }
     fn select_none(&mut self) {
         self.sel.clear();
@@ -5104,4 +5182,7 @@ mod tests {
     // B11-H: path autocomplete, Ctrl+E, Ctrl+Alt+T, path bar menu
     #[path = "../../view_b11h_tests.rs"]
     mod b11h;
+    // B11-F2: Group by
+    #[path = "../../view_group_tests.rs"]
+    mod group_tests;
 }

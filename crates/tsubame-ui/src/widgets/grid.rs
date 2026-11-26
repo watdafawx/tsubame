@@ -12,7 +12,9 @@ use crate::geom::{Pt, Rect};
 use crate::input::{Button, Event, Key, Mods};
 use crate::theme::Theme;
 use crate::ui::{Id, Sense, Ui};
-use crate::widgets::list::{BandMode, RowState, SelectBy};
+use crate::widgets::grid_grouped::{GroupBand, GroupGeo, grid_grouped};
+use crate::widgets::grouping::GroupRows;
+use crate::widgets::list::{BandMode, HeaderState, RowState, SelectBy};
 use crate::widgets::scrollbar::{ScrollMetrics, vscrollbar};
 
 /// Pointer travel (DIPs) before a press on empty space becomes a marquee band.
@@ -54,14 +56,25 @@ pub trait GridSource {
     /// covers (`None`: it covers none). The selection is base + these.
     fn band_update(&mut self, _cells: Option<BandCells>, _cols: usize) {}
     fn band_end(&mut self) {}
+    /// Grouped cells, if the grid is grouped. Then `len()` counts items and every
+    /// index the source is handed is an item (source) index.
+    fn groups(&self) -> Option<&dyn GroupRows> {
+        None
+    }
+    /// A click (or key) on the header of group `g`: toggle it (`all`: every group).
+    fn toggle_group(&mut self, _g: usize, _all: bool) {}
+    /// Draws the header row of group `g` in `r` (full width, background drawn).
+    fn draw_header(&mut self, _c: &mut dyn Canvas, _theme: &Theme, _g: usize, _r: Rect, _st: HeaderState) {}
+    /// Grouped `band_update`: the covered cells of every group (inside its own cell block).
+    fn band_update_groups(&mut self, _spans: &[GroupBand], _cols: usize) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Band {
+pub(crate) struct Band {
     /// start in content coordinates (x from the cells' left edge, y from the top)
-    sx: f32,
-    sy: f64,
-    started: bool,
+    pub(crate) sx: f32,
+    pub(crate) sy: f64,
+    pub(crate) started: bool,
 }
 
 /// Scroll, cursor and metrics of one grid. Plain data: the app keeps one per view.
@@ -80,12 +93,18 @@ pub struct GridState {
     pub cols: usize,
     /// scroll the cursor into view on the next frame (set after the app moved it)
     pub reveal: bool,
-    band: Option<Band>,
+    /// header row height of a grouped grid (DIPs)
+    pub header_h: f32,
+    pub(crate) band: Option<Band>,
+    /// grouped: the header that has the keyboard focus, and the cursor item when it got it
+    pub(crate) header: Option<(usize, usize)>,
+    pub(crate) geo: GroupGeo,
+    pub(crate) band_scratch: Vec<GroupBand>,
 }
 
 impl GridState {
     pub fn new(cell_w: f32, cell_h: f32) -> GridState {
-        GridState { scroll: 0.0, cursor: 0, cell_w, cell_h, view_w: 0.0, view_h: 0.0, cols: 1, reveal: false, band: None }
+        GridState { scroll: 0.0, cursor: 0, cell_w, cell_h, view_w: 0.0, view_h: 0.0, cols: 1, reveal: false, header_h: 24.0, band: None, header: None, geo: GroupGeo::default(), band_scratch: Vec::new() }
     }
     pub fn cols_for(&self, w: f32) -> usize {
         ((w / self.cell_w.max(1.0)) as usize).max(1)
@@ -94,7 +113,18 @@ impl GridState {
         len.div_ceil(self.cols.max(1))
     }
     pub fn content_h(&self, len: usize) -> f64 {
-        self.rows_for(len) as f64 * self.cell_h as f64
+        if self.geo.active { self.geo.total() } else { self.rows_for(len) as f64 * self.cell_h as f64 }
+    }
+    /// The last frame laid the cells out in groups (`cell_origin` / `cell_at` do not apply).
+    pub fn geo_active(&self) -> bool {
+        self.geo.active
+    }
+    /// Group whose header has the keyboard focus (grouped grid).
+    pub fn header_focus(&self) -> Option<usize> {
+        self.header.filter(|&(_, at)| at == self.cursor).map(|(g, _)| g)
+    }
+    pub fn set_header_focus(&mut self, g: Option<usize>) {
+        self.header = g.map(|g| (g, self.cursor));
     }
     pub fn max_scroll(&self, len: usize) -> f64 {
         (self.content_h(len) - self.view_h as f64).max(0.0)
@@ -128,9 +158,11 @@ impl GridState {
             return;
         }
         let row = (self.scroll / self.cell_h.max(1.0) as f64).floor().max(0.0);
+        let ratio = h as f64 / self.cell_h.max(1.0) as f64;
         self.cell_w = w;
         self.cell_h = h;
-        self.scroll = row * h as f64;
+        // grouped: the same place in the content, to within a header
+        self.scroll = if self.geo.active { self.scroll * ratio } else { row * h as f64 };
     }
     /// Index of the first cell on the top visible row.
     pub fn top_index(&self) -> usize {
@@ -246,6 +278,8 @@ pub struct GridResponse {
     pub empty_double_click: bool,
     /// middle click released on this cell
     pub middle_clicked: Option<usize>,
+    /// a group header was toggled (click or key)
+    pub header_toggled: bool,
     /// a left or middle press landed inside the cells area this frame
     pub pressed: bool,
     /// right click released (cell under it, if any), at this point
@@ -263,6 +297,10 @@ pub struct GridResponse {
 
 /// The grid in `rect`, with its scrollbar on the right.
 pub fn grid(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut GridState, src: &mut dyn GridSource) -> GridResponse {
+    if src.groups().is_some() {
+        return grid_grouped(ui, c, id, rect, st, src);
+    }
+    st.geo.active = false;
     let mut resp = GridResponse::default();
     let len = src.len();
     let mut area = rect;

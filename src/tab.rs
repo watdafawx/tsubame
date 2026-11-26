@@ -140,6 +140,8 @@ pub struct Tab {
     pub list: ListState,
     /// scroll and cursor of the grid view (the details view keeps `list`)
     pub grid: GridState,
+    /// Group by: the mode and the grouped rows of this tab (`view_group.rs`)
+    pub group: crate::view_group::GroupState,
     /// selection before a Ctrl/Shift rubber-band started
     pub band_base: Vec<tsubame_core::EntryId>,
     /// how the active rubber-band combines with `band_base`
@@ -253,6 +255,7 @@ impl Tab {
             filter: String::new(),
             list: ListState::new(row_h),
             grid: GridState::new(96.0, 118.0),
+            group: crate::view_group::GroupState::new(crate::view_group::default_by()),
             band_base: Vec::new(),
             band_mode: BandMode::Replace,
             load: Load::Done,
@@ -576,8 +579,7 @@ impl Tab {
             if let Some(pos) = self.store.view().iter().position(|id| self.sel.contains(*id)) {
                 self.list.cursor = pos;
                 self.grid.cursor = pos;
-                let len = self.shown();
-                self.list.ensure_visible(pos, len);
+                self.move_cursor_to(false, pos);
             }
         }
     }
@@ -664,7 +666,9 @@ impl Tab {
     /// visible entry where it was (positions shift, IDs do not).
     fn keep_place(&mut self, f: impl FnOnce(&mut Tab) -> bool) -> bool {
         let row_h = self.list.row_h.max(1.0) as f64;
-        let top_pos = (self.list.scroll / row_h) as usize;
+        let top_row = (self.list.scroll / row_h) as usize;
+        // grouped: the rows of the list are not the positions of the entries
+        let top_pos = self.item_at_top_row(top_row);
         let top = self.store.at(top_pos);
         let cur = self.store.at(self.list.cursor);
         let gcur = self.store.at(self.grid.cursor);
@@ -674,8 +678,9 @@ impl Tab {
         let pos_of = |t: &Tab, id: Option<tsubame_core::EntryId>| id.and_then(|id| t.store.view().iter().position(|v| *v == id));
         let n = self.shown();
         if let Some(p) = pos_of(self, top) {
-            let frac = self.list.scroll - top_pos as f64 * row_h;
-            self.list.scroll = p as f64 * row_h + frac;
+            let frac = self.list.scroll - top_row as f64 * row_h;
+            self.set_list_top(p);
+            self.list.scroll += frac;
         }
         let clamp = |p: usize| p.min(n.saturating_sub(1));
         self.list.cursor = pos_of(self, cur).unwrap_or_else(|| clamp(self.list.cursor));
@@ -799,8 +804,9 @@ impl Tab {
         let Some(r) = self.restore.take() else { return };
         let n = self.shown();
         if n > 0 && r.scroll_first_row > 0 {
+            // the saved number is the entry at the top of the list
             let row = r.scroll_first_row.min(n - 1);
-            self.list.scroll = row as f64 * self.list.row_h as f64;
+            self.set_list_top(row);
             self.list.cursor = row;
         }
         self.apply_selection(&r.selected);
@@ -970,7 +976,7 @@ impl Tab {
             return None;
         }
         let row_h = self.list.row_h.max(1.0) as f64;
-        let scroll_first_row = (self.list.scroll.max(0.0) / row_h).round() as usize;
+        let scroll_first_row = self.item_at_top_row((self.list.scroll.max(0.0) / row_h).round() as usize);
         Some(ClosedTab { path: self.path.clone(), view_mode, sort: self.sort, scroll_first_row, index })
     }
 }
@@ -1067,6 +1073,7 @@ impl Tab {
     /// Leaves Miller columns: the model goes, the folder lists again.
     pub fn leave_miller(&mut self) {
         self.miller_on = false;
+        self.sync_group();
         if self.miller.take().is_some()
             && let Some(w) = self.wake.clone()
         {
