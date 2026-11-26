@@ -25,6 +25,7 @@ pub use widgets::button::{button, button_behaviour};
 pub use widgets::controls::{checkbox, keycap, keycaps_right, segmented, slider, split_chord, toggle};
 pub use widgets::colheader::{HeaderCol, HeaderResponse, column_header};
 pub use widgets::grid::{BAND_DEADZONE, BandCells, GridResponse, GridSource, GridState, grid, nav_target};
+pub use widgets::grid_grouped::{GroupBand, GroupHit, group_nav};
 pub use widgets::grouping::{GroupRows, Grouping, Row as GroupRow};
 pub use widgets::list::{BandMode, HeaderState, ListResponse, ListSource, ListState, RowState, SelectBy, list};
 pub use widgets::menu::{MenuResponse, MenuRow, MenuSource, MenuState, MenuStyle, RowIcon, RowKind};
