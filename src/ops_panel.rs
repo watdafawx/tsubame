@@ -788,7 +788,8 @@ fn link(ui: &mut Ui, g: &mut dyn Canvas, t: &Theme, id: Id, x: f32, y: f32, h: f
             clicked = true;
         }
     }
-    g.text(label, Rect::new(x + 4.0, y, w - 8.0, h), font, t.accent);
+    // +2: a rect exactly as wide as the measured text ellipsises it
+    g.text(label, Rect::new(x + 4.0, y, w - 6.0, h), font, t.accent);
     if it.hovered {
         g.fill(Rect::new(x + 4.0, y + h / 2.0 + 7.0, w - 8.0, 1.0), t.accent);
     }
@@ -1714,5 +1715,35 @@ mod tests {
         paint_pill(&p, &mut ui, &mut g, &tsubame_ui::DARK, Rect::new(0.0, 0.0, 800.0, 30.0), 780.0);
         let _ = ui.end_frame();
         assert!(g.has_text("Copying, 0%"));
+    }
+
+
+    /// Rig showed "Un..." and "Show deta...": a text rect exactly as wide as
+    /// the measured label ellipsises it. Links get room to spare.
+    #[test]
+    fn link_labels_are_never_squeezed() {
+        let t = t0();
+        let mut p = Panel::default();
+        for i in 1..=2 {
+            let mut c = Card::new(Key::Queue(i), "Copying", "Copied", 1).with_folders("C:\\a\\src", "C:\\a\\dst");
+            c.stop = Stop::Queue(Cancellation::default());
+            p.add(c);
+            p.started(Key::Queue(i), t);
+        }
+        p.tick(t + OPEN_DELAY);
+        p.finished(Key::Queue(1), t + OPEN_DELAY, false, tot(1, 1));
+        p.error(Key::Queue(2), "C:\\a\\src\\small".into(), "in use".into(), Some(Operation::NewFile("x".into())));
+        p.finished(Key::Queue(2), t + OPEN_DELAY, false, tot(1, 1));
+        let (g, _) = frame(&mut p, t + OPEN_DELAY);
+        let mut seen = 0;
+        for o in &g.ops {
+            if let tsubame_ui::testcanvas::Op::Text(s, r, font, _) = o
+                && (s == "Undo" || s == "Show details")
+            {
+                assert!(r.w > tsubame_ui::TestCanvas::width_of(s, *font) + 1.0, "{s:?} squeezed into {}", r.w);
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 2, "{:?}", g.texts());
     }
 }
