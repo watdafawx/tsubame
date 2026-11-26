@@ -93,6 +93,9 @@ impl View {
             self.apply_hide();
         }
         self.sync_basics();
+        if bits & crate::settings::C_FOLDER_VIEWS != 0 {
+            self.run_folder_views(ui, CMD_RESET_FOLDER_VIEWS);
+        }
         if bits & C_KEYS != 0 {
             self.prefs.keys.overrides = self.keymap.to_overrides(&self.prefs.keys.overrides);
             keymap::set_current(&self.keymap);

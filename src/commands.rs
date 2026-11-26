@@ -91,6 +91,14 @@ pub const CMD_REVEAL_SIDEBAR: u32 = 123;
 pub const CMD_CREATE_SHORTCUT: u32 = 140;
 pub const CMD_PASTE_SHORTCUT: u32 = 141;
 pub const CMD_RENAME_PREV: u32 = 142;
+// B11-G: per-folder views, tab menu, column order (ids 220-239)
+pub const CMD_RESET_FOLDER_VIEWS: u32 = 220;
+pub const CMD_APPLY_VIEW_ALL: u32 = 221;
+pub const CMD_CLOSE_OTHER_TABS: u32 = 222;
+pub const CMD_CLOSE_TABS_RIGHT: u32 = 223;
+pub const CMD_DUPLICATE_TAB: u32 = 224;
+pub const CMD_TAB_TO_WINDOW: u32 = 225;
+pub const CMD_RESET_COLUMNS: u32 = 226;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -165,6 +173,13 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_PASTE_SHORTCUT, "edit.paste-shortcut", "Paste shortcut", [], F),
     // Tab is `pane.switch` (it commits and renames the next row); the view binds Shift+Tab to this while a rename is open
     cmd!(CMD_RENAME_PREV, "rename.previous", "Rename: commit and rename the previous item", [], F),
+    cmd!(CMD_RESET_FOLDER_VIEWS, "view.reset-folder-views", "Forget all folder views", [], GF),
+    cmd!(CMD_APPLY_VIEW_ALL, "view.apply-to-all-folders", "Use this view for all folders", [], GF),
+    cmd!(CMD_CLOSE_OTHER_TABS, "tab.close-others", "Close other tabs", [], GF),
+    cmd!(CMD_CLOSE_TABS_RIGHT, "tab.close-right", "Close tabs to the right", [], GF),
+    cmd!(CMD_DUPLICATE_TAB, "tab.duplicate", "Duplicate tab", [], GF),
+    cmd!(CMD_TAB_TO_WINDOW, "tab.move-to-window", "Move tab to a new window", [], GF),
+    cmd!(CMD_RESET_COLUMNS, "view.reset-columns", "Reset columns (order and widths)", [], GF),
 ];
 
 /// Archive extension (`tsubame.vfs.archive`) commands. The extension commands take the
@@ -384,6 +399,13 @@ mod tests {
         (CMD_CREATE_SHORTCUT, &[], false),
         (CMD_PASTE_SHORTCUT, &[], false),
         (CMD_RENAME_PREV, &[], false),
+        (CMD_RESET_FOLDER_VIEWS, &[], true),
+        (CMD_APPLY_VIEW_ALL, &[], true),
+        (CMD_CLOSE_OTHER_TABS, &[], true),
+        (CMD_CLOSE_TABS_RIGHT, &[], true),
+        (CMD_DUPLICATE_TAB, &[], true),
+        (CMD_TAB_TO_WINDOW, &[], true),
+        (CMD_RESET_COLUMNS, &[], true),
     ];
 
     const FEATURE_BEFORE: &[Before] = &[
