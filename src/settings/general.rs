@@ -1,7 +1,7 @@
 //! Settings > General: where a window opens, hidden files, deleting.
 
-use super::lay::Pg;
-use super::{C_HIDE, C_OTHER, C_PREVIEW, Cx};
+use super::lay::{Look, Pg, button};
+use super::{C_FOLDER_VIEWS, C_HIDE, C_OTHER, C_PREVIEW, Cx};
 use tsubame_ui::{Id, Rect, TextInput, text_input};
 
 const ID_FOLDER: Id = Id::new("settings-start-folder");
@@ -61,7 +61,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     }
 
     pg.section("Files and folders");
-    let mut c = pg.card(5, 52.0);
+    let mut c = pg.card(7, 52.0);
     if let Some(v) = pg.toggle_row(&mut c, "Show hidden files", "Same as Ctrl+H. Items with the hidden attribute are drawn in a dimmer colour.", g.show_hidden, true) {
         g.show_hidden = v;
         cx.changed |= C_HIDE;
@@ -82,6 +82,16 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     if let Some(v) = pg.toggle_row(&mut c, "Row hover tooltips", "Show Name, Type, Size and Date modified when hovering a row in Details or Grid.", g.row_tooltips, true) {
         g.row_tooltips = v;
         cx.changed |= C_OTHER;
+    }
+    if let Some(v) = pg.toggle_row(&mut c, "Remember each folder's view", "Each folder keeps its own view (Details or thumbnails, icon size, sort), like Explorer. Off: every folder shows the same view.", g.remember_folder_views, true) {
+        g.remember_folder_views = v;
+        cx.changed |= C_OTHER;
+    }
+    let row = pg.next_row(&mut c);
+    pg.row_text(row, "Forget all folder views", "Every folder goes back to the default view. The command \"Use this view for all folders\" sets that default.", 170.0, true);
+    let id = pg.id();
+    if button(pg.ui, pg.g, id, row.r() - 16.0, row.y + (row.h - pg.t.height_button) / 2.0, "Forget all", Look::Normal, true, true).0 {
+        cx.changed |= C_FOLDER_VIEWS;
     }
 
     pg.section("Sidebar");

@@ -127,6 +127,13 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Create shortcut | `file.create-shortcut` |
 | Paste shortcut | `edit.paste-shortcut` |
 | Rename: commit and rename the previous item | `rename.previous` |
+| Forget all folder views | `view.reset-folder-views` |
+| Use this view for all folders | `view.apply-to-all-folders` |
+| Close other tabs | `tab.close-others` |
+| Close tabs to the right | `tab.close-right` |
+| Duplicate tab | `tab.duplicate` |
+| Move tab to a new window | `tab.move-to-window` |
+| Reset columns (order and widths) | `view.reset-columns` |
 | Age colours: toggle | `view.age_colours` |
 | Batch rename selected items… | `file.batch_rename` |
 

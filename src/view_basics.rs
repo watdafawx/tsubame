@@ -139,6 +139,37 @@ impl View {
     /// Applies the config's `[view]` section to what draws (names without extensions).
     pub(super) fn sync_basics(&mut self) {
         data::set_show_extensions(self.prefs.view.show_extensions);
+        self.refresh_colset();
+    }
+
+    /// The columns of the registry in the user's order (`[columns] order`).
+    pub(super) fn refresh_colset(&mut self) {
+        let mut set = ColSet::current();
+        set.reorder_by(&self.prefs.columns.order);
+        self.colset = set;
+    }
+
+    /// A header cell was dropped: column `from` of the columns showing goes before column `gap`
+    /// (`shown.len()` is the end). The order is saved in `[columns] order`.
+    pub(super) fn reorder_columns(&mut self, shown: &[Col], from: usize, gap: usize) {
+        let (Some(&col), true) = (shown.get(from), gap <= shown.len()) else { return };
+        let before = shown.get(gap).copied();
+        let next = crate::cols::move_column(self.colset.order(), col, before);
+        let ids = crate::cols::order_ids(&next);
+        if ids == crate::cols::order_ids(self.colset.order()) {
+            return;
+        }
+        self.prefs.columns.order = ids;
+        self.refresh_colset();
+        self.config_dirty = true;
+    }
+
+    /// "Reset columns": the default order and widths.
+    pub fn reset_columns(&mut self) {
+        self.prefs.columns.order.clear();
+        self.cols = crate::cols::Columns::default();
+        self.refresh_colset();
+        self.config_dirty = true;
     }
 
     /// A view mode picked by name (`view.grid-small`, the toolbar button): the grid modes bring
@@ -156,6 +187,7 @@ impl View {
             self.config_dirty = true;
         }
         self.set_mode(mode);
+        self.remember_folder_view();
     }
 
     /// Ctrl+wheel over a list or grid: `dy` notches this frame.
@@ -188,6 +220,7 @@ impl View {
                 break;
             }
         }
+        self.remember_folder_view();
     }
 
     // ---- type-ahead ----------------------------------------------------------------------
@@ -232,6 +265,7 @@ impl View {
             // one notch of the wheel = two steps
             CMD_VIEW_ZOOM_IN => self.zoom_by(2),
             CMD_VIEW_ZOOM_OUT => self.zoom_by(-2),
+            CMD_RESET_COLUMNS => self.reset_columns(),
             CMD_SELECT_INVERT => {
                 let t = self.tab_mut();
                 if !(t.miller_on || t.tree_on) {
@@ -360,6 +394,7 @@ impl View {
         }
         let mut items: Vec<MenuItem> = rows.iter().map(|(_, _, label, on, can)| MenuItem::new(label, "").check(*on).off(!*can)).collect();
         items.push(MenuItem::new("Size all columns to fit", "").sep());
+        items.push(MenuItem::new("Reset columns", ""));
         let Some(picked) = overlay::menu(ui, g, id, at, &items) else { return };
         self.basics.col_menu = None;
         match rows.get(picked) {
@@ -371,7 +406,8 @@ impl View {
             Some(&(_, ext, _, on, _)) => {
                 let _ = self.set_extension_enabled(ui, ext, !on);
             }
-            None => self.basics.fit_pending = Some(slot),
+            None if picked == rows.len() => self.basics.fit_pending = Some(slot),
+            None => self.reset_columns(),
         }
         ui.request_repaint();
     }

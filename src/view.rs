@@ -26,7 +26,7 @@ use crate::shellui::GridPic;
 use tsubame_config::DEFAULT_SIDEBAR_WIDTH;
 use tsubame_core::{EntryId, EntryStore, Selection};
 use tsubame_ui::{
-    BandCells, BandMode, Button, Canvas, Cursor, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header, f, grid, list, splitter, tab_strip, text_input,
+    BandCells, BandMode, Button, Canvas, Cursor, Density, Event, Font, GridSource, GridState, HeaderCol, Id, Key, ListSource, Mods, Output, Pt, Rect, RowState, SelectBy, Sense, Split, TabStrip, TextInput, Theme, Ui, column_header_ex, f, grid, list, splitter, tab_strip, text_input,
 };
 use tsubame_win::enumerate::Wake;
 
@@ -46,6 +46,11 @@ mod uiav;
 mod basics;
 #[path = "view_nav.rs"]
 mod navv;
+#[path = "view_folder_memory.rs"]
+mod fmem;
+#[path = "tab_menu.rs"]
+mod tabmenu;
+pub use fmem::FILE_NAME as FOLDER_VIEWS_FILE;
 pub use navv::spawn_new_window;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
@@ -395,6 +400,16 @@ pub struct View {
     crumb_anchors: [Vec<(usize, Pt)>; 2],
     /// Delayed hover tooltip for file rows (Details and Grid)
     pub row_tip: crate::view_tooltip::RowTooltip,
+    /// B11-G: what each folder remembers (view mode, icon size, sort)
+    pub folder_views: fmem::FolderViews,
+    /// B11-G: a remembered view is being applied (not a change the user made)
+    folder_applying: bool,
+    /// B11-G: the open tab menu: (pane slot, tab id, where it opened)
+    tab_menu: Option<tabmenu::OpenMenu>,
+    /// B11-G: ids of tabs whose "move to new window" process started (the spawn worker fills it)
+    tab_windows: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    /// B11-G: a header cell is being dragged to reorder the columns
+    col_drag: tsubame_ui::HeaderDrag,
 }
 
 impl View {
@@ -503,6 +518,11 @@ impl View {
             nav_hold: None,
             crumb_anchors: [Vec::new(), Vec::new()],
             row_tip: crate::view_tooltip::RowTooltip::new(),
+            folder_views: fmem::FolderViews::default(),
+            folder_applying: false,
+            tab_menu: None,
+            tab_windows: Default::default(),
+            col_drag: tsubame_ui::HeaderDrag::new(),
         }
     }
 
@@ -681,6 +701,7 @@ impl View {
     }
 
     fn after_nav(&mut self) {
+        self.apply_folder_view();
         self.tags_after_nav();
         self.close_edits();
         self.meta.cancel_folder_sizes();
@@ -771,6 +792,7 @@ impl View {
         self.filter.set_text("");
         self.editing = false;
         self.focus_list = true;
+        self.apply_folder_view();
     }
 
     /// Closes tab `i`: its store is freed and its enumeration cancelled
@@ -864,6 +886,7 @@ impl View {
         self.editing = false;
         self.path_error = None;
         self.focus_list = true;
+        self.apply_folder_view();
     }
 
     /// Opens a file: uses an enabled pack's `open_with` rule when one matches
@@ -929,6 +952,8 @@ impl View {
         changed |= self.preview.pump();
         changed |= self.tags.pump();
         changed |= self.pump_nav_menu();
+        changed |= self.pump_folder_views();
+        changed |= self.pump_tab_windows();
         if self.tab_mut().take_watch_changed() {
             let p = self.tab().path.clone();
             self.meta.invalidate_git(&p);
@@ -1127,7 +1152,7 @@ impl View {
     fn sync_cols(&mut self) {
         let g = crate::ext::generation();
         if self.colset.generation != g || self.colset.tags != (crate::tags::column_shown() && crate::tags::enabled()) {
-            self.colset = ColSet::current();
+            self.refresh_colset();
         }
     }
 
@@ -1185,7 +1210,7 @@ impl View {
             ui.request_repaint();
             return;
         }
-        if self.run_u4(ui, cmd) || self.run_basics(ui, cmd) {
+        if self.run_u4(ui, cmd) || self.run_basics(ui, cmd) || self.run_folder_views(ui, cmd) || self.run_tab_menu_cmd(ui, cmd) {
             ui.request_repaint();
             return;
         }
@@ -1823,6 +1848,7 @@ impl View {
             }
         }
         self.focus_list = true;
+        self.remember_folder_view();
     }
 
     /// Client position (DIP) of the middle of view row/cell `i` (keyboard menus).
@@ -1976,6 +2002,7 @@ impl View {
         self.paint_tags_picker(ui, g, (w, h));
         self.paint_quick_look(ui, g, (w, h));
         self.paint_col_menu(ui, g);
+        self.paint_tab_menu(ui, g);
         self.paint_nav_menu(ui, g, (w, h));
         // the context menu is on top of everything
         if let Some(c) = self.ctx.as_mut() {
@@ -2137,6 +2164,9 @@ impl View {
         }
         if let Some((from, to)) = resp.moved {
             self.tabs.move_tab(from, to);
+        }
+        if let Some((i, at)) = resp.context {
+            self.open_tab_menu(ui, i, at);
         }
         if let Some(i) = resp.close {
             self.close_tab(i);
@@ -2467,11 +2497,15 @@ impl View {
         }
         let tab = &mut self.tabs.items[self.tabs.active];
         let sorted = shown.iter().position(|c| c.sort_column() == Some(tab.sort.column)).map(|i| (i, tab.sort.descending));
-        let hr = column_header(ui, g, pid(self.live, ID_HEADER), header_r, &hc[..n], &hspans[..n], sorted);
+        let hr = column_header_ex(ui, g, pid(self.live, ID_HEADER), header_r, &hc[..n], &hspans[..n], sorted, &mut self.col_drag);
         if let Some(i) = hr.sort
             && let Some(sc) = shown[i].sort_column()
         {
             tab.sort_by(sc);
+            self.remember_folder_view();
+        }
+        if let Some((from, gap)) = hr.reorder {
+            self.reorder_columns(shown, from, gap);
         }
         if let Some((_, pt)) = hr.context {
             self.open_col_menu(ui, pt);
@@ -2706,6 +2740,7 @@ impl View {
         }
         if let Some(c) = clicked {
             self.tab_mut().sort_by(c);
+            self.remember_folder_view();
             ui.request_repaint();
         }
     }
@@ -5025,4 +5060,7 @@ mod tests {
     // B10-D: sidebar parity, eject, row tooltips, icon overlays
     #[path = "../../view_b10d_tests.rs"]
     mod b10d;
+    // B11-G: per-folder view memory, tab context menu, column reorder
+    #[path = "../../view_b11g_tests.rs"]
+    mod b11g;
 }

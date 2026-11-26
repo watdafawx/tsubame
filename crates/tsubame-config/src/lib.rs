@@ -225,6 +225,10 @@ pub struct General {
     /// Show Recycle Bin in the sidebar.
     #[serde(default = "yes")]
     pub show_sidebar_recycle: bool,
+    /// Remember view mode, icon size and sort for each folder (like Explorer). The views live in
+    /// `folder-views.tsv` next to this file. Off: one view for every folder.
+    #[serde(default = "yes")]
+    pub remember_folder_views: bool,
 }
 
 impl Default for General {
@@ -240,6 +244,7 @@ impl Default for General {
             show_sidebar_onedrive: true,
             show_sidebar_wsl: true,
             show_sidebar_recycle: true,
+            remember_folder_views: true,
         }
     }
 }
@@ -359,6 +364,16 @@ impl Default for ViewConfig {
     fn default() -> Self {
         ViewConfig { grid_size: DEFAULT_GRID_SIZE, type_ahead_filters: false, show_extensions: true }
     }
+}
+
+/// `[columns]`: the Details view's column order (drag a header cell to reorder).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnsConfig {
+    /// Column ids (`core.modified`, `core.size`, ...) in the order they show. Name always comes
+    /// first and is not listed. Unknown ids are ignored, columns not listed follow in the default
+    /// order. Empty: the default order. The header menu's "Reset columns" clears it.
+    pub order: Vec<String>,
 }
 
 /// `[tags]`: P4.F6 tags and colours (`tsubame.ext.tags`). The tags
@@ -676,6 +691,7 @@ pub struct Config {
     pub appearance: Appearance,
     pub panes: Panes,
     pub view: ViewConfig,
+    pub columns: ColumnsConfig,
     pub preview: PreviewConfig,
     pub tags: TagsConfig,
     pub tree: TreeConfig,
@@ -698,6 +714,7 @@ impl Default for Config {
             appearance: Appearance::default(),
             panes: Panes::default(),
             view: ViewConfig::default(),
+            columns: ColumnsConfig::default(),
             preview: PreviewConfig::default(),
             tags: TagsConfig::default(),
             tree: TreeConfig::default(),
@@ -2012,6 +2029,30 @@ hidden = true
         let loaded = ConfigFile::load(&p);
         assert_eq!(loaded.status, LoadStatus::Loaded);
         assert_eq!(loaded.value.config.general, cfg.general);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn b11g_folder_memory_toggle_and_column_order_default_and_round_trip() {
+        let def = Config::default();
+        assert!(def.general.remember_folder_views, "remember per-folder views by default");
+        assert!(def.columns.order.is_empty(), "no custom column order by default");
+        let d = temp_dir("b11g-cols");
+        let p = d.join("config.toml");
+        let mut cfg = Config::default();
+        cfg.general.remember_folder_views = false;
+        cfg.columns.order = vec!["core.size".into(), "core.git".into(), "core.modified".into()];
+        ConfigFile::new(cfg.clone()).save(&p).unwrap();
+        let loaded = ConfigFile::load(&p);
+        assert_eq!(loaded.status, LoadStatus::Loaded);
+        assert!(!loaded.value.config.general.remember_folder_views);
+        assert_eq!(loaded.value.config.columns, cfg.columns);
+        // an old file without the keys keeps the defaults
+        fs::write(&p, "[general]
+show_hidden = true
+").unwrap();
+        let old = ConfigFile::load(&p).value.config;
+        assert!(old.general.remember_folder_views && old.columns.order.is_empty());
         let _ = fs::remove_dir_all(&d);
     }
 }

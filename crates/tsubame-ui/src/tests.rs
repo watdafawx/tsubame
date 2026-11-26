@@ -1,6 +1,7 @@
 //! Kit tests on `TestCanvas`.
 
 use crate::testcanvas::Op;
+use crate::widgets::colheader::{drop_gap, reorder_of};
 use crate::*;
 
 const W: f32 = 800.0;
@@ -861,6 +862,133 @@ fn column_header_right_click_and_edge_double_click() {
     assert_eq!(r.auto_fit, Some(2));
     h.up(597.0, 12.0);
     run(&mut h);
+}
+
+#[test]
+fn column_header_drag_reorders_with_a_drop_line_and_never_sorts() {
+    let mut h = Harness::new();
+    let id = Id::new("hdr-drag");
+    let rect = Rect::new(0.0, 0.0, 600.0, 24.0);
+    let cols = [
+        HeaderCol { label: "Name", right: false },
+        HeaderCol { label: "Date", right: false },
+        HeaderCol { label: "Type", right: false },
+        HeaderCol { label: "Size", right: true },
+    ];
+    let spans = [(0.0, 300.0), (300.0, 100.0), (400.0, 100.0), (500.0, 100.0)];
+    let mut drag = HeaderDrag::new();
+    let mut resp = HeaderResponse::default();
+    let mut run = |h: &mut Harness, drag: &mut HeaderDrag| {
+        h.frame(|ui, c| {
+            resp = column_header_ex(ui, c, id, rect, &cols, &spans, None, drag);
+        });
+        resp
+    };
+    let accent = h.ui.theme.accent;
+    let line = |h: &Harness| h.c.ops.iter().filter_map(|o| if let Op::Fill(r, c, _) = o { (*c == accent && r.w == 2.0).then_some(*r) } else { None }).collect::<Vec<_>>();
+    run(&mut h, &mut drag);
+
+    // press Date (cell 1) and move a little: still a click, no line
+    h.move_to(350.0, 12.0);
+    run(&mut h, &mut drag);
+    h.down(350.0, 12.0);
+    run(&mut h, &mut drag);
+    h.move_to(353.0, 12.0);
+    run(&mut h, &mut drag);
+    assert!(!drag.is_dragging());
+    h.up(353.0, 12.0);
+    let r = run(&mut h, &mut drag);
+    assert_eq!(r.sort, Some(1), "a press without a drag sorts");
+    assert_eq!(r.reorder, None);
+
+    // drag Date far right: the line shows at the end, the drop reorders and does not sort
+    h.move_to(350.0, 12.0);
+    run(&mut h, &mut drag);
+    h.down(350.0, 12.0);
+    run(&mut h, &mut drag);
+    h.move_to(560.0, 12.0);
+    let r = run(&mut h, &mut drag);
+    assert!(drag.is_dragging());
+    assert_eq!(r.reorder, None, "nothing moves until the drop");
+    let l = line(&h);
+    assert_eq!(l.len(), 1, "one drop line");
+    assert_eq!(l[0].x, 600.0 - 1.0, "at the right edge of the last column");
+    h.up(560.0, 12.0);
+    let r = run(&mut h, &mut drag);
+    assert_eq!(r.reorder, Some((1, 4)));
+    assert_eq!(r.sort, None, "the drop is not a sort click");
+    assert!(!drag.is_dragging());
+    run(&mut h, &mut drag);
+    assert!(line(&h).is_empty(), "the line is gone after the drop");
+
+    // dropping where it already is changes nothing and draws no line
+    h.move_to(350.0, 12.0);
+    run(&mut h, &mut drag);
+    h.down(350.0, 12.0);
+    run(&mut h, &mut drag);
+    h.move_to(330.0, 12.0);
+    run(&mut h, &mut drag);
+    assert!(drag.is_dragging());
+    assert!(line(&h).is_empty(), "no line over its own place");
+    h.up(330.0, 12.0);
+    let r = run(&mut h, &mut drag);
+    assert_eq!((r.reorder, r.sort), (None, None));
+
+    // Name (cell 0) never drags, and nothing drops before it
+    h.move_to(100.0, 12.0);
+    run(&mut h, &mut drag);
+    h.down(100.0, 12.0);
+    run(&mut h, &mut drag);
+    h.move_to(450.0, 12.0);
+    run(&mut h, &mut drag);
+    assert!(!drag.is_dragging());
+    h.up(450.0, 12.0);
+    assert_eq!(run(&mut h, &mut drag).reorder, None);
+    let spans4: Vec<(f32, f32)> = spans.to_vec();
+    assert_eq!(drop_gap(&spans4, 4, 5.0), 1, "left of everything lands after Name");
+    assert_eq!(drop_gap(&spans4, 4, 590.0), 4);
+    assert_eq!(reorder_of(0, 2), None);
+    assert_eq!(reorder_of(2, 1), Some((2, 1)));
+    assert_eq!(reorder_of(2, 2), None);
+    assert_eq!(reorder_of(2, 3), None);
+
+    // a header without a drag state (the plain widget) keeps sorting only
+    let mut plain = HeaderDrag::default();
+    h.move_to(350.0, 12.0);
+    run(&mut h, &mut plain);
+    h.down(350.0, 12.0);
+    run(&mut h, &mut plain);
+    h.move_to(560.0, 12.0);
+    run(&mut h, &mut plain);
+    assert!(!plain.is_dragging());
+    h.up(560.0, 12.0);
+    assert_eq!(run(&mut h, &mut plain).reorder, None);
+}
+
+#[test]
+fn tab_strip_right_click_reports_the_tab_and_the_point() {
+    let mut h = Harness::new();
+    let mut strip = TabStrip::default();
+    let labels = ["one", "two", "three"];
+    let id = Id::new("tabs-ctx");
+    let rect = Rect::new(0.0, 0.0, 400.0, 30.0);
+    let mut resp = TabResponse::default();
+    let mut run = |h: &mut Harness| {
+        h.frame(|ui, c| resp = tab_strip(ui, c, id, rect, &mut strip, &labels, 0));
+        resp
+    };
+    run(&mut h);
+    let w = 368.0 / 3.0;
+    let at = Pt::new(w * 1.5, 15.0);
+    h.move_to(at.x, at.y);
+    run(&mut h);
+    h.push(Event::MouseDown { pos: at, button: Button::Right, mods: Mods::NONE, double: false });
+    run(&mut h);
+    h.push(Event::MouseUp { pos: at, button: Button::Right, mods: Mods::NONE });
+    let r = run(&mut h);
+    assert_eq!(r.context, Some((1, at)));
+    assert_eq!(r.select, None, "a right click does not select");
+    assert_eq!(r.close, None);
 }
 
 #[test]

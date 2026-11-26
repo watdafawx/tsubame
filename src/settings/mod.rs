@@ -37,6 +37,8 @@ pub const C_UPDATES: u32 = 16;
 pub const C_MENU: u32 = 32;
 pub const C_OTHER: u32 = 64;
 pub const C_PREVIEW: u32 = 128;
+/// "Forget all folder views" on the General page
+pub const C_FOLDER_VIEWS: u32 = 256;
 
 const ID_NAV: Id = Id::new("settings-nav");
 const ID_FIND: Id = Id::new("settings-find");

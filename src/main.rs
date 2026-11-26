@@ -581,6 +581,10 @@ fn main() {
         if let Some(b) = bench_state.as_mut() {
             b.grid = view.mode.is_grid();
         }
+        // each folder remembers its own view (B11-G): the file is read on a worker
+        if !dev && arg_value(&args, "--view").is_none() && !timing_mode && !gate_mode {
+            view.attach_folder_views(loc.data_dir.join(view::FOLDER_VIEWS_FILE));
+        }
 
         let timing = timing_mode.then(|| timing::Run::new(if timing_dirs.is_empty() { vec![start.clone()] } else { timing_dirs.clone() }, arg_value(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(3)));
         let gate = gate_mode.then(|| {
@@ -966,6 +970,8 @@ fn save_flush_geom(hwnd: HWND, geom: tsubame_config::WindowState, force: bool) {
         a.saver.config.config.window = geom;
         a.saver.config_changed();
         a.saver.flush(Instant::now(), force);
+        // the folder views ride the same gate (written on a worker, here only on exit)
+        a.view.flush_folder_views(force);
         arm_save(hwnd, a);
     });
 }

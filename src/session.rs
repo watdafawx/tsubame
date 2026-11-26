@@ -174,7 +174,11 @@ pub fn sync_config(view: &View, cfg: &mut tsubame_config::Config) {
     cfg.file_age = view.prefs.file_age.clone();
     cfg.appearance.density = config_density(view.density);
     cfg.appearance.zebra = view.zebra;
-    cfg.appearance.view_mode = view.mode.to_config();
+    // with per-folder views the file keeps the global default, not the folder on screen
+    let (default_mode, default_grid) = view.default_view_for_config();
+    cfg.appearance.view_mode = default_mode;
+    cfg.view.grid_size = default_grid;
+    cfg.columns = view.prefs.columns.clone();
     cfg.panes.dual = view.dual();
     cfg.panes.split = view.orient;
     cfg.panes.ratio = view.ratio;

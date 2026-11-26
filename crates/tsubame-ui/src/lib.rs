@@ -23,7 +23,7 @@ pub use theme::{DARK, Density, LIGHT, Theme};
 pub use ui::{Cells, Clipboard, Id, Interaction, MemClipboard, Output, Press, Sense, Shortcut, Shortcuts, Ui};
 pub use widgets::button::{button, button_behaviour};
 pub use widgets::controls::{checkbox, keycap, keycaps_right, segmented, slider, split_chord, toggle};
-pub use widgets::colheader::{HeaderCol, HeaderResponse, column_header};
+pub use widgets::colheader::{HeaderCol, HeaderDrag, HeaderResponse, column_header, column_header_ex};
 pub use widgets::grid::{BAND_DEADZONE, BandCells, GridResponse, GridSource, GridState, grid, nav_target};
 pub use widgets::list::{BandMode, ListResponse, ListSource, ListState, RowState, SelectBy, list};
 pub use widgets::menu::{MenuResponse, MenuRow, MenuSource, MenuState, MenuStyle, RowIcon, RowKind};

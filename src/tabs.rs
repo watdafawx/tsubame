@@ -130,7 +130,6 @@ impl<T> ClosedStack<T> {
     pub fn len(&self) -> usize {
         self.items.len()
     }
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

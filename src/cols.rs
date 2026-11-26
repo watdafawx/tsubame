@@ -48,6 +48,46 @@ impl Col {
     }
 }
 
+impl Col {
+    /// The id the config's `[columns] order` uses (`core.size`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Col::Name => "core.name",
+            Col::Modified => "core.modified",
+            Col::Type => "core.type",
+            Col::Size => "core.size",
+            Col::Git => "core.git",
+            Col::Tags => "core.tags",
+        }
+    }
+    /// The column with config id `id` (`None` for an unknown one).
+    pub fn from_id(id: &str) -> Option<Col> {
+        [Col::Name, Col::Modified, Col::Type, Col::Size, Col::Git, Col::Tags].into_iter().find(|c| c.id() == id.trim())
+    }
+}
+
+/// The ids to save for `order` (Name is always first and is not listed).
+pub fn order_ids(order: &[Col]) -> Vec<String> {
+    order.iter().filter(|&&c| c != Col::Name).map(|c| c.id().to_string()).collect()
+}
+
+/// `order` with column `from` moved before column `before` (`None`: to the end). Name stays
+/// first: nothing goes in front of it and it does not move. A column not in `order` changes
+/// nothing.
+pub fn move_column(order: &[Col], from: Col, before: Option<Col>) -> Vec<Col> {
+    if from == Col::Name || !order.contains(&from) || before == Some(from) {
+        return order.to_vec();
+    }
+    let mut out: Vec<Col> = order.iter().copied().filter(|&c| c != from).collect();
+    let at = match before {
+        Some(b) if b != Col::Name => out.iter().position(|&c| c == b).unwrap_or(out.len()),
+        Some(_) => 1.min(out.len()),
+        None => out.len(),
+    };
+    out.insert(at, from);
+    out
+}
+
 /// A built-in column and the extension that registers it.
 pub struct Builtin {
     pub col: Col,
@@ -118,6 +158,38 @@ impl ColSet {
     /// The set of the current registry.
     pub fn current() -> ColSet {
         crate::ext::read(ColSet::from_registry)
+    }
+
+    /// Puts the columns in the user's order (`[columns] order`): Name first, then the listed
+    /// ones that are showing, then the rest in the registry's order. Unknown ids and columns that
+    /// are switched off are skipped; an empty list changes nothing.
+    pub fn reorder_by(&mut self, ids: &[String]) {
+        if ids.is_empty() || self.n < 2 {
+            return;
+        }
+        let mut out = [Col::Name; NUM_COLS];
+        let mut n = 1;
+        for id in ids {
+            if let Some(c) = Col::from_id(id)
+                && c != Col::Name
+                && self.order[..self.n].contains(&c)
+                && !out[..n].contains(&c)
+            {
+                out[n] = c;
+                n += 1;
+            }
+        }
+        for i in 0..self.n {
+            let c = self.order[i];
+            if c != Col::Name && !out[..n].contains(&c) {
+                out[n] = c;
+                n += 1;
+            }
+        }
+        // the registry lists Name first, so nothing is lost
+        if n == self.n {
+            self.order = out;
+        }
     }
 
     /// The enabled columns, in order.
@@ -347,5 +419,56 @@ mod tests {
         assert!(!s3.order().contains(&Col::Git));
         assert_eq!(Columns::default().spans(1000.0, s3.order())[Col::Git.slot()].1, 0.0);
         assert!(r.set_enabled(crate::ext::CORE, false).is_err(), "Name stays");
+    }
+
+    #[test]
+    fn column_ids_round_trip_and_unknown_ids_are_ignored() {
+        for c in [Col::Name, Col::Modified, Col::Type, Col::Size, Col::Git, Col::Tags] {
+            assert_eq!(Col::from_id(c.id()), Some(c));
+            assert_eq!(c.id(), &*BUILTIN[c.slot()].spec.id, "the id is the registry's column id");
+        }
+        assert_eq!(Col::from_id(" core.size "), Some(Col::Size));
+        assert_eq!(Col::from_id("plugin.whatever"), None);
+        assert_eq!(order_ids(&[Col::Name, Col::Size, Col::Git]), vec!["core.size", "core.git"]);
+    }
+
+    #[test]
+    fn moving_a_column_keeps_name_first_and_the_rest_in_order() {
+        let o = [Col::Name, Col::Modified, Col::Type, Col::Size, Col::Git];
+        assert_eq!(move_column(&o, Col::Size, Some(Col::Modified)), vec![Col::Name, Col::Size, Col::Modified, Col::Type, Col::Git]);
+        assert_eq!(move_column(&o, Col::Modified, None), vec![Col::Name, Col::Type, Col::Size, Col::Git, Col::Modified]);
+        assert_eq!(move_column(&o, Col::Git, Some(Col::Type)), vec![Col::Name, Col::Modified, Col::Git, Col::Type, Col::Size]);
+        // in front of Name means second
+        assert_eq!(move_column(&o, Col::Size, Some(Col::Name)), vec![Col::Name, Col::Size, Col::Modified, Col::Type, Col::Git]);
+        // Name does not move; a column that is not there changes nothing; onto itself changes nothing
+        assert_eq!(move_column(&o, Col::Name, None), o.to_vec());
+        assert_eq!(move_column(&o, Col::Tags, None), o.to_vec());
+        assert_eq!(move_column(&o, Col::Type, Some(Col::Type)), o.to_vec());
+    }
+
+    #[test]
+    fn the_user_order_applies_to_the_columns_that_show() {
+        let r = crate::ext::builtin();
+        let mut s = ColSet::from_registry(&r);
+        assert_eq!(s.order(), ALL);
+        s.reorder_by(&[]);
+        assert_eq!(s.order(), ALL, "no custom order: the registry's");
+        let ids: Vec<String> = ["core.size", "core.git", "core.modified"].iter().map(|s| s.to_string()).collect();
+        s.reorder_by(&ids);
+        assert_eq!(s.order(), [Col::Name, Col::Size, Col::Git, Col::Modified, Col::Type], "listed first, the rest after");
+        // unknown ids, Name, repeats and columns that are off (Tags) are skipped
+        let mut s = ColSet::from_registry(&r);
+        let junk: Vec<String> = ["nope", "core.name", "core.tags", "core.type", "core.type"].iter().map(|s| s.to_string()).collect();
+        s.reorder_by(&junk);
+        assert_eq!(s.order(), [Col::Name, Col::Type, Col::Modified, Col::Size, Col::Git]);
+        // a switched-off column keeps no place; the others keep theirs
+        let mut r2 = crate::ext::builtin();
+        r2.set_enabled("tsubame.column.size", false).unwrap();
+        let mut s = ColSet::from_registry(&r2);
+        s.reorder_by(&ids);
+        assert_eq!(s.order(), [Col::Name, Col::Git, Col::Modified, Col::Type]);
+        // the spans follow the order
+        let sp = Columns::default().spans(1000.0, s.order());
+        assert!(sp[Col::Git.slot()].0 < sp[Col::Modified.slot()].0 && sp[Col::Modified.slot()].0 < sp[Col::Type.slot()].0);
     }
 }
