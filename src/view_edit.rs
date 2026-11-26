@@ -638,9 +638,10 @@ impl View {
         self.want_drives = true;
     }
 
-    /// File operations are running: main keeps a timer for their events.
+    /// File operations are running: main keeps a timer for their events (not
+    /// while the conflict dialog waits or the running job is paused).
     pub fn ops_busy(&self) -> bool {
-        self.ops.busy()
+        self.ops.wants_timer()
     }
 
     pub(super) fn undo_op(&mut self) {

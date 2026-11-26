@@ -103,6 +103,7 @@
   --c-on-danger: #ffffff;
   --c-highlight: #5a4a12;
   --c-folder: #e8b34a;
+  --c-ok: #5fd08a;
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -130,4 +131,5 @@
   --c-on-danger: #ffffff;
   --c-highlight: #ffe28a;
   --c-folder: #d99a1e;
+  --c-ok: #1e7a3c;
 }

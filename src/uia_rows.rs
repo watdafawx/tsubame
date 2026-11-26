@@ -36,6 +36,10 @@ pub const PART_PANE: u32 = 2;
 pub const PART_CRUMBS: u32 = 3;
 /// The path edit's autocomplete dropdown (each row invokes: opens that folder).
 pub const PART_SUGGEST: u32 = 4;
+/// The Operations panel or its status-bar pill (slot 0 only).
+pub const PART_OPS: u32 = 8;
+/// The conflict dialog's buttons and checkbox (slot 0 only).
+pub const PART_CONFLICT: u32 = 9;
 /// Miller column `i` is `PART_MILLER + i` (at most 13 live columns).
 pub const PART_MILLER: u32 = 16;
 
@@ -478,6 +482,28 @@ pub fn suggestions(slot: usize, area: Rect, rows: &[SuggestUia]) {
         size,
         items,
     });
+}
+
+// ---- buttons (Operations panel, conflict dialog) ----------------------------
+
+/// Publishes a row of own-drawn buttons as one surface of slot 0: every item is
+/// Invokable and named (`docs/uia-views.md`). `items` are (key, name, rect).
+pub fn buttons(part: u32, name: &str, desc: &str, area: Rect, items: Vec<(u64, String, Rect)>) {
+    let size = items.len() as u32;
+    let items = items
+        .into_iter()
+        .enumerate()
+        .map(|(pos, (key, name, rect))| VItem {
+            key,
+            name,
+            kind: "Button".into(),
+            rect: px(rect),
+            pos: pos as u32 + 1,
+            invokable: true,
+            ..Default::default()
+        })
+        .collect();
+    push(VSurface { key: skey(0, part), tree: false, name: name.into(), desc: desc.into(), rect: px(area), focused: false, multi: false, size, items });
 }
 
 #[cfg(test)]

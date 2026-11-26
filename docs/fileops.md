@@ -23,7 +23,9 @@ queue.totals();                         // queue-wide Totals, zero when idle
 
 - Submission performs no disk or COM call. One STA worker thread (`OleInitialize`) runs jobs FIFO and pumps messages while idle (`MsgWaitForMultipleObjectsEx` on a wake event) and while it waits for a conflict answer.
 - Poll `events` with `try_recv`. Events: `Started`, `Progress`, `Conflict`, `Error` (per item; later items continue), `Finished`.
-- A `Conflict` owns a one-use `ConflictReply`: `answer(choice, apply_to_all)`. Choices: `Replace`, `Skip`, `KeepBoth`. Cancelling interrupts the wait.
+- A `Conflict` owns a one-use `ConflictReply`: `answer(choice, apply_to_all)`. Choices: `Replace`, `Skip`, `KeepBoth`, `Cancel` (stops the whole job). It also carries `source` and both sides' `FileMeta` (size, modified, folder) for the dialog. Cancelling interrupts the wait.
+- `Ticket.cancellation` is the job's cancel flag and pause gate. `pause()` holds the worker before the next operation and, inside a copy, between chunks; it sleeps on a condition variable (no polling, no events, so the throttle never sees paused time). `resume()` and `cancel()` wake it. A job cancelled while it waits behind another sends only `Finished { cancelled: true }`.
+- `undo_group_of(id)` reverts submission `id` only if it is still the newest undo group when the worker reaches it (the panel's Undo link); otherwise nothing runs.
 - Dropping the queue closes submission; queued work drains on the detached worker.
 - `OpBackend::execute(op, cancel, progress: FnMut(Step))` returns the inverse operation only after success. `Step { bytes, files }`.
 
@@ -60,10 +62,21 @@ On a `Replace` answer the queue runs `Sequence[Delete{target, recycle}, op]`. If
 
 ## Progress and totals
 
-Every `Progress` event carries `totals: Totals { files_done, files_total, bytes_done, bytes_total }` for the whole queue (all submitted batches, not just the current one), and `bytes_done` for the current item. `Finished` carries the last snapshot.
+Every `Progress` event carries `totals: Totals { files_done, files_total, bytes_done, bytes_total }` for the whole queue (all submitted batches, not just the current one), `job` (the same numbers for this job alone), `index` and `item_bytes` (the current operation and its scanned size) and `bytes_done` for the current item. `Finished` carries the last queue snapshot and the job's own totals.
 
 - On submit a scanner thread (never the UI thread) sizes each operation: copies and cross-volume moves recurse into folders (files and bytes); everything else counts as one file and no bytes. If the worker reaches an item before the scanner, the worker adds what it actually did and the late scan result is ignored. Skipped or cancelled items leave the totals. Counters reset when the queue drains.
 - Progress is throttled queue-wide to one event per 34 ms (at most 30 in any second). Lifecycle, conflict and error events are not throttled.
+
+## Operations panel and conflict dialog (B11-E2)
+
+The app shows the queue in an own-drawn panel (`src/ops_panel.rs`, mock `mocks/progress-panel.html`, decisions in `docs/progress-panel-mock.md`) and asks conflicts in an own-drawn dialog (`src/conflict_dialog.rs`). `src/ops.rs` feeds both from the events above; archive extraction gets a card through a thin adapter (`archive_ui::ExtractNote`).
+
+- One card per job, FIFO: waiting (Cancel only), running (Pause, file list, Cancel), paused, asking ("Waiting for your answer"), done (Undo link for 5 s, then Ctrl+Z as before), cancelled ("Cancelled after N of M"), failed (never auto-dismissed; Show details, Retry the failed items, Skip). Finished cards sit above the active ones.
+- The panel opens 400 ms after a job starts, so quick jobs never flash; a failure always shows. Folding it (chevron or Ctrl+Shift+O, `view.operations`) leaves a pill in the status bar ("Copying, 43%", "2 operations, 43%", "Done", "1 failed").
+- Speed is UI side: an EMA (weight 0.3) of the job's done counter, at most 4 samples a second, and a 40-sample ring for the 10 s sparkline. Paused time and the time a question waits never count.
+- Dialog: Replace (R), Keep both (K), Skip (S), Cancel operation (Esc, stops the job), Enter = focused or suggested button, A toggles "Do this for all remaining conflicts", Tab moves the focus. Suggested: Replace when the incoming file is newer, else Skip (also when both look identical: same size and second). Modal over the window, no scrim. For an extraction, Cancel sets its cancel flag and skips.
+- Cost: no timer of its own. Main's 60 ms `OPS_TIMER` exists only while a job runs and is not paused and no dialog waits. Progress repaints at most 10 times a second and only when a card's numbers changed (the frame is still painted whole: the renderer has no partial redraw). One one-shot `DISMISS_TIMER` fires for the earliest finished card; the countdown line is drawn from the clock at paint time and does not animate on its own. With the panel closed and nothing running there are no wake-ups.
+- UI Automation: the panel (or pill) is one surface (`PART_OPS`), the dialog another (`PART_CONFLICT`); every button is an Invokable item with a name (`docs/uia-views.md`).
 
 ## Journal text format
 

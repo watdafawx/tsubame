@@ -247,6 +247,14 @@ pub enum ExtractEvent {
     Done { job_id: u64, archive_name: String, dest: PathBuf, result: Result<ExtractReport, String> },
 }
 
+/// What the Operations panel hears about extractions (`Ops::on_extract`).
+pub enum ExtractNote {
+    Started { id: u64, archive: String, dest: String, cancel: Arc<AtomicBool> },
+    Progress { id: u64, done: u64, total: u64 },
+    /// `files` extracted; `error` the failure, if any
+    Done { id: u64, cancelled: bool, error: Option<String>, files: usize },
+}
+
 /// Finished extraction notification for `View` so any tab showing `dest` refreshes.
 pub struct ExtractFinished {
     pub dest: String,
@@ -260,6 +268,8 @@ pub struct ArchiveOps {
     next_id: AtomicU64,
     active: Option<ActiveExtract>,
     pub status: Option<String>,
+    /// for the Operations panel: drained by `View::pump` into `Ops::on_extract`
+    pub notes: Vec<ExtractNote>,
 }
 
 struct ActiveExtract {
@@ -298,6 +308,7 @@ impl ArchiveOps {
     fn spawn_extract(&mut self, archive_path: PathBuf, selection: Option<Vec<String>>, dest: PathBuf, wake: Wake) {
         if let Some(prev) = self.active.take() {
             prev.cancel.store(true, Ordering::Release);
+            self.notes.push(ExtractNote::Done { id: prev.job_id, cancelled: true, error: None, files: 0 });
         }
         let job_id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let archive_name = archive_path
@@ -310,6 +321,12 @@ impl ArchiveOps {
         let name_w = archive_name.clone();
 
         self.status = Some(format!("Extracting {archive_name}\u{2026}"));
+        self.notes.push(ExtractNote::Started {
+            id: job_id,
+            archive: archive_path.to_string_lossy().into_owned(),
+            dest: dest.to_string_lossy().into_owned(),
+            cancel: Arc::clone(&cancel),
+        });
         self.active = Some(ActiveExtract { job_id, archive_name, cancel, rx });
 
         let _ = std::thread::Builder::new()
@@ -363,6 +380,7 @@ impl ArchiveOps {
         loop {
             match active.rx.try_recv() {
                 Ok(ExtractEvent::Progress { job_id, done, total }) if job_id == expected_id => {
+                    self.notes.push(ExtractNote::Progress { id: job_id, done, total });
                     let msg = if total > 0 {
                         let pct = ((done.min(total) as f64 / total as f64) * 100.0).round() as u32;
                         format!("Extracting {name}\u{2026} {pct}%")
@@ -375,6 +393,11 @@ impl ArchiveOps {
                 Ok(ExtractEvent::Done { job_id, archive_name, dest, result }) if job_id == expected_id => {
                     drop_active = true;
                     changed = true;
+                    let cancelled = active.cancel.load(Ordering::Acquire);
+                    self.notes.push(match &result {
+                        Ok(rep) => ExtractNote::Done { id: job_id, cancelled, error: None, files: rep.files },
+                        Err(e) => ExtractNote::Done { id: job_id, cancelled, error: Some(e.clone()), files: 0 },
+                    });
                     let msg = match result {
                         Ok(rep) => {
                             let mut sz = String::new();
@@ -398,6 +421,7 @@ impl ArchiveOps {
                 Ok(_) => {}
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    self.notes.push(ExtractNote::Done { id: expected_id, cancelled: true, error: None, files: 0 });
                     drop_active = true;
                     self.status = None;
                     changed = true;

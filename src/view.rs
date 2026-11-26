@@ -53,6 +53,8 @@ mod tabmenu;
 pub use fmem::FILE_NAME as FOLDER_VIEWS_FILE;
 #[path = "view_suggest.rs"]
 mod suggestv;
+#[path = "view_ops.rs"]
+mod opsv;
 pub use navv::spawn_new_window;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
@@ -939,6 +941,9 @@ impl View {
         }
         let (arch_changed, arch_done) = self.archive_ops.pump();
         changed |= arch_changed;
+        for n in std::mem::take(&mut self.archive_ops.notes) {
+            self.ops.on_extract(n);
+        }
         if let Some(fin) = arch_done {
             self.ops.message = Some(fin.message);
             self.ops.changed(&fin.dest, Vec::new());
@@ -1323,6 +1328,7 @@ impl View {
                 }
             }
             CMD_UNDO => self.undo_op(),
+            CMD_OPS_PANEL => self.toggle_ops_panel(),
             CMD_REDO => self.redo_op(),
             CMD_PIN_FOLDER => {
                 let p = self.selected_folder().unwrap_or_else(|| self.folder_path());
@@ -2013,6 +2019,7 @@ impl View {
         self.paint_col_menu(ui, g);
         self.paint_tab_menu(ui, g);
         self.paint_nav_menu(ui, g, (w, h));
+        self.paint_ops_panel(ui, g, (w, h));
         // the context menu is on top of everything
         if let Some(c) = self.ctx.as_mut() {
             c.paint(ui, g, Rect::new(0.0, 0.0, w, h));
@@ -2020,6 +2027,7 @@ impl View {
             // dropped by the app (picked, replaced, stress run): its popups go too
             ui.close_popup(crate::ctxui::ID_CTX.with(0));
         }
+        self.paint_conflict(ui, g, (w, h));
         let target = self.side_target.take();
         self.finish_drag(ui, g, &t, target.as_ref());
         self.sole_hist = [self.sole_hist[1], self.sole_row()];
@@ -2035,7 +2043,7 @@ impl View {
             again = true;
         }
         // typing in the list starts the filter
-        let typed: Vec<char> = if self.tab().settings || self.palette.is_some() || self.search.is_some() || self.tags.picker_open() || self.preview.quick_look_open() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
+        let typed: Vec<char> = if self.tab().settings || self.ops.conflict.is_some() || self.palette.is_some() || self.search.is_some() || self.tags.picker_open() || self.preview.quick_look_open() { Vec::new() } else { ui.leftover().iter().filter_map(|e| if let Event::Char(c) = e { Some(*c) } else { None }).collect() };
         if self.tree_keys(ui) || self.miller_keys(ui) {
             again = true;
         }
@@ -2777,6 +2785,8 @@ impl View {
         let tab = &self.tabs.items[self.tabs.active];
         let loading = matches!(tab.load, Load::Loading).then_some(tab.delivered);
         let side = panes::side_name(self.orient, self.live);
+        let pill = if hints || self.other.is_none() { self.ops_pill_w(g, t) } else { 0.0 };
+        let tab = &self.tabs.items[self.tabs.active];
         let mut s = std::mem::take(&mut self.text);
         let info = StatusInfo {
             loading,
@@ -2789,10 +2799,13 @@ impl View {
             other_side: hints.then_some(side),
             batch: self.batch.is_some() && self.batch_slot == self.live,
             message: if hints || self.other.is_none() { self.status_message() } else { None },
-            reserve_right: if age_key { crate::age::KEY_W + 8.0 } else { 0.0 },
+            reserve_right: if age_key { crate::age::KEY_W + 8.0 } else { 0.0 } + if pill > 0.0 { pill + 8.0 } else { 0.0 },
         };
         statusbar::paint(g, t, r, &info, &mut s);
         self.text = s;
+        if pill > 0.0 {
+            self.paint_ops_pill(ui, g, t, r, r.r() - 12.0 - if age_key { crate::age::KEY_W + 8.0 } else { 0.0 });
+        }
         self.paint_tags_status(g, r, t);
         if age_key {
             let tab = &self.tabs.items[self.tabs.active];

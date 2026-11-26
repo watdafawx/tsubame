@@ -131,6 +131,10 @@ impl Journal {
             .filter_map(|(i, e)| e.inverse.clone().map(|inv| (i, inv)))
             .collect()
     }
+    /// The group `undo_group` would revert now (None: nothing to undo).
+    pub fn newest_undo_group(&self) -> Option<u64> {
+        self.undo.iter().rposition(Entry::is_undoable).map(|i| self.undo[i].group)
+    }
     /// The group on top of the redo stack: (index, forward) of each entry, oldest first
     /// (the order they first ran in).
     pub fn redo_group(&self) -> Vec<(usize, Operation)> {

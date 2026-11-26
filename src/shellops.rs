@@ -254,10 +254,13 @@ fn names_of(paths: &[PathBuf]) -> Vec<String> {
 
 // ---- file-op events ------------------------------------------------------------
 
-/// main.rs's OPS_TIMER (it exists only while `ops.busy()`): drains the queue's
-/// events. Conflicts ask with a dialog, outside the app borrow.
+/// main.rs's OPS_TIMER (it exists only while `ops.wants_timer()`): drains the
+/// queue's events into `Ops` and its panel. A conflict opens the own-drawn
+/// dialog (`conflict_dialog`) and stops the drain: the worker waits for the
+/// answer, so nothing else comes meanwhile. Repaints follow `Ops::want_paint`
+/// (layout at once, progress at most 10 times a second).
 pub fn on_ops_timer(hwnd: HWND) {
-    if with(|a| a.view.ops.asking).unwrap_or(true) {
+    if with(|a| a.view.ops.asking || a.view.ops.conflict.is_some()).unwrap_or(true) {
         return;
     }
     let mut any = false;
@@ -265,70 +268,49 @@ pub fn on_ops_timer(hwnd: HWND) {
         let Some(ev) = with(|a| a.view.ops.next_event()).flatten() else { break };
         any = true;
         match ev {
-            fileops::Event::Conflict { id, target, reply } => {
+            fileops::Event::Conflict { id, source, target, existing, incoming, reply } => {
                 if with(|a| a.view.ops.keep_both(id)).unwrap_or(false) {
                     reply.answer(Choice::KeepBoth, true);
                     continue;
                 }
-                with(|a| a.view.ops.asking = true);
-                let c = ask_conflict(hwnd, &target);
-                with(|a| a.view.ops.asking = false);
-                reply.answer(c, true);
+                with(|a| a.view.ops.ask(id, source, target, existing, incoming, reply));
+                break;
             }
             other => {
                 with(|a| a.view.ops.on_event(other));
             }
         }
     }
+    let now = std::time::Instant::now();
+    let ticked = with(|a| a.view.ops.tick(now)).unwrap_or(false);
     if any {
         with(|a| a.view.after_ops());
+    }
+    if ticked || with(|a| a.view.ops.want_paint(now)).unwrap_or(false) {
         invalidate(hwnd);
     }
-}
-
-/// Yes = replace, No = keep both, Cancel = skip; for the rest of the job too.
-fn ask_conflict(hwnd: HWND, target: &Path) -> Choice {
-    ask_conflict_box(hwnd, target, "Yes: replace it (the old one goes to the Recycle Bin)")
 }
 
 /// The window the extract thread's question belongs to (set by `attach`).
 static ARCHIVE_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-/// Extracting from an archive onto an existing file: the same question as a
-/// copy, asked from the extract thread (the UI thread keeps painting). The answer
-/// always applies to the rest of the extraction.
+type ExtractAsk = (PathBuf, fileops::FileMeta, std::sync::mpsc::Sender<tsubame_core::archive::ConflictAnswer>);
+/// Questions from the extract thread, taken by `on_app` into the dialog.
+static EXTRACT_ASKS: Mutex<Vec<ExtractAsk>> = Mutex::new(Vec::new());
+
+/// Extracting from an archive onto an existing file: the same dialog as a copy.
+/// Runs on the extract thread: it posts the question to the UI thread and waits.
 fn ask_extract_conflict(target: &Path) -> tsubame_core::archive::ConflictAnswer {
     use tsubame_core::archive::ConflictChoice;
-    let h = HWND(ARCHIVE_HWND.load(std::sync::atomic::Ordering::Relaxed) as *mut _);
-    let c = ask_conflict_box(h, target, "Yes: replace it (overwrites the old one)");
-    (
-        match c {
-            Choice::Replace => ConflictChoice::Replace,
-            Choice::KeepBoth => ConflictChoice::KeepBoth,
-            Choice::Skip => ConflictChoice::Skip,
-        },
-        true,
-    )
-}
-
-fn ask_conflict_box(hwnd: HWND, target: &Path, yes_line: &str) -> Choice {
-    let text = format!(
-        "\"{}\" already exists in
-{}
-
-{yes_line}
-No: keep both (the new one gets a number)
-Cancel: skip it
-
-The answer applies to the other conflicts of this operation too.",
-        short(&target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), 80),
-        short(&target.parent().map(|p| p.to_string_lossy()).unwrap_or_default(), 120)
-    );
-    match unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), &HSTRING::from("Tsubame: item already exists"), MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) } {
-        IDYES => Choice::Replace,
-        IDNO => Choice::KeepBoth,
-        _ => Choice::Skip,
+    let (tx, rx) = std::sync::mpsc::channel();
+    let meta = fileops::FileMeta::of(target);
+    if let Ok(mut g) = EXTRACT_ASKS.lock() {
+        g.push((target.to_path_buf(), meta, tx));
     }
+    let h = ARCHIVE_HWND.load(std::sync::atomic::Ordering::Relaxed);
+    let _ = unsafe { PostMessageW(Some(HWND(h as *mut _)), WM_APP_SHELLOPS, WPARAM(0), LPARAM(0)) };
+    // the window went away: skip the rest
+    rx.recv().unwrap_or((ConflictChoice::Skip, true))
 }
 
 // ---- delete ------------------------------------------------------------------
@@ -361,6 +343,15 @@ fn start_delete(a: &mut App, paths: Vec<String>, permanent: bool) {
 
 /// WM_APP_SHELLOPS: confirm permanent deletes, then queue them.
 pub fn on_app(hwnd: HWND) {
+    let asks: Vec<ExtractAsk> = EXTRACT_ASKS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
+    if !asks.is_empty() {
+        with(|a| {
+            for (target, meta, tx) in asks {
+                a.view.ops.ask_extract(target, meta, tx);
+            }
+        });
+        invalidate(hwnd);
+    }
     let errs: Vec<String> = CUSTOM_ERRS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
     if let Some(m) = errs.into_iter().last() {
         with(|a| status(a, m));

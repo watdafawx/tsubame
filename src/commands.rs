@@ -90,6 +90,8 @@ pub const CMD_REVEAL_SIDEBAR: u32 = 123;
 // B10-C: file operation basics
 pub const CMD_CREATE_SHORTCUT: u32 = 140;
 pub const CMD_PASTE_SHORTCUT: u32 = 141;
+/// B11-E2 (ids 260-279)
+pub const CMD_OPS_PANEL: u32 = 260;
 pub const CMD_RENAME_PREV: u32 = 142;
 // B11-G: per-folder views, tab menu, column order (ids 220-239)
 pub const CMD_RESET_FOLDER_VIEWS: u32 = 220;
@@ -176,6 +178,7 @@ pub static BUILTIN: &[CommandSpec] = &[
     cmd!(CMD_REVEAL_SIDEBAR, "sidebar.reveal-current", "Reveal current folder in sidebar", ["Ctrl+Shift+E"], GF),
     cmd!(CMD_CREATE_SHORTCUT, "file.create-shortcut", "Create shortcut", [], F),
     cmd!(CMD_PASTE_SHORTCUT, "edit.paste-shortcut", "Paste shortcut", [], F),
+    cmd!(CMD_OPS_PANEL, "view.operations", "Show or hide the Operations panel", ["Ctrl+Shift+O"], G),
     // Tab is `pane.switch` (it commits and renames the next row); the view binds Shift+Tab to this while a rename is open
     cmd!(CMD_RENAME_PREV, "rename.previous", "Rename: commit and rename the previous item", [], F),
     cmd!(CMD_RESET_FOLDER_VIEWS, "view.reset-folder-views", "Forget all folder views", [], GF),
@@ -407,6 +410,7 @@ mod tests {
         (CMD_REVEAL_SIDEBAR, &[(Key::Char('E'), CS)], true),
         (CMD_CREATE_SHORTCUT, &[], false),
         (CMD_PASTE_SHORTCUT, &[], false),
+        (CMD_OPS_PANEL, &[(Key::Char('O'), CS)], true),
         (CMD_RENAME_PREV, &[], false),
         (CMD_RESET_FOLDER_VIEWS, &[], true),
         (CMD_APPLY_VIEW_ALL, &[], true),
@@ -441,7 +445,7 @@ mod tests {
     fn settings_tab_allowed_before(cmd: u32) -> bool {
         matches!(
             cmd,
-            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS | CMD_VIEW_EXTENSIONS | CMD_REOPEN_TAB | CMD_NEW_WINDOW | CMD_FULLSCREEN
+            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS | CMD_VIEW_EXTENSIONS | CMD_REOPEN_TAB | CMD_NEW_WINDOW | CMD_FULLSCREEN | CMD_OPS_PANEL
         ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
     }
 

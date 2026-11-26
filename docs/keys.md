@@ -86,6 +86,7 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Pin this folder to the sidebar | `sidebar.pin-folder` | `Ctrl+D` |
 | Show hidden files | `view.hidden` | `Ctrl+H` |
 | Reveal current folder in sidebar | `sidebar.reveal-current` | `Ctrl+Shift+E` |
+| Show or hide the Operations panel | `view.operations` | `Ctrl+Shift+O` |
 | Toggle preview pane | `preview.toggle_pane` | `Alt+P` |
 | Quick Look | `preview.quick_look` | `Space`, `F3` |
 | Tree view | `view.tree` | `Ctrl+Shift+4` |

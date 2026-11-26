@@ -53,6 +53,7 @@ mod clip;
 mod cols;
 mod custom_cmd;
 mod commands;
+mod conflict_dialog;
 mod ctxui;
 mod rowmenu;
 mod data;
@@ -72,6 +73,7 @@ mod nav_menu;
 mod newmenu;
 mod ole_glue;
 mod ops;
+mod ops_panel;
 mod overlay;
 mod packs;
 mod palette;
@@ -147,6 +149,9 @@ const PARK_TIMER: usize = 9;
 /// of the folder's context menus on a worker (`ctxui::prewarm`), so the first
 /// right click is as fast as the later ones. Never repeats.
 const CTX_WARM_TIMER: usize = 12;
+/// One-shot: the earliest finished card of the Operations panel goes
+/// (`Panel::next_dismiss`). Armed only while such a card waits.
+const DISMISS_TIMER: usize = 14;
 const CTX_WARM_MS: u32 = 400;
 const OPS_MS: u32 = 60;
 const CARET_MS: u32 = 530;
@@ -201,6 +206,8 @@ struct App {
     suggest_timer: Option<u64>,
     /// the GPU park timer is armed
     park_timer: bool,
+    /// the Operations panel's one-shot dismiss timer is armed for this moment
+    dismiss_timer: Option<Instant>,
     /// the blink timer exists
     caret_timer: bool,
     /// the blink stopped for lack of input (caret solid until the next key)
@@ -626,6 +633,7 @@ fn main() {
                 row_tip_timer: None,
                 suggest_timer: None,
                 park_timer: false,
+                dismiss_timer: None,
                 caret_timer: false,
                 caret_idle: false,
                 last_input: Instant::now(),
@@ -812,6 +820,22 @@ fn arm_ops(hwnd: HWND, a: &mut App) {
     }
 }
 
+/// One one-shot timer for the earliest finished-card dismiss; none otherwise.
+fn arm_dismiss(hwnd: HWND, a: &mut App) {
+    match a.view.ops.panel.next_dismiss() {
+        Some(at) if a.dismiss_timer != Some(at) => {
+            let ms = at.saturating_duration_since(Instant::now()).as_millis().clamp(1, 60_000) as u32 + 1;
+            unsafe { SetTimer(Some(hwnd), DISMISS_TIMER, ms, None) };
+            a.dismiss_timer = Some(at);
+        }
+        None if a.dismiss_timer.is_some() => {
+            let _ = unsafe { KillTimer(Some(hwnd), DISMISS_TIMER) };
+            a.dismiss_timer = None;
+        }
+        _ => {}
+    }
+}
+
 /// The caret rule: one blink timer exists only while a text field has
 /// focus; it stops after `CARET_IDLE` without input (caret stays solid);
 /// with no text field focused there is no timer at all.
@@ -908,6 +932,7 @@ fn after_paint(hwnd: HWND, a: &mut App) {
     a.shell.end_frame(&mut a.pool);
     arm_watch(hwnd, a);
     arm_ops(hwnd, a);
+    arm_dismiss(hwnd, a);
     arm_ctx(hwnd, a);
     arm_row_tip(hwnd, a);
     arm_suggest(hwnd, a);
@@ -1183,6 +1208,9 @@ unsafe fn on_bench_tick(hwnd: HWND) {
     let r = with(|a| {
         let b = a.bench.as_mut()?;
         let r = b.tick(a.view.tab_mut());
+        if std::env::var_os("TSUBAME_BENCH_OPS").is_some_and(|v| v != "0") {
+            a.view.ops.panel.bench_tick(Instant::now());
+        }
         if b.just_started {
             b.just_started = false;
             if a.hang_bench {
@@ -2070,6 +2098,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 // file-op events: progress, conflicts (a dialog), results
                 shellops::on_ops_timer(hwnd);
                 with(|a| arm_ops(hwnd, a));
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == DISMISS_TIMER => {
+                let _ = KillTimer(Some(hwnd), DISMISS_TIMER);
+                with(|a| {
+                    a.dismiss_timer = None;
+                    a.view.ops.tick(Instant::now());
+                });
+                invalidate(hwnd);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == PARK_TIMER => {
