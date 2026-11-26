@@ -3,6 +3,7 @@
 //! [`archive`] is the archive VFS (zip, tar, tar.gz, 7z): browse and extract
 //! without a scratch copy, with the zip-slip check and a bounded index cache.
 pub mod archive;
+pub mod grouping;
 
 use std::cmp::Ordering;
 pub type EntryId = u32;
