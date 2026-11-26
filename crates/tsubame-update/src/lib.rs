@@ -257,7 +257,13 @@ impl Updater {
 
     /// [`Updater::production`] following `channel`.
     pub fn production_channel(current_version: &str, channel: Channel) -> Result<Updater> {
-        Ok(Updater::new(Config::production(current_version, Layout::of_current_exe()?)?.with_channel(channel)))
+        let layout = Layout::of_current_exe()?;
+        // TEST ONLY (feature `test-server`, debug builds): a fake GitHub on loopback for the rig relaunch test.
+        #[cfg(feature = "test-server")]
+        if let Ok(base) = std::env::var("TSUBAME_UPDATE_TEST_BASE") {
+            return Ok(Updater::new(Config::for_test(current_version, layout, &base, DEFAULT_REPO)?.with_channel(channel)));
+        }
+        Ok(Updater::new(Config::production(current_version, layout)?.with_channel(channel)))
     }
 
     pub fn config(&self) -> &Config {
