@@ -2548,9 +2548,11 @@ impl View {
             && let Some(&col) = shown.get(i)
         {
             self.fit_edge(g, t, col);
+            ui.request_repaint(); // the header above was drawn with the old widths
         }
         if self.take_fit_all() {
             self.fit_columns(g, t, shown);
+            ui.request_repaint();
         }
         if !hide_type
             && !self.fit_held(ui)
