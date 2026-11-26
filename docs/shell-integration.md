@@ -96,7 +96,7 @@ Always NONE (no drop):
 
 `ole_glue::ops` turns the drop into queue operations: COPY → `Copy`, MOVE →
 `Move` (items already in the target are skipped), LINK → no queue op; a shell
-worker creates `<name> - Shortcut.lnk` files (`ClipJob::Links`) and returns
+worker creates `<stem> - Shortcut.lnk` (extension stripped for files, like Explorer) files (`ClipJob::Links`) and returns
 their names, which the pane then selects.
 
 ## Clipboard

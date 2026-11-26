@@ -173,8 +173,8 @@ fn shortcuts() {
     std::fs::write(&target, b"x").unwrap();
     let out = root.join("out");
     std::fs::create_dir_all(&out).unwrap();
-    assert_eq!(clipboard::make_links(&[target.clone(), target.clone()], &out), Ok(vec!["t.txt - Shortcut.lnk".to_string(), "t.txt - Shortcut (2).lnk".to_string()]));
-    assert!(out.join("t.txt - Shortcut.lnk").exists());
-    assert!(out.join("t.txt - Shortcut (2).lnk").exists());
+    assert_eq!(clipboard::make_links(&[target.clone(), target.clone()], &out), Ok(vec!["t - Shortcut.lnk".to_string(), "t - Shortcut (2).lnk".to_string()]));
+    assert!(out.join("t - Shortcut.lnk").exists());
+    assert!(out.join("t - Shortcut (2).lnk").exists());
     let _ = std::fs::remove_dir_all(&root);
 }

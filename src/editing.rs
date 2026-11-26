@@ -118,14 +118,43 @@ pub fn paint(ui: &mut Ui, g: &mut dyn Canvas, t: &Theme, id: Id, rect: Rect, edi
 /// The reason and the keys, under the field (above it near the window's bottom).
 fn bubble(g: &mut dyn Canvas, t: &Theme, win: (f32, f32), field: Rect, edit: &RenameEdit) {
     let Some(err) = &edit.error else {
-        // a valid name: just the keys
-        return keys_line(g, t, win, field, None, &[("Enter", "Rename"), ("Esc", "Cancel")]);
+        // a valid name: the keys sit inside the field (a bubble would cover the next rows),
+        // and only when the typed name leaves room for them
+        return inline_keys(g, t, field, &edit.input.text, &[("Enter", "Rename"), ("Esc", "Cancel")]);
     };
     let msg = err.message();
     if edit.can_replace() {
         keys_line(g, t, win, field, Some(&msg), &[("Shift+Enter", "Replace"), ("Esc", "Cancel")]);
     } else {
         keys_line(g, t, win, field, Some(&msg), &[("Esc", "Cancel")]);
+    }
+}
+
+/// Width the key hints need: keycap, gap, label, gap per entry.
+fn keys_width(g: &mut dyn Canvas, t: &Theme, keys: &[(&str, &str)]) -> f32 {
+    let font = t.font_small();
+    keys.iter().map(|(k, l)| g.measure(k, t.font_mono()) + 10.0 + 6.0 + g.measure(l, font) + 14.0).sum()
+}
+
+/// Whether `need` px of hints fit in a field `field_w` wide next to `text_w` px of typed text.
+fn hints_fit(field_w: f32, text_w: f32, need: f32) -> bool {
+    field_w - (text_w + 24.0) >= need
+}
+
+/// The key hints right-aligned inside the field; dropped when the name leaves no room.
+fn inline_keys(g: &mut dyn Canvas, t: &Theme, field: Rect, text: &str, keys: &[(&str, &str)]) {
+    let need = keys_width(g, t, keys);
+    if !hints_fit(field.w, g.measure(text, t.font()), need) {
+        return;
+    }
+    let font = t.font_small();
+    let cy = field.y + field.h / 2.0;
+    let mut right = field.r() - 8.0;
+    for (k, l) in keys.iter().rev() {
+        let lw = g.measure(l, font) + 2.0;
+        g.text(l, Rect::new(right - lw, field.y, lw, field.h), font, t.text_dim);
+        right -= lw + 6.0;
+        right -= overlay::keycap_right(g, t, right, cy, k) + 14.0;
     }
 }
 
@@ -171,6 +200,14 @@ fn keys_line(g: &mut dyn Canvas, t: &Theme, win: (f32, f32), field: Rect, msg: O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_hints_only_when_the_name_leaves_room() {
+        // a long name in a narrow cell: no hints, so nothing covers the text or the next row
+        assert!(!hints_fit(200.0, 190.0, 150.0));
+        assert!(hints_fit(400.0, 100.0, 150.0));
+        assert!(!hints_fit(400.0, 240.0, 150.0));
+    }
 
     #[test]
     fn stem_is_preselected_and_extension_kept() {
