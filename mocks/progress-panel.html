@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsubame: operations panel mock (B11-E)</title>
+<style>
+/* Tokens copied from mocks/tokens.css (generated from tokens.json). --c-ok is NEW (proposed), see docs/progress-panel-mock.md. */
+:root{
+  --font-ui:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;--font-mono:"Cascadia Mono","Consolas",monospace;
+  --space-1:2px;--space-2:4px;--space-3:6px;--space-4:8px;--space-5:12px;--space-6:16px;--space-7:24px;
+  --radius-sm:3px;--radius-md:5px;--radius-lg:8px;
+  --font-size-xs:11px;--font-size-sm:12px;--font-size-md:13px;--font-size-lg:15px;
+  --height-titlebar:34px;--height-tab:28px;--height-toolbar:40px;--height-path-bar:28px;--height-button:28px;--height-column-header:24px;--height-list-row:22px;--height-status-bar:24px;--height-progress-line:2px;
+  --layout-sidebar-width:208px;--layout-scrollbar-width:10px;--layout-scrollbar-thumb:6px;
+}
+:root,:root[data-theme="dark"]{color-scheme:dark;
+  --c-bg:#0b0f16;--c-panel:#121722;--c-popup:#1a2130;--c-field:#0d1119;--c-row:#0e131b;--c-row-alt:#111721;--c-hover:#1a2231;--c-selected:#1f3c63;--c-selected-inactive:#1b2a40;--c-focus:#7fb0ff;
+  --c-text:#e9e6df;--c-text-dim:#a3adbf;--c-text-disabled:#5c677b;--c-accent:#6aa0ff;--c-on-accent:#0b0f16;--c-border:#252f42;--c-popup-border:#34415a;--c-scrollbar:#3a4660;--c-scrollbar-hover:#5a6987;
+  --c-danger:#ff8f78;--c-danger-fill:#c42b1c;--c-on-danger:#ffffff;--c-highlight:#5a4a12;--c-folder:#e8b34a;
+  --c-ok:#5fd08a;}
+:root[data-theme="light"]{color-scheme:light;
+  --c-bg:#dde2ea;--c-panel:#eef0f4;--c-popup:#ffffff;--c-field:#ffffff;--c-row:#ffffff;--c-row-alt:#f5f7fa;--c-hover:#e4e9f1;--c-selected:#c9dcf7;--c-selected-inactive:#dfe5ee;--c-focus:#1b52bf;
+  --c-text:#161b26;--c-text-dim:#525d72;--c-text-disabled:#9aa3b2;--c-accent:#1b52bf;--c-on-accent:#ffffff;--c-border:#cdd3de;--c-popup-border:#a7b1c3;--c-scrollbar:#b0b9ca;--c-scrollbar-hover:#8995ad;
+  --c-danger:#a62612;--c-danger-fill:#c42b1c;--c-on-danger:#ffffff;--c-highlight:#ffe28a;--c-folder:#d99a1e;
+  --c-ok:#1e7a3c;}
+
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--c-bg);color:var(--c-text);font:var(--font-size-sm)/1 var(--font-ui)}
+svg{display:block;flex:none}
+button{all:unset;cursor:pointer;box-sizing:border-box}
+.ic{stroke:currentColor;fill:none;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
+.ic .f{fill:currentColor;stroke:none}
+
+/* ---------- review page chrome (not part of the app) */
+.page{padding:18px 24px 60px;max-width:1500px;margin:0 auto}
+.page h1{font-size:var(--font-size-lg);font-weight:600;margin:0 0 4px}
+.page .lede{color:var(--c-text-dim);margin:0 0 12px;line-height:1.45;max-width:980px}
+.page code{font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--c-text)}
+.ctl{display:flex;flex-wrap:wrap;gap:8px 22px;align-items:center;margin:0 0 12px}
+.ctl .lbl{color:var(--c-text-dim);font-size:var(--font-size-xs);margin-right:6px}
+.seg{display:inline-flex;border:1px solid var(--c-border);border-radius:var(--radius-md);overflow:hidden;background:var(--c-panel)}
+.seg button{padding:6px 11px;color:var(--c-text-dim);font-size:var(--font-size-sm);border-right:1px solid var(--c-border)}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--c-selected);color:var(--c-text)}
+.seg button:hover:not(.on){background:var(--c-hover)}
+.note{color:var(--c-text-dim);font-size:var(--font-size-sm);line-height:1.5;max-width:1100px;margin:14px 0 0}
+.note b{color:var(--c-text);font-weight:600}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px 28px;margin-top:18px;max-width:1300px}
+.notes div{color:var(--c-text-dim);line-height:1.5}
+.notes h3{font-size:var(--font-size-sm);color:var(--c-text);margin:0 0 3px;font-weight:600}
+
+/* ---------- app window (everything inside is drawable: fills, rounded rects, strokes, text, icons; no shadow/blur/alpha) */
+#stage{display:inline-block;transform-origin:0 0}
+.win{position:relative;display:flex;flex-direction:column;overflow:hidden;width:1000px;height:560px;background:var(--c-bg);color:var(--c-text);
+  user-select:none;cursor:default;outline:1px solid var(--c-border)}
+.win.z2{width:640px;height:420px}
+.win .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;line-height:1.35}
+.dim{color:var(--c-text-dim)}
+.grow{flex:1;min-width:0}
+.titlebar{height:var(--height-titlebar);flex:none;display:flex;align-items:flex-end;background:var(--c-bg)}
+.tab{display:flex;align-items:center;gap:6px;height:28px;width:176px;padding:0 8px;border-radius:8px 8px 0 0;background:var(--c-panel);color:var(--c-text);margin-left:10px}
+.wc{margin-left:auto;display:flex;height:34px;align-self:flex-start}
+.wc span{width:46px;display:grid;place-items:center;color:var(--c-text)}
+.toolbar{height:40px;flex:none;display:flex;align-items:flex-start;gap:4px;padding:5px 8px 0 6px;background:var(--c-panel);border-bottom:1px solid var(--c-border)}
+.btn{width:28px;height:28px;border-radius:5px;display:grid;place-items:center;color:var(--c-text)}
+.btn.off{color:var(--c-text-disabled)}
+.pathbar{flex:1;min-width:0;height:28px;display:flex;align-items:center;gap:4px;padding:0 8px;background:var(--c-field);border:1px solid var(--c-border);border-radius:5px;font-size:13px;color:var(--c-text-dim)}
+.pathbar b{font-weight:600;color:var(--c-text)}
+.body{flex:1;min-height:0;display:flex}
+.sidebar{width:var(--layout-sidebar-width);flex:none;background:var(--c-panel);border-right:1px solid var(--c-border);padding-top:6px}
+.win.z2 .sidebar{display:none}
+.sh{height:26px;display:flex;align-items:center;padding:0 8px;font-size:11px;font-weight:600;color:var(--c-text-dim)}
+.si{height:24px;margin:0 4px;padding:0 8px;border-radius:5px;display:flex;align-items:center;gap:8px;position:relative;color:var(--c-text)}
+.si .ic{color:var(--c-text-dim)}
+.si.cur{background:var(--c-selected-inactive)}
+.si.cur::before{content:"";position:absolute;left:0;top:5px;width:2px;height:14px;background:var(--c-accent);border-radius:1px}
+.main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--c-row)}
+.colhead{height:24px;flex:none;display:flex;background:var(--c-panel);border-bottom:1px solid var(--c-border);padding-right:10px;font-size:11px;color:var(--c-text-dim)}
+.colhead>div{display:flex;align-items:center;padding:0 8px}
+.c-name{flex:1;min-width:0}.c-date{width:150px;flex:none}.c-size{width:90px;flex:none;justify-content:flex-end}
+.win.z2 .c-date{display:none}
+.list{position:relative;flex:1;min-height:0;overflow:hidden;background:var(--c-row)}
+.row{height:22px;display:flex;align-items:center;font-size:12px}
+.row:nth-child(even){background:var(--c-row-alt)}
+.row.sel{background:var(--c-selected-inactive)}
+.row>div{padding:0 8px;display:flex;align-items:center;gap:6px;color:var(--c-text-dim);min-width:0}
+.row .c-name{color:var(--c-text)}
+.status{height:var(--height-status-bar);flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 12px;background:var(--c-panel);border-top:1px solid var(--c-border);font-size:11px;color:var(--c-text-dim)}
+
+/* ---------- operations panel */
+.panel{position:absolute;right:14px;bottom:8px;width:344px;max-height:calc(100% - 16px);display:flex;flex-direction:column;background:var(--c-popup);border:1px solid var(--c-popup-border);border-radius:var(--radius-lg);overflow:hidden}
+.ph{height:28px;flex:none;display:flex;align-items:center;gap:6px;padding:0 4px 0 10px;border-bottom:1px solid var(--c-border);font-size:12px;font-weight:600}
+.chip{font-size:11px;font-weight:400;color:var(--c-text-dim);border:1px solid var(--c-border);border-radius:9px;padding:2px 6px;line-height:1}
+.cards{overflow-y:auto;overflow-x:hidden;min-height:0}
+.cards::-webkit-scrollbar{width:10px}
+.cards::-webkit-scrollbar-thumb{background:var(--c-scrollbar);border-radius:3px;border:2px solid var(--c-popup)}
+.cards::-webkit-scrollbar-thumb:hover{background:var(--c-scrollbar-hover)}
+.card{position:relative;padding:8px 10px 9px}
+.card+.card{border-top:1px solid var(--c-border)}
+.c1{display:flex;align-items:center;gap:6px;height:22px}
+.c1 .verb{font-weight:600;font-size:13px}
+.c1 .pct{color:var(--c-text-dim);font-size:11px;font-variant-numeric:tabular-nums}
+.c2{height:18px;font-size:12px;color:var(--c-text-dim);display:flex;align-items:center;gap:0}
+.c2 b{font-weight:400;color:var(--c-text)}
+.bar{height:4px;border-radius:2px;background:var(--c-border);margin:5px 0 6px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--c-accent);border-radius:2px}
+.card.paused .bar i{background:var(--c-text-dim)}
+.card.needs .bar i{background:var(--c-accent)}
+.c3{display:flex;align-items:center;gap:8px;height:16px;font-size:11px;color:var(--c-text-dim);font-variant-numeric:tabular-nums}
+.c3 .r{text-align:right;white-space:nowrap}
+.spark{width:72px;height:16px;flex:none}
+.spark polyline{fill:none;stroke:var(--c-accent);stroke-width:1.4;stroke-linejoin:round;stroke-linecap:round}
+.spark line{stroke:var(--c-border);stroke-width:1}
+.card.paused .spark polyline{stroke:var(--c-text-disabled)}
+.st-wait{color:var(--c-text-dim)}
+.st-need{color:var(--c-accent);font-weight:600}
+.ib{width:22px;height:22px;border-radius:var(--radius-sm);display:grid;place-items:center;color:var(--c-text-dim)}
+.ib:hover{background:var(--c-hover);color:var(--c-text)}
+.ib:focus-visible,.tb:focus-visible,.lnk:focus-visible,.pill:focus-visible{outline:1px solid var(--c-focus);outline-offset:1px}
+.ib.x:hover{background:var(--c-danger-fill);color:var(--c-on-danger)}
+.files{margin-top:6px;border-top:1px solid var(--c-border);padding-top:4px}
+.fr{height:22px;display:flex;align-items:center;gap:6px;font-size:12px}
+.fr .n{flex:1;min-width:0}
+.fr .s{font-size:11px;color:var(--c-text-dim);font-variant-numeric:tabular-nums;white-space:nowrap}
+.fr.next{color:var(--c-text-dim)}
+.fr .mini{width:40px;height:3px;border-radius:2px;background:var(--c-border);overflow:hidden;flex:none}
+.fr .mini i{display:block;height:100%;background:var(--c-accent)}
+.fr.err .n{color:var(--c-text)}
+.fr.err .s{display:block;color:var(--c-danger);white-space:normal;font-size:11px}
+.fr.err{display:block;height:auto;padding:3px 0 4px}
+.fr.err .ic{margin-top:2px}
+.fr.more{font-size:11px;color:var(--c-text-dim)}
+/* finished */
+.card.fin .c1 .ic.ok{color:var(--c-ok)}
+.card.fin .c1 .ic.bad{color:var(--c-danger)}
+.fin .msg{flex:1;min-width:0;font-size:12px}
+.fin .msg b{font-weight:600}
+.lnk{color:var(--c-accent);font-size:12px;padding:2px 4px;border-radius:var(--radius-sm)}
+.lnk:hover{text-decoration:underline}
+.cd{position:absolute;left:0;bottom:0;height:var(--height-progress-line);background:var(--c-ok);opacity:1}
+.tb{height:24px;padding:0 10px;border:1px solid var(--c-popup-border);border-radius:var(--radius-md);display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--c-text)}
+.tb:hover{background:var(--c-hover)}
+.tb.pri{background:var(--c-accent);border-color:var(--c-accent);color:var(--c-on-accent);font-weight:600}
+.tb.pri:hover{background:var(--c-accent);outline:1px solid var(--c-focus);outline-offset:1px}
+.errbtns{display:flex;align-items:center;gap:6px;margin-top:6px;padding-left:22px}
+/* status bar pill */
+.pill{height:20px;padding:0 8px 0 6px;border:1px solid var(--c-border);border-radius:10px;display:flex;align-items:center;gap:6px;color:var(--c-text);font-size:11px;background:var(--c-popup)}
+.pill:hover{background:var(--c-hover)}
+.pill .mini{width:36px;height:4px;border-radius:2px;background:var(--c-border);overflow:hidden}
+.pill .mini i{display:block;height:100%;background:var(--c-accent)}
+.pill .ic.ok{color:var(--c-ok)}.pill .ic.bad{color:var(--c-danger)}
+.pill .tx{font-variant-numeric:tabular-nums}
+
+/* ---------- conflict dialog (modal, replaces the MessageBox) */
+.dlg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:540px;max-width:calc(100% - 24px);background:var(--c-popup);border:1px solid var(--c-popup-border);border-radius:var(--radius-lg);padding:14px 16px 12px;z-index:10}
+.win.z2 .dlg{width:500px}
+.dlg h2{font-size:15px;font-weight:600;margin:0 0 4px;line-height:1.3}
+.dlg .sub{font-size:12px;color:var(--c-text-dim);line-height:1.4;margin-bottom:12px}
+.dlg .sub b{font-weight:400;color:var(--c-text)}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.fc{border:1px solid var(--c-border);border-radius:var(--radius-md);background:var(--c-field);padding:8px 10px 10px;min-width:0}
+.fc.newer{border-color:var(--c-accent);background:var(--c-selected)}
+.fc .lab{display:flex;align-items:center;gap:6px;height:18px;font-size:11px;color:var(--c-text-dim);margin-bottom:6px}
+.fc.newer .lab{color:var(--c-text)}
+.badge{font-size:11px;line-height:1;padding:3px 6px;border-radius:9px;background:var(--c-accent);color:var(--c-on-accent);font-weight:600;margin-left:auto}
+.badge.eq{background:transparent;border:1px solid var(--c-border);color:var(--c-text-dim);font-weight:400}
+.fc .fm{display:flex;gap:10px;align-items:center}
+.fc .nm{font-size:13px;font-weight:600;word-break:break-all;line-height:1.3}
+.fc .meta{font-size:11px;color:var(--c-text-dim);line-height:1.55;margin-top:2px;font-variant-numeric:tabular-nums}
+.fc .meta b{font-weight:600;color:var(--c-text)}
+.fico{width:36px;height:44px;position:relative;flex:none}
+.fico svg{width:36px;height:44px}
+.fico span{position:absolute;left:0;right:0;bottom:7px;text-align:center;font:600 8px/1 var(--font-mono);color:var(--c-accent)}
+.dlg .hint{font-size:11px;color:var(--c-text-dim);margin:10px 0 0;display:flex;align-items:center;gap:6px}
+.chk{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:var(--c-text);cursor:pointer;width:max-content}
+.chk .box{width:16px;height:16px;border:1px solid var(--c-popup-border);border-radius:var(--radius-sm);background:var(--c-field);display:grid;place-items:center;color:var(--c-on-accent)}
+.chk.on .box{background:var(--c-accent);border-color:var(--c-accent)}
+.chk .box svg{display:none}.chk.on .box svg{display:block}
+.chk:focus-visible{outline:1px solid var(--c-focus);outline-offset:2px}
+.dbtns{display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid var(--c-border)}
+.dbtns .tb{height:28px;padding:0 14px}
+.tb u{text-decoration:none;border-bottom:1px solid currentColor}
+.win .shade{position:absolute;inset:0;z-index:9}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+<defs>
+<symbol id="i-check" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3.2L13 4.8" class="ic"/></symbol>
+<symbol id="i-x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" class="ic"/></symbol>
+<symbol id="i-pause" viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9" class="ic" style="stroke-width:1.8"/></symbol>
+<symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.5l7 4.5-7 4.5z" class="ic"/></symbol>
+<symbol id="i-down" viewBox="0 0 16 16"><path d="M4 6.5l4 4 4-4" class="ic"/></symbol>
+<symbol id="i-up" viewBox="0 0 16 16"><path d="M4 9.5l4-4 4 4" class="ic"/></symbol>
+<symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="7" height="8" rx="1.2" class="ic"/><path d="M3.5 10.5v-7a1 1 0 0 1 1-1h5" class="ic"/></symbol>
+<symbol id="i-move" viewBox="0 0 16 16"><path d="M2.5 8h9M8.5 4.5L12 8l-3.5 3.5" class="ic"/><path d="M13.5 3.5v9" class="ic"/></symbol>
+<symbol id="i-trash" viewBox="0 0 16 16"><path d="M3 4.5h10M6.2 4.5V3h3.6v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M6.8 7v4M9.2 7v4" class="ic"/></symbol>
+<symbol id="i-zip" viewBox="0 0 16 16"><rect x="3" y="2.5" width="10" height="11" rx="1.2" class="ic"/><path d="M8 2.5v3M8 6.5v1M8 9v1" class="ic"/></symbol>
+<symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 2.5l6 10.5H2z" class="ic"/><path d="M8 6.8v3M8 11.4v.2" class="ic"/></symbol>
+<symbol id="i-folder" viewBox="0 0 16 16"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.3 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" style="fill:var(--c-folder);stroke:none"/></symbol>
+<symbol id="i-file" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3V13a.5.5 0 0 1-.5.5h-7A.5.5 0 0 1 4 13z" class="ic"/><path d="M9 2.5v3h3" class="ic"/></symbol>
+<symbol id="i-undo" viewBox="0 0 16 16"><path d="M5.5 4L3 6.5 5.5 9M3 6.5h6a3.5 3.5 0 0 1 0 7H6.5" class="ic"/></symbol>
+<symbol id="i-retry" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.8v2.7h-2.7" class="ic"/></symbol>
+<symbol id="i-back" viewBox="0 0 16 16"><path d="M9.5 3.5L5 8l4.5 4.5" class="ic"/></symbol>
+<symbol id="i-fwd" viewBox="0 0 16 16"><path d="M6.5 3.5L11 8l-4.5 4.5" class="ic"/></symbol>
+<symbol id="i-up2" viewBox="0 0 16 16"><path d="M8 13V3.5M4 7l4-3.5L12 7" class="ic"/></symbol>
+<symbol id="i-docpage" viewBox="0 0 36 44"><path d="M3 1.5h20l10 10V41a1.5 1.5 0 0 1-1.5 1.5h-28A1.5 1.5 0 0 1 2 41V3A1.5 1.5 0 0 1 3 1.5z" style="fill:var(--c-row-alt);stroke:var(--c-text-dim);stroke-width:1.2"/><path d="M23 1.5v10h10" style="fill:none;stroke:var(--c-text-dim);stroke-width:1.2"/></symbol>
+</defs>
+</svg>
+
+<div class="page">
+  <h1>Operations panel (mock, B11-E)</h1>
+  <p class="lede">Flat, no shadows, tokens from <code>tokens.json</code> (one new: <code>ok</code> green). Pick a state, toggle theme and scale. Everything is clickable: Pause / Resume, Cancel, expand, collapse to the status-bar pill, Undo, Show details, Retry, Skip and the conflict buttons. Auto-dismiss of finished cards is 5 s (hover holds it). The simulation here ticks at 10 Hz and stops when nothing runs, as the real one must.</p>
+
+  <div class="ctl">
+    <span><span class="lbl">State</span><span class="seg" id="seg-state">
+      <button data-v="running">Running + waiting</button>
+      <button data-v="queue">Four queued</button>
+      <button data-v="done">Finished</button>
+      <button data-v="error">Error</button>
+      <button data-v="conflict">Conflict</button>
+      <button data-v="pill">Collapsed pill</button>
+    </span></span>
+    <span><span class="lbl">Theme</span><span class="seg" id="seg-theme"><button data-v="dark">Dark</button><button data-v="light">Light</button></span></span>
+    <span><span class="lbl">Scale</span><span class="seg" id="seg-scale"><button data-v="1">100%</button><button data-v="2">200%</button></span></span>
+    <span><span class="lbl">Sim speed</span><span class="seg" id="seg-sim"><button data-v="1">1x</button><button data-v="6">6x</button></span></span>
+    <span id="ctl-conf" style="display:none"><span class="lbl">Conflict case</span><span class="seg" id="seg-conf"><button data-v="in">Incoming newer</button><button data-v="ex">Existing newer</button><button data-v="eq">Identical</button></span></span>
+  </div>
+
+  <div id="stage">
+    <div class="win" id="win">
+      <div class="titlebar">
+        <div class="tab"><svg width="14" height="14"><use href="#i-folder"/></svg><span class="t">Projects</span></div>
+        <div class="wc"><span><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor"/></svg></span><span><svg width="10" height="10" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor"/></svg></span><span><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor"/></svg></span></div>
+      </div>
+      <div class="toolbar">
+        <span class="btn"><svg width="16" height="16"><use href="#i-back"/></svg></span><span class="btn off"><svg width="16" height="16"><use href="#i-fwd"/></svg></span><span class="btn"><svg width="16" height="16"><use href="#i-up2"/></svg></span>
+        <div class="pathbar"><span>X:</span><span>/</span><span>Dev</span><span>/</span><b>Projects</b></div>
+      </div>
+      <div class="body">
+        <div class="sidebar">
+          <div class="sh">Quick access</div>
+          <div class="si"><svg width="16" height="16"><use href="#i-folder"/></svg>Desktop</div>
+          <div class="si"><svg width="16" height="16"><use href="#i-folder"/></svg>Downloads</div>
+          <div class="si cur"><svg width="16" height="16"><use href="#i-folder"/></svg>Projects</div>
+          <div class="si"><svg width="16" height="16"><use href="#i-folder"/></svg>Archive</div>
+          <div class="sh">This PC</div>
+          <div class="si"><svg width="16" height="16"><use href="#i-folder"/></svg>Local Disk (X:)</div>
+        </div>
+        <div class="main">
+          <div class="colhead"><div class="c-name">Name</div><div class="c-date">Date modified</div><div class="c-size">Size</div></div>
+          <div class="list">
+            <div id="rows"></div>
+            <div id="panel"></div>
+          </div>
+        </div>
+      </div>
+      <div class="status"><span id="sbtext">18 items</span><span class="grow"></span><span id="pillhost"></span></div>
+      <div id="dlg"></div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div><h3>Panel</h3>Docked bottom-right over the list, 344 px wide, one card per operation, newest finished on top of the running ones. Opens by itself 400 ms after an operation starts (quick ones never flash; the status bar text stays as it is today). Collapse chevron folds it to the pill, the pill reopens it.</div>
+    <div><h3>Cards</h3>Verb + percent, "N items from A to B" (folders as names, full path in a tooltip), 4 px bar, bytes, speed + remaining, 10 s speed sparkline. Delete shows items instead of bytes. Pause / Resume, Cancel, expand for the files being processed.</div>
+    <div><h3>Queue</h3>The queue is FIFO with one worker, so a second operation shows "Waiting" with an empty bar and only Cancel. It starts by itself when the one before ends.</div>
+    <div><h3>Finished</h3>One line, green check, "Done, Undo", 2 px countdown line, gone after 5 s (hover holds). Errors never auto-dismiss: "Show details", Retry failed, Skip. Cancelled shows "Cancelled after 6 of 14" with Undo.</div>
+    <div><h3>Conflict</h3>App-modal dialog in the window (no scrim: no alpha). The newer file gets the accent border and a "Newer" chip. Suggested button is filled: Replace when incoming is newer, Skip otherwise. The old file goes to the Recycle Bin. Keys: R, S, K, Esc.</div>
+    <div><h3>Cost</h3>No timer while nothing runs. Progress repaints at most 10 Hz, only the changed card (bar, numbers, sparkline). One one-shot timer for the earliest finished-card dismiss. Idle = 0 wake-ups.</div>
+  </div>
+</div>
+
+<script>
+(function(){
+const KB=1024, MB=KB*KB, GB=MB*KB;
+const $=s=>document.querySelector(s);
+const win=$('#win'), panelEl=$('#panel'), pillHost=$('#pillhost'), dlgEl=$('#dlg');
+let theme='dark', scale=1, simMul=1, scenario='running', confCase='in';
+let ops=[], nextId=1, panelOpen=true, conflictOpId=null, applyAll=false, hoverId=null, ticking=null, lastT=0, sampleAcc=0;
+
+const rowsData=[
+ ['Archive','folder','',''],['assets','folder','',''],['docs','folder','',''],['src','folder','',''],['target','folder','',''],
+ ['Cargo.lock','file','86 KB','12 Nov 2026 09:12'],['Cargo.toml','file','2 KB','12 Nov 2026 09:12'],['CHANGELOG.md','file','31 KB','25 Nov 2026 18:40'],
+ ['design-notes.docx','file','48 KB','12 Nov 2026 09:12'],['Makefile','file','1 KB','02 Oct 2026 11:05'],['README.md','file','6 KB','21 Nov 2026 22:17'],
+ ['release-1.3.zip','file','412 MB','03 Nov 2026 13:58'],['report-2026.docx','file','48.2 KB','12 Nov 2026 09:12'],['rustfmt.toml','file','1 KB','02 Oct 2026 11:05'],
+ ['screenshot-04.png','file','1.8 MB','24 Nov 2026 16:31'],['tokens.json','file','7 KB','19 Nov 2026 10:02'],['todo.txt','file','3 KB','26 Nov 2026 08:44'],['wizard.log','file','212 KB','26 Nov 2026 12:20']];
+$('#rows').innerHTML=rowsData.map((r,i)=>`<div class="row${i===12?' sel':''}"><div class="c-name"><svg width="16" height="16" style="${r[1]==='file'?'color:var(--c-text-dim)':''}"><use href="#i-${r[1]}"/></svg><span class="t">${r[0]}</span></div><div class="c-date">${r[3]}</div><div class="c-size" style="justify-content:flex-end">${r[2]}</div></div>`).join('');
+
+/* ---------- formatting */
+const pad=n=>String(n).padStart(2,'0');
+function fb(n){ if(n>=GB) return (n/GB).toFixed(n>=10*GB?0:1)+' GB'; if(n>=MB) return (n/MB).toFixed(n>=100*MB?0:1)+' MB'; if(n>=KB) return Math.round(n/KB)+' KB'; return Math.round(n)+' B'; }
+function eta(s){ if(!isFinite(s)||s<0) return '…'; s=Math.ceil(s); if(s<2) return 'a moment'; const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60; return (h?h+':'+pad(m):m)+':'+pad(x); }
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+/* ---------- operations */
+const NAMES=['IMG_2041.CR3','IMG_2042.CR3','IMG_2043.CR3','budget-2026.xlsx','intro-video.mp4','presentation-final.pptx','site-backup.tar','invoice-0098.pdf','notes.md','scan-0001.tif','scan-0002.tif','podcast-ep12.flac','logo-final.svg','dataset.parquet'];
+function mk(o){
+  const base={id:nextId++,state:'running',done:0,speed:0,ema:0,hist:[],expanded:false,errors:[],dismissAt:0,names:NAMES,unit:'bytes',keyRef:null};
+  const op=Object.assign(base,o);
+  op.hist=op.hist.length?op.hist:Array.from({length:40},()=>0);
+  return op;
+}
+const V={
+  copy:{verb:'Copying',past:'Copied',icon:'copy'},
+  move:{verb:'Moving',past:'Moved',icon:'move'},
+  del:{verb:'Deleting',past:'Deleted',icon:'trash'},
+  ext:{verb:'Extracting',past:'Extracted',icon:'zip'}
+};
+function opCopy(p){return mk(Object.assign({kind:'copy',items:14,from:'Downloads',to:'Projects',total:3.4*GB,base:92*MB},p));}
+function opMove(p){return mk(Object.assign({kind:'move',items:3,from:'Desktop',to:'Archive',total:820*MB,base:140*MB},p));}
+function opDel(p){return mk(Object.assign({kind:'del',items:212,from:'build_cache',to:'Recycle Bin',total:212,unit:'items',base:46,names:['deps/serde-1a2b3c.rlib','deps/tokio-9f8e7d.rlib','incremental/ccd1-x.lock','.fingerprint/hopper-77ab/lib','build/ring-out/libring.a','deps/windows-3c.rmeta']},p));}
+function opExt(p){return mk(Object.assign({kind:'ext',items:118,from:'release-1.4.zip',to:'Builds',total:2.1*GB,base:68*MB,names:['bin/tsubame.exe','bin/tsubame-shell.dll','assets/icons.pak','assets/fonts/Cascadia.ttf','docs/manual.pdf','plugins/git.wasm']},p));}
+
+function preset(s){
+  nextId=1; ops=[]; panelOpen=true; conflictOpId=null; applyAll=false;
+  const now=performance.now();
+  if(s==='running'){
+    ops=[opCopy({done:0.41*3.4*GB,speed:90*MB,ema:90*MB,expanded:true}), opMove()];
+  } else if(s==='queue'){
+    ops=[opMove({state:'done',done:820*MB,dismissAt:now+5000}), opExt({done:0.22*2.1*GB,speed:68*MB,ema:68*MB}), opCopy(), opDel(), opMove({items:1,from:'Desktop',to:'Archive',total:140*MB})];
+  } else if(s==='done'){
+    ops=[opCopy({state:'done',done:3.4*GB,dismissAt:now+5000})];
+  } else if(s==='error'){
+    ops=[opCopy({state:'error',done:3.2*GB,errors:[
+      ['intro-video.mp4','In use by another process'],['site-backup.tar','Access denied (read-only share)']],errOpen:true}), opMove({base:140*MB,done:0.2*820*MB,speed:140*MB,ema:140*MB})];
+    ops[0].state='error';
+  } else if(s==='conflict'){
+    ops=[opCopy({state:'needs',done:0.38*3.4*GB,speed:0,ema:90*MB,hist:Array.from({length:40},(_, i)=>(88+Math.sin(i/4)*8)*MB)}), opMove()];
+    conflictOpId=ops[0].id;
+  } else if(s==='pill'){
+    ops=[opCopy({done:0.41*3.4*GB,speed:90*MB,ema:90*MB}), opMove({done:0.05*820*MB})];
+    panelOpen=false;
+  }
+  ops.forEach(o=>{ if(o.state==='running'&&!o.hist.some(x=>x)) o.hist=Array.from({length:40},(_,i)=>(o.base*(0.85+0.15*Math.sin(i/3)))); });
+  queueRule();
+  renderAll(); ensureTick();
+}
+
+/* ---------- derived */
+const active=o=>['running','waiting','paused','needs'].includes(o.state);
+function totalsPct(){ let d=0,t=0; ops.filter(active).forEach(o=>{d+=o.done/o.total; t+=1;}); return t?Math.round(d/t*100):0; }
+function pctOf(o){ return Math.min(100,Math.floor(o.done/o.total*100)); }
+function doneText(o){ return o.unit==='items'?`${Math.round(o.done)} of ${o.total} items`:`${fb(o.done)} of ${fb(o.total)}`; }
+function speedText(o){ return o.unit==='items'?`${Math.round(o.speed)} items/s`:`${fb(o.speed)}/s`; }
+function leftText(o){ const s=(o.total-o.done)/Math.max(1,o.ema); return eta(s)+' left'; }
+function curIndex(o){ return Math.min(o.names.length-1, Math.floor((o.done/o.total)*o.items) % o.names.length); }
+function curFilePct(o){ const f=(o.done/o.total)*o.items; return Math.round((f-Math.floor(f))*100); }
+function sparkPts(o){ const h=o.hist, max=Math.max(1,...h)*1.1; return h.map((v,i)=>`${(i/(h.length-1)*70+1).toFixed(1)},${(14-(v/max)*12).toFixed(1)}`).join(' '); }
+function sizeFor(name,o){ return o.unit==='items'?'':fb(((name.length*7919)%900+12)*MB/16); }
+
+/* ---------- render: full (structure) and live (numbers) */
+function dest(o){
+  if(o.kind==='del') return `<span class="t">${o.items} items from&nbsp;<b>${esc(o.from)}</b>&nbsp;<span class="dim">to ${o.to}</span></span>`;
+  return `<span class="t">${o.items} items from&nbsp;<b>${esc(o.from)}</b>&nbsp;to&nbsp;<b>${esc(o.to)}</b></span>`;
+}
+function filesBlock(o){
+  const i=curIndex(o), n=o.names, rows=[];
+  rows.push(`<div class="fr"><svg width="16" height="16" class="dim"><use href="#i-file"/></svg><span class="n t">${esc(n[i])}</span><span class="mini"><i style="width:${curFilePct(o)}%"></i></span><span class="s">${sizeFor(n[i],o)}</span></div>`);
+  for(let k=1;k<=2;k++){ const nm=n[(i+k)%n.length]; rows.push(`<div class="fr next"><svg width="16" height="16"><use href="#i-file"/></svg><span class="n t">${esc(nm)}</span><span class="s">${sizeFor(nm,o)}</span></div>`); }
+  const left=Math.max(0,o.items-Math.floor(o.done/o.total*o.items)-3);
+  if(left>0) rows.push(`<div class="fr more">and ${left} more</div>`);
+  return rows.join('');
+}
+function cardHTML(o){
+  const v=V[o.kind];
+  const cls=['card']; if(o.state==='paused') cls.push('paused'); if(o.state==='needs') cls.push('needs'); if(['done','cancelled','undone'].includes(o.state)||o.state==='error') cls.push('fin');
+  if(o.state==='done'||o.state==='cancelled'||o.state==='undone'){
+    let msg;
+    if(o.state==='done') msg=`<b>${v.past}</b> ${o.items} items${o.kind==='del'?'':` to <b>${esc(o.to)}</b>`}`;
+    else if(o.state==='cancelled') msg=`<b>Cancelled</b> after ${o.cancelAt} of ${o.items} items`;
+    else msg=`<b>Undone</b>, items are back in <b>${esc(o.from)}</b>`;
+    const undoTxt=o.state==='undone'?'':'<button class="lnk" data-act="undo">Undo</button>';
+    const icn=o.state==='done'?'<svg width="16" height="16" class="ic ok"><use href="#i-check"/></svg>':'<svg width="16" height="16" class="ic" style="color:var(--c-text-dim)"><use href="#i-'+(o.state==='undone'?'undo':'x')+'"/></svg>';
+    return `<div class="${cls.join(' ')}" data-id="${o.id}"><div class="c1">${icn}<span class="msg t">${msg}</span>${undoTxt}<button class="ib x" data-act="close" aria-label="Dismiss"><svg width="14" height="14"><use href="#i-x"/></svg></button></div><i class="cd" style="width:${Math.max(0,Math.min(100,(o.dismissAt-performance.now())/50))}%"></i></div>`;
+  }
+  if(o.state==='error'){
+    const nfail=o.errors.length, ok=o.items-nfail;
+    return `<div class="${cls.join(' ')}" data-id="${o.id}"><div class="c1"><svg width="16" height="16" class="ic bad"><use href="#i-alert"/></svg><span class="msg t"><b>${v.past}</b> ${ok} of ${o.items} items, <span style="color:var(--c-danger)">${nfail} failed</span></span><button class="ib x" data-act="close" aria-label="Dismiss"><svg width="14" height="14"><use href="#i-x"/></svg></button></div>
+      <div class="c2" style="padding-left:22px"><span class="t">from <b>${esc(o.from)}</b> to <b>${esc(o.to)}</b></span></div>
+      <div class="errbtns"><button class="lnk" data-act="details" style="padding-left:0">${o.errOpen?'Hide details':'Show details'}</button><span class="grow"></span><button class="tb pri" data-act="retry"><svg width="14" height="14"><use href="#i-retry"/></svg>Retry</button><button class="tb" data-act="skip">Skip</button></div>
+      ${o.errOpen?`<div class="files" style="margin-left:22px">${o.errors.map(e=>`<div class="fr err"><span class="n t" style="display:block">${esc(e[0])}</span><span class="s">${esc(e[1])}</span></div>`).join('')}</div>`:''}</div>`;
+  }
+  /* running / paused / waiting / needs */
+  const waiting=o.state==='waiting', paused=o.state==='paused', needs=o.state==='needs';
+  const pp=waiting||needs?'':`<button class="ib" data-act="pause" aria-label="${paused?'Resume':'Pause'}" title="${paused?'Resume':'Pause'}"><svg width="14" height="14"><use href="#i-${paused?'play':'pause'}"/></svg></button>`;
+  const meta=waiting?`<span class="st-wait">Waiting</span><span class="grow"></span><span class="r">${o.unit==='items'?o.total+' items':fb(o.total)}</span>`
+    : needs?`<span class="m-bytes">${doneText(o)}</span><span class="grow"></span><span class="st-need">Waiting for your answer</span>`
+    : paused?`<span class="m-bytes">${doneText(o)}</span><span class="grow"></span><span class="r">Paused</span>`
+    : `<span class="m-bytes">${doneText(o)}</span><svg class="spark" viewBox="0 0 72 16"><line x1="0" y1="15.5" x2="72" y2="15.5"/><polyline points="${sparkPts(o)}"/></svg><span class="grow"></span><span class="r m-speed">${speedText(o)} · ${leftText(o)}</span>`;
+  const exp=o.expanded&&!waiting?`<div class="files" data-idx="${curIndex(o)}">${filesBlock(o)}</div>`:'';
+  return `<div class="${cls.join(' ')}" data-id="${o.id}">
+    <div class="c1"><svg width="16" height="16" class="ic" style="color:var(--c-accent)"><use href="#i-${V[o.kind].icon}"/></svg><span class="verb">${V[o.kind].verb}</span><span class="pct m-pct">${waiting?'':pctOf(o)+'%'}</span><span class="grow"></span>${pp}<button class="ib" data-act="expand" aria-label="Show files" title="Show files" ${waiting?'disabled style="visibility:hidden"':''}><svg width="14" height="14"><use href="#i-${o.expanded?'up':'down'}"/></svg></button><button class="ib x" data-act="cancel" aria-label="Cancel" title="Cancel"><svg width="14" height="14"><use href="#i-x"/></svg></button></div>
+    <div class="c2">${dest(o)}</div>
+    <div class="bar"><i class="m-bar" style="width:${waiting?0:pctOf(o)}%"></i></div>
+    <div class="c3">${meta}</div>${exp}</div>`;
+}
+function renderPanel(){
+  if(!ops.length||!panelOpen){ panelEl.innerHTML=''; return; }
+  const n=ops.filter(active).length, fin=ops.filter(o=>!active(o)).length;
+  const order=[...ops.filter(o=>!active(o)), ...ops.filter(active)];
+  panelEl.innerHTML=`<div class="panel"><div class="ph"><span>Operations</span>${n?`<span class="chip">${n}</span>`:''}<span class="grow"></span>${fin?'<button class="lnk" data-act="clear">Clear finished</button>':''}<button class="ib" data-act="collapse" aria-label="Collapse to status bar" title="Collapse"><svg width="14" height="14"><use href="#i-down"/></svg></button></div><div class="cards">${order.map(cardHTML).join('')}</div></div>`;
+}
+function pillHTML(){
+  if(panelOpen||!ops.length) return '';
+  const act=ops.filter(active), failed=ops.filter(o=>o.state==='error').length;
+  let inner;
+  if(act.length){
+    const p=totalsPct();
+    const txt=act.length===1?`${V[act[0].kind].verb}, ${p}%`:`${act.length} operations, ${p}%`;
+    inner=`<span class="mini"><i style="width:${p}%"></i></span><span class="tx">${txt}</span>`;
+  } else if(failed) inner=`<svg width="14" height="14" class="ic bad"><use href="#i-alert"/></svg><span class="tx">${failed} failed</span>`;
+  else inner=`<svg width="14" height="14" class="ic ok"><use href="#i-check"/></svg><span class="tx">Done</span>`;
+  return `<button class="pill" data-act="open" title="Show operations">${inner}<svg width="12" height="12" style="color:var(--c-text-dim)"><use href="#i-up"/></svg></button>`;
+}
+function renderPill(){ pillHost.innerHTML=pillHTML(); }
+/* ---- conflict dialog */
+const CONF={
+  in:{ex:{size:'48.2 KB',date:'12 Nov 2026, 09:12'},inn:{size:'51.7 KB',date:'26 Nov 2026, 14:03'},newer:'in',def:'replace'},
+  ex:{ex:{size:'51.7 KB',date:'26 Nov 2026, 14:03'},inn:{size:'44.0 KB',date:'12 Nov 2026, 09:12'},newer:'ex',def:'skip'},
+  eq:{ex:{size:'48.2 KB',date:'12 Nov 2026, 09:12'},inn:{size:'48.2 KB',date:'12 Nov 2026, 09:12'},newer:'eq',def:'skip'}};
+function fileCard(role,d,c){
+  const newer=c.newer===role, eq=c.newer==='eq';
+  const label=role==='ex'?'Existing, in <b style="font-weight:600;color:var(--c-text)">Projects</b>':'Incoming, from <b style="font-weight:600;color:var(--c-text)">Downloads</b>';
+  const other=role==='ex'?c.inn:c.ex;
+  const sz=d.size===other.size?'':(parseFloat(d.size)>parseFloat(other.size)?' <span style="color:var(--c-text)">(larger)</span>':' <span>(smaller)</span>');
+  return `<div class="fc${newer?' newer':''}"><div class="lab"><span>${label}</span>${newer?'<span class="badge">Newer</span>':(eq?'<span class="badge eq">Same date</span>':'')}</div>
+    <div class="fm"><div class="fico"><svg viewBox="0 0 36 44"><use href="#i-docpage"/></svg><span>DOCX</span></div><div style="min-width:0"><div class="nm">report-2026.docx</div><div class="meta">${newer?'<b>'+d.date+'</b>':d.date}<br>${d.size}${sz}</div></div></div></div>`;
+}
+function renderDlg(){
+  if(conflictOpId==null){ dlgEl.innerHTML=''; return; }
+  const c=CONF[confCase], all=applyAll;
+  const b=(k,label,key)=>`<button class="tb${c.def===k?' pri':''}" data-act="c-${k}"><span>${label.replace(key,'<u>'+key+'</u>')}</span></button>`;
+  dlgEl.innerHTML=`<div class="shade"></div><div class="dlg" role="alertdialog" aria-labelledby="dt">
+    <h2 id="dt">${c.newer==='eq'?'This file is already here':'This folder already has a file with this name'}</h2>
+    <div class="sub">Copying 14 items to <b>Projects</b>. ${c.newer==='eq'?'The two files look identical (same size and date).':'Choose which one to keep.'}</div>
+    <div class="cmp">${fileCard('ex',c.ex,c)}${fileCard('in',c.inn,c)}</div>
+    <div class="hint"><svg width="14" height="14"><use href="#i-trash"/></svg>Replace sends the existing file to the Recycle Bin, so it can be undone.</div>
+    <div class="chk${all?' on':''}" data-act="all" role="checkbox" aria-checked="${all}" tabindex="0"><span class="box"><svg width="12" height="12"><use href="#i-check"/></svg></span>Do this for all remaining conflicts</div>
+    <div class="dbtns"><button class="tb" data-act="c-cancel">Cancel operation</button><span class="grow"></span>${b('skip',all?'Skip all':'Skip','S')}${b('keep',all?'Keep both, all':'Keep both','K')}${b('replace',all?'Replace all':'Replace','R')}</div>
+  </div>`;
+}
+function renderAll(){ renderPanel(); renderPill(); renderDlg(); renderStatusText(); }
+function renderStatusText(){ $('#sbtext').textContent='18 items · 1 selected'; }
+
+function live(){
+  ops.forEach(o=>{
+    const el=panelEl.querySelector(`.card[data-id="${o.id}"]`); if(!el) return;
+    if(o.state==='running'||o.state==='paused'||o.state==='needs'){
+      el.querySelector('.m-bar').style.width=pctOf(o)+'%';
+      const pc=el.querySelector('.m-pct'); if(pc) pc.textContent=pctOf(o)+'%';
+      const mb=el.querySelector('.m-bytes'); if(mb) mb.textContent=doneText(o);
+      const ms=el.querySelector('.m-speed'); if(ms) ms.textContent=speedText(o)+' · '+leftText(o);
+      const sp=el.querySelector('.spark polyline'); if(sp) sp.setAttribute('points',sparkPts(o));
+      const fl=el.querySelector('.files'); if(fl){ const ix=String(curIndex(o)); if(fl.dataset.idx!==ix){ fl.dataset.idx=ix; fl.innerHTML=filesBlock(o);} else { const m=fl.querySelector('.mini i'); if(m) m.style.width=curFilePct(o)+'%'; } }
+    }
+    const cd=el.querySelector('.cd'); if(cd) cd.style.width=Math.max(0,Math.min(100,(o.dismissAt-performance.now())/50))+'%';
+  });
+  const pill=pillHost.querySelector('.pill');
+  if(pill){ const act=ops.filter(active); if(act.length){ const p=totalsPct(); pill.querySelector('.mini i').style.width=p+'%'; pill.querySelector('.tx').textContent=act.length===1?`${V[act[0].kind].verb}, ${p}%`:`${act.length} operations, ${p}%`; } }
+}
+
+/* ---------- simulation: only ticks while something moves or a dismiss is pending; 100 ms = 10 Hz */
+function needTick(){ return ops.some(o=>o.state==='running'||(o.dismissAt&&['done','cancelled','undone'].includes(o.state))) || (ops.some(o=>o.state==='waiting')&&!ops.some(o=>['running','paused','needs'].includes(o.state))); }
+function ensureTick(){ if(ticking||!needTick()) return; lastT=performance.now(); ticking=setInterval(tick,100); }
+function stopTick(){ clearInterval(ticking); ticking=null; }
+function tick(){
+  const now=performance.now(), dt=Math.min(0.5,(now-lastT)/1000)*simMul; lastT=now; const realDt=dt/simMul; sampleAcc+=realDt;
+  let structural=false;
+  const run=ops.find(o=>o.state==='running');
+  if(run){
+    const target=run.base*(0.8+0.4*Math.random());
+    run.speed=run.speed*0.75+target*0.25; run.ema=run.ema?run.ema*0.92+run.speed*0.08:run.speed;
+    run.done=Math.min(run.total,run.done+run.speed*dt);
+    if(sampleAcc>=0.25){ sampleAcc=0; run.hist.push(run.speed); run.hist.shift(); }
+    if(run.done>=run.total){ run.state='done'; run.dismissAt=now+5000; structural=true; }
+  }
+  if(!ops.some(o=>['running','paused','needs'].includes(o.state))){
+    const nxt=ops.find(o=>o.state==='waiting'); if(nxt){ nxt.state='running'; nxt.speed=nxt.base; nxt.ema=nxt.base; nxt.hist=Array.from({length:40},()=>nxt.base*0.9); structural=true; }
+  }
+  ops.forEach(o=>{ if(o.dismissAt&&['done','cancelled','undone'].includes(o.state)){ if(hoverId===o.id) o.dismissAt+=realDt*1000; }});
+  const before=ops.length;
+  ops=ops.filter(o=>!(o.dismissAt&&['done','cancelled','undone'].includes(o.state)&&now>=o.dismissAt));
+  if(ops.length!==before) structural=true;
+  if(structural){ renderPanel(); renderPill(); } else live();
+  if(!needTick()) stopTick();
+}
+function normalize(){ // first waiting op becomes running if nothing runs
+  if(!ops.some(o=>['running','paused','needs'].includes(o.state))){ const n=ops.find(o=>o.state==='waiting'); if(n){ n.state='running'; n.speed=n.base; n.ema=n.base; } }
+}
+/* mark ops after the first active as waiting */
+function queueRule(){ let seen=false; ops.forEach(o=>{ if(['running','paused','needs'].includes(o.state)) seen=true; }); let first=true; ops.forEach(o=>{ if(o.state==='running'&&!first) o.state='waiting'; if(active(o)) first=false; }); }
+
+/* ---------- actions */
+function opOf(el){ const c=el.closest('.card'); return c?ops.find(o=>o.id===+c.dataset.id):null; }
+function act(a,el){
+  const o=opOf(el);
+  switch(a){
+    case 'pause': if(o){ o.state=o.state==='paused'?'running':'paused'; if(o.state==='running'){ o.speed=o.ema; } else o.speed=0; renderPanel(); renderPill(); ensureTick(); } break;
+    case 'expand': if(o){ o.expanded=!o.expanded; renderPanel(); } break;
+    case 'cancel': if(o){ if(o.state==='waiting'){ ops=ops.filter(x=>x!==o); } else { o.cancelAt=Math.floor(o.done/o.total*o.items); o.state='cancelled'; o.dismissAt=performance.now()+5000; } renderPanel(); renderPill(); ensureTick(); } break;
+    case 'close': case 'skip': if(o){ ops=ops.filter(x=>x!==o); renderPanel(); renderPill(); } break;
+    case 'undo': if(o){ o.state='undone'; o.dismissAt=performance.now()+3000; renderPanel(); ensureTick(); } break;
+    case 'details': if(o){ o.errOpen=!o.errOpen; renderPanel(); } break;
+    case 'retry': if(o){ const n=o.errors.length; o.state='running'; o.items=n; o.total=n*170*MB; o.done=0; o.errors=[]; o.errOpen=false; o.speed=o.base; o.ema=o.base; o.hist=Array.from({length:40},()=>o.base*0.9); queueRule(); renderPanel(); renderPill(); ensureTick(); } break;
+    case 'clear': ops=ops.filter(active); renderPanel(); renderPill(); break;
+    case 'collapse': panelOpen=false; renderPanel(); renderPill(); break;
+    case 'open': panelOpen=true; renderPanel(); renderPill(); break;
+    case 'all': applyAll=!applyAll; renderDlg(); break;
+    case 'c-replace': case 'c-skip': case 'c-keep': case 'c-cancel': resolve(a); break;
+  }
+}
+function resolve(a){
+  const o=ops.find(x=>x.id===conflictOpId); conflictOpId=null;
+  if(o){ if(a==='c-cancel'){ o.cancelAt=Math.floor(o.done/o.total*o.items); o.state='cancelled'; o.dismissAt=performance.now()+5000; } else { o.state='running'; o.speed=o.ema; } }
+  renderAll(); ensureTick();
+}
+document.addEventListener('click',e=>{ const t=e.target.closest('[data-act]'); if(t) act(t.dataset.act,t); });
+document.addEventListener('keydown',e=>{
+  if(conflictOpId!=null){ const k=e.key.toLowerCase(); if(k==='r') resolve('c-replace'); else if(k==='s') resolve('c-skip'); else if(k==='k') resolve('c-keep'); else if(e.key==='Escape') resolve('c-cancel'); else if(e.key==='Enter'&&!e.target.closest('.chk')) resolve('c-'+CONF[confCase].def); else if((e.key===' '||e.key==='Enter')&&e.target.closest('.chk')){ e.preventDefault(); act('all'); } }
+  else if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-act]')){ }
+});
+panelEl.addEventListener('mouseover',e=>{ const c=e.target.closest('.card'); hoverId=c?+c.dataset.id:null; });
+panelEl.addEventListener('mouseleave',()=>{ hoverId=null; });
+
+/* ---------- review controls */
+function setSeg(id,val,cb){ document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('on',b.dataset.v===String(val))); }
+function wire(id,cb){ document.querySelectorAll('#'+id+' button').forEach(b=>b.addEventListener('click',()=>{ cb(b.dataset.v); setSeg(id,b.dataset.v); })); }
+function setTheme(t){ theme=t; document.documentElement.dataset.theme=t; try{localStorage.setItem('pp-theme',t);}catch(_){} }
+function setScale(s){ scale=+s; win.classList.toggle('z2',scale===2); $('#stage').style.zoom=scale===2?2:1; }
+wire('seg-state',v=>{ scenario=v; $('#ctl-conf').style.display=v==='conflict'?'':'none'; stopTick(); preset(v); });
+wire('seg-theme',setTheme); wire('seg-scale',setScale); wire('seg-sim',v=>{ simMul=+v; }); wire('seg-conf',v=>{ confCase=v; renderDlg(); });
+let t0='dark'; try{ t0=localStorage.getItem('pp-theme')||'dark'; }catch(_){}
+const q=new URLSearchParams(location.search);
+t0=q.get('theme')||t0; setTheme(t0); setSeg('seg-theme',t0);
+setScale(q.get('scale')||1); setSeg('seg-scale',q.get('scale')||1);
+setSeg('seg-sim',1); setSeg('seg-conf','in');
+scenario=q.get('state')||'running'; confCase=q.get('conf')||'in'; setSeg('seg-conf',confCase);
+if(q.get('sim')){ simMul=+q.get('sim'); setSeg('seg-sim',simMul); }
+setSeg('seg-state',scenario); $('#ctl-conf').style.display=scenario==='conflict'?'':'none';
+preset(scenario);
+if(q.get('freeze')){ stopTick(); }
+})();
+</script>
+</body>
+</html>
