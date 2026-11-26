@@ -599,6 +599,17 @@ mod tests {
     }
 
     #[test]
+    fn every_restart_label_leads_to_a_restart() {
+        // "Download and restart" (Available) must restart after apply; "Restart now"
+        // (Staged / ReadyToRestart) sets cx.restart. A label with "restart" in it is a promise.
+        assert!(crate::updates::restarts_after(true));
+        let src = include_str!("updates_page.rs");
+        assert!(src.contains("updates::install();"));
+        assert!(src.contains("cx.restart = true;"));
+        assert!(!src.contains("\"Restart to apply\""));
+    }
+
+    #[test]
     fn the_offer_names_its_channel_and_the_copy_names_its_build() {
         let n = Info { version: "0.1.1-nightly.42".into(), channel: Channel::Nightly, notes_url: String::new(), in_place_ok: true, size: 1 };
         assert_eq!(available_title(&n), "Nightly 0.1.1-nightly.42 is available");

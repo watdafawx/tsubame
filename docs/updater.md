@@ -236,10 +236,16 @@ Around the state:
    `Phase::Downloading { done, total }`; `updates::cancel()` makes the progress closure return false.
 2. `apply(&staged)` runs on the same worker; the result is `Phase::ReadyToRestart(v)` and the old exe is
    kept as `tsubame.exe.old`. A failure keeps the previous state and shows the `Error` text.
+   After a successful apply on this path (`restarts_after(true)`) the worker sets a restart request;
+   main's `WM_APP_UPDATE` handler takes it (`take_restart_request`) and quits exactly like step 3,
+   so "Download and restart" restarts by itself. Auto-download (`download(up, false)`) only stages.
 3. `[Restart now]` sets `want_restart`; `settings_requests` stores `AFTER_EXIT = 1` and posts `WM_CLOSE`.
 4. The session is saved and the window is destroyed first. Only at the end of `main` does
    `updates::restart()` run `relaunch_watched(&[], 30 s)`, and only then does the process exit.
-5. The new process starts with `--after-update <old pid>`, waits for it, and calls `on_start()` /
+5. The new process starts with `--after-update 0` (0 = the old process is watching and exits only after
+   this one is ready, so there is nothing to wait for; waiting for it would deadlock for 10 s). It never
+   forwards to another running Tsubame window (`claim(.., new_window = true)`), because a forward would
+   exit before `on_ready` and trigger a rollback. It calls `on_start()` /
    `on_ready()`, which ends the trial. If it dies before `on_ready`, the old process's watchdog rolls back
    and starts the old version.
 6. "Roll back" stores `AFTER_EXIT = 2`, so `updates::rollback_and_relaunch()` runs instead: `rollback()`

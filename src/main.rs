@@ -452,7 +452,8 @@ fn main() {
         let mut _instance = None;
         if !dev {
             let launch = single::Launch { new_tab: cli.new_tab, paths: targets.clone() };
-            match single::claim(hinst, &launch, cli.new_window) {
+            // an update restart never forwards to another running window: it must become ready itself
+            match single::claim(hinst, &launch, cli.new_window || cli.after_update.is_some()) {
                 single::Claim::Forwarded => return,
                 single::Claim::Owner(inst) => _instance = Some(inst),
                 single::Claim::Standalone => {}
@@ -2066,6 +2067,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
             WM_APP_UPDATE => {
+                // "Download and restart" applied the update: quit through the normal close path
+                if updates::take_restart_request() {
+                    AFTER_EXIT.store(1, Ordering::Release);
+                    let first = with(|a| !std::mem::replace(&mut a.closing, true)).unwrap_or(true);
+                    if first {
+                        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                    return LRESULT(0);
+                }
                 // only Settings > Updates shows update state: repaint when it is visible
                 invalidate(hwnd);
                 LRESULT(0)
