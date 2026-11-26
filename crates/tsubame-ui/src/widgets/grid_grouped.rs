@@ -563,9 +563,7 @@ pub(crate) fn grid_grouped(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, 
 
     // headers and cells that intersect the viewport
     let focused = it.focused && ui.window_focused();
-    let hot = (it.hovered && ui.active().is_none_or(|a| a == id) && area.contains_pt(ui.mouse()) && !st.banding())
-        .then(|| hit_at(st, src, ui.mouse()))
-        .unwrap_or(GroupHit::None);
+    let hot = if it.hovered && ui.active().is_none_or(|a| a == id) && area.contains_pt(ui.mouse()) && !st.banding() { hit_at(st, src, ui.mouse()) } else { GroupHit::None };
     resp.hovered = match hot {
         GroupHit::Cell(gi, j) => Some(item_of(src, gi, j)),
         _ => None,
