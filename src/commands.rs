@@ -116,6 +116,11 @@ pub const CMD_OPEN_TERMINAL: u32 = 240;
 pub const CMD_COPY_ADDRESS: u32 = 241;
 pub const CMD_COPY_ADDRESS_QUOTED: u32 = 242;
 pub const CMD_PASTE_AND_GO: u32 = 243;
+// B12-B: the app menu (gear button in the title bar), ids 330-359
+pub const CMD_APP_MENU: u32 = 330;
+pub const CMD_ABOUT: u32 = 331;
+pub const CMD_QUIT: u32 = 332;
+pub const CMD_COLUMNS_MENU: u32 = 333;
 
 /// What the rest of the app reads about a command: id, dotted name, title,
 /// default chords (text) and flags. Lives in the extension registry.
@@ -218,6 +223,15 @@ pub static GROUP_COMMANDS: &[CommandSpec] = &[
     cmd!(CMD_GROUP_EXPAND_ALL, "view.group-expand-all", "Expand all groups", [], F),
 ];
 
+/// The app menu: part of the core extension, registered right after `GROUP_COMMANDS`. F10 is the
+/// Windows key for "the menu"; Ctrl+Q quits (Alt+F4 closes the window, as everywhere).
+pub static APP_COMMANDS: &[CommandSpec] = &[
+    cmd!(CMD_APP_MENU, "app.menu", "Open the app menu", ["F10"], G),
+    cmd!(CMD_ABOUT, "app.about", "About Tsubame (version and build)", [], G),
+    cmd!(CMD_QUIT, "app.quit", "Quit Tsubame", ["Ctrl+Q"], G),
+    cmd!(CMD_COLUMNS_MENU, "view.columns-menu", "Choose columns (the column header's menu)", [], F),
+];
+
 /// Archive extension (`tsubame.vfs.archive`) commands. The extension commands take the
 /// `Alt+letter` family (`Alt+P` preview, `Alt+T` tags): `Alt+E` extracts here, `Shift+Alt+E`
 /// extracts the selection, `Alt+S` calculates sizes, `Alt+H` hashes (checksum).
@@ -281,6 +295,7 @@ pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
     BUILTIN
         .iter()
         .chain(GROUP_COMMANDS)
+        .chain(APP_COMMANDS)
         .chain(ARCHIVE_COMMANDS)
         .chain(FOLDER_SIZE_COMMANDS)
         .chain(CHECKSUM_COMMANDS)
@@ -298,6 +313,7 @@ pub fn all_builtin() -> impl Iterator<Item = &'static CommandSpec> {
 pub const fn builtin_count() -> usize {
     BUILTIN.len()
         + GROUP_COMMANDS.len()
+        + APP_COMMANDS.len()
         + ARCHIVE_COMMANDS.len()
         + FOLDER_SIZE_COMMANDS.len()
         + CHECKSUM_COMMANDS.len()
@@ -461,6 +477,10 @@ mod tests {
         (CMD_GROUP_TOGGLE, &[], false),
         (CMD_GROUP_COLLAPSE_ALL, &[], false),
         (CMD_GROUP_EXPAND_ALL, &[], false),
+        (CMD_APP_MENU, &[(Key::F(10), NM)], true),
+        (CMD_ABOUT, &[], true),
+        (CMD_QUIT, &[(Key::Char('Q'), CT)], true),
+        (CMD_COLUMNS_MENU, &[], false),
         (CMD_ARCHIVE_EXTRACT_HERE, &[(Key::Char('E'), AL)], false),
         (CMD_ARCHIVE_EXTRACT_SELECTED, &[(Key::Char('E'), AS)], false),
         (CMD_FOLDER_CALC_SIZES, &[(Key::Char('S'), AL)], false),
@@ -480,7 +500,7 @@ mod tests {
     fn settings_tab_allowed_before(cmd: u32) -> bool {
         matches!(
             cmd,
-            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS | CMD_VIEW_EXTENSIONS | CMD_REOPEN_TAB | CMD_NEW_WINDOW | CMD_FULLSCREEN | CMD_OPS_PANEL
+            CMD_FIND | CMD_NEW_TAB | CMD_CLOSE_TAB | CMD_NEXT_TAB | CMD_PREV_TAB | CMD_THEME | CMD_DENSITY | CMD_ZEBRA | CMD_SPLIT | CMD_SPLIT_ORIENTATION | CMD_SWITCH_PANE | CMD_TAB_TO_OTHER | CMD_GLOBAL_SEARCH | CMD_AGE_COLOURS | CMD_VIEW_EXTENSIONS | CMD_REOPEN_TAB | CMD_NEW_WINDOW | CMD_FULLSCREEN | CMD_OPS_PANEL | CMD_APP_MENU | CMD_ABOUT | CMD_QUIT
         ) || (CMD_PALETTE..=CMD_RESET_KEYS).contains(&cmd)
     }
 

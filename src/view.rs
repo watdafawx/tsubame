@@ -57,6 +57,8 @@ mod suggestv;
 mod opsv;
 #[path = "view_groupcmd.rs"]
 mod groupcmd;
+#[path = "view_appmenu.rs"]
+mod appmenuv;
 pub use navv::spawn_new_window;
 use crate::batchui::BatchEdit;
 use crate::editing::RenameEdit;
@@ -412,6 +414,8 @@ pub struct View {
     folder_applying: bool,
     /// B11-G: the open tab menu: (pane slot, tab id, where it opened)
     tab_menu: Option<tabmenu::OpenMenu>,
+    /// the app menu's gear button and the toolbar tooltips (`view_appmenu.rs`)
+    appm: appmenuv::AppUi,
     /// B11-G: ids of tabs whose "move to new window" process started (the spawn worker fills it)
     tab_windows: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
     /// B11-G: a header cell is being dragged to reorder the columns
@@ -530,6 +534,7 @@ impl View {
             folder_views: fmem::FolderViews::default(),
             folder_applying: false,
             tab_menu: None,
+            appm: Default::default(),
             tab_windows: Default::default(),
             col_drag: tsubame_ui::HeaderDrag::new(),
             psug: crate::path_suggest::PathSuggest::new(wake_for_suggest),
@@ -1228,7 +1233,7 @@ impl View {
             ui.request_repaint();
             return;
         }
-        if self.run_u4(ui, cmd) || self.run_basics(ui, cmd) || self.run_folder_views(ui, cmd) || self.run_tab_menu_cmd(ui, cmd) || self.run_suggest(ui, cmd) || self.run_group(cmd) {
+        if self.run_appmenu(ui, cmd) || self.run_u4(ui, cmd) || self.run_basics(ui, cmd) || self.run_folder_views(ui, cmd) || self.run_tab_menu_cmd(ui, cmd) || self.run_suggest(ui, cmd) || self.run_group(cmd) {
             ui.request_repaint();
             return;
         }
@@ -2012,6 +2017,7 @@ impl View {
             && self.drag.is_none()
             && ui.popups_open() == 0;
         self.row_tip.finish_and_paint(g, &t, (w, h), tip_allowed, std::time::Instant::now());
+        self.paint_btn_tip(ui, g, &t, (w, h));
         self.paint_batch_preview(g, &t, (w, h));
         self.paint_palette(ui, g, (w, h));
         self.paint_search(ui, g, (w, h));
@@ -2245,9 +2251,12 @@ impl View {
             self.set_layout(dual, orient);
             ui.request_repaint();
         }
+        // the app menu (Settings, shortcuts, updates, new window, about, quit and every command)
+        let gear = Rect::new(sw.x - 6.0 - appmenuv::GEAR_W, sw.y, appmenuv::GEAR_W, sw.h);
+        self.paint_gear(ui, g, t, gear);
         // tabs (with two panes every pane has its own strip)
         if with_tabs {
-            let strip_r = Rect::new(r.x + 40.0, r.y, (sw.x - r.x - 40.0 - 8.0).max(0.0), r.h);
+            let strip_r = Rect::new(r.x + 40.0, r.y, (gear.x - r.x - 40.0 - 8.0).max(0.0), r.h);
             self.paint_tabs(ui, g, strip_r);
         }
     }
@@ -2267,9 +2276,11 @@ impl View {
         x += bs + 2.0;
         self.paint_nav_btn(ui, g, Rect::new(x, by, bs, bs), can_fwd, true);
         x += bs + 2.0;
-        if icon_button(ui, g, t, pid(self.live, ID_UP), Rect::new(x, by, bs, bs), "\u{E74A}", can_up) {
+        let up_id = pid(self.live, ID_UP);
+        if icon_button(ui, g, t, up_id, Rect::new(x, by, bs, bs), "\u{E74A}", can_up) {
             self.up();
         }
+        self.tip_cmd(ui, up_id, Rect::new(x, by, bs, bs), "Up one folder", CMD_UP);
         x += bs + t.space_4;
 
         // filter box on the right (+ preview pane toggle button at the far right), path bar takes the rest
@@ -2291,6 +2302,7 @@ impl View {
             let m = self.mode.next();
             self.set_mode_preset(m);
         }
+        self.tip_cmd(ui, pid(self.live, ID_VIEW), vb, "Next view (Details, thumbnails, tree, columns)", CMD_VIEW_DETAILS);
         let bar = Rect::new(x, fr.y, (vb.x - t.space_4 - x).max(40.0), t.height_path_bar);
         self.paint_path_bar(ui, g, bar, t);
         if icon_only {
@@ -2299,6 +2311,7 @@ impl View {
                 ui.set_focus(Some(filter_id));
                 ui.request_repaint();
             }
+            self.tip_cmd(ui, pid(self.live, ID_SEARCH), sb, "Filter this folder", CMD_FIND);
         } else {
             self.paint_filter(ui, g, fr, t, compact);
         }
@@ -2313,6 +2326,7 @@ impl View {
                 g.round(pb, t.radius_md, if it.active { t.selected_inactive } else { t.hover });
             }
             g.text("\u{E8A0}", pb, f(t.icon_toolbar).icon().c(), if on { t.accent } else { t.text });
+            self.tip_cmd(ui, pid(self.live, ID_PREVIEW_BTN), pb, "Preview pane", CMD_PREVIEW_TOGGLE);
             if it.clicked == Some(Button::Left) {
                 self.toggle_preview_pane(ui);
             }
@@ -5187,6 +5201,9 @@ mod tests {
     // B11-H: path autocomplete, Ctrl+E, Ctrl+Alt+T, path bar menu
     #[path = "../../view_b11h_tests.rs"]
     mod b11h;
+    // B12-B: the app menu and the toolbar tooltips
+    #[path = "../../view_appmenu_tests.rs"]
+    mod appmenu_t;
     // B11-F2: Group by
     #[path = "../../view_group_tests.rs"]
     mod group_tests;

@@ -145,6 +145,7 @@ impl View {
             g.round(r, t.radius_md, if it.active { t.selected_inactive } else { t.hover });
         }
         g.text(glyph, r, f(t.icon_toolbar).icon().c(), if enabled { t.text } else { t.text_disabled });
+        self.tip_cmd(ui, id, r, if forward { "Forward (right click: history)" } else { "Back (right click: history)" }, if forward { CMD_FORWARD } else { CMD_BACK });
         if !enabled {
             return;
         }

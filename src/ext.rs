@@ -34,7 +34,7 @@ impl Extension<App> for Core {
         ExtensionInfo::builtin(CORE, "Tsubame core", true)
     }
     fn contribute(&self, c: &mut Contributions<App>) {
-        for spec in crate::commands::BUILTIN.iter().chain(crate::commands::GROUP_COMMANDS) {
+        for spec in crate::commands::BUILTIN.iter().chain(crate::commands::GROUP_COMMANDS).chain(crate::commands::APP_COMMANDS) {
             c.command(spec.clone(), View::run_builtin);
         }
         for b in crate::cols::BUILTIN.iter().filter(|b| b.ext == CORE) {
