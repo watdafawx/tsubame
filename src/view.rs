@@ -1295,6 +1295,7 @@ impl View {
                 }
             }
             CMD_UNDO => self.undo_op(),
+            CMD_OPS_PANEL => self.toggle_ops_panel(),
             CMD_REDO => self.redo_op(),
             CMD_PIN_FOLDER => {
                 let p = self.selected_folder().unwrap_or_else(|| self.folder_path());

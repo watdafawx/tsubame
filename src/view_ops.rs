@@ -47,6 +47,17 @@ impl View {
         }
     }
 
+    /// Ctrl+Shift+O: fold the panel into the pill, or unfold it.
+    pub(super) fn toggle_ops_panel(&mut self) {
+        if self.ops.panel.cards.is_empty() {
+            self.ops.message = Some("No file operations".into());
+        } else if self.ops.panel.open {
+            self.ops.act(Act::Collapse);
+        } else {
+            self.ops.act(Act::Open);
+        }
+    }
+
     pub(super) fn ops_act(&mut self, ui: &mut Ui, a: Act) {
         self.ops.act(a);
         self.after_ops();
