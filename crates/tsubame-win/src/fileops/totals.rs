@@ -32,10 +32,23 @@ enum OpScan {
     Settled,
 }
 
+/// One job: its operations' estimates and its own totals.
+#[derive(Default)]
+struct JobScan {
+    ops: Vec<OpScan>,
+    totals: Totals,
+}
+
 #[derive(Default)]
 struct State {
     totals: Totals,
-    jobs: HashMap<u64, Vec<OpScan>>,
+    jobs: HashMap<u64, JobScan>,
+}
+
+/// Adds to both the queue-wide and the job's totals.
+fn bump(a: &mut Totals, b: &mut Totals, f: impl Fn(&mut Totals)) {
+    f(a);
+    f(b);
 }
 
 /// Shared between queue, worker and scanner.
@@ -51,7 +64,18 @@ impl Shared {
     }
     /// Register a job of `ops` operations (all `Pending`).
     pub fn begin_job(&self, id: u64, ops: usize) {
-        self.lock().jobs.insert(id, vec![OpScan::Pending; ops]);
+        self.lock().jobs.insert(id, JobScan { ops: vec![OpScan::Pending; ops], totals: Totals::default() });
+    }
+    /// The numbers of job `id` alone (zero when unknown).
+    pub fn job(&self, id: u64) -> Totals {
+        self.lock().jobs.get(&id).map(|j| j.totals).unwrap_or_default()
+    }
+    /// The scanned size of operation `index` of job `id` (0: not scanned yet).
+    pub fn op_bytes(&self, id: u64, index: usize) -> u64 {
+        match self.lock().jobs.get(&id).and_then(|j| j.ops.get(index)) {
+            Some(OpScan::Scanned { bytes, .. }) => *bytes,
+            _ => 0,
+        }
     }
     /// Job still running (a scan result for a finished job is dropped).
     pub fn is_open(&self, id: u64) -> bool {
@@ -61,49 +85,63 @@ impl Shared {
     pub fn scanned(&self, id: u64, index: usize, files: u64, bytes: u64) {
         let mut s = self.lock();
         let State { totals, jobs } = &mut *s;
-        if let Some(slot) = jobs.get_mut(&id).and_then(|j| j.get_mut(index))
+        let Some(job) = jobs.get_mut(&id) else { return };
+        if let Some(slot) = job.ops.get_mut(index)
             && matches!(slot, OpScan::Pending)
         {
             *slot = OpScan::Scanned { files, bytes };
-            totals.files_total += files;
-            totals.bytes_total += bytes;
+            bump(totals, &mut job.totals, |t| {
+                t.files_total += files;
+                t.bytes_total += bytes;
+            });
         }
     }
     /// The backend moved data. Called often; cheap.
-    pub fn step(&self, files: u64, bytes: u64) {
+    pub fn step(&self, id: u64, files: u64, bytes: u64) {
         let mut s = self.lock();
-        s.totals.files_done += files;
-        s.totals.bytes_done += bytes;
+        let State { totals, jobs } = &mut *s;
+        totals.files_done += files;
+        totals.bytes_done += bytes;
+        if let Some(j) = jobs.get_mut(&id) {
+            j.totals.files_done += files;
+            j.totals.bytes_done += bytes;
+        }
     }
     /// Operation `index` ended. `files`/`bytes` are what the backend reported through
     /// `step` (already counted as done). Call for skipped and failed operations too.
     pub fn op_finished(&self, id: u64, index: usize, files: u64, bytes: u64) {
         let mut s = self.lock();
         let State { totals, jobs } = &mut *s;
-        let Some(slot) = jobs.get_mut(&id).and_then(|j| j.get_mut(index)) else {
+        let Some(job) = jobs.get_mut(&id) else { return };
+        let Some(slot) = job.ops.get_mut(index) else {
             return;
         };
+        let jt = &mut job.totals;
         match *slot {
             OpScan::Scanned { files: f, bytes: b } => {
                 // Done may be short of the estimate (renames, skips): close the gap.
                 // Or over it (folder changed while copying): grow the total.
-                if files < f {
-                    totals.files_done += f - files;
-                } else {
-                    totals.files_total += files - f;
-                }
-                if bytes < b {
-                    totals.bytes_done += b - bytes;
-                } else {
-                    totals.bytes_total += bytes - b;
-                }
+                bump(totals, jt, |t| {
+                    if files < f {
+                        t.files_done += f - files;
+                    } else {
+                        t.files_total += files - f;
+                    }
+                    if bytes < b {
+                        t.bytes_done += b - bytes;
+                    } else {
+                        t.bytes_total += bytes - b;
+                    }
+                });
             }
             OpScan::Pending => {
                 // No estimate yet: count the work as it happened. At least one unit.
                 let units = files.max(1);
-                totals.files_total += units;
-                totals.files_done += units - files;
-                totals.bytes_total += bytes;
+                bump(totals, jt, |t| {
+                    t.files_total += units;
+                    t.files_done += units - files;
+                    t.bytes_total += bytes;
+                });
             }
             OpScan::Settled => {}
         }
@@ -115,7 +153,7 @@ impl Shared {
         let mut s = self.lock();
         let State { totals, jobs } = &mut *s;
         if let Some(job) = jobs.remove(&id) {
-            for slot in job {
+            for slot in job.ops {
                 if let OpScan::Scanned { files, bytes } = slot {
                     totals.files_total = totals.files_total.saturating_sub(files);
                     totals.bytes_total = totals.bytes_total.saturating_sub(bytes);
@@ -220,7 +258,7 @@ mod tests {
         s.scanned(1, 0, 3, 300);
         s.scanned(1, 1, 1, 0);
         assert_eq!(s.snapshot().files_total, 4);
-        s.step(3, 300);
+        s.step(1, 3, 300);
         s.op_finished(1, 0, 3, 300);
         s.op_finished(1, 1, 0, 0); // rename: no steps, estimate closes the gap
         let t = s.snapshot();
@@ -234,7 +272,7 @@ mod tests {
     fn work_before_scan_is_not_counted_twice() {
         let s = Shared::default();
         s.begin_job(1, 1);
-        s.step(2, 50);
+        s.step(1, 2, 50);
         s.op_finished(1, 0, 2, 50); // worker was faster than the scanner
         s.scanned(1, 0, 2, 50); // late scan result is ignored
         let t = s.snapshot();
@@ -252,10 +290,32 @@ mod tests {
         // job 2 is cancelled before it runs: its estimate leaves the total
         s.end_job(2);
         assert_eq!(s.snapshot().files_total, 10);
-        s.step(10, 100);
+        s.step(1, 10, 100);
         s.op_finished(1, 0, 10, 100);
         s.end_job(1);
         assert_eq!(s.snapshot(), Totals::default());
+    }
+
+    #[test]
+    fn per_job_totals_stay_apart() {
+        let s = Shared::default();
+        s.begin_job(1, 1);
+        s.begin_job(2, 2);
+        s.scanned(1, 0, 4, 400);
+        s.scanned(2, 0, 1, 10);
+        s.scanned(2, 1, 1, 20);
+        assert_eq!(s.op_bytes(2, 1), 20);
+        assert_eq!(s.op_bytes(2, 9), 0);
+        s.step(1, 2, 200);
+        let (a, b) = (s.job(1), s.job(2));
+        assert_eq!((a.files_done, a.files_total, a.bytes_done, a.bytes_total), (2, 4, 200, 400));
+        assert_eq!((b.files_done, b.files_total, b.bytes_total), (0, 2, 30));
+        assert_eq!(s.snapshot().bytes_total, 430);
+        s.op_finished(1, 0, 2, 200); // cancelled half way: the gap closes for the job too
+        assert_eq!(s.job(1).bytes_done, 400);
+        assert_eq!(s.job(2).bytes_done, 0);
+        s.end_job(1);
+        assert_eq!(s.job(1), Totals::default());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The queue worker: FIFO jobs, conflicts, progress throttle, journal updates.
 use super::{
-    Cancellation, Choice, ConflictReply, Entry, Event, Journal, OpBackend, Operation, Step, Ticket,
+    Cancellation, Choice, ConflictReply, Entry, Event, FileMeta, Journal, OpBackend, Operation,
+    Step, Ticket,
     totals::{ScanRequest, Shared, Totals, scan_loop},
 };
 use std::{
@@ -58,6 +59,8 @@ enum Command {
     Redo,
     UndoGroup,
     RedoGroup,
+    /// undo group `id` only if it is still the newest one
+    UndoGroupOf(u64),
 }
 struct Job {
     id: u64,
@@ -245,6 +248,11 @@ impl FileOpQueue {
     pub fn undo_group(&self) -> io::Result<Ticket> {
         self.send(Command::UndoGroup)
     }
+    /// Undo submission `group` as a whole, but only if it is still the newest one
+    /// when the worker gets to it (the panel's Undo link). Otherwise nothing runs.
+    pub fn undo_group_of(&self, group: u64) -> io::Result<Ticket> {
+        self.send(Command::UndoGroupOf(group))
+    }
     /// Redo the submission undone last, as a whole, in its original order.
     pub fn redo_group(&self) -> io::Result<Ticket> {
         self.send(Command::RedoGroup)
@@ -289,6 +297,16 @@ fn conflict_target(op: &mut Operation) -> Option<&mut PathBuf> {
         | Operation::Move { target, .. }
         | Operation::Rename { target, .. } => Some(target),
         _ => None,
+    }
+}
+
+/// The incoming item of a copy / move / rename (empty for anything else).
+fn conflict_source(op: &Operation) -> PathBuf {
+    match op {
+        Operation::Copy { source, .. }
+        | Operation::Move { source, .. }
+        | Operation::Rename { source, .. } => source.clone(),
+        _ => PathBuf::new(),
     }
 }
 
@@ -394,13 +412,22 @@ impl Worker {
 
     /// Ask the user (through the event channel) what to do with an occupied target.
     /// `None`: cancelled or nobody listening.
-    fn ask(&self, id: u64, target: &Path, cancel: &Cancellation) -> Option<(Choice, bool)> {
+    fn ask(
+        &self,
+        id: u64,
+        source: &Path,
+        target: &Path,
+        cancel: &Cancellation,
+    ) -> Option<(Choice, bool)> {
         let (tx, rx) = mpsc::channel();
         if self
             .events
             .send(Event::Conflict {
                 id,
+                source: source.to_path_buf(),
                 target: target.to_path_buf(),
+                existing: FileMeta::of(target),
+                incoming: FileMeta::of(source),
                 reply: ConflictReply(tx),
             })
             .is_err()
@@ -418,6 +445,17 @@ impl Worker {
 
     fn run_job(&mut self, job: Job, _wake: &Wake) {
         let id = job.id;
+        if job.cancel.is_cancelled() {
+            // cancelled while it waited: it never starts
+            self.shared.end_job(id);
+            self.send(Event::Finished {
+                id,
+                cancelled: true,
+                totals: self.shared.snapshot(),
+                job: Default::default(),
+            });
+            return;
+        }
         self.send(Event::Started(id));
         let ops: Vec<(Operation, Mode)> = match &job.command {
             Command::Run(ops) => ops.iter().map(|o| (o.clone(), Mode::Run)).collect(),
@@ -425,13 +463,24 @@ impl Worker {
             Command::Redo => lock(&self.journal).next_redo().map(|fwd| (fwd, Mode::Redo)).into_iter().collect(),
             Command::UndoGroup => lock(&self.journal).undo_group().into_iter().map(|(i, inv)| (inv, Mode::Undo(i))).collect(),
             Command::RedoGroup => lock(&self.journal).redo_group().into_iter().map(|(i, fwd)| (fwd, Mode::RedoAt(i))).collect(),
+            Command::UndoGroupOf(g) => {
+                let j = lock(&self.journal);
+                if j.newest_undo_group() == Some(*g) {
+                    j.undo_group().into_iter().map(|(i, inv)| (inv, Mode::Undo(i))).collect()
+                } else {
+                    Vec::new()
+                }
+            }
         };
         let mut apply_all: Option<Choice> = None;
         for (index, (mut op, mode)) in ops.into_iter().enumerate() {
+            // Pause holds here between operations (and inside copies between chunks)
+            job.cancel.wait_while_paused();
             if job.cancel.is_cancelled() {
                 break;
             }
             let shown = op.clone();
+            let source = conflict_source(&op);
             let mut replace_target = None;
             if !is_case_rename(&op)
                 && let Some(target) = conflict_target(&mut op)
@@ -439,7 +488,7 @@ impl Worker {
             {
                 let choice = match apply_all {
                     Some(c) => c,
-                    None => match self.ask(id, target, &job.cancel) {
+                    None => match self.ask(id, &source, target, &job.cancel) {
                         Some((c, all)) => {
                             if all {
                                 apply_all = Some(c);
@@ -453,6 +502,11 @@ impl Worker {
                     },
                 };
                 match choice {
+                    Choice::Cancel => {
+                        job.cancel.cancel();
+                        self.shared.op_finished(id, index, 0, 0);
+                        break;
+                    }
                     Choice::Skip => {
                         self.shared.op_finished(id, index, 0, 0);
                         continue;
@@ -494,6 +548,7 @@ impl Worker {
                 _ => PathBuf::new(),
             };
             let (mut op_bytes, mut op_files) = (0u64, 0u64);
+            let item_bytes = self.shared.op_bytes(id, index);
             let result = {
                 let events = &self.events;
                 let shared = &self.shared;
@@ -505,13 +560,16 @@ impl Worker {
                     &mut |s: Step| {
                         op_bytes += s.bytes;
                         op_files += s.files;
-                        shared.step(s.files, s.bytes);
+                        shared.step(id, s.files, s.bytes);
                         if throttle.allow(Instant::now()) {
                             let _ = events.send(Event::Progress {
                                 id,
                                 bytes_done: op_bytes,
                                 current: current.clone(),
+                                index,
+                                item_bytes,
                                 totals: shared.snapshot(),
+                                job: shared.job(id),
                             });
                         }
                     },
@@ -542,11 +600,13 @@ impl Worker {
             }
         }
         let totals = self.shared.snapshot();
+        let job_totals = self.shared.job(id);
         self.shared.end_job(id);
         self.send(Event::Finished {
             id,
             cancelled: job.cancel.is_cancelled(),
             totals,
+            job: job_totals,
         });
     }
 }

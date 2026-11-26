@@ -1197,3 +1197,178 @@ fn group_lookup_skips_history_and_keeps_groups_apart() {
     assert_eq!(loaded.undo_group().len(), 1);
     assert_eq!(loaded.redo_group().len(), 1);
 }
+
+// ---------------------------------------------------------------- B11-E2: pause, cancel, panel data
+
+/// A backend whose every operation is 20 chunks of 1 byte, checking the gate between
+/// chunks like the file system backend does. `ran` counts executed operations.
+struct Chunky {
+    ran: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    chunk: Duration,
+}
+impl OpBackend for Chunky {
+    fn execute(
+        &mut self,
+        _: &Operation,
+        cancel: &Cancellation,
+        progress: &mut dyn FnMut(Step),
+    ) -> io::Result<Option<Operation>> {
+        self.ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..20 {
+            cancel.check()?;
+            std::thread::sleep(self.chunk);
+            progress(Step { bytes: 1, files: 0 });
+        }
+        progress(Step { bytes: 0, files: 1 });
+        Ok(None)
+    }
+}
+
+fn chunky(chunk_ms: u64) -> (FileOpQueue, Receiver<Event>, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (q, rx) = FileOpQueue::new(Chunky { ran: ran.clone(), chunk: Duration::from_millis(chunk_ms) }).unwrap();
+    (q, rx, ran)
+}
+
+#[test]
+fn pause_holds_the_worker_and_resume_continues() {
+    let (q, rx, ran) = chunky(5);
+    let t = q.submit(vec![Operation::NewFile("a".into()), Operation::NewFile("b".into())]).unwrap();
+    // wait for the first progress, then pause
+    loop {
+        if let Event::Progress { .. } = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            break;
+        }
+    }
+    t.cancellation.pause();
+    assert!(t.cancellation.is_paused());
+    // drain what was in flight; afterwards the worker sends nothing while paused
+    std::thread::sleep(Duration::from_millis(60));
+    while rx.try_recv().is_ok() {}
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(rx.try_recv().is_err(), "a paused job must not progress");
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+    t.cancellation.resume();
+    let o = finish_with(&rx, None);
+    assert!(!o.cancelled);
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 2, "both operations ran after resume");
+}
+
+#[test]
+fn cancel_wakes_a_paused_job() {
+    let (q, rx, _) = chunky(5);
+    let t = q.submit(vec![Operation::NewFile("a".into())]).unwrap();
+    t.cancellation.pause();
+    std::thread::sleep(Duration::from_millis(50));
+    t.cancellation.cancel();
+    let o = finish_with(&rx, None);
+    assert!(o.cancelled);
+}
+
+#[test]
+fn cancelling_a_waiting_job_skips_it_without_running() {
+    let (q, rx, ran) = chunky(10);
+    let first = q.submit(vec![Operation::NewFile("a".into())]).unwrap();
+    let second = q.submit(vec![Operation::NewFile("b".into()), Operation::NewFile("c".into())]).unwrap();
+    second.cancellation.cancel();
+    let mut started = Vec::new();
+    let mut finished = Vec::new();
+    while finished.len() < 2 {
+        match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Event::Started(id) => started.push(id),
+            Event::Finished { id, cancelled, job, .. } => finished.push((id, cancelled, job)),
+            _ => {}
+        }
+    }
+    assert_eq!(started, vec![first.id], "the cancelled job never starts");
+    assert_eq!(finished[0].0, first.id);
+    assert!(!finished[0].1);
+    assert_eq!(finished[0].2.bytes_done, 20, "per-job totals of the job that ran");
+    assert_eq!(finished[1], (second.id, true, Totals::default()));
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn progress_carries_the_jobs_own_totals_and_index() {
+    let (q, rx, _) = chunky(2);
+    let t = q.submit(vec![Operation::NewFile("a".into()), Operation::NewFile("b".into())]).unwrap();
+    let mut seen = Vec::new();
+    loop {
+        match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Event::Progress { id, index, job, .. } => {
+                assert_eq!(id, t.id);
+                seen.push((index, job.bytes_done));
+            }
+            Event::Finished { job, .. } => {
+                assert_eq!(job.bytes_done, 40);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(seen.iter().any(|s| s.0 == 1), "index moves to the second operation: {seen:?}");
+    assert!(seen.windows(2).all(|w| w[0].1 <= w[1].1), "job bytes only grow");
+}
+
+#[test]
+fn conflict_reports_both_sides_and_cancel_stops_the_job() {
+    let t = Temp::new();
+    let src = t.0.join("in.txt");
+    let dst = t.0.join("out");
+    fs::create_dir(&dst).unwrap();
+    fs::write(&src, b"incoming!").unwrap();
+    fs::write(dst.join("in.txt"), b"old").unwrap();
+    fs::write(t.0.join("second.txt"), b"2").unwrap();
+    let r = Rig::new();
+    r.q.submit(vec![
+        Operation::Copy { source: src.clone(), target: dst.join("in.txt") },
+        Operation::Copy { source: t.0.join("second.txt"), target: dst.join("second.txt") },
+    ])
+    .unwrap();
+    let cancelled = loop {
+        match r.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Event::Conflict { source, target, existing, incoming, reply, .. } => {
+                assert_eq!(source, src);
+                assert_eq!(target, dst.join("in.txt"));
+                assert!(existing.known && incoming.known);
+                assert_eq!((existing.size, incoming.size), (3, 9));
+                assert!(!existing.dir && existing.modified.is_some());
+                reply.answer(Choice::Cancel, false);
+            }
+            Event::Finished { cancelled, .. } => break cancelled,
+            _ => {}
+        }
+    };
+    assert!(cancelled);
+    assert_eq!(fs::read(dst.join("in.txt")).unwrap(), b"old");
+    assert!(!dst.join("second.txt").exists(), "Cancel operation stops the rest too");
+}
+
+#[test]
+fn undo_group_of_runs_only_for_the_newest_group() {
+    let t = Temp::new();
+    if !bin_or_skip(&t.0) {
+        return;
+    }
+    let a = t.0.join("a");
+    let b = t.0.join("b");
+    fs::write(&a, b"1").unwrap();
+    fs::write(&b, b"2").unwrap();
+    let r = Rig::new();
+    let first = r.q.submit(vec![Operation::Rename { source: a.clone(), target: t.0.join("a2") }]).unwrap();
+    finish(&r.rx);
+    let second = r.q.submit(vec![Operation::Rename { source: b.clone(), target: t.0.join("b2") }]).unwrap();
+    finish(&r.rx);
+    // the older group is not the newest any more: nothing happens
+    r.q.undo_group_of(first.id).unwrap();
+    finish(&r.rx);
+    assert!(t.0.join("a2").exists() && t.0.join("b2").exists());
+    r.q.undo_group_of(second.id).unwrap();
+    finish(&r.rx);
+    assert!(b.exists() && !t.0.join("b2").exists());
+    assert_eq!(lock_journal(&r.q).newest_undo_group(), Some(first.id));
+}
+
+fn lock_journal(q: &FileOpQueue) -> Journal {
+    q.journal().lock().unwrap().clone()
+}
