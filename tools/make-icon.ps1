@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Frame plan (same cut as mocks\logo-final.html):
-    16, 24 px      res\tsubame-small.svg   fat wings, shallow fork, no red dot
+    16, 20, 24 px  res\tsubame-small.svg   16-unit integer grid, no red throat
     32, 48, 64, 256 res\tsubame.svg        master cut
 
   Each frame is rasterised by ImageMagick at an exact 8x the target size (4x for
@@ -120,6 +120,7 @@ if (-not $magick) {
 
 $plan = @(
     @{ Size = 16; Svg = 'res\tsubame-small.svg' },
+    @{ Size = 20; Svg = 'res\tsubame-small.svg' },
     @{ Size = 24; Svg = 'res\tsubame-small.svg' },
     @{ Size = 32; Svg = 'res\tsubame.svg' },
     @{ Size = 48; Svg = 'res\tsubame.svg' },
@@ -140,7 +141,9 @@ try {
         # then box-downscale: an integer-factor box is a plain area average, which
         # stays crisp at 16 px where a wide-window filter only smears the mark.
         $ss = if ($n -ge 256) { 4 } else { 8 }
-        $density = 0.96 * $ss * $n
+        # viewBox is 100 units (master) or 16 units (small cut): 96 dpi * units = density.
+        $units = if ($f.Svg -like '*small*') { 16 } else { 100 }
+        $density = (96.0 / $units) * $ss * $n
         # -strip plus the chunk excludes keep the 256 px PNG byte-identical between
         # runs (ImageMagick otherwise stamps tIME), so rebuilding the .ico is a no-op diff.
         & $magick.Source -background none -density $density $svg -filter Box -resize "${n}x${n}" `

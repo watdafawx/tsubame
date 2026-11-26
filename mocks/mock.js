@@ -140,10 +140,9 @@
 
   /* ---------- pieces ---------- */
   function logo() {
-    // small-cut app mark, same path as res/tsubame-small.svg
-    return '<svg class="logo" viewBox="0 0 100 100"><rect width="100" height="100" rx="22" fill="var(--brand-navy)"/>' +
-      '<g transform="translate(13 13) scale(.74)"><g transform="rotate(40 50 53) translate(2 3) scale(.96)">' +
-      '<path fill="var(--brand-cream)" d="M50 12C57 12 61 18 61 26C74 28 87 38 94 54C82 47 72 46 63 48C64 62 68 78 74 94C63 86 55 78 50 70C45 78 37 86 26 94C32 78 36 62 37 48C28 46 18 47 6 54C13 38 26 28 39 26C39 18 43 12 50 12Z"/></g></g></svg>';
+    // small-cut app mark (option A), same polygon as res/tsubame-small.svg
+    return '<svg class="logo" viewBox="0 0 16 16"><rect width="16" height="16" rx="3.5" fill="var(--brand-navy)"/>' +
+      '<polygon fill="var(--brand-cream)" points="8,2 9,3 9,4 15,11 10,9 11,14 8,11 5,14 6,9 1,11 7,4 7,3"/></svg>';
   }
   function titlebar(o) {
     var tabs = o.tabs || [{ t: 'Downloads', active: true }, { t: 'tsubame', hover: true }, { t: 'Documents' }];
