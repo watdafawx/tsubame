@@ -7,6 +7,9 @@ Up to two chords per command; a chord another command already uses asks before i
 moves. Commands with no default key can be given one the same way, or run from the
 command palette (Ctrl+Shift+P or Ctrl+K).
 
+Every command is also in the app menu (gear button in the title bar, or `F10`) with its
+shortcut: see [discoverability.md](discoverability.md).
+
 The extension commands (preview, tags, tree pane, extract, checksum, folder sizes)
 use `Alt+letter`; the view switches use `Ctrl+Shift+1` to `Ctrl+Shift+5`.
 
@@ -101,6 +104,8 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Settings: keyboard shortcuts | `settings.keys` | `F1` |
 | New window | `window.new` | `Ctrl+N` |
 | Toggle fullscreen | `window.fullscreen` | `F11` |
+| Open the app menu | `app.menu` | `F10` |
+| Quit Tsubame | `app.quit` | `Ctrl+Q` |
 
 ### Tools
 
@@ -148,6 +153,8 @@ This table is generated from the command table in `src/commands.rs`; the test
 | Collapse or expand the group of the cursor | `view.group-toggle` |
 | Collapse all groups | `view.group-collapse-all` |
 | Expand all groups | `view.group-expand-all` |
+| About Tsubame (version and build) | `app.about` |
+| Choose columns (the column header's menu) | `view.columns-menu` |
 | Age colours: toggle | `view.age_colours` |
 | Batch rename selected items… | `file.batch_rename` |
 

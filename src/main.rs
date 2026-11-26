@@ -44,6 +44,7 @@
 //! TSUBAME_DATA_DIR overrides the config/session directory.
 
 mod age;
+mod appmenu;
 mod archive_ui;
 mod batchui;
 mod bench;

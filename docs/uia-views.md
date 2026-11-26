@@ -17,6 +17,7 @@ covers the file views: file rows, Tree, Miller columns, and the tags picker.
 | Path edit autocomplete (`PART_SUGGEST`) | List (`"Address suggestions"`) | ListItem: folder name, folder path as value, `"Folder suggestion"` | Invoke (opens the folder) |
 | Operations panel or its pill (`PART_OPS`, slot 0) | List (`"Operations"`, `"N running"`) | ListItem `"Button"`: `"Pause: Copying 14 items, 43%"`, `"Cancel: ..."`, `"Undo: ..."`, `"Retry: ..."`, `"Show operations"` | Invoke |
 | Conflict dialog (`PART_CONFLICT`, slot 0) | List (the dialog title) | ListItem `"Button"`: Cancel operation, Skip, Keep both, Replace (or "... all"), the "all" check box | Invoke |
+| App menu (gear button in the title bar, `F10`; `docs/discoverability.md`) | menu-style rows (CM10 snapshot), submenus Go, Tabs, View, Group by, Panes, Files, Settings pages | row name, shortcut text, check or radio state (`"App menu"`) | Invoke, ExpandCollapse |
 | Tags picker & navigation menus | menu-style rows (CM10 snapshot) | row name, toggled state (`"Back history"`, `"Forward history"`, `"Subfolders of <name>"`) | Invoke (and Toggle) |
 
 - **Name** of a file row is the file name, plus `, tags: A, B` when it has tags

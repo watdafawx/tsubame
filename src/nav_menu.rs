@@ -86,6 +86,10 @@ struct HistRow {
 }
 
 enum Kind {
+    /// the app menu (gear button, F10): groups of commands with their shortcut text
+    App {
+        menu: crate::appmenu::AppMenu,
+    },
     /// the path bar's right-click menu: (command, title, glyph, shortcut text)
     Actions {
         rows: Vec<(u32, String, char, String)>,
@@ -161,6 +165,19 @@ impl NavMenu {
         }
     }
 
+    /// Opens the app menu (gear button in the title bar, F10) at `anchor`.
+    pub fn app(pane: usize, anchor: Pt, menu: crate::appmenu::AppMenu) -> Self {
+        Self {
+            pane,
+            state: MenuState::new(anchor, false),
+            open: true,
+            kind: Kind::App { menu },
+            clock: Instant::now(),
+            a11y_prev: None,
+            a11y_published: false,
+        }
+    }
+
     /// Opens a breadcrumb sibling subfolder menu for `dir_path`, starting
     /// asynchronous enumeration on the background enumerator worker.
     pub fn crumb(pane: usize, crumb_idx: usize, label: String, dir_path: String, active_child: Option<String>, anchor: Pt, wake: Wake) -> Self {
@@ -205,6 +222,11 @@ impl NavMenu {
         }
     }
 
+    /// This is the app menu.
+    pub fn is_app(&self) -> bool {
+        matches!(self.kind, Kind::App { .. })
+    }
+
     /// UIA menu name.
     pub fn a11y_name(&self) -> String {
         match &self.kind {
@@ -212,6 +234,7 @@ impl NavMenu {
             Kind::History { forward: true, .. } => "Forward history".into(),
             Kind::Crumb { label, .. } => format!("Subfolders of {label}"),
             Kind::Actions { .. } => "Address bar menu".into(),
+            Kind::App { .. } => "App menu".into(),
         }
     }
 
@@ -357,6 +380,7 @@ impl NavMenu {
             Kind::History { entries, .. } => entries.get(i).map(|e| NavMenuOut::GoHistory(e.index)),
             Kind::Crumb { dir_path, folders, .. } => folders.get(i).map(|name| NavMenuOut::GoFolder(nav::join(dir_path, name))),
             Kind::Actions { rows } => rows.get(i).map(|r| NavMenuOut::Command(r.0)),
+            Kind::App { menu } => menu.cmd_of(key).map(NavMenuOut::Command),
         }
     }
 
@@ -427,10 +451,15 @@ struct Source<'a> {
 
 impl MenuSource for Source<'_> {
     fn rows(&self, path: &[u64], out: &mut Vec<MenuRow>) {
+        if let Kind::App { menu } = self.kind {
+            menu.rows(path, out);
+            return;
+        }
         if !path.is_empty() {
             return;
         }
         match self.kind {
+            Kind::App { .. } => {}
             Kind::Actions { rows } => {
                 for (i, (_, title, glyph, keys)) in rows.iter().enumerate() {
                     out.push(MenuRow { icon: RowIcon::Glyph(*glyph), shortcut: keys.clone(), ..MenuRow::item(i as u64 + 1, title) });
