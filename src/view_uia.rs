@@ -14,6 +14,12 @@ impl View {
     /// Runs the requests screen readers queued since the last call.
     pub fn run_view_requests(&mut self) {
         for r in tsubame_win::uia::take_view_requests() {
+            if r.surf == uia_rows::skey(0, uia_rows::PART_OPS) || r.surf == uia_rows::skey(0, uia_rows::PART_CONFLICT) {
+                if matches!(r.act, VAct::Invoke) {
+                    self.a11y_ops(r.surf == uia_rows::skey(0, uia_rows::PART_CONFLICT), r.key);
+                }
+                continue;
+            }
             let slot = uia_rows::slot_of(r.surf);
             if slot > 1 || (slot == 1 && self.other.is_none()) {
                 continue;

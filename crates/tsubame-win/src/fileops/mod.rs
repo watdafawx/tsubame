@@ -138,6 +138,12 @@ pub enum Event {
 #[derive(Clone, Default)]
 pub struct Cancellation(Arc<Gate>);
 
+impl std::fmt::Debug for Cancellation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cancellation").field("cancelled", &self.is_cancelled()).field("paused", &self.is_paused()).finish()
+    }
+}
+
 #[derive(Default)]
 struct Gate {
     cancelled: AtomicBool,
