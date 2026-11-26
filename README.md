@@ -6,7 +6,7 @@ Tsubame (燕, "swallow") is a file browser for Windows written in Rust. It has o
 
 ## Status
 
-Pre-release, version 0.1.0. There is no stable release yet, so there is nothing to download: build it from source (below). The installer, the signed update manifest and the release workflow exist in the repository but have only been exercised as dry runs. Expect missing features and rough edges.
+Version 0.2.0. Windows Explorer parity batch: zoom, grouping, folder view memory, operations panel, path autocomplete and more. Installers are unsigned (see Installing). Expect rough edges.
 
 ## Features
 
@@ -90,7 +90,7 @@ Tsubame's own rows appear at once and the shell extensions fill in as they answe
 
 ## Installing
 
-The 0.1.0 installers are not code-signed (there is no Authenticode certificate yet), so Windows
+The 0.2.0 installers are not code-signed (there is no Authenticode certificate yet), so Windows
 SmartScreen shows "Windows protected your PC" the first time you run the setup or the app. Choose
 More info > Run anyway. That warning only covers the first run of an unsigned file: updates are
 checked against a signing key built into the app, so they are verified either way. A `SHA256SUMS`
