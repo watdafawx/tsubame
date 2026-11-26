@@ -46,6 +46,8 @@ license.workspace = true
 [features]
 # counting global allocator for the TSUBAME_MEMDIAG report (src/memdiag.rs)
 memdiag = []
+# TEST ONLY, debug builds: updater talks to TSUBAME_UPDATE_TEST_BASE (loopback fake GitHub), trusts the DEV key
+update-test = ["tsubame-update/test-server"]
 
 [build-dependencies]
 embed-resource = "3.0.12"

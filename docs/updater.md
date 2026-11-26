@@ -336,6 +336,17 @@ Layout rules for the banners (`Banner` in `src/settings/updates_page.rs`): butto
 text keeps its room, under the text otherwise (stacked below about 260 DIP), text cut with a tooltip
 only when it cannot fit even full width.
 
+## Testing a real relaunch on a machine (debug builds only)
+
+`cargo build -p tsubame -p tsubame-handler --features update-test` (debug only: `test-server` refuses to
+compile in release) makes the app's updater read `TSUBAME_UPDATE_TEST_BASE=http://127.0.0.1:<port>` instead of
+GitHub and trust the public DEV key. Without the variable the build behaves like production. Recipe used for
+B12-D on rig: build the "old" exe with `TSUBAME_VERSION=0.2.1` and the "new" one with `TSUBAME_VERSION=0.2.2`
+(no Cargo.toml edit), `toolselease.ps1 -Version 0.2.2 -DevKey -SkipBuild -ExeDir <new exes>` for the signed
+release dir, serve it with `tsubame-update-testserver --dir <rel> --port N`, copy the old exes to an
+install-style dir, start the app with `LOCALAPPDATA`/`APPDATA` pointing at a scratch dir and the variable set,
+then drive Settings > Updates. Results: `docsig-update-relaunch.md`.
+
 ## Rate limiting and politeness
 
 Anonymous GitHub API: 60 requests/hour per IP. A check is 1 request (the `releases/latest` JSON) plus, only when there is
