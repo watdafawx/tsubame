@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::tree::TreeModel;
-use crate::uia_rows::{self, PART_CRUMBS, PART_LIST, PART_MILLER, PART_PANE};
+use crate::uia_rows::{self, PART_CRUMBS, PART_LIST, PART_MILLER, PART_PANE, PART_SUGGEST};
 use tsubame_win::uia::{VAct, VReq};
 
 impl View {
@@ -31,6 +31,11 @@ impl View {
                 VAct::Collapse => self.a11y_crumb(r.key as usize, false),
                 _ => {}
             },
+            PART_SUGGEST => {
+                if r.act == VAct::Invoke {
+                    self.suggest_invoke(r.key as usize);
+                }
+            }
             p if p >= PART_MILLER => self.a11y_miller((p - PART_MILLER) as usize, r),
             _ => {}
         }

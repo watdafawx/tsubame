@@ -189,6 +189,7 @@ impl View {
         let mut new_tab = None;
         let mut open_chev: Option<(usize, Pt)> = None;
         let mut close_chev = false;
+        let mut right_click: Option<Pt> = None;
         let open_idx = self.nav_menu.as_ref().and_then(|m| m.open_crumb()).filter(|(slot, _)| *slot == self.live).map(|(_, i)| i);
         let a11y = crate::uia_rows::on();
         let mut uia_items: Vec<CrumbUia> = Vec::new();
@@ -208,6 +209,9 @@ impl View {
                 go = Some(self.crumbs.crumbs[i].path.clone());
             } else if hit.clicked == Some(Button::Middle) {
                 new_tab = Some(self.crumbs.crumbs[i].path.clone());
+            }
+            if hit.clicked == Some(Button::Right) {
+                right_click = Some(hit.click_pos);
             }
             x += wd;
 
@@ -256,6 +260,8 @@ impl View {
         } else if let Some(p) = new_tab {
             self.open_in_new_tab(&p);
             ui.request_repaint();
+        } else if let Some(p) = right_click {
+            self.open_path_menu(ui, Pt::new(p.x, bar.b() + 2.0));
         } else if close_chev {
             self.nav_menu = None;
             ui.close_popup(crate::nav_menu::ID_NAV_MENU.with(0));
@@ -285,6 +291,10 @@ impl View {
             }
             NavMenuOut::GoFolder(path) => {
                 self.with_pane(pane, |v| v.go(&path));
+                ui.request_repaint();
+            }
+            NavMenuOut::Command(cmd) => {
+                self.with_pane(pane, |v| v.run_command(ui, cmd));
                 ui.request_repaint();
             }
         }
