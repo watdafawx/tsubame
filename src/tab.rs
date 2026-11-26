@@ -1073,6 +1073,7 @@ impl Tab {
     /// Leaves Miller columns: the model goes, the folder lists again.
     pub fn leave_miller(&mut self) {
         self.miller_on = false;
+        self.sync_group();
         if self.miller.take().is_some()
             && let Some(w) = self.wake.clone()
         {

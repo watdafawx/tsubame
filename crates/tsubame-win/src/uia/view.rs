@@ -46,6 +46,8 @@ pub struct VItem {
     pub selectable: bool,
     /// Enter / double click does something (open, retry)
     pub invokable: bool,
+    /// a group header of a grouped list (a UIA group, expanded or collapsed)
+    pub group: bool,
 }
 
 /// A List or a Tree: the visible rows and how many there are.
@@ -365,12 +367,24 @@ impl Item_Impl {
                 let s = self.surface(&view)?;
                 let c = self.cell(&view)?;
                 Ok(match id {
-                    UIA_ControlTypePropertyId => VARIANT::from(if s.tree { UIA_TreeItemControlTypeId.0 } else { UIA_ListItemControlTypeId.0 }),
+                    UIA_ControlTypePropertyId => VARIANT::from(if c.group {
+                        UIA_GroupControlTypeId.0
+                    } else if s.tree {
+                        UIA_TreeItemControlTypeId.0
+                    } else {
+                        UIA_ListItemControlTypeId.0
+                    }),
                     UIA_NamePropertyId => variant_str(&c.name),
                     UIA_IsEnabledPropertyId | UIA_IsKeyboardFocusablePropertyId => variant_bool(true),
                     UIA_HasKeyboardFocusPropertyId => variant_bool(c.focused),
                     UIA_IsOffscreenPropertyId => variant_bool(false),
-                    UIA_ClassNamePropertyId => variant_str(if s.tree { "TsubameTreeItem" } else { "TsubameListItem" }),
+                    UIA_ClassNamePropertyId => variant_str(if c.group {
+                        "TsubameGroupHeader"
+                    } else if s.tree {
+                        "TsubameTreeItem"
+                    } else {
+                        "TsubameListItem"
+                    }),
                     UIA_AutomationIdPropertyId => variant_str(&format!("view.{sk}.{k:x}")),
                     UIA_LevelPropertyId if c.level > 0 => VARIANT::from(c.level as i32),
                     UIA_PositionInSetPropertyId if c.pos > 0 => VARIANT::from(c.pos as i32),

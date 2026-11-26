@@ -75,6 +75,8 @@ pub struct Bench {
     pub just_started: bool,
     /// scroll the grid instead of the details list (main sets it from the view mode)
     pub grid: bool,
+    /// `--group`: the group mode the run scrolled in
+    pub group: &'static str,
     /// extra report lines (shell stats, set by main before the report)
     pub extra: String,
     pub rows: usize,
@@ -153,6 +155,7 @@ impl Bench {
             start_row: START_ROW,
             just_started: false,
             grid: false,
+            group: "none",
             extra: String::new(),
             rows: 0,
             memdiag: String::new(),
@@ -209,7 +212,8 @@ impl Bench {
                         v.grid.cursor = self.start_row + 3;
                         v.grid.set_scroll(self.start_row as f64 * row_h as f64, len);
                     } else {
-                        v.list.set_scroll(self.start_row as f64 * row_h as f64, len);
+                        // grouped: the list has headers too, so it is longer than `len`
+                        v.list.set_scroll(self.start_row as f64 * row_h as f64, v.list_rows());
                     }
                     self.state = State::Running(Instant::now());
                     self.just_started = true;
@@ -237,8 +241,9 @@ impl Bench {
                     let max = v.grid.max_scroll(len);
                     v.grid.set_scroll(if max > 0.0 { s % max } else { 0.0 }, len);
                 } else {
-                    let max = v.list.max_scroll(len);
-                    v.list.set_scroll(if max > 0.0 { s % max } else { 0.0 }, len);
+                    let rows = v.list_rows();
+                    let max = v.list.max_scroll(rows);
+                    v.list.set_scroll(if max > 0.0 { s % max } else { 0.0 }, rows);
                 }
                 (false, true)
             }
@@ -258,6 +263,7 @@ impl Bench {
         };
         line("tsubame S1/S4 bench".into());
         line(format!("rows: {}", self.rows));
+        line(format!("group_by: {}", self.group));
         line(format!("build: {}", if cfg!(debug_assertions) { "debug" } else { "release" }));
         line(format!("data_source: {}", self.source));
         if let Some(ms) = self.store_build_ms {

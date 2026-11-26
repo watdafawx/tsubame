@@ -297,6 +297,82 @@ pub fn grid(g: &Geo, gs: &GridState, range: (usize, usize), store: &EntryStore, 
     push(VSurface { key: g.key, tree: false, name: g.title.to_string(), desc: counts(total, sel.count()), rect: px(g.area), focused: g.focused, multi: true, size: total as u32, items });
 }
 
+// ---- Grouped Details and Grid ----------------------------------------------------
+
+/// A group header's key: this bit and a hash of its label (entry ids are 32 bit, so the keys
+/// never meet), stable while the groups are rebuilt.
+pub const GROUP_KEY: u64 = 1 << 40;
+
+pub fn group_key(label: &str) -> u64 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in label.bytes() {
+        h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+    }
+    GROUP_KEY | u64::from(h)
+}
+
+/// A header as a UIA group: "Images, 12 items", expanded or collapsed.
+fn header_item(label: &str, count: usize, collapsed: bool, rect: [f32; 4], focused: bool, pos: u32) -> VItem {
+    VItem {
+        key: group_key(label),
+        name: format!("{label}, {}", counts(count, 0)),
+        kind: "Group".to_string(),
+        rect,
+        focused,
+        pos,
+        expand: if collapsed { Expand::Collapsed } else { Expand::Expanded },
+        group: true,
+        invokable: true,
+        ..Default::default()
+    }
+}
+
+/// One file row of a grouped surface.
+#[allow(clippy::too_many_arguments)]
+fn entry_item(store: &EntryStore, sel: &Selection, row: &mut RowBuf, tags: &mut Option<&mut RowTags>, age: Option<&AgeFrame>, i: usize, rect: [f32; 4], focused: bool, pos: u32) -> Option<VItem> {
+    let id = store.at(i)?;
+    row.fill(store, id);
+    let (kind, value) = row_texts(row, None, age);
+    Some(VItem { key: u64::from(id), name: named(row, id, tags), value, kind, rect, selected: sel.contains(id), focused, pos, selectable: true, invokable: true, ..Default::default() })
+}
+
+/// Details rows of a grouped list: the flat rows `range` (headers and files).
+#[allow(clippy::too_many_arguments)]
+pub fn details_grouped(g: &Geo, ls: &ListState, range: (usize, usize), gs: &crate::view_group::GroupState, store: &EntryStore, sel: &Selection, row: &mut RowBuf, mut tags: Option<&mut RowTags>, age: Option<&AgeFrame>) {
+    let Some(rows) = gs.rows() else { return };
+    let mut items = Vec::with_capacity(range.1.saturating_sub(range.0));
+    for r in range.0..range.1.min(rows.row_count()) {
+        let rect = list_row(g.area, ls, r);
+        let pos = r as u32 + 1;
+        match rows.row_at(r) {
+            tsubame_ui::GroupRow::Header(h) => items.push(header_item(gs.label(h), rows.group_len(h), rows.is_collapsed(h), rect, g.focused && ls.header_focus() == Some(h), pos)),
+            tsubame_ui::GroupRow::Item(i) => items.extend(entry_item(store, sel, row, &mut tags, age, i, rect, g.focused && ls.header_focus().is_none() && i == ls.cursor, pos)),
+        }
+    }
+    let total = store.view().len();
+    push(VSurface { key: g.key, tree: false, name: g.title.to_string(), desc: counts(total, sel.count()), rect: px(g.area), focused: g.focused, multi: true, size: rows.row_count() as u32, items });
+}
+
+/// Grid tiles of a grouped grid: every header and cell the view shows.
+pub fn grid_grouped(g: &Geo, st: &GridState, gs: &crate::view_group::GroupState, store: &EntryStore, sel: &Selection, row: &mut RowBuf, mut tags: Option<&mut RowTags>) {
+    let Some(rows) = gs.rows() else { return };
+    let mut items = Vec::new();
+    st.visible_groups(rows, |h, a, b| {
+        let hrect = clipped(Rect::new(g.area.x, g.area.y + st.group_header_y(h), g.area.w, st.header_h), g.area);
+        let hpos = rows.header_row(h) as u32 + 1;
+        items.push(header_item(gs.label(h), rows.group_len(h), rows.is_collapsed(h), hrect, g.focused && st.header_focus() == Some(h), hpos));
+        for p in a..b {
+            let i = rows.group_item(h, p);
+            let Some((ox, oy)) = st.group_item_origin(rows, i) else { continue };
+            let rect = clipped(Rect::new(g.area.x + ox, g.area.y + oy, st.cell_w, st.cell_h), g.area);
+            let pos = rows.item_row(i).map_or(0, |r| r as u32 + 1);
+            items.extend(entry_item(store, sel, row, &mut tags, None, i, rect, g.focused && st.header_focus().is_none() && i == st.cursor, pos));
+        }
+    });
+    let total = store.view().len();
+    push(VSurface { key: g.key, tree: false, name: g.title.to_string(), desc: counts(total, sel.count()), rect: px(g.area), focused: g.focused, multi: true, size: rows.row_count() as u32, items });
+}
+
 // ---- Tree rows and the Tree pane ----------------------------------------------
 
 /// The Tree: rows `range` (Tree rows with columns, or the folders-only pane).

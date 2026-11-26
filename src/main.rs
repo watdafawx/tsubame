@@ -580,8 +580,14 @@ fn main() {
         if let Some(m) = arg_value(&args, "--view").and_then(|v| view::ViewMode::parse(&v)) {
             view.set_mode(m);
         }
+        // `--group none|name|type|date|size`: the tab starts grouped (the bench and the rig checks use it)
+        if let Some(by) = arg_value(&args, "--group").and_then(|v| tsubame_core::grouping::GroupBy::parse(&v)) {
+            let grid = view.mode.is_grid();
+            view.tab_mut().set_group_by(by, grid);
+        }
         if let Some(b) = bench_state.as_mut() {
             b.grid = view.mode.is_grid();
+            b.group = view.tab().group.by.name();
         }
 
         let timing = timing_mode.then(|| timing::Run::new(if timing_dirs.is_empty() { vec![start.clone()] } else { timing_dirs.clone() }, arg_value(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(3)));

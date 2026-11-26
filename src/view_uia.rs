@@ -41,6 +41,10 @@ impl View {
         if self.tree_rows_on() && self.tab().tree.is_some() {
             return self.a11y_tree_row(r);
         }
+        if r.key & uia_rows::GROUP_KEY != 0 {
+            return self.a11y_group(r);
+        }
+        let grid = self.mode.is_grid();
         let tab = &mut self.tabs.items[self.tabs.active];
         // the row's entry id is its key; its position is found in the view (the
         // list may have changed since the snapshot: a missing row is dropped)
@@ -52,14 +56,38 @@ impl View {
             VAct::AddToSelection if !had => tab.sel.toggle(&tab.store, pos),
             VAct::RemoveFromSelection if had => tab.sel.toggle(&tab.store, pos),
             VAct::Invoke => {
-                tab.list.cursor = pos;
-                tab.grid.cursor = pos;
+                tab.group.reveal(pos);
+                tab.move_cursor_to(grid, pos);
                 return self.activate(pos);
             }
             _ => return,
         }
-        tab.list.cursor = pos;
-        tab.grid.cursor = pos;
+        // a row picked inside a collapsed group opens the group
+        tab.group.reveal(pos);
+        tab.move_cursor_to(grid, pos);
+    }
+
+    /// A group header: Invoke toggles it, Expand and Collapse set it.
+    fn a11y_group(&mut self, r: VReq) {
+        let grid = self.mode.is_grid();
+        let tab = &mut self.tabs.items[self.tabs.active];
+        let Some(rows) = tab.group.rows() else { return };
+        let Some(g) = (0..rows.group_count()).find(|&g| uia_rows::group_key(tab.group.label(g)) == r.key) else { return };
+        let open = !rows.is_collapsed(g);
+        let want_open = match r.act {
+            VAct::Invoke => !open,
+            VAct::Expand => true,
+            VAct::Collapse => false,
+            _ => return,
+        };
+        if want_open != open {
+            tab.group.grouping_mut().set_collapsed(g, !want_open, false);
+        }
+        if grid {
+            tab.grid.set_header_focus(Some(g));
+        } else {
+            tab.list.set_header_focus(Some(g));
+        }
     }
 
     /// A Tree-rows row: its key holds the tree model's slot, kind and entry id.

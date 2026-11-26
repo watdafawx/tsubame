@@ -9,6 +9,7 @@ covers the file views: file rows, Tree, Miller columns, and the tags picker.
 | Surface | Control type | Rows | Patterns |
 |---|---|---|---|
 | Details and Grid file list | List | ListItem: name (+ tags), value text, item type | SelectionItem, Invoke, Value |
+| Group headers of a grouped Details or Grid list | (rows of the same List) | Group: `"Images, 12 items"`, expanded or collapsed | ExpandCollapse, Invoke |
 | Tree rows (Details in Tree mode) | Tree | TreeItem: level, position in set, size of set | SelectionItem, ExpandCollapse, Invoke, Value |
 | Folders-only Tree pane | Tree | TreeItem, same as above | SelectionItem, ExpandCollapse, Invoke |
 | Miller column `i` | List (one per column) | ListItem: name, value, selected | SelectionItem, Invoke, Value |
@@ -62,6 +63,17 @@ covers the file views: file rows, Tree, Miller columns, and the tags picker.
 - `src/view_uia_tests.rs`: whole-frame tests on the recording canvas.
 - Hooks: `view.rs` (`begin_frame`, Details, Grid, `end_frame`), `view_tree.rs`
   (Tree rows and pane), `view_miller.rs` (columns), `tags/ui.rs` (picker invoke).
+
+## Group by
+
+A grouped list (`docs/grouping.md`) publishes its headers as rows of the same List,
+in reading order with the files: a UIA **Group** (class `TsubameGroupHeader`)
+named `<group>, <n> items`. Its ExpandCollapse state is the group's collapsed
+state; Invoke toggles it, Expand and Collapse set it. A header is not selectable.
+`PositionInSet` and the surface's size count the flat rows, headers included.
+A file inside a collapsed group is not published (it is not on screen); Select or
+Invoke on a file whose group is collapsed (a stale snapshot) opens the group first.
+A header's key is `uia_rows::GROUP_KEY` plus a hash of its label, so it survives a rebuild of the groups.
 
 ## Keys and ids
 

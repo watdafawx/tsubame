@@ -206,6 +206,25 @@ impl GridState {
         let y0 = if with_header && j < cols { top } else { y };
         self.ensure_span(y0, y + self.cell_h as f64)
     }
+    /// Every group the view shows any of (its header included): calls
+    /// `f(group, first place, last place + 1)`, the places being empty for a collapsed group.
+    pub fn visible_groups(&self, g: &dyn GroupRows, mut f: impl FnMut(usize, usize, usize)) {
+        let (y0, y1) = (self.scroll.max(0.0), self.scroll + self.view_h as f64);
+        let cols = self.cols.max(1);
+        let Some(mut gi) = self.geo.group_at(y0) else { return };
+        while gi < g.group_count() && self.geo.top(gi) < y1 {
+            let shown = g.shown_len(gi);
+            let base = self.geo.top(gi) + self.header_h as f64;
+            let (mut a, mut b) = (0, 0);
+            if shown > 0 {
+                let r0 = ((y0 - base) / self.cell_h as f64).floor().max(0.0) as usize;
+                let r1 = (((y1 - base) / self.cell_h as f64).ceil().max(0.0) as usize).min(shown.div_ceil(cols));
+                (a, b) = ((r0 * cols).min(shown), (r1 * cols).min(shown));
+            }
+            f(gi, a, b.max(a));
+            gi += 1;
+        }
+    }
     /// Items on screen: calls `f(group, first place, last place + 1)` for each visible
     /// stretch of whole rows, widened by `margin_rows` each way (prefetch).
     pub fn group_visible(&self, g: &dyn GroupRows, margin_rows: usize, mut f: impl FnMut(usize, usize, usize)) {

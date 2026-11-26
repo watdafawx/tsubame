@@ -62,6 +62,7 @@ impl View {
         let w = self.prefs.miller.sanitized().col_width as f32;
         let t = self.tab_mut();
         t.miller_on = true;
+        t.sync_group();
         t.ensure_miller(w);
     }
 
@@ -112,7 +113,10 @@ impl View {
         let mut changed = false;
         let mut moved = false;
         for (i, t) in self.tabs.items.iter_mut().enumerate() {
-            t.miller_on = rows;
+            if t.miller_on != rows {
+                t.miller_on = rows;
+                t.sync_group();
+            }
             if rows {
                 if i == active {
                     t.ensure_miller(cfg.col_width as f32);

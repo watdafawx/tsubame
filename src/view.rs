@@ -2521,7 +2521,10 @@ impl View {
             if crate::uia_rows::on() {
                 let area = Rect::new(list_r.x, list_r.y, list_r.w - ui.theme.layout_scrollbar_width, list_r.h);
                 let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
-                crate::uia_rows::details(&geo, lstate, lr.range, rows.store, rows.sel, rows.row, rows.tags.as_mut(), rows.age.as_ref());
+                match rows.groups.as_deref() {
+                    Some(gs) => crate::uia_rows::details_grouped(&geo, lstate, lr.range, gs, rows.store, rows.sel, rows.row, rows.tags.as_mut(), rows.age.as_ref()),
+                    None => crate::uia_rows::details(&geo, lstate, lr.range, rows.store, rows.sel, rows.row, rows.tags.as_mut(), rows.age.as_ref()),
+                }
             }
             // one page of icons beyond the viewport, nearest first
             rows.prefetch(lr.range, lstate.page_rows());
@@ -2624,7 +2627,10 @@ impl View {
             if crate::uia_rows::on() {
                 let area = Rect::new(grid_r.x, grid_r.y, grid_r.w - ui.theme.layout_scrollbar_width, grid_r.h);
                 let geo = crate::uia_rows::Geo { key: crate::uia_rows::skey(self.live, crate::uia_rows::PART_LIST), title: crate::uia_rows::leaf(path), area, focused: ui.has_focus(pid(self.live, ID_LIST)) && ui.window_focused() };
-                crate::uia_rows::grid(&geo, gstate, gr.range, tiles.store, tiles.sel, tiles.row, tiles.tags.as_mut());
+                match tiles.groups.as_deref() {
+                    Some(gs) => crate::uia_rows::grid_grouped(&geo, gstate, gs, tiles.store, tiles.sel, tiles.row, tiles.tags.as_mut()),
+                    None => crate::uia_rows::grid(&geo, gstate, gr.range, tiles.store, tiles.sel, tiles.row, tiles.tags.as_mut()),
+                }
             }
             tiles.prefetch(gstate);
             (gr, gr.activated)
@@ -5097,4 +5103,7 @@ mod tests {
     // B10-D: sidebar parity, eject, row tooltips, icon overlays
     #[path = "../../view_b10d_tests.rs"]
     mod b10d;
+    // B11-F2: Group by
+    #[path = "../../view_group_tests.rs"]
+    mod group_tests;
 }

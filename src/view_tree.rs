@@ -188,7 +188,11 @@ impl View {
         let active = self.tabs.active;
         let mut changed = false;
         for (i, t) in self.tabs.items.iter_mut().enumerate() {
-            t.tree_on = rows;
+            if t.tree_on != rows {
+                t.tree_on = rows;
+                // Tree ignores grouping (and gives the rows back when it goes)
+                t.sync_group();
+            }
             if rows {
                 if i == active {
                     t.ensure_tree(&cfg);

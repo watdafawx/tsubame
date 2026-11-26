@@ -109,3 +109,42 @@ fn miller_columns_are_lists_with_the_selected_row() {
     assert!(cols.iter().all(|c| !c.tree));
     uia_rows::force(false);
 }
+
+#[test]
+fn group_headers_are_uia_groups_that_expand_and_collapse() {
+    use tsubame_core::grouping::GroupBy;
+    uia_rows::force(true);
+    let mut r = Rig::new("uia-groups");
+    r.v.set_group_by(GroupBy::Type);
+    r.frame();
+    r.frame();
+    let key = uia_rows::skey(0, PART_LIST);
+    let s = surface(key).unwrap();
+    let heads: Vec<_> = s.items.iter().filter(|i| i.group).collect();
+    assert_eq!(heads.len(), 2, "Folder and TXT: {:?}", s.items.iter().map(|i| &i.name).collect::<Vec<_>>());
+    assert_eq!(s.items.len(), 5, "two headers and three files");
+    assert_eq!(s.size, 5, "the set counts headers");
+    assert!(heads.iter().all(|h| h.expand == UExpand::Expanded && h.invokable && !h.selectable && h.key & uia_rows::GROUP_KEY != 0));
+    assert!(heads.iter().any(|h| h.name.ends_with("1 item")), "{:?}", heads.iter().map(|h| &h.name).collect::<Vec<_>>());
+    // positions follow the flat rows
+    let pos: Vec<u32> = s.items.iter().map(|i| i.pos).collect();
+    assert_eq!(pos, [1, 2, 3, 4, 5]);
+    // Collapse hides the files of the group, Invoke opens it again
+    let txt = heads.iter().find(|h| h.name.starts_with("TXT")).map(|h| h.key).expect("the TXT group");
+    r.v.run_view_request(VReq { surf: key, key: txt, act: VAct::Collapse });
+    r.frame();
+    r.frame();
+    let s = surface(key).unwrap();
+    assert_eq!(s.items.len(), 3, "TXT collapsed: {:?}", s.items.iter().map(|i| &i.name).collect::<Vec<_>>());
+    assert_eq!(s.items.iter().find(|i| i.key == txt).unwrap().expand, UExpand::Collapsed);
+    r.v.run_view_request(VReq { surf: key, key: txt, act: VAct::Invoke });
+    r.frame();
+    r.frame();
+    assert_eq!(surface(key).unwrap().items.len(), 5);
+    // selecting a file works as it does without groups
+    let beta = item_named(&surface(key).unwrap(), "beta.txt").key;
+    r.v.run_view_request(VReq { surf: key, key: beta, act: VAct::Select });
+    r.frame();
+    assert!(item_named(&surface(key).unwrap(), "beta.txt").selected);
+    uia_rows::force(false);
+}
