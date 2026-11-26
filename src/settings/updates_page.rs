@@ -142,8 +142,7 @@ pub fn paint(pg: &mut Pg, st: &mut State, cx: &mut Cx) {
     {
         let r = Rect::new(c.r.x, c.r.y, c.r.w, lay.h);
         let logo = Rect::new(r.x + 16.0, r.y + 20.0, 44.0, 44.0);
-        pg.g.round(logo, t.radius_lg, tsubame_ui::theme::BRAND_NAVY);
-        pg.g.text("\u{2197}", logo, f(22.0).b().c(), tsubame_ui::theme::BRAND_CREAM);
+        crate::appmark::draw(pg.g, logo);
         let title_font = f(t.font_size_lg + 2.0).b();
         let title = fit(pg.g, &format!("Tsubame {}", snap.running), title_font, lay.text_w);
         pg.g.text(&title, Rect::new(r.x + TEXT_X, r.y + 14.0, lay.text_w, 22.0), title_font, t.text);

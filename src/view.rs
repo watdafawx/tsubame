@@ -2167,9 +2167,8 @@ impl View {
         g.fill(r, t.bg);
         // app mark
         let mark = Rect::new(r.x + 12.0, r.y + (r.h - 18.0) / 2.0, 18.0, 18.0);
-        g.round(mark, t.radius_md, tsubame_ui::theme::BRAND_NAVY);
-        g.round_stroke(mark, t.radius_md, t.border, 1.0);
-        g.text("\u{2197}", mark, f(12.0).b().c(), tsubame_ui::theme::BRAND_CREAM);
+        crate::appmark::set_dpi(self.dpi);
+        crate::appmark::draw(g, mark);
         // window controls
         let cw = t.layout_window_control_width;
         let ctl = Rect::new(r.r() - 3.0 * cw, r.y, 3.0 * cw, r.h);

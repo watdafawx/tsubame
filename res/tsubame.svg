@@ -1,10 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <!-- Tsubame app icon, master cut. Use for 32 px and larger. -->
+  <!-- Tsubame app icon, master cut (option A: top-down swallow). Use for 32 px and larger. -->
   <rect width="100" height="100" rx="22" fill="#16233f"/>
-  <g transform="translate(13 13) scale(.74)">
-    <g transform="rotate(40 50 53) translate(4 5) scale(.92)">
-      <path fill="#f3ecdf" d="M50 10C55.5 10 59 15 59 23C73 25 88 36 96 56C84 45 71 42 60 43C60 58 63 78 70 97C61 86 54 75 50 64C46 75 39 86 30 97C37 78 40 58 40 43C29 42 16 45 4 56C12 36 27 25 41 23C41 15 44.5 10 50 10Z"/>
-      <circle cx="50" cy="20" r="4.5" fill="#e0492c"/>
-    </g>
+  <g transform="translate(9 8) scale(.82)">
+    <path fill="#f3ecdf" d="M50 11C54.5 11 57 15.5 57 22L58 30C71 28 86 35 96 51C83 46 70 47 60 52C61 63 63 77 67 93C58 85 53 78 50 72C47 78 42 85 33 93C37 77 39 63 40 52C30 47 17 46 4 51C14 35 29 28 42 30L43 22C43 15.5 45.5 11 50 11Z"/>
+    <circle cx="50" cy="26" r="3.6" fill="#e0492c"/>
   </g>
 </svg>

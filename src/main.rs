@@ -44,6 +44,7 @@
 //! TSUBAME_DATA_DIR overrides the config/session directory.
 
 mod age;
+mod appmark;
 mod archive_ui;
 mod batchui;
 mod bench;
@@ -451,11 +452,14 @@ fn main() {
         tsubame_d2d::prewarm_software();
 
         let class = w!("TsubameMain");
+        // class icons from exe resource 1 (res/tsubame.ico) at the system sizes
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinst,
             style: CS_DBLCLKS,
+            hIcon: load_app_icon(hinst, false, 96),
+            hIconSm: load_app_icon(hinst, true, 96),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap(),
             lpszClassName: class,
             ..Default::default()
@@ -465,6 +469,8 @@ fn main() {
         let scale = GetDpiForSystem() as f32 / 96.0;
         let (w, h) = ((1120.0 * scale) as i32, (720.0 * scale) as i32);
         let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("Tsubame"), WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, w, h, None, None, Some(hinst), None).unwrap();
+
+        set_window_icons(hwnd, hinst, GetDpiForWindow(hwnd));
 
         // no WS_CAPTION: the kit draws the title bar (WM_NCCALCSIZE gives it the whole window)
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -701,6 +707,28 @@ fn main() {
         if leak::GATE_FAILED.load(Ordering::Acquire) {
             std::process::exit(1);
         }
+    }
+}
+
+/// The app icon (exe resource 1) at the big or small system icon size for `dpi`.
+/// The sizes come from GetSystemMetricsForDpi, so 16/20/24 px hit the
+/// hand-tuned small frames and 32+ the master cut.
+fn load_app_icon(hinst: HINSTANCE, small: bool, dpi: u32) -> HICON {
+    let metric = if small { SM_CXSMICON } else { SM_CXICON };
+    unsafe {
+        let px = GetSystemMetricsForDpi(metric, dpi.max(96));
+        LoadImageW(Some(hinst), PCWSTR(std::ptr::without_provenance::<u16>(1)), IMAGE_ICON, px, px, LR_SHARED).map(|h| HICON(h.0)).unwrap_or_default()
+    }
+}
+
+/// Sets the running window's big (Alt-Tab, taskbar) and small (caption, taskbar
+/// at small size) icons; called after creation and on every DPI change.
+fn set_window_icons(hwnd: HWND, hinst: HINSTANCE, dpi: u32) {
+    let big = load_app_icon(hinst, false, dpi);
+    let small = load_app_icon(hinst, true, dpi);
+    unsafe {
+        SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(big.0 as isize)));
+        SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(small.0 as isize)));
     }
 }
 
@@ -1647,6 +1675,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_DPICHANGED => {
                 let dpi = (wp.0 & 0xffff) as f32;
+                if let Ok(m) = GetModuleHandleW(None) {
+                    set_window_icons(hwnd, m.into(), dpi as u32);
+                }
                 with(|a| {
                     a.gfx.set_dpi(dpi);
                     a.shell.set_icon_px(icon_px(dpi));
