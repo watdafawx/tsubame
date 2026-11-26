@@ -21,6 +21,10 @@ pub struct Grouping<K> {
     rows: Vec<Row>,
     item_rows: Vec<Option<usize>>,
     navigable: Vec<usize>,
+    /// flat row of each group's header
+    header_rows: Vec<usize>,
+    /// moves whenever the rows change (rebuild, collapse, expand)
+    revision: u64,
 }
 
 impl<K: Ord + Clone> Default for Grouping<K> {
@@ -30,6 +34,8 @@ impl<K: Ord + Clone> Default for Grouping<K> {
             rows: Vec::new(),
             item_rows: Vec::new(),
             navigable: Vec::new(),
+            header_rows: Vec::new(),
+            revision: 0,
         }
     }
 }
@@ -132,10 +138,13 @@ impl<K: Ord + Clone> Grouping<K> {
         self.set_collapsed(group, !g.collapsed, all)
     }
     fn flatten(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.rows.clear();
         self.navigable.clear();
+        self.header_rows.clear();
         self.item_rows.fill(None);
         for (group, g) in self.groups.iter().enumerate() {
+            self.header_rows.push(self.rows.len());
             self.rows.push(Row::Header(group));
             if !g.collapsed {
                 for &item in &g.items {
@@ -148,9 +157,115 @@ impl<K: Ord + Clone> Grouping<K> {
     }
 }
 
+/// What the list and the grid need of a grouping, without its key type.
+pub trait GroupRows {
+    /// Flat rows: one per header plus one per visible item.
+    fn row_count(&self) -> usize;
+    fn row_at(&self, row: usize) -> Row;
+    /// Flat row of a source item (`None`: its group is collapsed or it is filtered out).
+    fn item_row(&self, item: usize) -> Option<usize>;
+    fn header_row(&self, group: usize) -> usize;
+    fn group_count(&self) -> usize;
+    /// Items of the group, collapsed or not.
+    fn group_len(&self, group: usize) -> usize;
+    /// Items shown: none while collapsed.
+    fn shown_len(&self, group: usize) -> usize {
+        if self.is_collapsed(group) { 0 } else { self.group_len(group) }
+    }
+    fn is_collapsed(&self, group: usize) -> bool;
+    /// The `j`-th item of the group, in the sort order.
+    fn group_item(&self, group: usize, j: usize) -> usize;
+    /// Group and place in it of a shown item.
+    fn item_slot(&self, item: usize) -> Option<(usize, usize)>;
+    /// Nearest selectable row at or after `row` (`forward`) or at or before it.
+    fn nav_row(&self, row: usize, forward: bool) -> Option<usize>;
+    /// Moves when the rows change.
+    fn revision(&self) -> u64;
+}
+
+impl<K: Ord + Clone> GroupRows for Grouping<K> {
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+    fn row_at(&self, row: usize) -> Row {
+        self.rows.get(row).copied().unwrap_or(Row::Item(usize::MAX))
+    }
+    fn item_row(&self, item: usize) -> Option<usize> {
+        self.row(item)
+    }
+    fn header_row(&self, group: usize) -> usize {
+        self.header_rows.get(group).copied().unwrap_or(usize::MAX)
+    }
+    fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+    fn group_len(&self, group: usize) -> usize {
+        self.groups.get(group).map_or(0, |g| g.items.len())
+    }
+    fn is_collapsed(&self, group: usize) -> bool {
+        self.groups.get(group).is_some_and(|g| g.collapsed)
+    }
+    fn group_item(&self, group: usize, j: usize) -> usize {
+        self.groups.get(group).and_then(|g| g.items.get(j)).copied().unwrap_or(usize::MAX)
+    }
+    fn item_slot(&self, item: usize) -> Option<(usize, usize)> {
+        let row = self.row(item)?;
+        let group = self.header_rows.partition_point(|&h| h <= row).checked_sub(1)?;
+        Some((group, row - self.header_rows[group] - 1))
+    }
+    fn nav_row(&self, row: usize, forward: bool) -> Option<usize> {
+        if forward {
+            self.navigable.get(self.navigable.partition_point(|&r| r < row)).copied()
+        } else {
+            self.navigable.partition_point(|&r| r <= row).checked_sub(1).map(|i| self.navigable[i])
+        }
+    }
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_rows_view_maps_slots_and_navigation() {
+        let mut g = Grouping::default();
+        g.rebuild(6, [(0, 'A'), (1, 'B'), (2, 'A'), (3, 'C'), (4, 'B'), (5, 'A')], false);
+        // A: 0 2 5 (rows 1..=3), B: 1 4 (rows 5, 6), C: 3 (row 8)
+        let r: &dyn GroupRows = &g;
+        assert_eq!(r.row_count(), 9);
+        assert_eq!((r.header_row(0), r.header_row(1), r.header_row(2)), (0, 4, 7));
+        assert_eq!(r.row_at(0), Row::Header(0));
+        assert_eq!(r.row_at(2), Row::Item(2));
+        assert_eq!(r.item_slot(5), Some((0, 2)));
+        assert_eq!(r.item_slot(4), Some((1, 1)));
+        assert_eq!(r.item_slot(3), Some((2, 0)));
+        assert_eq!(r.group_item(1, 1), 4);
+        assert_eq!(r.group_len(0), 3);
+        // inclusive nearest-item search skips headers
+        assert_eq!(r.nav_row(0, true), Some(1));
+        assert_eq!(r.nav_row(4, true), Some(5));
+        assert_eq!(r.nav_row(4, false), Some(3));
+        assert_eq!(r.nav_row(0, false), None);
+        assert_eq!(r.nav_row(8, true), Some(8));
+        assert_eq!(r.nav_row(9, true), None);
+        // collapsing hides the slots and moves the revision
+        let rev = r.revision();
+        g.toggle(1, false);
+        let r: &dyn GroupRows = &g;
+        assert_ne!(r.revision(), rev);
+        assert!(r.is_collapsed(1));
+        assert_eq!((r.group_len(1), r.shown_len(1), r.shown_len(0)), (2, 0, 3));
+        assert_eq!(r.item_slot(1), None);
+        assert_eq!(r.header_row(2), 5);
+        assert_eq!(r.nav_row(4, true), Some(6), "from the collapsed header to the next group");
+        // no change, no new revision
+        let rev = r.revision();
+        g.set_collapsed(1, true, false);
+        assert_eq!(GroupRows::revision(&g), rev);
+    }
     #[test]
     fn stable_group_sort_and_mapping() {
         let mut g = Grouping::default();
