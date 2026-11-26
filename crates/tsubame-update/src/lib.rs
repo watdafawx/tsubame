@@ -854,7 +854,9 @@ impl Updater {
     /// the previous version again. Call from the old process after its window is gone.
     pub fn relaunch_watched(&self, args: &[OsString], ready_timeout: Duration) -> Result<WatchOutcome> {
         let l = &self.cfg.layout;
-        let mut child = match spawn(&l.exe(manifest::MAIN_EXE), Some(std::process::id()), args) {
+        // pid 0: "I am watching you, do not wait for me to exit" (the child is ready only
+        // after it started, and this process exits only after that: waiting would deadlock)
+        let mut child = match spawn(&l.exe(manifest::MAIN_EXE), Some(0), args) {
             Ok(c) => c,
             Err(_) => {
                 self.rollback()?;

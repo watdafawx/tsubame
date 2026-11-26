@@ -149,6 +149,18 @@ struct Shared {
 static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 static CANCEL: AtomicBool = AtomicBool::new(false);
+/// Set by the worker after "Download and restart" applied the update: main quits and restarts.
+static RESTART_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// True once (then cleared) when an applied update asks the app to restart itself.
+pub fn take_restart_request() -> bool {
+    RESTART_WANTED.swap(false, Ordering::AcqRel)
+}
+
+/// What a finished download does: the "Download and restart" path (apply) restarts by itself.
+pub fn restarts_after(apply: bool) -> bool {
+    apply
+}
 
 fn shared() -> &'static Mutex<Shared> {
     SHARED.get_or_init(|| {
@@ -386,7 +398,13 @@ fn download(up: Arc<Updater>, apply: bool) {
             }
             Ok(staged) if !apply => set_phase(Phase::Staged(staged.version)),
             Ok(staged) => match up.apply(&staged) {
-                Ok(a) => set_phase(Phase::ReadyToRestart(a.version)),
+                Ok(a) => {
+                    set_phase(Phase::ReadyToRestart(a.version));
+                    if restarts_after(apply) {
+                        RESTART_WANTED.store(true, Ordering::Release);
+                        wake();
+                    }
+                }
                 Err(e) => set_phase(phase_from_error(&e)),
             },
         }
@@ -459,6 +477,9 @@ pub fn ago(last_unix: u64, now: u64) -> String {
 /// `--after-update <pid>`: wait (at most `max`) until the old process is gone, so the
 /// single-instance lock and the files it held are free.
 pub fn wait_for_exit(pid: u32, max: Duration) {
+    if pid == 0 {
+        return; // the old process watches us and exits after we are ready
+    }
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
     unsafe {
@@ -478,6 +499,27 @@ mod tests {
         Env { dev_run: dev, portable, bench }
     }
     const NORMAL: Env = Env { dev_run: false, portable: false, bench: false };
+
+
+    #[test]
+    fn download_and_restart_restarts_and_plain_download_does_not() {
+        assert!(restarts_after(true), "a button that says restart must restart");
+        assert!(!restarts_after(false), "auto-download only stages");
+    }
+
+    #[test]
+    fn restart_request_is_taken_once() {
+        RESTART_WANTED.store(true, Ordering::Release);
+        assert!(take_restart_request());
+        assert!(!take_restart_request());
+    }
+
+    #[test]
+    fn wait_for_exit_pid_zero_returns_at_once() {
+        let t = std::time::Instant::now();
+        wait_for_exit(0, Duration::from_secs(10));
+        assert!(t.elapsed() < Duration::from_secs(1), "watched relaunch must not wait for its parent");
+    }
 
     #[test]
     fn auto_check_follows_the_24_hour_rule() {
