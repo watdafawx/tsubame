@@ -156,6 +156,30 @@ fn sort_by_from_the_background_menu_is_remembered_per_folder() {
     let _ = std::fs::remove_file(&file);
 }
 
+/// Smoke: `G:\xG:\x\alpha` (a path typed after the old text) stayed in Recent beside the real
+/// `alpha` in Details, because only Miller dropped a dead folder.
+#[test]
+fn a_typed_path_that_fails_in_details_leaves_no_dead_folder_in_recent() {
+    let mut r = Rig::new("b11fix-dead-recent");
+    let docs = path_of(&r, "Docs");
+    r.v.go(&docs);
+    r.settle();
+    let bad = format!("{}{}", r.dir.to_string_lossy(), docs);
+    r.v.path_text.set_text(&bad);
+    r.v.submit_path();
+    let t0 = Instant::now();
+    while r.v.path_error.is_none() {
+        r.v.pump();
+        r.frame();
+        assert!(t0.elapsed() < Duration::from_secs(10), "the failure was not noticed");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    r.settle();
+    assert_eq!(r.v.tab().path, docs, "back in the previous folder");
+    assert!(!r.v.side.recents.iter().any(|p| p == &bad), "{:?}", r.v.side.recents);
+    assert_eq!(r.v.side.recents.iter().filter(|p| crate::sidebar::norm(p) == crate::sidebar::norm(&docs)).count(), 1);
+}
+
 #[test]
 fn memory_stays_off_without_a_file_or_with_the_setting_off() {
     // no file attached (tests, --dev): the old behaviour, one global view
