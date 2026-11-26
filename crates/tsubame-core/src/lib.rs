@@ -79,6 +79,7 @@ pub struct EntryStore {
     records: Vec<EntryRecord>,
     index: Vec<u32>,
     generation: u64,
+    revision: u64,
     sort: Sort,
     query: Vec<u16>,
     mode: FilterMode,
@@ -132,8 +133,15 @@ impl EntryStore {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    /// Changes whenever the view (its order, membership or an entry's data) may have
+    /// changed: clear, push, apply, sort, filter, hide rule, end of a stream. Views
+    /// that cache something derived from the listing rebuild when it moves.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     /// Invalidates outstanding batches and IDs. Retains allocation for reuse.
     pub fn clear(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.generation = self
             .generation
             .checked_add(1)
@@ -168,6 +176,7 @@ impl EntryStore {
         if !std::mem::take(&mut self.streaming) {
             return;
         }
+        self.revision = self.revision.wrapping_add(1);
         if self.top < self.index.len() {
             let mut ids = std::mem::take(&mut self.index);
             self.sort_ids(&mut ids);
@@ -210,6 +219,7 @@ impl EntryStore {
         if generation != self.generation {
             return Err(StoreError::StaleGeneration);
         }
+        self.revision = self.revision.wrapping_add(1);
         self.unfiltered = None;
         let mut units = self.names.len();
         for e in batch {
@@ -338,6 +348,7 @@ impl EntryStore {
         removed: &[EntryId],
         upserts: &[Upsert<'_>],
     ) -> Result<Vec<EntryId>, StoreError> {
+        self.revision = self.revision.wrapping_add(1);
         // the merge below needs a fully sorted view
         self.end_stream();
         self.unfiltered = None;
@@ -738,6 +749,7 @@ impl EntryStore {
         }
     }
     pub fn sort(&mut self, sort: Sort) {
+        self.revision = self.revision.wrapping_add(1);
         self.sort = sort;
         self.unfiltered = None;
         let mut ids = std::mem::take(&mut self.index);
@@ -762,6 +774,7 @@ impl EntryStore {
             return;
         }
         self.hide = mask;
+        self.revision = self.revision.wrapping_add(1);
         // the saved sorted order was built under the old rule
         self.unfiltered = None;
         let mut ids = (0..self.records.len() as u32)
@@ -772,6 +785,7 @@ impl EntryStore {
         self.top = self.index.len().min(STREAM_TOP);
     }
     pub fn filter(&mut self, query: &str, mode: FilterMode) {
+        self.revision = self.revision.wrapping_add(1);
         let next: Vec<u16> = query.encode_utf16().map(fold).collect();
         let refine =
             mode == FilterMode::Substring && self.mode == mode && next.starts_with(&self.query);
@@ -1180,6 +1194,34 @@ mod tests {
         assert!(s.view().is_empty());
         s.filter("", FilterMode::Substring);
         assert_eq!(s.view().len(), 5);
+    }
+    #[test]
+    fn revision_moves_with_every_change_of_the_view() {
+        let mut s = store(&["c", "a", "b"]);
+        let mut last = s.revision();
+        let mut moved = |s: &EntryStore| {
+            let r = s.revision();
+            assert_ne!(r, last);
+            last = r;
+        };
+        s.sort(Sort { descending: true, ..Sort::default() });
+        moved(&s);
+        s.filter("b", FilterMode::Substring);
+        moved(&s);
+        s.set_hide(HIDDEN);
+        moved(&s);
+        let n: Vec<u16> = "d".encode_utf16().collect();
+        s.apply(&[], &[Upsert { id: None, input: EntryInput { name: &n, size: 1, modified: 0, flags: 0 } }]).unwrap();
+        moved(&s);
+        s.begin_stream();
+        s.end_stream();
+        moved(&s);
+        s.clear();
+        moved(&s);
+        // reading changes nothing
+        let r = s.revision();
+        let _ = (s.view(), s.len());
+        assert_eq!(s.revision(), r);
     }
     #[test]
     fn selection() {
