@@ -54,3 +54,17 @@ default keys for these commands (bind them in Settings > Keys).
 - **Ctrl+E**: the search box, same as Ctrl+F (`nav.find`). F3 stays Quick Look.
 - **Ctrl+Alt+T** (`file.open-terminal`): Windows Terminal (`wt.exe -d`, fallback `cmd.exe`) in the
   shown folder; in an archive, the folder the archive sits in.
+
+## Measured
+
+Unit test (`path_suggest` 5k folders, release-like debug build, `--nocapture`): cold list + sort
+4.6 ms, a keystroke in the same parent 0.053 ms. A parent change adds the 80 ms debounce on top of
+the listing; Tab / Right completions skip the debounce.
+
+Rig, 4K at 200%: `E:\Dev\ho` shows hopper, hopper-wt, hopperd-0.13.2; Down + Tab gives
+`E:\Dev\hopper-wt\` with the next level listed; first Esc closes only the dropdown, second closes the
+field; a row click opens the folder; Ctrl+E focuses the Filter box. CPU time of the idle process
+over 6 s: 0 ms, with the dropdown closed and open.
+
+![dropdown](shots/b11h-suggest.png)
+![menu](shots/b11h-menu.png)
