@@ -197,7 +197,7 @@ maximized = false
 | `general.row_tooltips` | `true` | Details and Grid row hover tooltip (~600 ms dwell: Name, Type, Size, Date modified; folders omit Size); Settings > General (live) |
 | `general.show_sidebar_onedrive` / `show_sidebar_wsl` / `show_sidebar_recycle` | `true` | show or hide OneDrive, the Linux (WSL) section, and Recycle Bin in the sidebar; Settings > General (live) |
 | `general.remember_folder_views` | `true` | each folder keeps its own view mode, icon size and sort; a folder with no memory shows the default view (Settings > General, live) |
-| `columns.order` | `[]` | Details column order after Name, as ids (`core.modified`, `core.type`, `core.size`, `core.git`, `core.tags`, or an extension column's id). Drag a header cell to reorder; "Reset columns" (header menu, `view.reset-columns`) clears it. Unknown ids are ignored; columns not listed follow in the default order |
+| `columns.order` | `[]` | Details column order after Name, as ids (`core.modified`, `core.type`, `core.size`, `core.git`, `core.tags`, or an extension column's id). Drag a header cell to reorder; "Reset columns" (header menu, `view.reset-columns`) clears it, resets the widths and hides the Tags column again (`tags.column` default). Unknown ids are ignored; columns not listed follow in the default order |
 | `appearance.theme` | `"tsubame-dark"` | `View::dark`, Ctrl+Shift+L; Settings > Appearance picks any of the 19 themes (live) |
 | `appearance.density` | `"compact"` | row height, Ctrl+Shift+D, Settings > Appearance (live) |
 | `appearance.zebra` | `true` | alternating rows, Ctrl+Shift+Z, Settings > Appearance (live) |
@@ -238,7 +238,7 @@ maximized = false
 | `context_menu.items` | empty | hide / rename of the menu's other rows, keyed by `key`, never by label: `windows.verb:<verb>` (classic item with a canonical verb), `windows.label:<label>` (classic item without one), `windows.pkg:<package family>/{clsid}` (packaged Win11 item), `app:<action>` (Tsubame rows such as Copy name). Learned from real menus (at most 400; the oldest unedited ones go first); Settings > Context menu and the menu's own edit menu change them. A wrong-shaped item is dropped alone. Old `source = "windows"` entries in `entries` (and CM7's `windows.verb:{clsid}` keys) are still honoured, read only |
 | `context_menu.groups` | empty | group order, top to bottom: `tsubame`, `windows`, `apps`, `custom`; duplicates are dropped, missing ones follow in that order, an unknown value is dropped alone |
 | `tags.shapes` | `true` | each tag colour also has its own shape (circle, square, triangle ...); `false` draws plain dots |
-| `tags.column` | `false` | the Details Tags column (168 px, two chips then +N); tags after the name and in Grid show either way |
+| `tags.column` | `false` | the Details Tags column (168 px, two chips then +N); tags after the name and in Grid show either way. "Reset columns" switches it back to this default (off); a second window that cannot take the tags lock reads them read-only and says so in the status bar instead of a banner |
 | `advanced.diagnostics` | `false` | persists; no log writer behind it yet |
 | `window.*` | `0,0,1120,720,false` | geometry on a plain start |
 

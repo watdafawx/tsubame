@@ -520,6 +520,15 @@ impl Panel {
         }
         c.dirty = true;
         self.layout_dirty = true;
+        if asking && !self.collapsed {
+            // The event timer sleeps while a dialog waits, so the open delay would never be
+            // ticked off: the card ("Waiting for your answer") shows now, and its result after
+            // the answer is not swallowed as "a quick operation that never showed".
+            self.open = true;
+            for c in &mut self.cards {
+                c.shown = true;
+            }
+        }
     }
 
     pub fn error(&mut self, key: Key, path: PathBuf, message: String, op: Option<Operation>) {
@@ -1619,6 +1628,31 @@ mod tests {
         assert_eq!(p.cards[0].state, State::Asking);
         p.set_asking(Key::Queue(1), false);
         assert_eq!(p.cards[0].state, State::Running);
+    }
+
+    /// Rig smoke: a copy that asked about a conflict never showed a card (the event timer sleeps
+    /// while the dialog waits, so the 400 ms open delay was never ticked), and its result was
+    /// dropped as a quick operation. A question opens the panel at once.
+    #[test]
+    fn a_question_opens_the_panel_and_the_result_after_it_is_shown() {
+        let t = t0();
+        let mut p = Panel::default();
+        p.add(Card::new(Key::Queue(1), "Copying", "Copied", 1));
+        p.started(Key::Queue(1), t);
+        assert!(!p.open, "before the delay nothing shows");
+        p.set_asking(Key::Queue(1), true);
+        assert!(p.open && p.cards[0].shown, "the card says Waiting for your answer");
+        p.set_asking(Key::Queue(1), false);
+        p.finished(Key::Queue(1), t + Duration::from_millis(100), false, tot(1, 1));
+        assert_eq!(p.cards.len(), 1, "the done card stays");
+        assert_eq!(p.next_dismiss(), Some(t + Duration::from_millis(100) + DISMISS));
+        // a folded panel stays folded
+        let mut q = Panel::default();
+        q.add(Card::new(Key::Queue(2), "Copying", "Copied", 1));
+        q.started(Key::Queue(2), t);
+        q.collapsed = true;
+        q.set_asking(Key::Queue(2), true);
+        assert!(!q.open);
     }
 
     #[test]

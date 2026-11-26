@@ -337,7 +337,7 @@ impl View {
         }
         let t = self.tab();
         let here = t.path.as_str();
-        let recent_folders = self.side.recents.iter().filter(|p| p.as_str() != here).take(8).map(|p| (p.clone(), String::new())).collect();
+        let recent_folders = self.side.recents.iter().filter(|p| crate::sidebar::norm(p) != crate::sidebar::norm(here)).take(8).map(|p| (p.clone(), String::new())).collect();
         let mut matches = Vec::new();
         let (mut match_count, mut total) = (0, 0);
         if !t.settings {

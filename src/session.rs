@@ -123,7 +123,7 @@ pub fn apply_layout(view: &mut View, cfg: &tsubame_config::Config, s: Option<&Se
 /// other tabs are added as pending (no enumerator) in their saved order and
 /// the active tab ends up at `s.active_tab()`.
 pub fn apply(view: &mut View, s: &Session) {
-    view.side.recents = s.recents.iter().take(crate::sidebar::RECENT_CAP).cloned().collect();
+    view.side.set_recents(&s.recents);
     let tabs = s.tabs();
     if tabs.is_empty() {
         return;

@@ -152,8 +152,10 @@ const PARK_TIMER: usize = 9;
 /// right click is as fast as the later ones. Never repeats.
 const CTX_WARM_TIMER: usize = 12;
 /// One-shot: the earliest finished card of the Operations panel goes
-/// (`Panel::next_dismiss`). Armed only while such a card waits.
-const DISMISS_TIMER: usize = 14;
+/// (`Panel::next_dismiss`). Armed only while such a card waits. Its id must be
+/// unique: it was 14, the path autocomplete's id, whose handler ate the
+/// one-shot and left finished cards on screen for good (see `timer_ids_are_unique`).
+const DISMISS_TIMER: usize = 15;
 const CTX_WARM_MS: u32 = 400;
 const OPS_MS: u32 = 60;
 const CARET_MS: u32 = 530;
@@ -2210,6 +2212,32 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every WM_TIMER id of the window, one handler each: two sharing an id
+    /// means the first handler in `wnd_proc` swallows the other's one-shot.
+    #[test]
+    fn timer_ids_are_unique() {
+        let ids = [
+            ("bench", bench::TIMER_ID),
+            ("watch", WATCH_TIMER),
+            ("stress", stress::TIMER_ID),
+            ("caret", CARET_TIMER),
+            ("leak", leak::TIMER_ID),
+            ("save", SAVE_TIMER),
+            ("ops", OPS_TIMER),
+            ("park", PARK_TIMER),
+            ("ctx menu", ctxui::TIMER_ID),
+            ("ctx warm", CTX_WARM_TIMER),
+            ("row tip", view_tooltip::TIMER_ID),
+            ("suggest", path_suggest::TIMER_ID),
+            ("dismiss", DISMISS_TIMER),
+        ];
+        for (i, (a, x)) in ids.iter().enumerate() {
+            for (b, y) in &ids[i + 1..] {
+                assert_ne!(x, y, "timer id {x} shared by {a} and {b}");
+            }
+        }
+    }
 
     #[test]
     fn xbutton_and_appcommand_decode_back_and_forward() {

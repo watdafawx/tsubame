@@ -288,6 +288,15 @@ impl Ops {
         if redo { j.redo_group().is_empty() } else { j.undo_group().is_empty() }
     }
 
+    /// How many journal items the next undo (or redo) step covers: what its card
+    /// says ("Undone 14 items"). The group's entries, not 0 and not 1.
+    fn history_items(&self, redo: bool) -> usize {
+        let Some((q, _)) = &self.queue else { return 0 };
+        let j = q.journal();
+        let j = j.lock().unwrap_or_else(|e| e.into_inner());
+        if redo { j.redo_group().len() } else { j.undo_group().len() }
+    }
+
     /// Ctrl+Z: the newest submission of any kind, as a whole.
     pub fn undo(&mut self) -> bool {
         self.history(false)
@@ -303,12 +312,13 @@ impl Ops {
             self.message = Some(if redo { "Nothing to redo" } else { "Nothing to undo" }.into());
             return false;
         }
+        let count = self.history_items(redo);
         let Some(q) = self.queue() else { return false };
         let r = if redo { q.redo_group() } else { q.undo_group() };
         let (verb, done) = if redo { ("Redoing", "Redone") } else { ("Undoing", "Undone") };
         match r {
             Ok(t) => {
-                self.track_history(t, verb, done);
+                self.track_history(t, verb, done, count);
                 self.message = Some(format!("{verb}..."));
                 true
             }
@@ -385,10 +395,11 @@ impl Ops {
     }
 
     /// An undo / redo ticket: its job and its card (no Undo link on it).
-    fn track_history(&mut self, t: tsubame_win::fileops::Ticket, verb: &'static str, done: &'static str) {
+    fn track_history(&mut self, t: tsubame_win::fileops::Ticket, verb: &'static str, done: &'static str, count: usize) {
         let mut job = Job::new(verb, done);
         job.history = true;
-        let mut card = Card::new(Key::Queue(t.id), verb, done, 0);
+        job.count = count;
+        let mut card = Card::new(Key::Queue(t.id), verb, done, count);
         card.history = true;
         card.stop = Stop::Queue(t.cancellation.clone());
         self.panel.add(card);
@@ -524,10 +535,11 @@ impl Ops {
             self.message = Some("Only the newest operation can be undone (Ctrl+Z)".into());
             return false;
         }
+        let count = self.history_items(false);
         let Some(q) = self.queue() else { return false };
         match q.undo_group_of(id) {
             Ok(t) => {
-                self.track_history(t, "Undoing", "Undone");
+                self.track_history(t, "Undoing", "Undone", count);
                 self.message = Some("Undoing...".into());
                 true
             }
@@ -623,7 +635,7 @@ fn result_text(job: &Job, cancelled: bool) -> String {
     } else if job.errors > 0 {
         let ok = job.count.saturating_sub(job.errors);
         format!("{} {ok} of {}, {} failed: {}", job.done, job.count, job.errors, job.last_error)
-    } else if job.history {
+    } else if job.history && job.count == 0 {
         job.done.to_string()
     } else {
         format!("{} {} {}", job.done, job.count, plural(job.count))
@@ -772,6 +784,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+
+    /// Smoke bug: the Undo link said "Undone 0 items" after a Replace-all merge
+    /// (the files did come back). The card counts the journal group's items.
+    #[test]
+    fn undo_card_counts_the_groups_items_after_replace_all() {
+        let d = std::env::temp_dir().join(format!("tsubame-b11fix-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("dst")).unwrap();
+        for n in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(d.join("src").join(n), "new").unwrap();
+        }
+        std::fs::write(d.join("dst\\a.txt"), "old").unwrap();
+        std::fs::write(d.join("dst\\b.txt"), "old").unwrap();
+        let mut o = Ops::default();
+        let ops: Vec<Operation> = ["a.txt", "b.txt", "c.txt"].iter().map(|n| Operation::Copy { source: d.join("src").join(n), target: d.join("dst").join(n) }).collect();
+        assert!(o.submit(ops, Job::new("Copying", "Copied").into_folder(d.join("dst").to_string_lossy(), Vec::new())));
+        let t0 = Instant::now();
+        let mut id = 0;
+        while o.busy() {
+            assert!(t0.elapsed() < Duration::from_secs(30), "queue stuck");
+            match o.next_event() {
+                Some(Event::Conflict { reply, .. }) => reply.answer(Choice::Replace, true),
+                Some(ev) => {
+                    if let Event::Finished { id: i, .. } = &ev {
+                        id = *i;
+                    }
+                    o.on_event(ev)
+                }
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert_eq!(std::fs::read_to_string(d.join("dst\\a.txt")).unwrap(), "new");
+        assert!(o.undo_job(id), "{:?}", o.message);
+        let card = o.panel.cards.iter().find(|c| c.history).expect("the undo card");
+        assert!(card.count >= 3, "card counts the group's items, got {}", card.count);
+        drain(&mut o);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn the_event_timer_stops_while_paused_or_asking_and_paint_is_throttled() {

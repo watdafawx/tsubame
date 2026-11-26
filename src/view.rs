@@ -1008,13 +1008,16 @@ impl View {
             if let Some(msg) = failed {
                 if let Some(t) = self.tabs.items.iter_mut().find(|t| t.id == id) {
                     t.history.undo_push();
+                    // Recent took the dead folder when the navigation started (Details and Miller
+                    // alike): a typed `G:\xG:\x\alpha` must not stay listed
+                    let mut dead = vec![t.path.clone(), typed.clone()];
                     if let Some(m) = t.miller.as_mut() {
                         m.clear_goto_from();
-                        // the columns moved before the listing failed: Recent took the dead folder
-                        for dead in [t.path.as_str(), m.active_path(), typed.as_str()] {
-                            if !dead.eq_ignore_ascii_case(&prev) {
-                                self.side.drop_recent(dead);
-                            }
+                        dead.push(m.active_path().to_string());
+                    }
+                    for d in dead {
+                        if !crate::sidebar::norm(&d).eq(&crate::sidebar::norm(&prev)) {
+                            self.side.drop_recent(&d);
                         }
                     }
                     t.start(&prev, wake);
@@ -2545,9 +2548,11 @@ impl View {
             && let Some(&col) = shown.get(i)
         {
             self.fit_edge(g, t, col);
+            ui.request_repaint(); // the header above was drawn with the old widths
         }
         if self.take_fit_all() {
             self.fit_columns(g, t, shown);
+            ui.request_repaint();
         }
         if !hide_type
             && !self.fit_held(ui)
