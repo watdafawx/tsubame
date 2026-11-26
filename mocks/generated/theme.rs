@@ -40,6 +40,7 @@ pub struct Theme {
     pub on_danger: u32,
     pub highlight: u32,
     pub folder: u32,
+    pub ok: u32,
     // metrics: space (logical px)
     pub space_1: f32,
     pub space_2: f32,
@@ -144,6 +145,7 @@ pub const DARK: Theme = Theme {
     on_danger: 0xFFFFFF,
     highlight: 0x5A4A12,
     folder: 0xE8B34A,
+    ok: 0x5FD08A,
     space_1: 2.0,
     space_2: 4.0,
     space_3: 6.0,
@@ -242,6 +244,7 @@ pub const LIGHT: Theme = Theme {
     on_danger: 0xFFFFFF,
     highlight: 0xFFE28A,
     folder: 0xD99A1E,
+    ok: 0x1E7A3C,
     space_1: 2.0,
     space_2: 4.0,
     space_3: 6.0,
