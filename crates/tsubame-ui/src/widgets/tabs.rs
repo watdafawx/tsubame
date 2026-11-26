@@ -11,7 +11,7 @@
 //! strip are drawn.
 
 use crate::canvas::Canvas;
-use crate::geom::Rect;
+use crate::geom::{Pt, Rect};
 use crate::input::Button;
 use crate::ui::{Id, Sense, Ui};
 use crate::widgets::button::button_behaviour;
@@ -32,6 +32,8 @@ pub struct TabResponse {
     /// drag-reorder: move tab `.0` to index `.1` (the drag goes on with the
     /// tab at its new index)
     pub moved: Option<(usize, usize)>,
+    /// right click released on tab `.0` at this point: the app opens its tab menu
+    pub context: Option<(usize, Pt)>,
 }
 
 /// "+" button size and the gap before it.
@@ -103,6 +105,11 @@ pub fn tab_strip(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, st: &mut T
         && close_box(i).contains_pt(it.click_pos)
     {
         resp.close = Some(i);
+    }
+    if it.clicked == Some(Button::Right)
+        && let Some(i) = tab_at(it.click_pos.x)
+    {
+        resp.context = Some((i, it.click_pos));
     }
     // drag to reorder: past the middle of a neighbour swaps with it
     if it.active && !ui.drag_f64.is_nan() && n > 1 {

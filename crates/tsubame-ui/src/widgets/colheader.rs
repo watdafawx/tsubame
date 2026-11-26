@@ -27,6 +27,61 @@ pub struct HeaderResponse {
     pub context: Option<(usize, crate::geom::Pt)>,
     /// double click on the right edge of column `.0`: fit it to its content
     pub auto_fit: Option<usize>,
+    /// a header cell was dragged and dropped: move column `.0` before column `.1`
+    /// (`.1 == cols.len()` is after the last one). Never column 0, never to slot 0.
+    pub reorder: Option<(usize, usize)>,
+}
+
+/// Distance the pointer moves along the header before a pressed cell becomes a drag (DIPs).
+pub const DRAG_START: f32 = 6.0;
+
+/// The state of a column drag across frames (the app owns it; `enabled` switches reordering on).
+/// A header without one (`column_header`) sorts and resizes only.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HeaderDrag {
+    pub enabled: bool,
+    /// the cell pressed and the x of the press
+    press: Option<(usize, f32)>,
+    /// the pressed cell has moved far enough: a drag, not a click
+    dragging: bool,
+    /// where it would land now (the gap before this column)
+    drop: Option<usize>,
+}
+
+impl HeaderDrag {
+    pub fn new() -> HeaderDrag {
+        HeaderDrag { enabled: true, ..HeaderDrag::default() }
+    }
+    /// A column is being dragged.
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+    fn reset(&mut self) {
+        self.press = None;
+        self.dragging = false;
+        self.drop = None;
+    }
+}
+
+/// The gap (0..=n) whose left edge is nearest to `x`, among the gaps that can take a column:
+/// not before the first column (Name keeps its place).
+pub fn drop_gap(spans: &[(f32, f32)], n: usize, x: f32) -> usize {
+    let mut best = 1.min(n);
+    let mut best_d = f32::MAX;
+    for k in 1..=n {
+        let edge = if k < n { spans[k].0 } else { spans[n - 1].0 + spans[n - 1].1 };
+        let d = (edge - x).abs();
+        if d < best_d {
+            best_d = d;
+            best = k;
+        }
+    }
+    best
+}
+
+/// `Some((from, gap))` when moving column `from` into `gap` changes the order.
+pub fn reorder_of(from: usize, gap: usize) -> Option<(usize, usize)> {
+    (from >= 1 && gap >= 1 && gap != from && gap != from + 1).then_some((from, gap))
 }
 
 /// Width of the grab zone on a column's left edge.
@@ -51,6 +106,14 @@ fn arrow(c: &mut dyn Canvas, x: f32, y: f32, descending: bool, color: u32) {
 /// `rect.x` (see `cols::Columns::spans` in the app); `sorted` is the sorted
 /// column and whether it is descending.
 pub fn column_header(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, cols: &[HeaderCol], spans: &[(f32, f32)], sorted: Option<(usize, bool)>) -> HeaderResponse {
+    column_header_ex(ui, c, id, rect, cols, spans, sorted, &mut HeaderDrag::default())
+}
+
+/// `column_header` with drag-to-reorder: press a cell (not the first), move it sideways past
+/// `DRAG_START` and an accent line shows where it would land; letting go reports `reorder`
+/// (and no sort click).
+#[allow(clippy::too_many_arguments)]
+pub fn column_header_ex(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, cols: &[HeaderCol], spans: &[(f32, f32)], sorted: Option<(usize, bool)>, drag: &mut HeaderDrag) -> HeaderResponse {
     let mut resp = HeaderResponse::default();
     let t = ui.theme;
     c.fill(rect, t.panel);
@@ -63,6 +126,37 @@ pub fn column_header(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, cols: 
     for (i, &(x, w)) in spans.iter().enumerate().take(cols.len()) {
         let cell = Rect::new(rect.x + x, body.y, w, body.h);
         let it = ui.interact(id.with(i as u64), cell, Sense::click());
+        if drag.enabled && i >= 1 {
+            if let Some(p) = it.pressed.filter(|p| p.button == Button::Left && !p.double) {
+                drag.press = Some((i, p.pos.x));
+                drag.dragging = false;
+                drag.drop = None;
+            }
+            if it.active
+                && let Some((_, x0)) = drag.press.filter(|&(f, _)| f == i)
+            {
+                let mx = ui.mouse().x;
+                if !drag.dragging && (mx - x0).abs() >= DRAG_START {
+                    drag.dragging = true;
+                }
+                if drag.dragging {
+                    drag.drop = Some(drop_gap(spans, cols.len().min(spans.len()), mx - rect.x));
+                    ui.request_repaint();
+                }
+            }
+            if it.released && drag.press.is_some_and(|(f, _)| f == i) {
+                if drag.dragging {
+                    resp.reorder = drag.drop.and_then(|gap| reorder_of(i, gap));
+                    ui.request_repaint();
+                }
+                // the sort click that would follow a drag is not a click
+                let was_drag = drag.dragging;
+                drag.reset();
+                if was_drag {
+                    continue;
+                }
+            }
+        }
         if it.clicked == Some(Button::Left) {
             clicked = Some(i);
         }
@@ -97,6 +191,9 @@ pub fn column_header(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, cols: 
         }
     }
     resp.sort = clicked;
+    if drag.dragging {
+        hot = drag.press.map(|p| p.0);
+    }
 
     for (i, col) in cols.iter().enumerate().take(spans.len()) {
         let (x, w) = spans[i];
@@ -119,6 +216,16 @@ pub fn column_header(ui: &mut Ui, c: &mut dyn Canvas, id: Id, rect: Rect, cols: 
         if i + 1 < spans.len().min(cols.len()) {
             c.fill(Rect::new(cell.r() - 1.0, cell.y + 6.0, 1.0, cell.h - 12.0), t.border);
         }
+    }
+    // where the dragged column would land
+    if drag.dragging
+        && let (Some((from, _)), Some(gap)) = (drag.press, drag.drop)
+        && reorder_of(from, gap).is_some()
+        && let n = cols.len().min(spans.len())
+        && n > 0
+    {
+        let edge = if gap < n { spans[gap].0 } else { spans[n - 1].0 + spans[n - 1].1 };
+        c.fill(Rect::new(rect.x + edge - 1.0, rect.y + 2.0, 2.0, rect.h - 4.0), t.accent);
     }
     resp
 }
