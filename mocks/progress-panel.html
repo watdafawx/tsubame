@@ -48,7 +48,7 @@ button{all:unset;cursor:pointer;box-sizing:border-box}
 .note b{color:var(--c-text);font-weight:600}
 .notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px 28px;margin-top:18px;max-width:1300px}
 .notes div{color:var(--c-text-dim);line-height:1.5}
-.notes h3{font-size:var(--font-size-sm);color:var(--c-text);margin:0 0 3px;font-weight:600}
+.notes h2{font-size:var(--font-size-sm);color:var(--c-text);margin:0 0 3px;font-weight:600}
 
 /* ---------- app window (everything inside is drawable: fills, rounded rects, strokes, text, icons; no shadow/blur/alpha) */
 #stage{display:inline-block;transform-origin:0 0}
@@ -262,12 +262,12 @@ button{all:unset;cursor:pointer;box-sizing:border-box}
   </div>
 
   <div class="notes">
-    <div><h3>Panel</h3>Docked bottom-right over the list, 344 px wide, one card per operation, newest finished on top of the running ones. Opens by itself 400 ms after an operation starts (quick ones never flash; the status bar text stays as it is today). Collapse chevron folds it to the pill, the pill reopens it.</div>
-    <div><h3>Cards</h3>Verb + percent, "N items from A to B" (folders as names, full path in a tooltip), 4 px bar, bytes, speed + remaining, 10 s speed sparkline. Delete shows items instead of bytes. Pause / Resume, Cancel, expand for the files being processed.</div>
-    <div><h3>Queue</h3>The queue is FIFO with one worker, so a second operation shows "Waiting" with an empty bar and only Cancel. It starts by itself when the one before ends.</div>
-    <div><h3>Finished</h3>One line, green check, "Done, Undo", 2 px countdown line, gone after 5 s (hover holds). Errors never auto-dismiss: "Show details", Retry failed, Skip. Cancelled shows "Cancelled after 6 of 14" with Undo.</div>
-    <div><h3>Conflict</h3>App-modal dialog in the window (no scrim: no alpha). The newer file gets the accent border and a "Newer" chip. Suggested button is filled: Replace when incoming is newer, Skip otherwise. The old file goes to the Recycle Bin. Keys: R, S, K, Esc.</div>
-    <div><h3>Cost</h3>No timer while nothing runs. Progress repaints at most 10 Hz, only the changed card (bar, numbers, sparkline). One one-shot timer for the earliest finished-card dismiss. Idle = 0 wake-ups.</div>
+    <div><h2>Panel</h2>Docked bottom-right over the list, 344 px wide, one card per operation, newest finished on top of the running ones. Opens by itself 400 ms after an operation starts (quick ones never flash; the status bar text stays as it is today). Collapse chevron folds it to the pill, the pill reopens it.</div>
+    <div><h2>Cards</h2>Verb + percent, "N items from A to B" (folders as names, full path in a tooltip), 4 px bar, bytes, speed + remaining, 10 s speed sparkline. Delete shows items instead of bytes. Pause / Resume, Cancel, expand for the files being processed.</div>
+    <div><h2>Queue</h2>The queue is FIFO with one worker, so a second operation shows "Waiting" with an empty bar and only Cancel. It starts by itself when the one before ends.</div>
+    <div><h2>Finished</h2>One line, green check, "Done, Undo", 2 px countdown line, gone after 5 s (hover holds). Errors never auto-dismiss: "Show details", Retry failed, Skip. Cancelled shows "Cancelled after 6 of 14" with Undo.</div>
+    <div><h2>Conflict</h2>App-modal dialog in the window (no scrim: no alpha). The newer file gets the accent border and a "Newer" chip. Suggested button is filled: Replace when incoming is newer, Skip otherwise. The old file goes to the Recycle Bin. Keys: R, S, K, Esc.</div>
+    <div><h2>Cost</h2>No timer while nothing runs. Progress repaints at most 10 Hz, only the changed card (bar, numbers, sparkline). One one-shot timer for the earliest finished-card dismiss. Idle = 0 wake-ups.</div>
   </div>
 </div>
 
